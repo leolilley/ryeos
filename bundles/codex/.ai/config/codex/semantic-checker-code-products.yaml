@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T14:26:12Z:ba4485e1d8795e92f3fbaff464bf2d22291699ebe465d9f7426ef64b1438676f:dgw7Woot1zMBccWeLk3ufB54z8/2ma1kDgOgNxIHbAqYqqHc++AWTZDl3rJOBhMvn9vu/mykPpdvMSMzaA8kBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T18:21:22Z:85db548ff967f5437762427ec534a653514908ccce6d0448743e60af0f286cef:XI1Tyv44DBg9vbpNCegW0w9jUvuD03SBqicNcS18fi8mPu7MKT2P5p6gduZZtz/82My8Mk2B9AV79hFbhauNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 description: Retained authored Codex semantic checker source; capture is not checker execution or qualification.
@@ -18,7 +18,7 @@ build_products:
         maximum_depth: 4
         maximum_file_bytes: 1048576
         maximum_total_bytes: 2097152
-      expected_manifest_hash: 8f4dd335af59823647f76077ae334f15276a5facbf8d9da6c34880f704ee4e7a
+      expected_manifest_hash: 414b0becc1186dca9b5e02fe93a8ac3b176e8d8d324b828971f8e29f9c44bb7c
 product_relationships:
   schema: ryeos.product_relationships.v1
   relationships:

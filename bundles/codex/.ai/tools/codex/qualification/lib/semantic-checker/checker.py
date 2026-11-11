@@ -358,6 +358,92 @@ def _raw_output(raw, exit_code, expected_output):
                                  "Original token count: ")) for line in lines), "unknown raw header")
 
 
+MAX_CELL_SOURCE_BYTES = 16384
+JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+CELL_HEADER = re.compile(r"Script (?:running with cell ID ([0-9]{1,9})|(completed)|(failed))\n"
+                         r"Wall time [0-9]{1,9}(?:\.[0-9]{1,9})? seconds\nOutput:\n")
+
+
+def _js_strings(source):
+    """Decoded string literals of a code-mode cell; a literal reader, not a JS interpreter.
+
+    Comments are skipped and template literals with substitutions refuse, so a
+    role command can only be named by a literal this reader decodes exactly.
+    Any source it cannot read refuses; execution authority stays with the
+    nested commandExecution items the shared router reports.
+    """
+    literals, index, end = [], 0, len(source)
+    while index < end:
+        char = source[index]
+        if source.startswith("//", index):
+            newline = source.find("\n", index)
+            index = end if newline < 0 else newline + 1
+        elif source.startswith("/*", index):
+            close = source.find("*/", index + 2)
+            require(close >= 0, "unterminated cell comment")
+            index = close + 2
+        elif char in "'\"`":
+            value, index = [], index + 1
+            while True:
+                require(index < end, "unterminated cell string")
+                current = source[index]
+                if current == char:
+                    index += 1
+                    break
+                require(char == "`" or current != "\n", "unterminated cell string")
+                require(not (char == "`" and source.startswith("${", index)), "cell template substitution")
+                if current != "\\":
+                    value.append(current)
+                    index += 1
+                    continue
+                require(index + 1 < end, "unterminated cell escape")
+                escape = source[index + 1]
+                if escape in JS_ESCAPES:
+                    require(escape != "0" or index + 2 >= end or not source[index + 2].isdigit(),
+                            "legacy octal cell escape")
+                    value.append(JS_ESCAPES[escape])
+                    index += 2
+                elif escape == "x":
+                    digits = source[index + 2:index + 4]
+                    require(re.fullmatch(r"[0-9A-Fa-f]{2}", digits) is not None, "invalid cell escape")
+                    value.append(chr(int(digits, 16)))
+                    index += 4
+                elif escape == "u" and source.startswith("{", index + 2):
+                    close = source.find("}", index + 3)
+                    digits = source[index + 3:close] if close > 0 else ""
+                    require(re.fullmatch(r"[0-9A-Fa-f]{1,6}", digits) is not None
+                            and int(digits, 16) <= 0x10FFFF, "invalid cell escape")
+                    value.append(chr(int(digits, 16)))
+                    index = close + 1
+                elif escape == "u":
+                    digits = source[index + 2:index + 6]
+                    require(re.fullmatch(r"[0-9A-Fa-f]{4}", digits) is not None, "invalid cell escape")
+                    value.append(chr(int(digits, 16)))
+                    index += 6
+                elif escape == "\n":
+                    index += 2
+                else:
+                    require(not escape.isdigit(), "legacy octal cell escape")
+                    value.append(escape)
+                    index += 2
+            literals.append("".join(value))
+        else:
+            index += 1
+    return literals
+
+
+def _cell_parts(output):
+    if type(output) is str:
+        return [output]
+    require(type(output) is list and 0 < len(output) <= 8, "cell output shape")
+    parts = []
+    for part in output:
+        exact(part, ("type", "text"))
+        require(part["type"] == "input_text", "cell output part type")
+        parts.append(text(part, "text"))
+    return parts
+
+
 def _conversation(expected, provider, path, thread, turn, messages, presentations):
     read_command, refusal_command = _commands(path)
     require(expected["command"] not in (read_command, refusal_command), "role command collision")
@@ -366,19 +452,72 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
              (refusal_command, None, LOCAL_REFUSAL, 0, "")]
     require(obj(provider.get("command_environment")).get("environment_id") == expected["environment_id"],
             "provider environment mismatch")
+    # A role is invoked either directly (an exec_command function call) or, when
+    # pinned model metadata selects code mode, by one `exec` cell whose single
+    # nested tools.exec_command call goes through the same environment router.
+    # A code-mode role's command execution carries the router's own item id, so
+    # it binds by exact presentation; its result arrives in the cell output or a
+    # later `wait` poll of that cell.
     traces = [{"id": None, "output": False, "started": False, "completed": False,
-               "delta_seen": False, "delta": ""} for _ in roles]
+               "delta_seen": False, "delta": "", "code": False, "cell": None, "exec": None}
+              for _ in roles]
     terminal = turn_started = thread_started = False
-    responses, ancillary = set(), set()
+    responses, ancillary, cells, waits = set(), set(), {}, {}
 
     def same(params):
         require(text(params, "threadId") == thread and text(params, "turnId") == turn, "foreign notification turn")
 
     def role_id(value):
         for index, trace in enumerate(traces):
-            if trace["id"] == value:
+            if trace["id"] == value or (trace["exec"] is not None and trace["exec"] == value):
                 return index
         raise Refused("role observation before exact invocation")
+
+    def execution_role(value, command):
+        for index, trace in enumerate(traces):
+            if trace["id"] == value or (trace["exec"] is not None and trace["exec"] == value):
+                return index
+        matching = [i for i, t in enumerate(traces)
+                    if t["code"] and t["exec"] is None and roles[i][1] is not None and roles[i][1] == command]
+        require(len(matching) == 1, "role observation before exact invocation")
+        require(all(t["id"] != value for t in traces) and value not in ancillary, "execution reuses a call id")
+        traces[matching[0]]["exec"] = value
+        return matching[0]
+
+    def cell_role(source):
+        require(0 < len(source.encode("utf-8")) <= MAX_CELL_SOURCE_BYTES and "\0" not in source,
+                "cell source bound")
+        require(re.search(r"\bimport\b|\brequire\s*\(|\btools\s*\[", source) is None, "cell import or dynamic tool")
+        require(re.findall(r"\btools\s*\.\s*([A-Za-z_$][\w$]*)", source) == ["exec_command"],
+                "cell must make exactly one exec_command call")
+        literals = _js_strings(source)
+        matching = [i for i, spec in enumerate(roles) if spec[0] in literals]
+        require(len(matching) == 1, "unknown role command")
+        index = matching[0]
+        environment = "local" if index == 2 else expected["environment_id"]
+        other = expected["environment_id"] if index == 2 else "local"
+        require(environment in literals and other not in literals and expected["cwd"] in literals,
+                "role cell environment/workdir changed")
+        return index
+
+    def cell_result(index, output):
+        trace = traces[index]
+        require(trace["code"] and not trace["output"], "late or repeated cell result")
+        parts = _cell_parts(output)
+        header = CELL_HEADER.match(parts[0])
+        require(header is not None, "unknown cell result")
+        running, completed, failed = header.groups()
+        if running is not None:
+            require(len(parts) == 1 and trace["cell"] in (None, running)
+                    and cells.get(running, index) == index, "cell identity changed")
+            trace["cell"], cells[running] = running, index
+            return
+        if index == 2:
+            require(failed is not None and parts[-1] == "Script error:\n" + LOCAL_REFUSAL,
+                    "local execution not refused")
+        else:
+            require(completed is not None, "role cell failed")
+        trace["output"] = True
 
     def complete(index):
         trace = traces[index]
@@ -388,7 +527,8 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
 
     def ancillary_id(value):
         ident(value)
-        require(all(t["id"] != value for t in traces), "role disguised as ancillary item")
+        require(all(value not in (t["id"], t["exec"]) for t in traces) and value not in waits,
+                "role disguised as ancillary item")
         ancillary.add(value)
 
     for message, argument_projection in messages:
@@ -403,10 +543,36 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
             same(params)
             item = obj(params.get("item"))
             kind = text(item, "type")
-            if kind == "function_call":
+            if kind == "function_call" and text(item, "name") == "wait":
+                call = ident(text(item, "call_id"))
+                require(call not in ancillary and call not in waits and all(t["id"] != call for t in traces),
+                        "duplicate/reused wait id")
+                arguments = obj(argument_projection["value"])
+                require(set(arguments) <= {"cell_id", "yield_time_ms", "max_tokens"}
+                        and text(arguments, "cell_id") in cells
+                        and all(type(arguments[k]) is int and 0 < arguments[k] <= 60000
+                                for k in arguments if k != "cell_id"), "invalid cell wait")
+                waits[call] = cells[arguments["cell_id"]]
+            elif kind == "custom_tool_call":
+                require(text(item, "name") == "exec", "unexpected tool call")
+                call = ident(text(item, "call_id"))
+                require(call not in ancillary and call not in waits and all(t["id"] != call for t in traces),
+                        "duplicate/reused role id")
+                index = cell_role(text(item, "input"))
+                require(traces[index]["id"] is None, "repeated role invocation")
+                traces[index]["id"], traces[index]["code"] = call, True
+            elif kind == "custom_tool_call_output":
+                call = text(item, "call_id")
+                matching = [i for i, t in enumerate(traces) if t["code"] and t["id"] == call]
+                require(len(matching) == 1, "cell result before its invocation")
+                cell_result(matching[0], item.get("output"))
+            elif kind == "function_call_output" and text(item, "call_id") in waits:
+                cell_result(waits[item["call_id"]], item.get("output"))
+            elif kind == "function_call":
                 require(text(item, "name") == "exec_command", "unexpected tool call")
                 call = ident(text(item, "call_id"))
-                require(call not in ancillary and all(t["id"] != call for t in traces), "duplicate/reused role id")
+                require(call not in ancillary and call not in waits and all(t["id"] != call for t in traces),
+                        "duplicate/reused role id")
                 arguments = obj(argument_projection["value"])
                 command = text(arguments, "cmd")
                 matching = [i for i, spec in enumerate(roles) if spec[0] == command]
@@ -423,6 +589,8 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
                 traces[index]["id"] = call
             elif kind == "function_call_output":
                 index = role_id(text(item, "call_id"))
+                require(not traces[index]["code"] and traces[index]["id"] == item["call_id"],
+                        "direct result for a code-mode role")
                 require(not traces[index]["output"], "repeated raw role result")
                 output = text(item, "output")
                 if index == 2:
@@ -440,7 +608,7 @@ def _conversation(expected, provider, path, thread, turn, messages, presentation
             item = obj(params.get("item"))
             value, kind = ident(text(item, "id")), text(item, "type")
             if kind == "commandExecution":
-                index = role_id(value)
+                index = execution_role(value, item.get("command"))
                 require(index != 2, "local refusal launched command")
                 spec, trace = roles[index], traces[index]
                 completed = method == "item/completed"

@@ -78,8 +78,43 @@ def notification(method, **extra):
     return {"method": method, "params": {"threadId": "thread-one", "turnId": "turn-one", **extra}}
 
 
-def fixture():
-    path = "/private/Q-test/controller-canary/canary"
+def cell_source(environment, command):
+    # json.dumps yields a valid JS double-quoted string literal.
+    return ("const r = await tools.exec_command({environment_id:" + json.dumps(environment) + ",cmd:"
+            + json.dumps(command) + ",workdir:\"/workspace\",login:false,yield_time_ms:10000});"
+            " text(JSON.stringify(r));")
+
+
+def code_mode_role(index, command, output, status, code):
+    """One role as pinned code mode runs it: an exec cell, a wait poll and the router's own execution item."""
+    call, cell = "cell-call-" + str(index), str(index + 1)
+    environment = "local" if index == 2 else "ryeos-external-candidate"
+    messages = [notification("rawResponseItem/completed", item={"type": "custom_tool_call", "name": "exec",
+                             "call_id": call, "input": cell_source(environment, command)})]
+    if index == 2:
+        messages.append(notification("rawResponseItem/completed", item={"type": "custom_tool_call_output",
+            "call_id": call, "output": [
+                {"type": "input_text", "text": "Script failed\nWall time 0.0 seconds\nOutput:\n"},
+                {"type": "input_text", "text": "Script error:\n" + checker.LOCAL_REFUSAL}]}))
+        return messages
+    wait = "wait-call-" + str(index)
+    messages.append(notification("rawResponseItem/completed", item={"type": "custom_tool_call_output",
+        "call_id": call, "output": "Script running with cell ID " + cell + "\nWall time 11.0 seconds\nOutput:\n"}))
+    messages.append(notification("rawResponseItem/completed", item={"type": "function_call", "name": "wait",
+        "call_id": wait, "arguments": synthetic_json({"cell_id": cell, "yield_time_ms": 10000, "max_tokens": 1000})}))
+    item = {"type": "commandExecution", "id": "exec-" + str(index), "command": synthetic_presentation("zsh", command),
+            "cwd": "/workspace", "status": status, "exitCode": code, "aggregatedOutput": output}
+    messages.append(notification("item/started", item={**item, "status": "inProgress", "exitCode": None,
+                                                       "aggregatedOutput": None}))
+    messages.append(notification("item/completed", item=item))
+    messages.append(notification("rawResponseItem/completed", item={"type": "function_call_output", "call_id": wait,
+        "output": [{"type": "input_text", "text": "Script completed\nWall time 3.9 seconds\nOutput:\n"},
+                   {"type": "input_text", "text": synthetic_json({"exit_code": code, "output": output})}]}))
+    return messages
+
+
+def fixture(code_mode=False):
+    path ="/private/Q-test/controller-canary/canary"
     template = {"route_id": "turn.start", "payload": {"input": [{"type": "text", "text": checker.PATH_SLOT}]}}
     resolved = {"route_id": "turn.start", "payload": {"input": [{"type": "text", "text": path}]}}
     provider = {"provider_declaration_id": "openai", "configuration_adapter_artifact_hash": "a" * 64,
@@ -131,6 +166,10 @@ def fixture():
     messages = [notification("turn/started", turn={"id": "turn-one", "status": "inProgress"})]
     commands = [expected["command"], *checker._commands(path)]
     for index, command in enumerate(commands):
+        if code_mode:
+            output, status, code = (("probe", "completed", 0) if index == 0 else (checker.CANARY_DENIAL, "failed", 73))
+            messages.extend(code_mode_role(index, command, output, status, code))
+            continue
         call = "call-" + str(index)
         args = {"cmd": command, "workdir": "/workspace", "login": False, "yield_time_ms": 10000}
         if index == 2:
@@ -333,3 +372,68 @@ class CheckerSourceTests(unittest.TestCase):
         envelope["observations"][2]["digest"] = "0" * 64
         with self.assertRaises(checker.Refused):
             checker.check_conversation(envelope)
+
+    def test_code_mode_roles_bind_cells_waits_and_router_executions(self):
+        result = self.check(fixture(code_mode=True))["conversation"]
+        self.assertEqual((result["fixture_write_call_id"], result["canary_read_call_id"],
+                          result["local_refusal_call_id"]), ("cell-call-0", "cell-call-1", "cell-call-2"))
+
+    def test_code_mode_mutations_refuse(self):
+        def source(index):
+            return lambda item: item.get("type") == "custom_tool_call" and item["call_id"] == "cell-call-" + str(index)
+
+        def edit_input(index, change):
+            def apply(messages):
+                for message in messages:
+                    item = message["params"].get("item", {})
+                    if source(index)(item):
+                        item["input"] = change(item["input"])
+            return apply
+
+        def edit_items(match, change):
+            def apply(messages):
+                for message in messages:
+                    item = message["params"].get("item", {})
+                    if match(item):
+                        change(item)
+            return apply
+
+        mutations = {
+            "second_tool": edit_input(0, lambda s: s + " await tools.apply_patch({});"),
+            "two_exec_calls": edit_input(0, lambda s: s + " await tools.exec_command({});"),
+            "dynamic_tool": edit_input(0, lambda s: s.replace("tools.exec_command", "tools['exec_command']")),
+            "import": edit_input(0, lambda s: "import fs from 'fs'; " + s),
+            "template_substitution": edit_input(0, lambda s: s + " `${r}`;"),
+            "local_guest_role": edit_input(0, lambda s: s.replace('"ryeos-external-candidate"', '"local"')),
+            "routed_local_role": edit_input(2, lambda s: s.replace('"local"', '"ryeos-external-candidate"')),
+            "changed_workdir": edit_input(1, lambda s: s.replace('"/workspace"', '"/tmp"')),
+            "unknown_command": edit_input(0, lambda s: s.replace("printf probe", "printf other")),
+            "refusal_completed": edit_items(
+                lambda item: item.get("type") == "custom_tool_call_output" and item["call_id"] == "cell-call-2",
+                lambda item: item["output"][0].update(text="Script completed\nWall time 0.0 seconds\nOutput:\n")),
+            "role_cell_failed": edit_items(
+                lambda item: item.get("type") == "function_call_output" and item["call_id"] == "wait-call-0",
+                lambda item: item["output"][0].update(text="Script failed\nWall time 0.0 seconds\nOutput:\n")),
+            "foreign_execution": edit_items(
+                lambda item: item.get("type") == "commandExecution" and item["id"] == "exec-0",
+                lambda item: item.update(command="zsh -c 'printf elsewhere'")),
+            "unknown_cell_header": edit_items(
+                lambda item: item.get("type") == "custom_tool_call_output" and item["call_id"] == "cell-call-0",
+                lambda item: item.update(output="Script paused\nOutput:\n")),
+        }
+        for name, mutation in mutations.items():
+            values = fixture(code_mode=True)
+            batch = values[2]["batches"][0]
+            messages = [synthetic_decode(e["payload"]["notification_json"], checker.MAX_EVENT_BYTES)
+                        for e in batch["events"]]
+            mutation(messages)
+            batch["events"] = [{"payload": {"notification_json": synthetic_json(m)}} for m in messages]
+            with self.subTest(mutation=name), self.assertRaises(checker.Refused):
+                self.check(values)
+
+    def test_cell_string_reader_decodes_literals_and_skips_comments(self):
+        self.assertEqual(checker._js_strings('a("x\\"y", \'z\\n\') // "c"\n/* \'d\' */ `e` "\\u0041\\x42\\u{43}"'),
+                         ['x"y', "z\n", "e", "ABC"])
+        for source in ('"open', "`${x}`", '"\\1"', '"\\u12"', "/* open"):
+            with self.subTest(source=source), self.assertRaises(checker.Refused):
+                checker._js_strings(source)
