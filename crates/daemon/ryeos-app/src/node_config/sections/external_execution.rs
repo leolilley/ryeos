@@ -961,46 +961,6 @@ impl RetainedExternalExecutionBinding {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn composed_test_fixture(
-        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: impl Into<ComposedTestTransport>,
-        controller_tls_root_certificates_der_base64: Vec<String>,
-        backend: String,
-        backend_artifact_hash: String,
-        backend_artifact_bytes: u64,
-        settings_schema_digest: String,
-        supervisor_artifact_hash: String,
-        supervisor_artifact_bytes: u64,
-        launcher_artifact_hash: String,
-        launcher_artifact_bytes: u64,
-        configuration_adapter_artifact_hash: String,
-        configuration_adapter_artifact_bytes: u64,
-        connector_artifact_hash: String,
-        connector_artifact_bytes: u64,
-        qualification: &PlacementQualificationSelection,
-    ) -> Result<Self> {
-        Self::composed_test_fixture_with_settings(
-            program,
-            controller_transport,
-            controller_tls_root_certificates_der_base64,
-            backend,
-            backend_artifact_hash,
-            backend_artifact_bytes,
-            settings_schema_digest,
-            supervisor_artifact_hash,
-            supervisor_artifact_bytes,
-            launcher_artifact_hash,
-            launcher_artifact_bytes,
-            configuration_adapter_artifact_hash,
-            configuration_adapter_artifact_bytes,
-            connector_artifact_hash,
-            connector_artifact_bytes,
-            serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
-            qualification,
-        )
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
         controller_transport: impl Into<ComposedTestTransport>,

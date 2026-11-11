@@ -727,6 +727,7 @@ fn activate(
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
             guest_owner: None,
+            contact_failure: None,
         });
     };
     phase_lock.ensure_protects(&occurrence_root)?;
@@ -1049,6 +1050,7 @@ fn reconcile_activation(
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
             guest_owner: None,
+            contact_failure: None,
         });
     };
     phase_lock.ensure_protects(&occurrence_root)?;
@@ -1058,6 +1060,7 @@ fn reconcile_activation(
             operation_id: request.common().operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
             guest_owner: None,
+            contact_failure: None,
         });
     };
     let mut retained: ActivationRecord = decode_document(&file)?;
@@ -1105,6 +1108,7 @@ fn reconcile_activation(
         operation_id: request.common().operation_id.clone(),
         activation_request_digest: activation.activation_request_digest.clone(),
         guest_owner: None,
+        contact_failure: None,
     })
 }
 

@@ -373,7 +373,6 @@ impl<'a> RenderRelayFileContact<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read as _;
 
     #[test]
     fn only_statuses_that_say_nothing_about_the_file_are_read_again() {

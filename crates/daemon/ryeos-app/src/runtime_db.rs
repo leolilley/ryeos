@@ -7056,10 +7056,9 @@ fn ensure_scope_lifetime_resettable(
     .map(drop)
 }
 
-/// What the resettable check established: the attested fence discard for the
-/// report, and the Q local custody the reset settled or previewed.
+/// What the resettable check established: the Q local custody the reset
+/// settled or previewed.
 pub(crate) struct ResettableWitness {
-    pub(crate) lifetime_fence_discard: Option<LifetimeFenceDiscard>,
     pub(crate) cold_qualification_custody: Option<ColdQualificationCustodyReport>,
 }
 
@@ -7136,7 +7135,6 @@ fn ensure_scope_lifetime_resettable_with(
     let cold_qualification_custody =
         qualification_cold_custody::settle_open_qualification_custody(conn, stored_epoch, custody)?;
     Ok(ResettableWitness {
-        lifetime_fence_discard,
         cold_qualification_custody,
     })
 }
