@@ -1908,8 +1908,13 @@ pub fn from_json_slice_strict<T: DeserializeOwned>(input: &[u8], maximum: usize)
     serde_json::from_value(value).context("decode lifecycle message")
 }
 
+/// The RyeOS canonical JSON bytes of `value`: Lillux's sole canonical encoding
+/// (object keys sorted, non-ASCII as lowercase `\u` escapes), so bytes hashed,
+/// signed, persisted or compared here agree with every other RyeOS producer.
+/// Typed values are encoded through their JSON value, never in struct field
+/// declaration order.
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(value)?)
+    lillux::canonical_json_bytes_bounded(value, usize::MAX)
 }
 
 fn validate_inspection_common(

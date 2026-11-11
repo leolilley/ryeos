@@ -793,7 +793,7 @@ pub fn continuation_request_fingerprint(
         "lifecycle_authority": lifecycle_authority,
         "sealed_root_request": sealed_root_request,
     });
-    let bytes = serde_json::to_vec(&canonical).expect("fingerprint input is serializable");
+    let bytes = lillux::canonical_json(&canonical).expect("fingerprint input is canonical JSON");
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     format!("sha256:{:x}", hasher.finalize())

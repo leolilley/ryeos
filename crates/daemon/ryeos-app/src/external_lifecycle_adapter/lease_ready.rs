@@ -295,7 +295,7 @@ mod tests {
         assert!(
             String::from_utf8(composed)
                 .unwrap()
-                .ends_with(",\"resume\":null}")
+                .ends_with(",\"resume\":null,\"schema\":3}")
         );
     }
 

@@ -169,7 +169,7 @@ fn service_name(app_root: &Path) -> Result<String> {
     }
     Ok(format!(
         "ryeos-{}",
-        lillux::sha256_hex(&serde_json::to_vec(app_root)?)
+        lillux::sha256_hex(lillux::canonical_json(&serde_json::to_value(app_root)?)?.as_bytes())
     ))
 }
 

@@ -35,8 +35,8 @@ pub fn ordered_lease_ready_inputs<'a>(
 mod tests {
     use super::*;
 
-    const GOLDEN_FIELD_ORDER_SHA256: &str =
-        "6be0689c0b3c74dfa90e1ac9b4e4e7e2adcbdee53f006148767d2b734c09cf0c";
+    const GOLDEN_CANONICAL_SHA256: &str =
+        "cb967f5c49ab7118fe01cdcfabfe3f45da56780deb890fab54d6884b076105e6";
 
     #[test]
     fn golden_vector_pins_digest_and_order() {
@@ -62,7 +62,7 @@ mod tests {
     /// names is over this exact struct-field-order serialization, which is
     /// not the key-sorted encoding.
     #[test]
-    fn golden_signed_import_pins_the_field_order_derivation() {
+    fn golden_signed_import_pins_the_canonical_derivation() {
         use crate::guest_import_authorization::{
             GUEST_IMPORT_AUTHORIZATION_SCHEMA, GuestImportAuthorization,
             SignedGuestImportAuthorization,
@@ -126,20 +126,17 @@ mod tests {
             },
             signature_hex: "ab".repeat(64),
         };
-        let field_order = crate::canonical_json(&signed).unwrap();
-        let key_sorted = serde_json::to_vec(&serde_json::to_value(&signed).unwrap()).unwrap();
+        // The delivered form is the RyeOS canonical encoding: keys sorted at
+        // every level, whatever order the struct declares its fields in.
+        let delivered = crate::canonical_json(&signed).unwrap();
+        let canonical = lillux::canonical_json(&serde_json::to_value(&signed).unwrap())
+            .unwrap()
+            .into_bytes();
+        assert_eq!(delivered, canonical);
         assert!(
-            field_order.starts_with(b"{\"authorization\":{\"schema\":"),
-            "the delivered form leads with struct field order"
+            delivered.starts_with(b"{\"authorization\":{\"activation_request_digest\":"),
+            "the delivered form sorts nested keys, not struct field order"
         );
-        assert_ne!(field_order, key_sorted);
-        assert_ne!(
-            signed_import_sha256(&field_order),
-            signed_import_sha256(&key_sorted)
-        );
-        assert_eq!(
-            signed_import_sha256(&field_order),
-            GOLDEN_FIELD_ORDER_SHA256
-        );
+        assert_eq!(signed_import_sha256(&delivered), GOLDEN_CANONICAL_SHA256);
     }
 }
