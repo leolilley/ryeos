@@ -279,8 +279,11 @@ impl App {
     }
 
     pub(crate) fn begin_rename(&mut self, target: RenameTarget, title: &str) {
+        // Focused with the whole name selected, ready to type over.
         let mut edit = TextEdit::new(title);
-        edit.set_caret(title.len());
+        edit.anchor = 0;
+        edit.focus = title.len();
+        edit.focused = true;
         self.local.rename = Some(Rename { target, edit });
     }
 

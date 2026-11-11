@@ -208,7 +208,15 @@ fn surface_picker(session: &RyeOsSessionVm, local: &Local) -> El {
             choice = choice.fill(p.accent.alpha(0.12));
         }
         if renaming {
-            choice = choice.child(rename_form(local, "Surface name", ("Save", "Cancel")).grow(1.0));
+            choice = choice.child(
+                rename_form(
+                    local,
+                    format!("surface:{:?}", surface.surface_instance_id),
+                    "Surface name",
+                    ("Save", "Cancel"),
+                )
+                .grow(1.0),
+            );
         } else {
             let select = surface.select_intent.clone();
             choice = choice.child(
@@ -318,7 +326,12 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
             .h_full()
             .border_sides([0.0, 0.0, 2.0, 0.0], rule);
         slot = if renaming {
-            slot.child(rename_form(local, "View set name", ("✓", "×")))
+            slot.child(rename_form(
+                local,
+                format!("view-set:{view_set_id}"),
+                "View set name",
+                ("✓", "×"),
+            ))
         } else {
             slot.child(
                 row()
@@ -440,7 +453,8 @@ fn strip_action(glyph: &str, label: String, act: impl Fn(&mut App) + 'static) ->
 }
 
 /// The inline name field with save and cancel; Escape cancels.
-fn rename_form(local: &Local, label: &str, (save, cancel): (&str, &str)) -> El {
+/// An inline rename; when it closes, focus returns to the `trigger` slot's first control.
+fn rename_form(local: &Local, trigger: String, label: &str, (save, cancel): (&str, &str)) -> El {
     let p = Palette::get();
     let edit = local
         .rename
@@ -452,6 +466,7 @@ fn rename_form(local: &Local, label: &str, (save, cancel): (&str, &str)) -> El {
         .center_y()
         .gap(4.0)
         .px(8.0)
+        .focus_return(trigger)
         .child(
             text_input(&edit, theme::ui(13.0))
                 .key("rename:field")
