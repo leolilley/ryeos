@@ -2040,6 +2040,12 @@ pub(super) fn prepare_activated_bundle_consumer_content_inputs(
 /// content, not merely trust the historical verifier capsule. This check does
 /// not grant a qualification claim; applied-runtime parity remains separate.
 ///
+/// The comparison covers every signed and derived field except the bundle
+/// generation identity. That identity is process-local (it is renewed by every
+/// daemon start and bundle install, and another node's can never equal this
+/// one's), while a qualification is a durable record selected across restarts
+/// here and accepted as testimony elsewhere.
+///
 /// The retained closure is checked in a guarded segment; current consumer
 /// preparation then runs unguarded because it resolves signed definitions.
 pub(in crate::operator_external_content) fn require_current_consumer_content_for_selection(
@@ -2060,38 +2066,8 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
         evidence,
         subject_manifest_hash,
     )?;
-    if current != *retained {
-        bail!("current consumer source, environment or runtime member changed");
-    }
-    Ok(())
-}
-
-/// The same check for a qualification another node produced. The retained
-/// identity carries the origin's node-local bundle generation identity, which
-/// cannot equal this node's, so the comparison covers every signed and
-/// derived field except that one.
-pub(in crate::operator_external_content) fn require_current_consumer_content_for_remote_selection(
-    state: &AppState,
-    authority: &ryeos_state::PinnedStateAuthority,
-    limits: ryeos_state::object_closure::ObjectClosureLimits,
-    policy_source: &ProductQualificationPolicySource,
-    relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
-    evidence: &ProductQualificationEvidence,
-    subject_manifest_hash: &str,
-) -> anyhow::Result<()> {
-    let (retained, current) = prepare_current_consumer_content_for_selection(
-        state,
-        authority,
-        limits,
-        policy_source,
-        relationship,
-        evidence,
-        subject_manifest_hash,
-    )?;
     if current.portable() != retained.portable() {
-        bail!(
-            "current consumer source, environment or runtime member differs from the remote testimony"
-        );
+        bail!("current consumer source, environment or runtime member changed");
     }
     Ok(())
 }

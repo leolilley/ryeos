@@ -47,7 +47,7 @@ use ryeos_state::{CasMutationGuard, PinnedStateAuthority};
 use super::content_qualification::{load_current_qualified_content, prepare_source};
 use super::product_qualification::{
     CurrentVerifierContent, CurrentVerifierContext, load_current_qualification,
-    require_current_consumer_content_for_remote_selection, require_unguarded_resolution,
+    require_current_consumer_content_for_selection, require_unguarded_resolution,
     resolve_consumer_definition_in_generation, resolve_current_bundle_qualification_policy,
     resolve_current_bundle_verifier_identity_against_admitted,
     verify_current_external_runtime_qualification, verify_current_product_qualification_for_export,
@@ -690,7 +690,7 @@ pub(crate) fn verify_current_remote_selection_testimony(
                 == evidence.verifier.effective_definition_digest,
         "remote product testimony names a verifier this node does not resolve"
     );
-    require_current_consumer_content_for_remote_selection(
+    require_current_consumer_content_for_selection(
         state,
         authority,
         limits,
