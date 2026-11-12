@@ -4200,6 +4200,8 @@ mod tests {
             trust_files: Vec::new(),
             substrate_image_digest: None,
             app_root: None,
+            keep_sections: Vec::new(),
+            reset_sections: Vec::new(),
             confirm,
             json: false,
         }

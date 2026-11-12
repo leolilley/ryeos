@@ -101,6 +101,9 @@ if [[ -n "$node_profile" ]]; then
     [[ -n "$expected_bundles" ]]
     [[ -z "$(comm -23 <(printf '%s\n' "$expected_bundles") <(printf '%s\n' "$actual_bundles"))" ]]
     mkdir -p "$app_root/.ai/node/policies"
+    # Real init writes the signed operator-sections record in every
+    # generation it publishes.
+    printf 'sections: []\n' > "$app_root/.ai/node/policies/_operator-sections.yaml"
     while IFS= read -r policy_name; do
         printf 'schema: 1\n' > "$app_root/.ai/node/policies/$policy_name.yaml"
     done < <(
