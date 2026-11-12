@@ -10,6 +10,10 @@ enums, rejects duplicates and unchecked rows, and requires a web and TUI
 decision. Adding or removing a variant therefore requires an explicit parity
 decision here.
 
+The Web column describes the browser renderer the daemon serves: the Rune
+renderer (`crates/clients/rune`) over the shared client runtime
+(`crates/clients/runtime`). The Svelte sources in this crate are unserved.
+
 Legend: `native` means adapter-owned mechanics; `shared` means behavior reached
 through the shared core/keymap; `presentation` means a platform rendering of
 the same projection; `neutral` means a documented no-op result; `gap` is
@@ -23,8 +27,8 @@ shared-core behavior the adapter cannot currently originate.
 | [x] `FetchSource` | native | native | Same closed binding request. |
 | [x] `InvokeBinding` | native | native | Same bounded compiled binding. |
 | [x] `InvokePresentationOperation` | native | native | Execute an acknowledged prepared admission operation with its retained identity. |
-| [x] `OpenNewPresentationDocument` | native | gap | Browser prepares exact retained membership before offering an explicit same-origin link; no popup reservation or parent-side producer claim. Terminal returns explicit unsupported-native-effect error. |
-| [x] `ShowPreparedPresentationDocument` | native | gap | Completion ACK exposes the already-prepared nonbearer presentation link; no second preparation, producer claim or parent mount publication. Terminal reports unsupported independent-document hosting. |
+| [x] `OpenNewPresentationDocument` | gap | gap | Needs a prepare-first document host (prepare exact retained membership, then offer an explicit same-origin link; no popup reservation or parent-side producer claim). The Rune page has none yet and refuses explicitly; the terminal returns an unsupported-native-effect error. |
+| [x] `ShowPreparedPresentationDocument` | gap | gap | Would expose the already-prepared nonbearer presentation link after its completion ACK; no second preparation, producer claim or parent mount publication. Refused by the Rune page and the terminal until a document host exists. |
 | [x] `ObserveTransferDestination` | native | native | Bounded destination observation under the exact current source producer; no attachment or grant follows from observation. |
 | [x] `PrepareTransfer` | native | native | Existing transfer ingress carries exact producer/anchors and retained export/freeze evidence; completion returns to Core. |
 | [x] `ContactTransfer` | native | native | Existing transfer contact/reconciliation transport; no adapter-owned transfer state machine. |
@@ -229,7 +233,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 
 ## Migration rule
 
-Svelte may replace browser presentation only. It must retain every checked row,
+A browser renderer (Rune, as Svelte before it) may replace browser presentation only. It must retain every checked row,
 keep effects/events FIFO through WASM/core, and preserve the exceptions above.
 A browser-only store, command model, authority mode or product-specific route
 is a competing application model and fails this gate.

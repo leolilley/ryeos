@@ -24,12 +24,24 @@ test("packaged browser generation is the exact clean-cut closure", async () => {
   assert.doesNotMatch(index, /bootstrap|web-shell|ryeos_shell/);
 });
 
+// The daemon serves the Rune renderer's package; this crate's Svelte package
+// is no longer in the manifest.
+const servedRoot = new URL("../rune/pkg/", root);
+const served = [
+  "index.html",
+  "rune_bridge.js",
+  "rune_platform.js",
+  "ryeos_boot.js",
+  "ryeos_rune.js",
+  "ryeos_rune_bg.wasm",
+];
+
 test("typed asset manifest commits every packaged byte", async () => {
   const manifest = JSON.parse(await readFile(manifestUrl, "utf8"));
-  assert.deepEqual(manifest.assets.map((asset) => asset.filename).sort(), expected);
+  assert.deepEqual(manifest.assets.map((asset) => asset.filename).sort(), served);
   const routes = new Set(manifest.assets.map((asset) => asset.route));
   for (const asset of manifest.assets) {
-    const bytes = await readFile(new URL(asset.filename, packageRoot));
+    const bytes = await readFile(new URL(asset.filename, servedRoot));
     assert.equal(createHash("sha256").update(bytes).digest("hex"), asset.sha256);
     for (const imported of asset.imports) assert.ok(routes.has(imported));
   }

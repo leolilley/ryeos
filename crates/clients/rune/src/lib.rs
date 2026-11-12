@@ -374,6 +374,38 @@ impl App {
         }
     }
 
+    /// Tell the core when a field took keyboard focus, as the browser
+    /// shell's focus handler does. Rune records focus on the field's buffer
+    /// and has no focus callback, so the change is read here.
+    fn sync_input_focus(&mut self) -> bool {
+        let Some(core) = self.core() else {
+            return false;
+        };
+        let vm = core.envelope(Vec::new()).view_model;
+        let mut mounted = Vec::new();
+        collect_inputs(&vm, &mut mounted);
+        let Some(address) = mounted
+            .into_iter()
+            .find(|input| {
+                !input.focused
+                    && self
+                        .local
+                        .edits
+                        .0
+                        .get(&input_key(&input.address))
+                        .is_some_and(|edit| edit.focused)
+            })
+            .map(|input| input.address.clone())
+        else {
+            return false;
+        };
+        self.ui(RyeOsUiEvent::InputAt {
+            address,
+            action: ryeos_client_base::ui::event::RyeOsInputAction::Focus,
+        });
+        true
+    }
+
     pub(crate) fn edit_mut(&mut self, key: &str) -> &mut TextEdit {
         self.local
             .edits
@@ -586,7 +618,7 @@ fn setup(app: &mut App, waker: rune::runtime::Waker) {
 }
 
 fn poll(app: &mut App, seconds: f64, tx: &mut Tx) -> bool {
-    let changed = advance(app, seconds, tx);
+    let changed = app.sync_input_focus() | advance(app, seconds, tx);
     if changed {
         app.sync_edits();
     }
