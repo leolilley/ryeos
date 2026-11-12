@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T03:26:26Z:9cbafc8f3673b56ac8c168134b29a4b61475df20ccfd8ad847699bfac4576652:zcn/trMqGSX8hm8T/n/9UoW8Ybyxc8Duu9R5SdI5vOcZSedSPBBFhsLc8O/NiSUm0FaxmVhP3ncayLGEbXRuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:14:08Z:24bee098d4d4478564e2101886f88c461e8873a15aadaf63b106a3df6acc9f85:orMZPSlnfwFJTj65LFxRb2dsrr2gHQ1OipOtAGNjUVq/XuT58FiPfOXaGn6SmuVYQvdBSFTTosH7USuTzBcrDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -19,8 +19,9 @@ escalation, secret leakage, and environment-dependent behavior.
 ## Node-owned OS isolation
 
 Tool and runtime item launches can additionally pass through the immutable strict
-node isolation snapshot. The default mode is disabled. In enforce mode, the
-node—not the item—owns filesystem/network policy, environment filtering, and
+node isolation snapshot. The mode comes from the node's init profile; most
+packaged profiles' lanes select disabled. In enforce mode, the node—not the
+item—owns filesystem/network policy, environment filtering, and
 the Lillux open-file cap. Policy is resolved once at startup and shared across
 launch paths; edits require restart. Parser/composer handlers are trusted engine
 infrastructure and retain the hermetic handler boundary below.

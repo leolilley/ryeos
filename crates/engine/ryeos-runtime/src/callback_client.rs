@@ -1310,7 +1310,7 @@ impl CallbackClient {
         let value = serde_json::to_value(&payload)
             .map_err(|e| anyhow::anyhow!("encode ProgressEvent: {e}"))?;
         // High-frequency progressive event — maps to `stream_snapshot`
-        // (journal_only). The original "progress" name is preserved
+        // (ephemeral). The original "progress" name is preserved
         // inside the payload via a `kind` field for downstream
         // consumers that want to discriminate.
         let mut wrapped = serde_json::json!({"kind": "progress"});

@@ -3349,7 +3349,7 @@ impl Runner {
                             // Hook events ("before_step", "after_step", …)
                             // are not in the daemon's event-vocabulary
                             // allow-list; map them to `cognition_reasoning`
-                            // (journal_only) and stash the original hook name
+                            // (ephemeral) and stash the original hook name
                             // in the payload so consumers can still
                             // discriminate.
                             record_callback_warning(

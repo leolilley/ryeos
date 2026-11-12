@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T23:03:08Z:839704d8564382359a0257e35886cdfc7f4ceb5f579cb54b31ab28474639ea61:AwJvQIgi+hshAiH66eukV7LOtZpqfWy13SpvMu55jK5dvO07fOfxlmBYq3o3E3eUyIpc5bhU3IWYpwthgYvKAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:14:08Z:36e51b6a186c1bcdae22ccee3870b5e01e4fc4d2bb4236b90c1594ada345f0ab:0yVEreO7Rjn7m7XJtBxaDMw6okI5v2IdFbvTzwVskgN21IqKLoXHX44Qs3a+L+6pAaTxIzr50YAx6NFMoGgEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -186,8 +186,9 @@ installed runtime node-trusted.
 
 The policy has two modes:
 
-- `mode: disabled` does not wrap the subprocess in an isolation adapter. This is the
-  default and does not require the selected bundle. Node-owned stdout/stderr retention
+- `mode: disabled` does not wrap the subprocess in an isolation adapter. Profiles
+  select it per host class (the `standard` profile's `local` and `hosted` lanes
+  do). It does not require the selected bundle. Node-owned stdout/stderr retention
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement. Verification-to-exec is still pinned: an
   admitted command runs only from a retained descriptor carrying its exact
@@ -393,8 +394,9 @@ artificial dependency on the selected bundle.
 
 Re-init validates the complete source generation even when ordinary preflight
 is skipped. It also re-resolves the selected backend from its completed staging
-tree before that tree can be atomically activated. First init has no policy and
-uses the compiled disabled default until it creates the policy once.
+tree before that tree can be atomically activated. First init has no policy. It
+requires an explicit `--node-profile` and creates the policy from that profile's
+selected host-class lane; there is no compiled default.
 
 ## Filesystem authority
 
@@ -814,8 +816,9 @@ healthy inactive opt-out without resolving the selected backend. Enforce mode ve
 backend availability and capture digest, and reports filesystem, network,
 environment, open-file, captured-output, and verified-artifact-limit posture.
 
-The published container runs the default disabled profile without extra
-capabilities. Enforce mode requires a separately installed selected signed
+Images that initialize from a profile whose selected lane is disabled (for
+example `standard`) run without extra capabilities. The `contained-workflow`
+image requires enforce. Enforce mode requires a separately installed selected signed
 backend bundle and every host facility needed by its declared capabilities.
 Setuid, setgid, and file-capability adapter or external artifact executables are
 refused, and verified bytes execute from sealed private captures.
@@ -841,7 +844,7 @@ authorization, and capability checks remain active.
 
 ## Local use, hosted nodes, and Docker
 
-For a trusted, single-user local node, keeping the default disabled mode is a
+For a trusted, single-user local node, choosing a profile lane with disabled mode is a
 reasonable choice. It avoids namespace requirements while retaining RyeOS's
 normal signed-item and capability model. Enforcement becomes important when a
 node executes bundles for another person, accepts remotely supplied projects,
