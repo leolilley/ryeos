@@ -1287,6 +1287,18 @@ fn exact_terminal_timestamp<'a>(
 }
 
 fn has_json_content_type(headers: &[Header]) -> bool {
+    has_media_type(headers, "application/json")
+}
+
+/// A run stream's response type. Render sends `text/event-stream;
+/// charset=utf-8`; the same single-header, single-charset rule as JSON.
+fn has_event_stream_content_type(headers: &[Header]) -> bool {
+    has_media_type(headers, "text/event-stream")
+}
+
+/// Exactly one Content-Type header of visible ASCII naming `media_type`,
+/// optionally with the single parameter `charset=utf-8`.
+fn has_media_type(headers: &[Header], media_type: &str) -> bool {
     let mut values = headers
         .iter()
         .filter(|header| header.name.eq_ignore_ascii_case("content-type"));
@@ -1301,14 +1313,15 @@ fn has_json_content_type(headers: &[Header]) -> bool {
     {
         return false;
     }
-    std::str::from_utf8(header.value()).is_ok_and(is_json_content_type_value)
+    std::str::from_utf8(header.value()).is_ok_and(|value| is_media_type_value(value, media_type))
 }
 
-fn is_json_content_type_value(value: &str) -> bool {
+fn is_media_type_value(value: &str, expected: &str) -> bool {
     let mut parts = value.split(';');
-    if !parts.next().is_some_and(|media_type| {
-        trim_http_ows(media_type).eq_ignore_ascii_case("application/json")
-    }) {
+    if !parts
+        .next()
+        .is_some_and(|media_type| trim_http_ows(media_type).eq_ignore_ascii_case(expected))
+    {
         return false;
     }
     let Some(parameter) = parts.next() else {
@@ -1834,6 +1847,42 @@ mod offline_fixture_tests {
 
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn run_streams_accept_renders_charset_and_nothing_looser() {
+        let headers = |values: &[&str]| -> Vec<Header> {
+            values
+                .iter()
+                .map(|value| Header::new("Content-Type", *value))
+                .collect()
+        };
+        // Recorded from Render's run stream, 2026-11-12.
+        assert!(has_event_stream_content_type(&headers(&[
+            "text/event-stream; charset=utf-8"
+        ])));
+        assert!(has_event_stream_content_type(&headers(&[
+            "text/event-stream"
+        ])));
+        assert!(has_event_stream_content_type(&headers(&[
+            "Text/Event-Stream;charset=UTF-8"
+        ])));
+        for refused in [
+            &["text/plain; charset=utf-8"][..],
+            &["text/event-stream; charset=latin-1"][..],
+            &["text/event-stream; charset=utf-8; extra=1"][..],
+            &["text/event-stream", "text/event-stream"][..],
+            &[][..],
+        ] {
+            assert!(
+                !has_event_stream_content_type(&headers(refused)),
+                "{refused:?}"
+            );
+        }
+        assert!(has_json_content_type(&headers(&[
+            "application/json; charset=utf-8"
+        ])));
+        assert!(!has_json_content_type(&headers(&["text/event-stream"])));
+    }
 
     #[test]
     fn only_a_direct_refusal_of_the_create_proves_no_sandbox() {

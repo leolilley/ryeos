@@ -158,20 +158,10 @@ pub(crate) fn first_contact(
             &format!("run {detail}"),
         ));
     }
-    let exact_event_stream = run_response
-        .headers
-        .iter()
-        .filter(|header| header.name.eq_ignore_ascii_case("content-type"))
-        .count()
-        == 1
-        && run_response.headers.iter().any(|header| {
-            header.name.eq_ignore_ascii_case("content-type")
-                && header.value() == b"text/event-stream"
-        });
-    if !exact_event_stream {
+    if !crate::has_event_stream_content_type(&run_response.headers) {
         return Err(failure(
             UncertaintyClass::ContentType,
-            "run status 200 without exactly one text/event-stream content type",
+            "run status 200 without exactly one text/event-stream content type (optionally charset=utf-8)",
         ));
     }
     let mut stream = Vec::new();

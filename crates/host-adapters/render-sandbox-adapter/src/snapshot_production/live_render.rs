@@ -380,17 +380,7 @@ fn run_command(contact: &RenderContact<'_>, command: &str) -> Result<String> {
         RESPONSE_BYTES,
     )?;
     ensure!(
-        response.status == 200
-            && response
-                .headers
-                .iter()
-                .filter(|header| header.name.eq_ignore_ascii_case("content-type"))
-                .count()
-                == 1
-            && response.headers.iter().any(|header| {
-                header.name.eq_ignore_ascii_case("content-type")
-                    && header.value() == b"text/event-stream"
-            }),
+        response.status == 200 && crate::has_event_stream_content_type(&response.headers),
         "run did not return an exact event stream (status {})",
         response.status
     );
