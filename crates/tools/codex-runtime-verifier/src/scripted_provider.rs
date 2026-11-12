@@ -576,9 +576,18 @@ mod tests {
         // Stream merge order is arrival order: the denial may abut the shell's
         // own diagnostic on either side; twice, or absent, still refuses.
         for (body, accepted) in [
-            ("zsh:1: no such file or directory: /c/canary\ncontroller-canary-read-denied", true),
-            ("controller-canary-read-deniedzsh:1: no such file or directory: /c/canary\n", true),
-            ("controller-canary-read-denied\ncontroller-canary-read-denied\n", false),
+            (
+                "zsh:1: no such file or directory: /c/canary\ncontroller-canary-read-denied",
+                true,
+            ),
+            (
+                "controller-canary-read-deniedzsh:1: no such file or directory: /c/canary\n",
+                true,
+            ),
+            (
+                "controller-canary-read-denied\ncontroller-canary-read-denied\n",
+                false,
+            ),
             ("zsh:1: no such file or directory: /c/canary\n", false),
         ] {
             let mut merged = requests.clone();

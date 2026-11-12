@@ -254,7 +254,13 @@ pub(crate) const MAX_GUEST_FAILURE_BYTES: usize = 1024;
 /// flattened to spaces so no control bytes travel into a retained account.
 pub(crate) fn bounded_failure_reason(text: &str) -> String {
     text.chars()
-        .map(|ch| if ch.is_ascii_graphic() || ch == ' ' { ch } else { ' ' })
+        .map(|ch| {
+            if ch.is_ascii_graphic() || ch == ' ' {
+                ch
+            } else {
+                ' '
+            }
+        })
         .take(MAX_GUEST_FAILURE_BYTES)
         .collect()
 }
