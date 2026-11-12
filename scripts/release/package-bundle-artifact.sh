@@ -254,10 +254,13 @@ ryeos_term_update "verifying staged node init profile" "$node_init_profile"
     --host-class local >/dev/null
 
 selected_node_init_profile="$stage/.ai/node/init/profiles/$node_init_profile.yaml"
+# Every generation carries its signed operator record beside the sections.
 expected_node_policies="$(
-    ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
-        | sed 's/$/.yaml/' \
-        | sort
+    {
+        ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
+            | sed 's/$/.yaml/'
+        printf '%s\n' _operator-sections.yaml
+    } | sort
 )"
 policy_directory="$policy_verify_app_root/.ai/node/policies"
 [[ -n "$expected_node_policies" && -d "$policy_directory" && ! -L "$policy_directory" ]] || {

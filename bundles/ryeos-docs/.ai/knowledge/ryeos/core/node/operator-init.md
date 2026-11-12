@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-28T22:45:28Z:8ee7ef27d88cec6d8bd0630ea9105bf56386b7123787c43c9c8362b1544a8d8b:d+xFg2Ki94nA4WQa4EEe/6p9sSS87Q3XzYR9Y0QIHq5u3yK+NcnR8id0NZVsu4HGaV3kFnq5CauMKQpB8mUNCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T07:09:43Z:9cca1b98cd1e3bfcc47c0813b5286f6e6b70b4ab654f1f17339ef1ba2069dcda:GSqe6mlvCbOdyCKMjDtn8a67RMUUl9ML4TPp6qfP/+3peZ0YlXtZPxIHxhVSpLXvgquIQjedGOhaXD6mZtKfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -165,7 +165,12 @@ generation is intentionally undecodable and `policy-apply` cannot treat it as
 current authority. Use the explicit stopped-node
 `ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm` cutover
 against the trusted packaged source. There is no implicit migration or
-fallback.
+fallback. The cutover takes every section from the profile except those an
+operator applied, which carry forward after they are checked under the new
+schema; one that no longer validates refuses the cut by name until it is fixed
+or named with `--reset-section`. On a node whose generation predates the
+operator record, the cutover lists every section that differs from the
+profile and needs each named with `--keep-section` or `--reset-section`.
 
 The `ingest_ignore` schema-1 to schema-2 change is one such clean cut. Schema 1
 only carried `additional_patterns`; schema 2 carries the complete canonical
@@ -179,6 +184,7 @@ sudo scripts/pkg/install-local-direct.sh \
 ```
 
 The installer maps the installed bundle set to its exact signed node profile
-and invokes the same explicit replacement boundary. It preserves node,
-operator, and vault identities and all non-policy state. Do not use the reset
+and invokes the same explicit replacement boundary, passing through any
+`--keep-section`/`--reset-section` choices. It preserves node, operator, and
+vault identities, operator-applied policy sections, and all non-policy state. Do not use the reset
 flag on a fresh node or a node whose generation is already current.

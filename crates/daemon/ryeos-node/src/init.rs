@@ -139,6 +139,10 @@ pub struct InitOptions {
     /// selected trusted profile as part of this same stopped-node init
     /// transaction. This is never inferred from a mismatch.
     pub replace_node_policy_generation: bool,
+    /// Which sections a replacement keeps from the installed generation or
+    /// takes from the profile, beyond those the operator record carries.
+    /// Meaningful only with `replace_node_policy_generation`.
+    pub policy_carry: ryeos_node_runtime::node_policy::generation::PolicyCarryChoices,
     /// Authorize the offered substrate identity to replace the recorded one
     /// when only the image digest differs. Valid only together with
     /// `replace_node_policy_generation` and the confirmation below; never
@@ -588,6 +592,7 @@ pub fn prospective_replacement_policy_digest(
     node_profile: &str,
     host_class: &str,
     trust_files: &[PathBuf],
+    policy_carry: &ryeos_node_runtime::node_policy::generation::PolicyCarryChoices,
 ) -> Result<String> {
     let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     let mut trust = TrustStore::load(None, &operator_config_root)
@@ -617,11 +622,21 @@ pub fn prospective_replacement_policy_digest(
     let profile = select_profile_host_class(node_profile, &profile, Some(host_class))?
         .admit_import_roots(app_root)
         .context("admit declared external-content import roots")?;
-    let generation = profile.validated_generation(
-        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
-        Path::new("selected-node-profile"),
-    )?;
-    Ok(generation.digest().to_owned())
+    let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+    let generation =
+        profile.validated_generation(&policy_table, Path::new("selected-node-profile"))?;
+    let update =
+        ryeos_node_runtime::node_policy::generation::prepare_schema_cut_carrying_operator_policy(
+            app_root,
+            &trust,
+            &policy_table,
+            host_class,
+            generation,
+            policy_carry,
+            Path::new("selected-node-profile"),
+        )
+        .context("carry operator-applied policy into the replacement generation")?;
+    Ok(update.generation().digest().to_owned())
 }
 
 pub fn run_init_with_progress(
@@ -952,6 +967,9 @@ fn run_init_under_lock_on_storage(
     }
     let config_table = ryeos_app::node_config::NodeConfigTable::new();
     let policy_table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
+    if !opts.replace_node_policy_generation && !opts.policy_carry.is_empty() {
+        bail!("--keep-section and --reset-section apply only to a policy generation replacement");
+    }
     let current_node_policy_generation = if opts.replace_node_policy_generation {
         ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(
             &opts.app_root,
@@ -981,13 +999,30 @@ fn run_init_under_lock_on_storage(
             bail!("node initialization requires an explicit publisher-signed --node-profile")
         }
         (None, Some(selected)) if opts.replace_node_policy_generation => Some(
-            ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::schema_cut(selected),
+            ryeos_node_runtime::node_policy::generation::prepare_schema_cut_carrying_operator_policy(
+                &opts.app_root,
+                &seed_trust_store,
+                &policy_table,
+                opts.host_class
+                    .as_deref()
+                    .context("a policy generation replacement names the node's host class")?,
+                selected,
+                &opts.policy_carry,
+                Path::new("selected-node-profile"),
+            )
+            .context("carry operator-applied policy into the replacement generation")?,
         ),
         (None, Some(selected)) => {
             Some(ryeos_node_runtime::node_policy::generation::NodePolicyUpdate::initial(selected))
         }
         (Some(_), None) => None,
-        (Some(current), Some(selected)) if current.policies() == selected.policies() => None,
+        // Sections the operator applied stay theirs: the profile matches when
+        // every other section does.
+        (Some(current), Some(selected))
+            if &selected.with_operator_sections_of(current) == current.policies() =>
+        {
+            None
+        }
         (Some(_), Some(_)) => bail!(
             "selected node profile conflicts with the existing node policy generation; use explicit stopped-node policy changes"
         ),
@@ -2717,6 +2752,7 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,
@@ -3103,6 +3139,7 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,
@@ -3458,6 +3495,7 @@ mod tests {
             "standard",
             "local",
             &[dev_trust_file()],
+            &Default::default(),
         )
         .expect("the generation the seed would install");
         let replacement = InitOptions {
@@ -3470,6 +3508,7 @@ mod tests {
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,
@@ -3525,6 +3564,7 @@ mod tests {
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,
@@ -3802,6 +3842,7 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,
@@ -3837,6 +3878,7 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,
@@ -4264,6 +4306,7 @@ typo_field: oops
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,

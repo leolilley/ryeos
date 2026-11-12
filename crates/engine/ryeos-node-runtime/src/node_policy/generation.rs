@@ -6,7 +6,7 @@
 //! stopped-node state lock and conditionally exchanges one pinned directory,
 //! so readers cannot observe a mixed generation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,11 @@ pub const POLICIES_DIRECTORY: &str = "policies";
 const POLICY_STAGING_DIRECTORY: &str = ".policies.staging";
 const MAX_POLICY_FILES: usize = 32;
 const MAX_POLICY_DEPTH: usize = 1;
+/// The generation's signed record of which sections an operator applied. The
+/// leading underscore is outside the canonical section-name grammar, so no
+/// section can ever own this filename.
+const OPERATOR_SECTIONS_FILE: &str = "_operator-sections.yaml";
+const OPERATOR_SECTIONS_KEY: &str = "sections";
 
 /// Publisher-authored initial policy generation. `exact_bundles` is the exact
 /// bundle inventory selected by this node profile, not a minimum dependency
@@ -108,7 +113,12 @@ impl NodeInitProfile {
         source_file: &Path,
     ) -> Result<NodePolicyGeneration> {
         self.validate(policy_table, source_file)?;
-        validate_policy_generation(policy_table, self.policies.clone(), source_file)
+        validate_policy_generation(
+            policy_table,
+            self.policies.clone(),
+            Some(BTreeSet::new()),
+            source_file,
+        )
     }
 
     /// This profile's member for policy `T`, compiled by its registered
@@ -150,12 +160,38 @@ impl NodeInitProfile {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodePolicyGeneration {
     policies: BTreeMap<String, Value>,
+    /// Sections an operator applied with `policy-apply`, which a policy
+    /// generation replacement carries forward. `None` only for a generation
+    /// published before this record existed: nothing is known about which of
+    /// its sections an operator chose, so a replacement asks rather than
+    /// guessing.
+    operator_sections: Option<BTreeSet<String>>,
     digest: String,
 }
 
 impl NodePolicyGeneration {
     pub fn policies(&self) -> &BTreeMap<String, Value> {
         &self.policies
+    }
+
+    pub fn operator_sections(&self) -> Option<&BTreeSet<String>> {
+        self.operator_sections.as_ref()
+    }
+
+    /// This generation's policies with the operator-applied members of
+    /// `current` in place of its own, for comparing a profile against a node
+    /// whose operator changed some sections.
+    pub fn with_operator_sections_of(
+        &self,
+        current: &NodePolicyGeneration,
+    ) -> BTreeMap<String, Value> {
+        let mut policies = self.policies.clone();
+        for section in current.operator_sections.iter().flatten() {
+            if let Some(body) = current.policies.get(section) {
+                policies.insert(section.clone(), body.clone());
+            }
+        }
+        policies
     }
 
     pub fn digest(&self) -> &str {
@@ -196,7 +232,12 @@ impl NodePolicyGeneration {
         policies: BTreeMap<String, Value>,
         source_file: &Path,
     ) -> Result<NodePolicyUpdate> {
-        let generation = validate_policy_generation(policy_table, policies, source_file)?;
+        let generation = validate_policy_generation(
+            policy_table,
+            policies,
+            self.operator_sections.clone(),
+            source_file,
+        )?;
         Ok(NodePolicyUpdate {
             generation,
             expected: ExpectedPolicyGeneration::ExactDigest(self.digest.clone()),
@@ -337,6 +378,7 @@ pub fn validate_policy_bodies(
 fn validate_policy_generation(
     policy_table: &NodePolicyTable,
     policies: BTreeMap<String, Value>,
+    operator_sections: Option<BTreeSet<String>>,
     source_file: &Path,
 ) -> Result<NodePolicyGeneration> {
     validate_policy_bodies(policy_table, &policies, source_file)?;
@@ -348,14 +390,67 @@ fn validate_policy_generation(
             );
         }
     }
-    let digest = policy_bodies_digest(&policies)?;
-    Ok(NodePolicyGeneration { policies, digest })
+    for section in operator_sections.iter().flatten() {
+        if !policies.contains_key(section) {
+            bail!(
+                "node policy generation records operator section `{section}` it does not contain"
+            );
+        }
+    }
+    let digest = generation_digest(&policies, operator_sections.as_ref())?;
+    Ok(NodePolicyGeneration {
+        policies,
+        operator_sections,
+        digest,
+    })
 }
 
-fn policy_bodies_digest(policies: &BTreeMap<String, Value>) -> Result<String> {
-    ryeos_state::objects::canonical_value_digest(
-        &serde_json::to_value(policies).context("serialize node policy generation")?,
-    )
+/// A generation without an operator record keeps the bodies-only digest it
+/// was published under; one with a record binds the record too.
+fn generation_digest(
+    policies: &BTreeMap<String, Value>,
+    operator_sections: Option<&BTreeSet<String>>,
+) -> Result<String> {
+    let value = match operator_sections {
+        None => serde_json::to_value(policies),
+        Some(sections) => serde_json::to_value(serde_json::json!({
+            "policies": policies,
+            "operator_sections": sections,
+        })),
+    }
+    .context("serialize node policy generation")?;
+    ryeos_state::objects::canonical_value_digest(&value)
+}
+
+fn operator_sections_body(sections: &BTreeSet<String>) -> Value {
+    serde_json::json!({ OPERATOR_SECTIONS_KEY: sections })
+}
+
+fn parse_operator_sections(body: &Value) -> Result<BTreeSet<String>> {
+    let map = body
+        .as_object()
+        .context("node policy operator record must be a mapping")?;
+    if map.len() != 1 {
+        bail!("node policy operator record declares fields other than `{OPERATOR_SECTIONS_KEY}`");
+    }
+    let names = map
+        .get(OPERATOR_SECTIONS_KEY)
+        .and_then(Value::as_array)
+        .context("node policy operator record has no section list")?;
+    let mut sections = BTreeSet::new();
+    let mut previous: Option<&str> = None;
+    for name in names {
+        let name = name
+            .as_str()
+            .context("node policy operator record names a non-string section")?;
+        validate_policy_name("node policy operator section", name)?;
+        if previous.is_some_and(|candidate| candidate >= name) {
+            bail!("node policy operator record sections must be sorted and unique");
+        }
+        previous = Some(name);
+        sections.insert(name.to_owned());
+    }
+    Ok(sections)
 }
 
 /// Explicit replacement does not need to interpret the retired member's
@@ -379,18 +474,150 @@ pub fn prepare_policy_member_replacement(
         .context("unknown replacement policy section")?;
     let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
         .context("node has no explicit signed policy generation")?;
-    let mut policies = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    let SignedPolicyBodies {
+        mut policies,
+        operator_sections,
+    } = read_signed_policy_bodies(app_root, &directory, trust_store)?;
     if !policies.contains_key(section) {
         bail!("node policy generation has no `{section}` member to replace");
     }
-    let expected = ExpectedPolicyGeneration::ExactDigest(policy_bodies_digest(&policies)?);
+    let expected = ExpectedPolicyGeneration::ExactDigest(generation_digest(
+        &policies,
+        operator_sections.as_ref(),
+    )?);
     policies.insert(section.to_owned(), body);
-    let generation = validate_policy_generation(policy_table, policies, source_file)?;
+    // A generation published before the record existed stays unrecorded: its
+    // earlier operator changes are unknown, and recording only this one would
+    // let the next replacement silently drop them. That replacement asks.
+    let operator_sections = operator_sections.map(|mut sections| {
+        sections.insert(section.to_owned());
+        sections
+    });
+    let generation =
+        validate_policy_generation(policy_table, policies, operator_sections, source_file)?;
     generation.require_host_class(host_class)?;
     Ok(NodePolicyUpdate {
         generation,
         expected,
     })
+}
+
+/// The operator's explicit choices for a policy generation replacement:
+/// sections to keep from the installed generation and sections to take from
+/// the new profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyCarryChoices {
+    #[serde(default)]
+    pub keep: BTreeSet<String>,
+    #[serde(default)]
+    pub reset: BTreeSet<String>,
+}
+
+impl PolicyCarryChoices {
+    pub fn is_empty(&self) -> bool {
+        self.keep.is_empty() && self.reset.is_empty()
+    }
+}
+
+/// Replace the node's policy generation with `profile`, carrying every
+/// section an operator applied. Each carried body is compiled under the
+/// current table; the replacement is refused, naming every section that no
+/// longer validates, before anything changes. A generation published before
+/// the operator record existed cannot say which sections were chosen, so
+/// every member that differs from the profile must be named in
+/// `choices.keep` or `choices.reset`. Nothing is reset silently.
+///
+/// The installed generation is read meaning-blind, as the schema cut already
+/// proves it, and is unchanged until publication: a rerun after a crash
+/// computes the same generation, including after the exchange, when the
+/// installed generation is the one this produced.
+pub fn prepare_schema_cut_carrying_operator_policy(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    policy_table: &NodePolicyTable,
+    host_class: &str,
+    profile: NodePolicyGeneration,
+    choices: &PolicyCarryChoices,
+    source_file: &Path,
+) -> Result<NodePolicyUpdate> {
+    let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
+        .context("node has no existing policy generation to replace")?;
+    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)?;
+    let installed = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    for name in choices.keep.iter().chain(&choices.reset) {
+        validate_policy_name("policy carry section", name)?;
+    }
+    if let Some(both) = choices.keep.intersection(&choices.reset).next() {
+        bail!("section `{both}` is named both to keep and to reset");
+    }
+    for name in &choices.keep {
+        if !installed.policies.contains_key(name) {
+            bail!("the installed policy generation has no `{name}` section to keep");
+        }
+    }
+    let carried: BTreeSet<String> = match &installed.operator_sections {
+        Some(recorded) => recorded
+            .union(&choices.keep)
+            .filter(|section| !choices.reset.contains(*section))
+            .cloned()
+            .collect(),
+        None => {
+            let undecided = installed
+                .policies
+                .iter()
+                .filter(|(section, body)| {
+                    profile
+                        .policies
+                        .get(*section)
+                        .is_some_and(|new| new != *body)
+                        && !choices.keep.contains(*section)
+                        && !choices.reset.contains(*section)
+                })
+                .map(|(section, _)| section.as_str())
+                .collect::<Vec<_>>();
+            if !undecided.is_empty() {
+                bail!(
+                    "this node's policy generation predates the operator record, so it cannot \
+                     say which sections an operator chose; these differ from the new profile: \
+                     {}. Name each with --keep-section (carry the installed policy) or \
+                     --reset-section (take the profile's)",
+                    undecided.join(", ")
+                );
+            }
+            choices.keep.clone()
+        }
+    };
+    let mut refused = Vec::new();
+    let mut policies = profile.policies.clone();
+    for section in &carried {
+        let Some(body) = installed.policies.get(section) else {
+            refused.push(format!(
+                "`{section}`: recorded as operator-applied but absent from the installed generation"
+            ));
+            continue;
+        };
+        let single = BTreeMap::from([(section.clone(), body.clone())]);
+        if let Err(error) = validate_policy_bodies(policy_table, &single, source_file) {
+            refused.push(format!("`{section}`: {error:#}"));
+            continue;
+        }
+        policies.insert(section.clone(), body.clone());
+    }
+    if !refused.is_empty() {
+        bail!(
+            "operator-applied policy no longer validates under this release; nothing was \
+             changed. Fix and re-apply it after the replacement, or pass --reset-section \
+             to take the profile's: {}",
+            refused.join("; ")
+        );
+    }
+    let generation =
+        validate_policy_generation(policy_table, policies, Some(carried), source_file)?;
+    generation
+        .require_host_class(host_class)
+        .context("check the replacement generation against this node's host class")?;
+    Ok(NodePolicyUpdate::schema_cut(generation))
 }
 
 /// Load and validate the exact node-signed policy generation.
@@ -453,7 +680,9 @@ fn validate_schema_cut_directory_occupant(
             .file_stem()
             .and_then(OsStr::to_str)
             .context("existing node policy filename is not UTF-8")?;
-        validate_policy_name("existing node policy section", name)?;
+        if entry.name != OPERATOR_SECTIONS_FILE {
+            validate_policy_name("existing node policy section", name)?;
+        }
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .context("existing node policy entry disappeared")?;
@@ -474,8 +703,17 @@ fn load_policy_generation_from_directory(
     trust_store: &ryeos_engine::trust::TrustStore,
     policy_table: &NodePolicyTable,
 ) -> Result<NodePolicyGeneration> {
-    let policies = read_signed_policy_bodies(app_root, directory, trust_store)?;
-    validate_policy_generation(policy_table, policies, directory.path())
+    let SignedPolicyBodies {
+        policies,
+        operator_sections,
+    } = read_signed_policy_bodies(app_root, directory, trust_store)?;
+    validate_policy_generation(policy_table, policies, operator_sections, directory.path())
+}
+
+/// A generation's node-signed members, read without compiling any section.
+struct SignedPolicyBodies {
+    policies: BTreeMap<String, Value>,
+    operator_sections: Option<BTreeSet<String>>,
 }
 
 /// Signature/shape verification shared by strict loading and explicit cuts.
@@ -484,10 +722,11 @@ fn read_signed_policy_bodies(
     app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
-) -> Result<BTreeMap<String, Value>> {
+) -> Result<SignedPolicyBodies> {
     let node_fingerprint = crate::identity::node_identity_fingerprint(app_root)?;
     let entries = directory.entries_no_follow_bounded(MAX_POLICY_FILES)?;
     let mut policies = BTreeMap::new();
+    let mut operator_sections = None;
     for entry in entries {
         if entry.entry_type != lillux::secure_fs::PinnedEntryType::Regular {
             bail!(
@@ -507,7 +746,10 @@ fn read_signed_policy_bodies(
             .and_then(OsStr::to_str)
             .context("node policy filename is not UTF-8")?
             .to_owned();
-        validate_policy_name("node policy section", &section_name)?;
+        let is_operator_record = entry.name == OPERATOR_SECTIONS_FILE;
+        if !is_operator_record {
+            validate_policy_name("node policy section", &section_name)?;
+        }
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .with_context(|| format!("node policy disappeared: {}", path.display()))?;
@@ -520,6 +762,13 @@ fn read_signed_policy_bodies(
                 node_fingerprint
             );
         }
+        if is_operator_record {
+            operator_sections = Some(
+                parse_operator_sections(&verified.body)
+                    .with_context(|| format!("read {}", path.display()))?,
+            );
+            continue;
+        }
         if policies
             .insert(section_name.clone(), verified.body)
             .is_some()
@@ -527,7 +776,10 @@ fn read_signed_policy_bodies(
             bail!("duplicate node policy section `{section_name}`");
         }
     }
-    Ok(policies)
+    Ok(SignedPolicyBodies {
+        policies,
+        operator_sections,
+    })
 }
 
 /// Publish one complete validated generation. The caller must hold the same
@@ -568,8 +820,8 @@ pub fn publish_policy_update(
             let current = current
                 .as_ref()
                 .context("node policy generation disappeared before replacement")?;
-            let found =
-                policy_bodies_digest(&read_signed_policy_bodies(app_root, current, trust_store)?)?;
+            let observed = read_signed_policy_bodies(app_root, current, trust_store)?;
+            let found = generation_digest(&observed.policies, observed.operator_sections.as_ref())?;
             if &found != expected {
                 bail!(
                     "node policy generation changed before publication: expected {expected}, found {found}"
@@ -614,6 +866,21 @@ pub fn publish_policy_update(
                 crate::node_document::render_signed_item(section_name, "policy", body, identity)?;
             staging.atomic_write_pinned_if_same(
                 &filename,
+                None,
+                &bytes,
+                0o600,
+                crate::NODE_RUNTIME_TEMP_PURPOSE,
+            )?;
+        }
+        if let Some(sections) = &update.generation.operator_sections {
+            let bytes = crate::node_document::render_signed_item(
+                "operator_sections",
+                "policy",
+                &operator_sections_body(sections),
+                identity,
+            )?;
+            staging.atomic_write_pinned_if_same(
+                OsStr::new(OPERATOR_SECTIONS_FILE),
                 None,
                 &bytes,
                 0o600,
@@ -1027,5 +1294,284 @@ mod tests {
             load_policy_generation(root.path(), &trust, &table).unwrap(),
             update.generation
         );
+    }
+
+    struct CarryFixture {
+        root: tempfile::TempDir,
+        identity: NodeIdentity,
+        trust: ryeos_engine::trust::TrustStore,
+        table: NodePolicyTable,
+        profile: NodePolicyGeneration,
+    }
+
+    impl CarryFixture {
+        fn new() -> Self {
+            use ryeos_engine::trust::{TrustStore, TrustedSigner};
+            let root = tempfile::tempdir().unwrap();
+            let identity_path = root
+                .path()
+                .join(ryeos_engine::AI_DIR)
+                .join("node/identity/private_key.pem");
+            std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+            let identity = NodeIdentity::create(&identity_path).unwrap();
+            let trust = TrustStore::from_signers(vec![TrustedSigner {
+                fingerprint: identity.fingerprint().to_owned(),
+                verifying_key: *identity.verifying_key(),
+                label: None,
+            }]);
+            let table = NodePolicyTable::new();
+            let profile = authored_profile("full")
+                .for_host_class("local")
+                .unwrap()
+                .validated_generation(&table, Path::new("profile.yaml"))
+                .unwrap();
+            Self {
+                root,
+                identity,
+                trust,
+                table,
+                profile,
+            }
+        }
+
+        /// Install a generation as it lies on disk, with or without a record.
+        fn install(&self, policies: &BTreeMap<String, Value>, record: Option<&[&str]>) {
+            let directory = policy_directory(self.root.path());
+            if directory.exists() {
+                std::fs::remove_dir_all(&directory).unwrap();
+            }
+            std::fs::create_dir_all(&directory).unwrap();
+            for (section, body) in policies {
+                std::fs::write(
+                    directory.join(format!("{section}.yaml")),
+                    crate::node_document::render_signed_item(
+                        section,
+                        "policy",
+                        body,
+                        &self.identity,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            if let Some(record) = record {
+                let sections = record.iter().map(|name| (*name).to_owned()).collect();
+                std::fs::write(
+                    directory.join(OPERATOR_SECTIONS_FILE),
+                    crate::node_document::render_signed_item(
+                        "operator_sections",
+                        "policy",
+                        &operator_sections_body(&sections),
+                        &self.identity,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+        }
+
+        fn cut(&self, choices: &PolicyCarryChoices) -> Result<NodePolicyGeneration> {
+            prepare_schema_cut_carrying_operator_policy(
+                self.root.path(),
+                &self.trust,
+                &self.table,
+                "local",
+                self.profile.clone(),
+                choices,
+                Path::new("profile.yaml"),
+            )
+            .map(|update| update.generation)
+        }
+    }
+
+    fn operator_ingest_ignore() -> Value {
+        serde_json::json!({"schema": 2, "patterns": ["target/", "operator-only/"]})
+    }
+
+    fn sections(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_replacement_carries_recorded_operator_sections_and_retakes_the_rest() {
+        let fixture = CarryFixture::new();
+        let mut installed = fixture.profile.policies().clone();
+        installed.insert("ingest_ignore".into(), operator_ingest_ignore());
+        // A profile section in a retired shape is retaken, not interpreted.
+        installed.insert(
+            "isolation".into(),
+            serde_json::json!({"retired_shape": true}),
+        );
+        fixture.install(&installed, Some(&["ingest_ignore"]));
+
+        let carried = fixture.cut(&PolicyCarryChoices::default()).unwrap();
+        assert_eq!(
+            carried.policies()["ingest_ignore"],
+            operator_ingest_ignore()
+        );
+        assert_eq!(
+            carried.policies()["isolation"],
+            fixture.profile.policies()["isolation"]
+        );
+        assert_eq!(
+            carried.operator_sections(),
+            Some(&sections(&["ingest_ignore"]))
+        );
+
+        // A rerun after the exchange computes the same generation.
+        fixture.install(carried.policies(), Some(&["ingest_ignore"]));
+        assert_eq!(
+            fixture
+                .cut(&PolicyCarryChoices::default())
+                .unwrap()
+                .digest(),
+            carried.digest()
+        );
+        assert_eq!(
+            load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table)
+                .unwrap()
+                .digest(),
+            carried.digest()
+        );
+
+        // Resetting a recorded section takes the profile's and forgets it.
+        let reset = fixture
+            .cut(&PolicyCarryChoices {
+                reset: sections(&["ingest_ignore"]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            reset.policies()["ingest_ignore"],
+            fixture.profile.policies()["ingest_ignore"]
+        );
+        assert_eq!(reset.operator_sections(), Some(&BTreeSet::new()));
+    }
+
+    #[test]
+    fn a_replacement_names_every_operator_section_that_no_longer_validates() {
+        let fixture = CarryFixture::new();
+        let mut installed = fixture.profile.policies().clone();
+        installed.insert(
+            "ingest_ignore".into(),
+            serde_json::json!({"retired_shape": true}),
+        );
+        fixture.install(&installed, Some(&["ingest_ignore"]));
+        let refused = format!(
+            "{:#}",
+            fixture
+                .cut(&PolicyCarryChoices::default())
+                .expect_err("a carried section must validate")
+        );
+        assert!(
+            refused.contains("`ingest_ignore`") && refused.contains("nothing was changed"),
+            "{refused}"
+        );
+        // The explicit reset takes the profile's instead.
+        assert!(
+            fixture
+                .cut(&PolicyCarryChoices {
+                    reset: sections(&["ingest_ignore"]),
+                    ..Default::default()
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_generation_asks_about_every_section_that_differs() {
+        let fixture = CarryFixture::new();
+        let mut installed = fixture.profile.policies().clone();
+        installed.insert("ingest_ignore".into(), operator_ingest_ignore());
+        fixture.install(&installed, None);
+        let installed_generation =
+            load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table).unwrap();
+        assert_eq!(installed_generation.operator_sections(), None);
+
+        let refused = format!(
+            "{:#}",
+            fixture
+                .cut(&PolicyCarryChoices::default())
+                .expect_err("an unrecorded difference is never reset silently")
+        );
+        assert!(
+            refused.contains("ingest_ignore") && refused.contains("--keep-section"),
+            "{refused}"
+        );
+
+        let kept = fixture
+            .cut(&PolicyCarryChoices {
+                keep: sections(&["ingest_ignore"]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(kept.policies()["ingest_ignore"], operator_ingest_ignore());
+        assert_eq!(
+            kept.operator_sections(),
+            Some(&sections(&["ingest_ignore"]))
+        );
+
+        let reset = fixture
+            .cut(&PolicyCarryChoices {
+                reset: sections(&["ingest_ignore"]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(reset.digest(), fixture.profile.digest());
+
+        assert!(
+            fixture
+                .cut(&PolicyCarryChoices {
+                    keep: sections(&["ingest_ignore"]),
+                    reset: sections(&["ingest_ignore"]),
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_generation_without_a_record_keeps_its_bodies_only_digest() {
+        let fixture = CarryFixture::new();
+        let policies = fixture.profile.policies().clone();
+        fixture.install(&policies, None);
+        let unrecorded =
+            load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table).unwrap();
+        let bodies_only =
+            ryeos_state::objects::canonical_value_digest(&serde_json::to_value(&policies).unwrap())
+                .unwrap();
+        assert_eq!(unrecorded.digest(), bodies_only);
+        fixture.install(&policies, Some(&[]));
+        let recorded =
+            load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table).unwrap();
+        assert_ne!(recorded.digest(), bodies_only);
+        assert_eq!(recorded.digest(), fixture.profile.digest());
+    }
+
+    #[test]
+    fn policy_apply_records_its_section_only_where_a_record_exists() {
+        let fixture = CarryFixture::new();
+        let policies = fixture.profile.policies().clone();
+        let apply = || {
+            prepare_policy_member_replacement(
+                fixture.root.path(),
+                &fixture.trust,
+                &fixture.table,
+                "local",
+                "ingest_ignore",
+                operator_ingest_ignore(),
+                Path::new("policy.yaml"),
+            )
+            .unwrap()
+            .generation
+        };
+        fixture.install(&policies, Some(&[]));
+        assert_eq!(
+            apply().operator_sections(),
+            Some(&sections(&["ingest_ignore"]))
+        );
+        // Recording only this section on an unrecorded generation would let
+        // the next replacement drop earlier, unknown operator changes.
+        fixture.install(&policies, None);
+        assert_eq!(apply().operator_sections(), None);
     }
 }

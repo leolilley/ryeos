@@ -521,7 +521,21 @@ struct NodePolicyGenerationResetArgs {
     #[arg(long)]
     app_root: Option<PathBuf>,
 
-    /// Required acknowledgement that current custom node policy is retired.
+    /// Keep this section's installed policy (repeatable). Needed only for a
+    /// node whose generation predates the operator record, or to keep a
+    /// section the record does not name; recorded operator sections carry
+    /// forward on their own.
+    #[arg(long = "keep-section", action = clap::ArgAction::Append)]
+    keep_sections: Vec<String>,
+
+    /// Take this section from the new profile even if an operator applied it
+    /// (repeatable).
+    #[arg(long = "reset-section", action = clap::ArgAction::Append)]
+    reset_sections: Vec<String>,
+
+    /// Required acknowledgement that the node's policy generation is
+    /// replaced: profile sections are taken from the seed, operator-applied
+    /// sections carry forward unless reset.
     #[arg(long)]
     confirm: bool,
 
@@ -580,6 +594,7 @@ fn run_node_policy_generation_reset_command(
             .context("read the substrate image the node was initialized under; pass --substrate-image-digest")?
             .image_digest,
     };
+    let policy_carry = policy_carry_choices(&args.keep_sections, &args.reset_sections);
     let arguments = serde_json::to_value(
         ryeos_node::offline_operation::handlers::PolicyReplaceArguments {
             seed_digest,
@@ -587,6 +602,7 @@ fn run_node_policy_generation_reset_command(
             host_class: args.host_class.clone(),
             substrate_image_digest: substrate_image_digest.clone(),
             trust_documents,
+            policy_carry: policy_carry.clone(),
         },
     )?;
     // The request pins the generation the seed will install; the operation
@@ -597,6 +613,7 @@ fn run_node_policy_generation_reset_command(
         &args.node_profile,
         &args.host_class,
         &args.trust_files,
+        &policy_carry,
     )
     .context("compute the policy generation the image seed would install")?;
     let host = crate::offline_apply::CliHost::new()
@@ -1509,6 +1526,24 @@ struct InitArgs {
     )]
     replace_node_policy_generation: bool,
 
+    /// Keep this section's installed policy during the replacement
+    /// (repeatable). Recorded operator sections carry forward on their own.
+    #[arg(
+        long = "keep-section",
+        action = clap::ArgAction::Append,
+        requires = "replace_node_policy_generation"
+    )]
+    keep_sections: Vec<String>,
+
+    /// Take this section from the new profile even if an operator applied it
+    /// (repeatable).
+    #[arg(
+        long = "reset-section",
+        action = clap::ArgAction::Append,
+        requires = "replace_node_policy_generation"
+    )]
+    reset_sections: Vec<String>,
+
     /// Required acknowledgement for --replace-node-policy-generation.
     #[arg(long, requires = "replace_node_policy_generation")]
     confirm_node_policy_generation_replacement: bool,
@@ -1567,6 +1602,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         host_class: args.host_class,
         substrate_identity,
         replace_node_policy_generation: args.replace_node_policy_generation,
+        policy_carry: policy_carry_choices(&args.keep_sections, &args.reset_sections),
         replace_substrate_identity: args.replace_substrate_identity,
         confirm_substrate_identity_replacement: args.confirm_substrate_identity_replacement,
         skip_preflight: false,
@@ -4242,5 +4278,15 @@ mod tests {
         assert_eq!(parse_installed_revision(b"unknown\n"), None);
         assert_eq!(parse_installed_revision(b"two revisions\n"), None);
         assert_eq!(parse_installed_revision(&[b'a'; 129]), None);
+    }
+}
+
+fn policy_carry_choices(
+    keep: &[String],
+    reset: &[String],
+) -> ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
+    ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
+        keep: keep.iter().cloned().collect(),
+        reset: reset.iter().cloned().collect(),
     }
 }
