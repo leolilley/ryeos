@@ -1050,6 +1050,9 @@ struct RenderSnapshotCreateResponse {
     size_bytes: Option<i64>,
     source_sandbox_id: String,
     status: SnapshotStatus,
+    /// Retention the provider granted the snapshot; it bounds `expires_at`
+    /// and must be positive.
+    ttl_seconds: u64,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -1153,7 +1156,8 @@ pub(crate) fn bind_snapshot_create_response(
             && snapshot.sandbox_group_id == intent.sandbox_group_id
             && snapshot.plan == intent.plan
             && snapshot.name.is_none()
-            && snapshot.error.is_none(),
+            && snapshot.error.is_none()
+            && snapshot.ttl_seconds > 0,
         "snapshot create response differs from exact source or filesystem kind"
     );
     let requested = DateTime::parse_from_rfc3339(&snapshot.requested_at)?;
@@ -1233,6 +1237,7 @@ pub(crate) fn observe_snapshot_available(
             && snapshot.plan == intent.plan
             && snapshot.name.is_none()
             && snapshot.error.is_none()
+            && snapshot.ttl_seconds > 0
             && same_instant(&snapshot.requested_at, &creation.requested_at)
             && same_instant(&snapshot.expires_at, &creation.expires_at),
         "available snapshot differs from its exact creation"
@@ -1300,7 +1305,8 @@ mod tests {
             "kind": "filesystem", "name": null, "plan": "starter",
             "requestedAt": "2026-09-28T00:00:00Z",
             "sandboxGroupId": "sbg-exact", "sizeBytes": null,
-            "sourceSandboxId": "sbx-exact", "status": "creating"
+            "sourceSandboxId": "sbx-exact", "status": "creating",
+            "ttlSeconds": 2592000
         })
     }
 
@@ -1589,6 +1595,7 @@ mod tests {
             ("id", serde_json::json!("snp-other")),
             ("requestedAt", serde_json::json!("2026-09-27T00:00:00Z")),
             ("sizeBytes", serde_json::json!(0)),
+            ("ttlSeconds", serde_json::json!(0)),
         ] {
             let mut changed = available.clone();
             changed[field] = replacement;
@@ -1614,8 +1621,8 @@ mod tests {
         );
     }
 
-    const LIVE_CREATE: &str = r#"{"expiresAt":"2026-11-28T23:16:59.190498656Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783106Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"creating"}"#;
-    const LIVE_AVAILABLE: &str = r#"{"capturedAt":"2026-10-29T23:16:59.34709Z","expiresAt":"2026-11-28T23:16:59.190498Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sizeBytes":4660019,"sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"available"}"#;
+    const LIVE_CREATE: &str = r#"{"expiresAt":"2026-11-28T23:16:59.190498656Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783106Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"creating","ttlSeconds":2592000}"#;
+    const LIVE_AVAILABLE: &str = r#"{"capturedAt":"2026-10-29T23:16:59.34709Z","expiresAt":"2026-11-28T23:16:59.190498Z","id":"snp-dbht7qr346tc73dqpacg","kind":"filesystem","plan":"starter","requestedAt":"2026-10-29T23:16:59.230783Z","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","sizeBytes":4660019,"sourceSandboxId":"sbx-18p4gdbht7ogae00c739p3070","status":"available","ttlSeconds":2592000}"#;
 
     fn live_intent() -> SnapshotCreationIntent {
         let mut live = intent();
