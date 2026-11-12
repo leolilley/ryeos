@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-29T03:29:27Z:62ed11508eeed218fbce70a951a8a97bd8dee44755942f63b92cb5abb72f15e6:TF+gEIyigzThfKaGaMio1+XMZWf6cP5FeQcmR5PiGuSKh2TvUBtVDFNyHLWR1BHGc9xAjGruXa89DtYusqD5CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T09:41:52Z:4c4b8faf655c62f757ab401e208fcc8db3041136dcbd598ff216f39946d7e8f0:esR2UBDiE9x6V/ZHhZZXNt8MU5bopkAoRLJY5Pjx4RgDjVHGgSrT33OWAjOFy2iDtlCt6gr/TKwOYT6UfC3LDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime

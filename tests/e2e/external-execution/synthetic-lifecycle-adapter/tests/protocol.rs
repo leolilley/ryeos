@@ -68,6 +68,12 @@ use candidate_authoring::{
 };
 use candidate_operation_sources::signed_candidate_operation_sources;
 
+/// Ceilings, not expectations: an adapter operation or controller request that
+/// would pass in milliseconds on an idle host can take seconds on a loaded CI
+/// runner, and these fixtures assert completion, never expiry.
+const ADAPTER_OPERATION_CEILING: lillux::time::Duration = lillux::time::Duration::from_secs(60);
+const CONTROLLER_REQUEST_CEILING_MS: u32 = 15_000;
+
 /// Observe the signed Worker source before selecting its subject product. This
 /// authoring preview cannot borrow an identity from D1 qualification or a
 /// later capsule, so the final signed policy has no recursive dependency.

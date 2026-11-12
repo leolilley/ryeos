@@ -1001,6 +1001,83 @@ pub fn require_effective_user_owned_regular(file: &File) -> Result<OpenFileIdent
     }
 }
 
+/// `statfs` magic of FUSE filesystems: their bytes are served by a user-space
+/// process, so permission bits say nothing about whether they can change.
+#[cfg(target_os = "linux")]
+const FUSE_SUPER_MAGIC: u32 = 0x6573_5546;
+
+/// Prove that the current process cannot change the bytes of the exact open
+/// regular file. The file is owned by root and carries no group/other write
+/// bits, so the effective user can neither write it nor chmod itself into
+/// writing it (POSIX ACL entries are bounded by the group bits). The kernel's
+/// own effective-identity access check must also deny writing, which covers
+/// capabilities such as `CAP_DAC_OVERRIDE`. A root effective user never
+/// proves this, and a FUSE-backed file never does either.
+///
+/// Callers use this to run a verified host inode in place of a sealed copy:
+/// the proof is about this process's authority, so a workload launched with
+/// the same credentials inherits the same inability to modify the file.
+pub fn require_unwritable_by_effective_user(file: &File) -> Result<OpenFileIdentity> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("unwritable regular-file proof is unavailable on this platform")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            anyhow::bail!("a root effective user can write every file; no unwritable proof");
+        }
+        let identity = observe_open_file_identity(file)?;
+        if identity.file_type != libc::S_IFREG
+            || identity.owner != 0
+            || identity.is_group_or_other_writable()
+        {
+            anyhow::bail!(
+                "descriptor is not a root-owned regular file without group/other write bits (uid={}, mode={:#o})",
+                identity.owner,
+                identity.mode & 0o7777,
+            );
+        }
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+        // SAFETY: the descriptor is open for the call and the kernel fully
+        // writes the exclusively borrowed output on success.
+        if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("read filesystem type of open descriptor");
+        }
+        // SAFETY: fstatfs succeeded. Magic numbers are 32-bit; the field's
+        // width and signedness differ by target.
+        let filesystem_type = i128::from(unsafe { stats.assume_init() }.f_type) & 0xffff_ffff;
+        if filesystem_type == i128::from(FUSE_SUPER_MAGIC) {
+            anyhow::bail!("descriptor is on a FUSE filesystem served by a user-space process");
+        }
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .expect("descriptor path has no interior NUL");
+        // SAFETY: the path is a valid C string; AT_EACCESS judges the
+        // effective identity, which the kernel checks when it writes.
+        if unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::W_OK, libc::AT_EACCESS) }
+            == 0
+        {
+            anyhow::bail!("the kernel grants this process write access to the descriptor");
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EACCES | libc::EPERM | libc::EROFS)
+        ) {
+            return Err(error).context("judge write access to open descriptor");
+        }
+        if observe_open_file_identity(file)? != identity {
+            anyhow::bail!("descriptor changed while its write authority was judged");
+        }
+        Ok(identity)
+    }
+}
+
 /// Compare the inode identities of two already-open descriptors.
 pub fn same_open_file_identity(left: &File, right: &File) -> Result<bool> {
     let left = observe_open_file_identity(left)?;
@@ -9182,6 +9259,38 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_root_owned_system_binary_is_unwritable_by_an_ordinary_effective_user() {
+        if unsafe { libc::geteuid() } == 0 {
+            let file = File::open("/bin/sh").unwrap();
+            assert!(require_unwritable_by_effective_user(&file).is_err());
+            return;
+        }
+        let canonical = std::fs::canonicalize("/bin/sh").unwrap();
+        let file = File::open(&canonical).unwrap();
+        let identity = require_unwritable_by_effective_user(&file)
+            .expect("a root-owned system shell cannot be written by an ordinary user");
+        assert_eq!(identity.owner, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_owned_by_the_effective_user_is_never_proved_unwritable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let file = File::open(&path).unwrap();
+        let error = require_unwritable_by_effective_user(&file).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("root-owned")
+                || format!("{error:#}").contains("root effective user"),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn stable_prefix_is_bounded_cursor_independent_and_rejects_changed_file() {

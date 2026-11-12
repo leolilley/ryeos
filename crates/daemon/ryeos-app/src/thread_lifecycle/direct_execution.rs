@@ -1562,6 +1562,13 @@ impl PreparedItemPlan {
             );
         }
         let execution_path = admitted_direct_command_path(&original)?;
+        let host_origin = match self.admitted_command.as_ref() {
+            Some(ryeos_engine::isolation::IsolationAdmittedCommand::DescriptorBound(command)) => {
+                command.host_origin().map(Path::to_path_buf)
+            }
+            Some(_) => None,
+            None => Some(original.source_path.clone()),
+        };
         let stored_hash = if self.admitted_command.is_some() {
             let expected_path = admitted_direct_command_path(&original)?;
             if original.source_path != expected_path {
@@ -1603,6 +1610,7 @@ impl PreparedItemPlan {
             self.admitted_command = Some(
                 isolation
                     .bind_admitted_verified_command(cached_identity.clone(), blob)?
+                    .with_host_origin(host_origin.clone())
                     .into(),
             );
         }
@@ -1627,6 +1635,7 @@ impl PreparedItemPlan {
                 command: ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash: stored_hash,
                     execution_path,
+                    host_origin,
                 },
                 admitted_project_root: admitted_project_root.map(Path::to_path_buf),
             },
@@ -1748,6 +1757,7 @@ impl PreparedItemPlan {
             ryeos_state::objects::AdmittedDirectCommandClosure::ContentAddressed {
                 executable_blob_hash,
                 execution_path,
+                host_origin,
             } => {
                 let (blob, _) = cas
                     .open_blob(executable_blob_hash)?
@@ -1758,6 +1768,7 @@ impl PreparedItemPlan {
                 };
                 let admitted = isolation
                     .bind_admitted_verified_command(cached_identity.clone(), blob)?
+                    .with_host_origin(host_origin.clone())
                     .into();
                 spec.cmd = execution_path.display().to_string();
                 match spec

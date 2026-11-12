@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:ffa3b59bf06533fed84359fc51c1a7e32db4b884c314759efa35964b2f9a8f01:hCogR55PQU9QqleF1SFbTCXE4z2KMP7w9ea6lGpmK9kktODURRxlrIBYmiRRRb3MqrEnoFIOxN5z7cy8J+SGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T09:41:52Z:9667cc19f7a979c2e1c4543d54ec41be370479d5036d6690cdbecaf97b0d87af:NU6pXbu6wI2I2MRtBzdqK+Q9YCjRGJhuNgCoM4Mq+Np96kvgepDdaM47CWMVgGA23ubsxaNkmrQC9v7k3j9EDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, authoring, external-content, production]

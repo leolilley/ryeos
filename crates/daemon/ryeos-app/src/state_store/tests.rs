@@ -413,6 +413,7 @@ pub(super) fn signed_direct_storage_root(store: &StateStore, thread_id: &str, ex
             AdmittedDirectCommandClosure::ContentAddressed {
                 executable_blob_hash: command_hash,
                 execution_path: command_path,
+                host_origin: None,
             }
         } else {
             AdmittedDirectCommandClosure::NodePolicy

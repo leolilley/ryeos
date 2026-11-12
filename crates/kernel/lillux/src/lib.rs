@@ -156,8 +156,8 @@ pub use secure_fs::{
     read_optional_regular_file_no_follow, read_regular_file_bounded_no_follow,
     read_regular_file_no_follow, read_regular_file_to_string_no_follow,
     require_effective_user_owned_executable, require_effective_user_owned_regular,
-    same_open_file_identity, set_open_regular_file_mode, visit_regular_files_no_follow,
-    visit_regular_files_no_follow_bounded,
+    require_unwritable_by_effective_user, same_open_file_identity, set_open_regular_file_mode,
+    visit_regular_files_no_follow, visit_regular_files_no_follow_bounded,
 };
 #[cfg(target_os = "linux")]
 pub use secure_fs::{

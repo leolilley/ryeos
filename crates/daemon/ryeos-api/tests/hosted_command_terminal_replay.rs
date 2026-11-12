@@ -97,6 +97,7 @@ fn store_structured_session_capsule_with_schema(
                     std::path::Path::new("fixture-session"),
                 )
                 .unwrap(),
+                host_origin: None,
             },
             admitted_project_root: None,
         },

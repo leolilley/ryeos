@@ -64,7 +64,7 @@ pub use policy::{
 use provenance::redacted_plan_digest;
 pub use provenance::{
     AppliedIsolationLaunch, AppliedIsolationLaunchAwaitingAttachment,
-    IsolationAdapterProtocolIdentity, IsolationLaunchProvenance,
+    IsolationAdapterProtocolIdentity, IsolationCommandDelivery, IsolationLaunchProvenance,
     IsolationRequestAwaitingAttachment,
 };
 
@@ -3088,6 +3088,7 @@ impl IsolationRuntime {
             // safety. Retained output remains bounded by the immutable node
             // policy, with any lower caller limit preserved.
             let mut request = request;
+            let mut command_delivery = None;
             if !context.verified_code.is_empty() || context.verified_command.is_some() {
                 let lexical_command = verified_command_authority
                     .map(|authority| {
@@ -3152,7 +3153,7 @@ impl IsolationRuntime {
                         command_authority,
                         Some(IsolationCommandAuthorityRef::DescriptorBound(_))
                     );
-                    let (canonical_source, handle) = match command_authority {
+                    let (canonical_source, handle, delivery) = match command_authority {
                         Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
                             self.seal_descriptor_bound_command_for_disabled(command)?
                         }
@@ -3190,6 +3191,7 @@ impl IsolationRuntime {
                     )?;
                     if is_command {
                         sealed_command = Some(destination.to_string_lossy().into_owned());
+                        command_delivery = Some(delivery);
                     }
                     request.inherited_fds.push(handle);
                 }
@@ -3233,9 +3235,11 @@ impl IsolationRuntime {
                         }),
                 ),
             });
+            let mut provenance = self.launch_provenance(None);
+            provenance.command_delivery = command_delivery;
             return Ok(CompiledIsolationLaunch {
                 request,
-                provenance: self.launch_provenance(None),
+                provenance,
                 expected_applied_launch: None,
                 expected_mount_preparation: None,
                 loopback_transfer: None,
@@ -5315,6 +5319,7 @@ impl IsolationRuntime {
             effective_capabilities: self.inspection.backend.effective_capabilities.clone(),
             network_runtime_files: network_inputs::digests(&self.network_runtime_files),
             plan_digest,
+            command_delivery: None,
         }
     }
 
@@ -5777,9 +5782,27 @@ impl IsolationRuntime {
     fn seal_descriptor_bound_command_for_disabled(
         &self,
         command: &IsolationDescriptorBoundCommand,
-    ) -> Result<(PathBuf, lillux::InheritedDescriptorAuthority), EngineError> {
+    ) -> Result<
+        (
+            PathBuf,
+            lillux::InheritedDescriptorAuthority,
+            IsolationCommandDelivery,
+        ),
+        EngineError,
+    > {
         validate_descriptor_bound_command(command)?;
         let identity = command.identity();
+        if let Some(host_origin) = command.host_origin()
+            && host_origin.file_name() == identity.source_path.file_name()
+            && let Some(handle) =
+                self.retain_verified_host_inode_for_disabled(host_origin, identity)?
+        {
+            return Ok((
+                identity.source_path.clone(),
+                handle,
+                IsolationCommandDelivery::VerifiedHostInode,
+            ));
+        }
 
         #[cfg(not(unix))]
         {
@@ -5840,20 +5863,37 @@ impl IsolationRuntime {
                             identity.source_path.display()
                         ))
                     })?;
-            Ok((identity.source_path.clone(), handle))
+            Ok((
+                identity.source_path.clone(),
+                handle,
+                IsolationCommandDelivery::SealedCopy,
+            ))
         }
     }
 
-    /// Revalidate admitted code and copy the exact bytes into a kernel-sealed
-    /// anonymous file. Disabled isolation deliberately provides no filesystem
-    /// confinement, so a regular cache inode is not an immutable boundary
-    /// against another same-UID workload. Memfd seals make the bytes immutable
-    /// even after the descriptor is inherited by that workload.
+    /// Revalidate verified code and deliver it to a disabled-isolation launch.
+    /// Disabled isolation deliberately provides no filesystem confinement, so
+    /// a regular cache inode is not an immutable boundary against another
+    /// same-UID workload; memfd seals make copied bytes immutable even after
+    /// the descriptor is inherited by that workload. An admitted
+    /// command on a system runtime surface that the daemon's effective
+    /// identity provably cannot change runs from its own inode, re-digested
+    /// through the retained descriptor, so its executable self lookup names
+    /// the real file (multi-call binaries dispatch on that name). Everything
+    /// else is copied into a kernel-sealed anonymous file. Neither carrier
+    /// reopens a path after the digest.
     fn seal_verified_code_for_disabled(
         &self,
         verified: &IsolationVerifiedCode,
         executable: bool,
-    ) -> Result<(PathBuf, lillux::InheritedDescriptorAuthority), EngineError> {
+    ) -> Result<
+        (
+            PathBuf,
+            lillux::InheritedDescriptorAuthority,
+            IsolationCommandDelivery,
+        ),
+        EngineError,
+    > {
         if !verified.source_path.is_absolute() {
             return Err(refused(format!(
                 "verified code path must be absolute: {}",
@@ -5872,6 +5912,16 @@ impl IsolationRuntime {
             )));
         }
         let canonical_source = canonicalize_context_mount("verified code", &verified.source_path)?;
+        if executable
+            && let Some(handle) =
+                self.retain_verified_host_inode_for_disabled(&canonical_source, verified)?
+        {
+            return Ok((
+                canonical_source,
+                handle,
+                IsolationCommandDelivery::VerifiedHostInode,
+            ));
+        }
         let (content, metadata) = read_regular_file_bytes_limited(
             "verified code",
             &canonical_source,
@@ -5909,7 +5959,91 @@ impl IsolationRuntime {
             lillux::sealed_memfd(c"ryeos-verified-code", &content)
         }
         .map_err(|error| refused(format!("seal verified code content: {error}")))?;
-        Ok((canonical_source, handle))
+        Ok((
+            canonical_source,
+            handle,
+            IsolationCommandDelivery::SealedCopy,
+        ))
+    }
+
+    /// Retain the original inode of an admitted host command when the
+    /// daemon's effective identity provably cannot change its bytes, which a
+    /// workload launched with the same credentials therefore cannot either.
+    /// `None` means that proof does not hold and the caller seals a copy; it
+    /// is the delivery rule, not a fallback, and the launch records which
+    /// carrier ran. A file that passes the proof but no longer carries the
+    /// admitted digest refuses, exactly as a sealed capture would.
+    fn retain_verified_host_inode_for_disabled(
+        &self,
+        canonical_source: &Path,
+        verified: &IsolationVerifiedCode,
+    ) -> Result<Option<lillux::InheritedDescriptorAuthority>, EngineError> {
+        if !is_on_system_runtime_surface(canonical_source) {
+            return Ok(None);
+        }
+        let pinned =
+            lillux::open_pinned_regular_file_no_follow(canonical_source).map_err(|error| {
+                refused(format!(
+                    "open verified host command {}: {error:#}",
+                    canonical_source.display()
+                ))
+            })?;
+        let descriptor = pinned.try_clone_descriptor().map_err(|error| {
+            refused(format!(
+                "duplicate verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        if let Err(error) = lillux::require_unwritable_by_effective_user(&descriptor) {
+            tracing::debug!(
+                command = %canonical_source.display(),
+                reason = %format!("{error:#}"),
+                "verified host command is not provably unwritable; sealing a copy"
+            );
+            return Ok(None);
+        }
+        drop(descriptor);
+        pinned.require_executable().map_err(|error| {
+            refused(format!(
+                "verified code {} is not executable: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        let observation = pinned.observation().map_err(|error| {
+            refused(format!(
+                "observe verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        let max_bytes = self.inspection.limits.verified_artifact_file_bytes;
+        if observation.size() > max_bytes {
+            return Err(refused(format!(
+                "verified host command {} is {} bytes, exceeding configured per-file limit {max_bytes}",
+                canonical_source.display(),
+                observation.size(),
+            )));
+        }
+        let actual_hash = pinned.digest_stable_exact(&observation).map_err(|error| {
+            refused(format!(
+                "digest verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        if actual_hash != verified.content_hash {
+            return Err(refused(format!(
+                "verified code {} changed after verification (expected {}, got {})",
+                canonical_source.display(),
+                verified.content_hash,
+                actual_hash
+            )));
+        }
+        let handle = pinned.inherited_descriptor_authority().map_err(|error| {
+            refused(format!(
+                "retain verified host command {}: {error:#}",
+                canonical_source.display()
+            ))
+        })?;
+        Ok(Some(handle))
     }
 
     fn prepare_current_command(
@@ -8313,7 +8447,10 @@ mod tests {
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let cache = tempfile::tempdir().unwrap();
         let command_path = cache.path().join("ordinary-executor-cache-entry");
-        let admitted_bytes = std::fs::read("/bin/echo").unwrap();
+        // A script, not a copied host binary: Ubuntu's multi-call coreutils
+        // refuse to run under another file name, and this fixture is about
+        // descriptor retention, not the host's utilities.
+        let admitted_bytes = b"#!/bin/sh\nprintf '%s\\n' \"$1\"\n".to_vec();
         std::fs::write(&command_path, &admitted_bytes).unwrap();
         std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let executable = lillux::PinnedDirectory::open(cache.path())
@@ -8425,6 +8562,10 @@ mod tests {
         assert_eq!(seals & required_seals, required_seals);
         assert_ne!(prepared.file_identity().unwrap().mode() & 0o111, 0);
         assert!(std::fs::write(prepared.path(), b"mutate").is_err());
+        assert_eq!(
+            applied.provenance.command_delivery,
+            Some(IsolationCommandDelivery::SealedCopy)
+        );
 
         let result = lillux::run(applied.request);
         assert!(result.success, "stderr: {}", result.stderr);
@@ -8486,7 +8627,211 @@ mod tests {
         assert_eq!(applied.request.argv0.as_deref(), Some("/bin/true"));
         assert_eq!(applied.request.inherited_fds.len(), 1);
         assert!(std::fs::write(applied.request.inherited_fds[0].path(), b"mutate").is_err());
+        // A root-owned system command runs from its own inode, so a multi-call
+        // binary's self lookup names the real file; a root daemon can write
+        // every file and therefore seals a copy.
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::SealedCopy)
+            );
+        } else {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::VerifiedHostInode)
+            );
+            assert_eq!(
+                std::fs::read_link(applied.request.inherited_fds[0].path()).unwrap(),
+                std::fs::canonicalize("/bin/true").unwrap()
+            );
+        }
         assert!(lillux::run(applied.request).success);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_admitted_host_command(
+        runtime: &IsolationRuntime,
+        work: &Path,
+        admitted_bytes: &[u8],
+        host_origin: &Path,
+    ) -> Result<AppliedIsolationLaunch, EngineError> {
+        let blob = work.join("blob");
+        std::fs::write(&blob, admitted_bytes).unwrap();
+        let content_hash = lillux::cas::sha256_hex(admitted_bytes);
+        let execution_path = PathBuf::from("/ryeos/admitted-direct-command")
+            .join(&content_hash)
+            .join(host_origin.file_name().unwrap());
+        let command = runtime
+            .bind_admitted_verified_command(
+                IsolationVerifiedCode {
+                    source_path: execution_path.clone(),
+                    content_hash,
+                },
+                std::fs::File::open(&blob).unwrap(),
+            )
+            .unwrap()
+            .with_host_origin(Some(host_origin.to_path_buf()));
+        runtime.apply_with_provenance(
+            lillux::SubprocessRequest {
+                cmd: execution_path.to_string_lossy().into_owned(),
+                argv0: None,
+                args: Vec::new(),
+                cwd: Some(work.to_string_lossy().into_owned()),
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 1.0,
+                limits: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                supervised_status: None,
+            },
+            IsolationLaunchContext {
+                immutable_project: None,
+                workspace_view: None,
+                project_path: work,
+                project_authority: IsolationProjectAuthority::ReadOnly,
+                filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                live_access: None,
+                state_root: None,
+                checkpoint_dir: None,
+                checkpoint_authority: None,
+                daemon_socket_path: None,
+                captured_callback_socket: false,
+                bundle_roots: &[],
+                node_trusted_keys_dir: None,
+                verified_code: std::slice::from_ref(command.identity()),
+                verified_command: Some(&command),
+                external_read_only_mounts: &[],
+                writable_runtime_view_mounts: &[],
+                producer_prepared_mounts: &[],
+                target_channels: &[],
+                item_ref: "tool:tests/admitted-host-command",
+                thread_id: "T-admitted-host-command",
+                verbatim_env_names: &[],
+            },
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_admitted_command_runs_from_its_unwritable_host_origin() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let origin = std::fs::canonicalize("/bin/true").unwrap();
+        let applied = apply_admitted_host_command(
+            &runtime,
+            app_root.path(),
+            &std::fs::read(&origin).unwrap(),
+            &origin,
+        )
+        .unwrap();
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::SealedCopy)
+            );
+        } else {
+            assert_eq!(
+                applied.provenance.command_delivery,
+                Some(IsolationCommandDelivery::VerifiedHostInode)
+            );
+            assert_eq!(
+                std::fs::read_link(applied.request.inherited_fds[0].path()).unwrap(),
+                origin
+            );
+        }
+        assert!(lillux::run(applied.request).success);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_admitted_command_refuses_a_host_origin_with_other_bytes() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let origin = std::fs::canonicalize("/bin/true").unwrap();
+        let error =
+            apply_admitted_host_command(&runtime, app_root.path(), b"#!/bin/sh\nexit 0\n", &origin)
+                .err()
+                .expect("an origin that no longer carries the admitted bytes must refuse");
+        assert!(
+            error.to_string().contains("changed after verification"),
+            "{error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_runtime_seals_a_command_the_daemon_could_change() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::disabled_for_authoring());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".ai")).unwrap();
+        let command = project.path().join("owned-command");
+        std::fs::write(&command, b"#!/bin/sh\nprintf sealed\n").unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let captured = runtime
+            .capture_verified_command(&command, Some(project.path()), None)
+            .unwrap();
+        let applied = runtime
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: command.to_string_lossy().into_owned(),
+                    argv0: None,
+                    args: Vec::new(),
+                    cwd: Some(project.path().to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    inherited_fd_mappings: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    immutable_project: None,
+                    workspace_view: None,
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    filesystem_authority_ceiling: IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    network_authority_ceiling: IsolationNetworkAuthorityCeiling::NodePolicy,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    checkpoint_authority: None,
+                    daemon_socket_path: None,
+                    captured_callback_socket: false,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: std::slice::from_ref(&captured),
+                    verified_command: Some(&captured),
+                    external_read_only_mounts: &[],
+                    writable_runtime_view_mounts: &[],
+                    producer_prepared_mounts: &[],
+                    target_channels: &[],
+                    item_ref: "tool:tests/owned-command",
+                    thread_id: "T-owned-command",
+                    verbatim_env_names: &[],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            applied.provenance.command_delivery,
+            Some(IsolationCommandDelivery::SealedCopy)
+        );
+        std::fs::write(&command, b"#!/bin/sh\nprintf mutated\n").unwrap();
+        assert!(std::fs::write(applied.request.inherited_fds[0].path(), b"mutate").is_err());
+        let result = lillux::run(applied.request);
+        assert!(result.success, "stderr: {}", result.stderr);
+        assert_eq!(result.stdout, "sealed");
     }
 
     #[cfg(unix)]

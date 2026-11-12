@@ -2002,6 +2002,7 @@ fn store_structured_session_capsule(state: &AppState) -> (String, String, serde_
                     std::path::Path::new("fixture-session"),
                 )
                 .unwrap(),
+                host_origin: None,
             },
             admitted_project_root: None,
         },
