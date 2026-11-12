@@ -5789,6 +5789,7 @@ mod tests {
                 command: AdmittedDirectCommandClosure::ContentAddressed {
                     executable_blob_hash,
                     execution_path,
+                    host_origin: None,
                 },
                 admitted_project_root: Some(logical_admission_workspace()),
             },

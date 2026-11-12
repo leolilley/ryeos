@@ -2599,7 +2599,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // earlier epoch gains authority through defaults or migration. Epoch 132: every
 // stored digest and canonical text is RyeOS canonical JSON (Lillux encoding);
 // rows written by the field-order encoder of epoch 131 do not re-verify.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 132;
+// Epoch 133: a content-addressed direct command closure carries its required,
+// nullable `host_origin`; epoch-132 capsules lack it and refuse.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 133;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK

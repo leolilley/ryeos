@@ -189,6 +189,7 @@ pub(crate) fn capsule(
                     Path::new("/executor"),
                 )
                 .unwrap(),
+                host_origin: None,
             },
             admitted_project_root: None,
         },

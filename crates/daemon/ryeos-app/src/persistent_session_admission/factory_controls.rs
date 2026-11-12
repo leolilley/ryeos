@@ -325,6 +325,7 @@ session:
             command: AdmittedDirectCommandClosure::ContentAddressed {
                 executable_blob_hash: executable_hash,
                 execution_path: path,
+                host_origin: None,
             },
             admitted_project_root: Some(PathBuf::from("/workspace")),
         },
