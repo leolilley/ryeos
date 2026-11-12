@@ -18,191 +18,191 @@ use sha2::{Digest, Sha256};
 const VIEW_BEHAVIOR_GOLDENS: &[(&str, &str)] = &[
     (
         "view:ryeos/chain/timeline",
-        "610cf228de34cf2f05623cc13981bd23c220ff3290baecf38d08827042e3014b",
+        "3710ecd476be87ccc6e0aedd0e0469b4c56f2dd54a91703a0ea4c9a5fbaec578",
     ),
     (
         "view:ryeos/commands/grammar",
-        "e60559b82661a01433ca2641a1169e1a41d743668166c27a5cbb815a92315468",
+        "5b27011bdb5569f503a8e45bf6a682ac629e2b52198eb19516e851cba420121f",
     ),
     (
         "view:ryeos/development/changes",
-        "edd2c6e16a79c67ca517acee005dd4adb1c172d401b49d1c6341d7545fa78661",
+        "a45b0597dc79934adef2e096b05c81901d7c1537b110bbd77d387b1b3fdb0a02",
     ),
     (
         "view:ryeos/development/execution",
-        "dfbeaeb22706b8f40b6d09b7207ec03ae8391ddbab77a1ceb16b5f5f80da3e09",
+        "d5c79120849dfa4367d4f740f99e96239b33d7322547314b006e2a67999e8716",
     ),
     (
         "view:ryeos/development/explorer",
-        "ad41addc72ca14b6345b128fc65e01e98e4c4b6a6cee6d24a46392c24b74d08f",
+        "ad6fe09de5362e8de5aba6188d1618ed0892c8d3eafc59916df19551cac2cb9a",
     ),
     (
         "view:ryeos/development/occurrence",
-        "18e0821fb71ca1b4a195761422f2c58de0114c740849b12e9cd1f3ab36d815f3",
+        "5a22ee8129b9a103350afe653a03bc3896ed1c366f0499b0daf2a803749e41da",
     ),
     (
         "view:ryeos/files/list",
-        "ffc9ca80d3fa05620b19f08142eacb40fef770c2261965eccb8e7a1d65f158c4",
+        "b28248ab756bd4b1344f2e479931f136a950d65ab1e9e8bff81b3dcf3ea60b22",
     ),
     (
         "view:ryeos/home/overview",
-        "e4d39494556688fe853d5198676a25385f2c3fbbe9652b258857d0881f668e8f",
+        "d6ea909186b24348e1a72170a10314e27209aa75558c9c8537ac7e9fc01d4247",
     ),
     (
         "view:ryeos/input",
-        "f1e18aead35e2eecb646fe7b7dad1c9489434763ba8162b5c449b0f3fa623ce4",
+        "e5015789547fd6cdbe84f4c4dbd1e0cf9823dea2ae6ef0737179826a6773ab6e",
     ),
     (
         "view:ryeos/item/explain",
-        "9b486eb5b113a91ece92473cb44705a56f1f1ca9ec78ec48b1a56341f84ef019",
+        "b5866c3aad55d78c121b4bd06cf4bc36fc1e73ad31b5ff09877fcc2b7007af3c",
     ),
     (
         "view:ryeos/item/inspector",
-        "180dc39ad6c7f75825e017ac8492745fdd8fbb64bf41a54c8dda6c1405dcbcc6",
+        "700aadd73147116a0e8085c991501ca2469f306375e70e670214c5342430a39f",
     ),
     (
         "view:ryeos/items/space",
-        "e0220b733614fb3a25d6a1d8e48695d012bc528f6b9b64090b3a9cc4ecce9197",
+        "486ba92ff003fd8c6b38e8bf633156999621e91b32f6ef54f27cabcb14fd7daf",
     ),
     (
         "view:ryeos/node/bundles",
-        "5bb023437191a6f9603c86105c91c4ad4e2bc859a96837c089aa0b1972411829",
+        "7c60ba64a2b50191870f9bc93d6c57420885913c5a8788cbe32d9d64e6d12be1",
     ),
     (
         "view:ryeos/node/events",
-        "f74336fc9d665c3d38be1a10813c765d359c9157e7ef43c7ed2c3e1419df2450",
+        "d469f22d69eb3cdb0c5e7bc51015dda0afd45708cf0a2cba908a89a59b8edbf1",
     ),
     (
         "view:ryeos/node/gc",
-        "9e0f0f3494a25ddf0ddfee8894357fb7a9d15742619f378c32f7ce669dce5394",
+        "8a895b21f9d44c38eaa563d8dbc2a3c8c3ccb8f0e0cacb6db1aa5430bb0065de",
     ),
     (
         "view:ryeos/node/remotes",
-        "e2e8397e4885f09b338a57a4c1de6584f2dc7da1c46cde23b36d91fab1a6f5b0",
+        "adc424ef15137bd7e125429c338e9f8a861ea90f0233a434ddce7c395c3d4a96",
     ),
     (
         "view:ryeos/node/status",
-        "c0259606f85f5b0b62ab37787c5d8700592d37219c014c7a37c34db7ee6f5483",
+        "9a48edeb6927a9841751fb7039228479a3c7e8c0e1d9778bbd721a751abc2050",
     ),
     (
         "view:ryeos/node/threads/history",
-        "ef650329aa6b8e43f3d3b6644152085daac0bec7396315abd20f2cf84aa30bb5",
+        "e9c7f8e518314fdbaa84d8d448f67b08d9e4d8a47052eb2b37a1640f10260d43",
     ),
     (
         "view:ryeos/programs/list",
-        "d81c4c116405ad850ee6a165fd172edf18fa097c3c10d46add1e45b0efcce816",
+        "49c8c9d122c61ebc2172e88ed5e6c1a237fa9369e4ccaec35c71aac2267159cf",
     ),
     (
         "view:ryeos/project/document",
-        "14a144ed67cebfd3f4263041b53809715efa9f4e29845f522d15576974a8f1cc",
+        "ba26692b7fb5edee183eef066e2aa30a341c85b52cc04eb9ed0c99bececb33bb",
     ),
     (
         "view:ryeos/project/files",
-        "64984e488f7259fac2f1aff598b83824a1437873e76f9e8187f24b8f91aedf91",
+        "339529bf8328f3197c10bc261990c0ec3e533fcdd14d2742e82271ccbfe4cbb9",
     ),
     (
         "view:ryeos/project/items",
-        "2d7fd3544cf258c44f6ec74a3daf2c0e166a65205b206b566200ac0f573984cc",
+        "9ab7025f95dfce92dca489ab0e504fc61848660a1d2ccd3dd68433c98c6a9c39",
     ),
     (
         "view:ryeos/project/schedules",
-        "b9ebcd53387915f025c8192f89dcdddf941467f63a20ec063f31f8485a99217b",
+        "6d95b5d28b2aab44c20ca013fa54323d3ef4ef596914141ec7f8f5cf197febb1",
     ),
     (
         "view:ryeos/projects/list",
-        "cec63d2d8854c48198d59b049d95a6af615ea8a334b445b48029246cab14a2a9",
+        "902f44c24d655ace29c1d5d181dd08fcc0fb7240c65985914363bd111fc66e89",
     ),
     (
         "view:ryeos/review/history",
-        "dc5bda39edd8856138f3f72521c373cb67fc8e698b0a0486d4f576756867fdd5",
+        "fc504699bd003db693c07aec2836e5cc4a4dd0f1fc1dbe07bf49b63fe8a1e235",
     ),
     (
         "view:ryeos/review/pending",
-        "30167a99ec169b96a74b67d773eab9f95620946311744c04bab96a92afe77e49",
+        "2ce603c83cbb5e52790a6aad83bda5b09889d39b7cd04dfc49c4cbc00fca82f7",
     ),
     (
         "view:ryeos/runs/comparison",
-        "b6a45077f686d1bec3586a7a6ae1cc63be17a577e1ba1583a67120bef3ed9426",
+        "843b947077a2730be5d39a9a0fd43665fd4e7d74bf18c96a1ce18c1092c9dc06",
     ),
     (
         "view:ryeos/schedules/list",
-        "056d3e932db57ed0b87ab5d148002b9c49b86c6a49e011465488d6f7c8f4d6a1",
+        "07d7e134c31711250c492b81b5f3e99f46389dfa3fd62c7d781563336c1ed59b",
     ),
     (
         "view:ryeos/sites/list",
-        "ebb2e4d4abb8f408ea78ec9af8aa56d1b5ace713ad71478b48cc0f5d31620d70",
+        "b29e6fa4058b22f6de0c78c75bb611e336d787e1dc67f4b2964cb3699f7095c3",
     ),
     (
         "view:ryeos/surfaces/list",
-        "18a959f2638bd2fa04c6de16716ddd102edd240ebc639694c64e7a7cdc89d51c",
+        "fd1b745d9aa5cace159d053ef3246805e1854ef404e9ce326b5188e34f157372",
     ),
     (
         "view:ryeos/thread/conversation",
-        "59d8e8fef5adbda3e142a8430789961ad1e226c97b3f13b193bec6f0c2f8de81",
+        "e065eb4204633b08f41af17cb93f99d4a8bfa937434b9982dc2a24c6ff1955f1",
     ),
     (
         "view:ryeos/thread/transcript",
-        "72ca6ee35b3befba9eea0bc8ec4fd8fcde02c700b20d9274986bc65b5b12f126",
+        "92a90d201f7b2e0f9c3557e2b8a9a5e38b052ef7a58badbb1211c378f62a0b0a",
     ),
     (
         "view:ryeos/thread/tree",
-        "6521a672ce1fb5d5deb9609651066fa4edd4b763ddbde56cb171d9e6490c3ae6",
+        "10922668a8c3bd9ef38b08c52415aa7f0f996ce038282e14afddfd755fe30c5b",
     ),
     (
         "view:ryeos/threads/detail",
-        "9c33df1467aafd9c8669ac0ff3a13ab129221d358c3cca273340da226b7ac369",
+        "c07ee26a7bbc7ef8738eea0be0ed1c6d859f06c9af324819f80bd980ada1d9ee",
     ),
     (
         "view:ryeos/threads/history",
-        "9defb9eb4b3a5504e46a8a1c4ee6954116ca1fa9b5c10636e3c7b9aa1651c608",
+        "2e59945f65580f3b1e100b630c5a6127370560a8945abd7386d3d21f5cadc795",
     ),
     (
         "view:ryeos/threads/list",
-        "b72f5092b1be79d11e03b8b153d00895e35a0162b24559b739cd195aa4059f75",
+        "b4dfccae5fe7abdae8ed1d541f0524d1e8ffbb3e343bbeac53c1503282f29f53",
     ),
     (
         "view:ryeos/ui/launcher",
-        "14d29829c7ea61d193420021024e3904309ac53dcd7e63013d1d169b37bfdf8c",
+        "7c8d3c79e5e7d952f6ee3655e1a2119683ad5919f8a2d6bed2c9aeb5e3c16bb0",
     ),
     (
         "view:ryeos/ui/session-details",
-        "f4c1862bbf76bdbb900815c1200380ee10d295376a98a4acaeaa0392aa45c1ea",
+        "41ce861c02aa06309a0a3042697f6103c56b6d965f455e5df92421e066445228",
     ),
     (
         "view:ryeos/ui/shortcuts",
-        "240c3a4a073235fc9af093ab8cda957b61cb7c520a904c456c94c49d3d89a766",
+        "750563f2755ea6f97bc5301df0bdad6b655614503f84d532f67edd496c262b87",
     ),
     (
         "view:ryeos/ui/status",
-        "c7d494547d8365f3e424ca5ff8cf598c75ceab22c8a1b4b286245da694dbc2e6",
+        "a4855f4e1d150c61d29d6c3dcb6ec4d85adc4e16f732e011763d759ce2852036",
     ),
     (
         "view:ryeos/view-sets/library",
-        "910296c1620d044f1b13feb4e8f4ed5d57327b064505ab92f1a92b28e7ee8f89",
+        "6341eb8bbd2602d321577bf6c77e135e80d4705071706c4e49a6e6d957bb4f06",
     ),
     (
         "view:ryeos/work/approvals",
-        "e13c87f2b9ece1d29acc268dc17bf09d4ae2fb62bf28105d647d0684fc536459",
+        "5d54e54066c79101f036d99c95f2e78fdcedf3a6d967e98f8074ed7010b004c9",
     ),
     (
         "view:ryeos/work/candidate",
-        "aa08a8a5fc1449c9e32b8a4433cbf7d4d284b36b89b26e07f5f79d5f39773e29",
+        "72977fc1152d0f866cb21434a02248bb7ee2f07ed8ccfea5dc11b06cb42b37ee",
     ),
     (
         "view:ryeos/work/children",
-        "f60d2eda767c671dbe45567842e1eec75a43b29ad8722e570c4be64ccfccb85e",
+        "746eb4a199dd4eb94458cab371a6b4136df056067b737a9c6a6ad83910eb0338",
     ),
     (
         "view:ryeos/work/evidence",
-        "940e4410a206bfe74c3f41db689616b45795795cfd72ffe3543708e7764b6ee2",
+        "8472770115de240fc8d38e28cbfd06b7740711b4dbc4520317fcdcd46dcf456c",
     ),
     (
         "view:ryeos/work/list",
-        "5a90d90407323b22d4b2f0d81cd09ba8d288d0f3e7aca3be866a6eb9d10a6882",
+        "ae9be57b871a2c3d4ac6b896caaeeb34320d7f0407db45bb5d8d1eb2ebb59e38",
     ),
     (
         "view:ryeos/work/overview",
-        "32b513805494c4b9f215667b86aec382fe1256eb476358a0972f7c9dea0bc5b4",
+        "d03a993b0148ec0e2e8d128a1c9eb6992f4ded64791e88f826ddb27c1e5368e1",
     ),
 ];
 
