@@ -1,18 +1,18 @@
-# Web and terminal UI parity ledger
+# Browser and terminal adapter parity ledger
 
 The browser and terminal are transport and rendering adapters over the same
 `RyeOsCore`. Rust owns state, reduction, effects, layout, semantic view models
 and key commands. A checked row means both adapters were
 audited; it does not claim byte-identical presentation.
 
-`tests/parity_matrix.test.js` compares these checked inventories with the Rust
+`tests/adapter_parity.rs` compares these checked inventories with the Rust
 enums, rejects duplicates and unchecked rows, and requires a web and TUI
 decision. Adding or removing a variant therefore requires an explicit parity
 decision here.
 
 The Web column describes the browser renderer the daemon serves: the Rune
 renderer (`crates/clients/rune`) over the shared client runtime
-(`crates/clients/runtime`). The Svelte sources in this crate are unserved.
+(`crates/clients/runtime`).
 
 Legend: `native` means adapter-owned mechanics; `shared` means behavior reached
 through the shared core/keymap; `presentation` means a platform rendering of
@@ -27,8 +27,8 @@ shared-core behavior the adapter cannot currently originate.
 | [x] `FetchSource` | native | native | Same closed binding request. |
 | [x] `InvokeBinding` | native | native | Same bounded compiled binding. |
 | [x] `InvokePresentationOperation` | native | native | Execute an acknowledged prepared admission operation with its retained identity. |
-| [x] `OpenNewPresentationDocument` | gap | gap | Needs a prepare-first document host (prepare exact retained membership, then offer an explicit same-origin link; no popup reservation or parent-side producer claim). The Rune page has none yet and refuses explicitly; the terminal returns an unsupported-native-effect error. |
-| [x] `ShowPreparedPresentationDocument` | gap | gap | Would expose the already-prepared nonbearer presentation link after its completion ACK; no second preparation, producer claim or parent mount publication. Refused by the Rune page and the terminal until a document host exists. |
+| [x] `OpenNewPresentationDocument` | native | gap | The shared runtime re-reads the session (same session, same root attachment), sends one frozen `seat/open` prepare under the existing seat owner, and offers an explicit same-origin link once prepared; retry repeats the same bytes, dismissal withdraws only the offer. No popup, no producer claim. The terminal returns an explicit unsupported-native-effect error. |
+| [x] `ShowPreparedPresentationDocument` | native | gap | Offers the already-prepared presentation's link after its completion ACK; no second preparation, producer claim or parent mount publication. The terminal reports unsupported independent-document hosting. |
 | [x] `ObserveTransferDestination` | native | native | Bounded destination observation under the exact current source producer; no attachment or grant follows from observation. |
 | [x] `PrepareTransfer` | native | native | Existing transfer ingress carries exact producer/anchors and retained export/freeze evidence; completion returns to Core. |
 | [x] `ContactTransfer` | native | native | Existing transfer contact/reconciliation transport; no adapter-owned transfer state machine. |

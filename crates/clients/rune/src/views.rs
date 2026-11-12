@@ -1477,3 +1477,50 @@ fn empty_state(title: &str, message: &str) -> El {
                 .max_w(360.0),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use rune::{Key, KeyEvent, Mods};
+
+    use super::is_launcher_chord;
+
+    fn press(key: Key, mods: Mods) -> KeyEvent {
+        KeyEvent { key, mods }
+    }
+
+    /// K with exactly one of Ctrl and Alt opens the launcher from anywhere;
+    /// Shift, the Super key, both modifiers or neither leave it to typing.
+    #[test]
+    fn only_the_admitted_launcher_chord_escapes_typing() {
+        let with = |ctrl, alt, shift, logo| Mods {
+            ctrl,
+            alt,
+            shift,
+            logo,
+            ..Mods::default()
+        };
+        let k = || Key::Text("k".to_owned());
+        assert!(is_launcher_chord(&press(k(), with(true, false, false, false))));
+        assert!(is_launcher_chord(&press(k(), with(false, true, false, false))));
+        assert!(is_launcher_chord(&press(
+            Key::Command('k'),
+            with(true, false, false, false)
+        )));
+        assert!(is_launcher_chord(&press(
+            Key::Text("K".to_owned()),
+            with(false, true, false, false)
+        )));
+        for mods in [
+            with(false, false, false, false),
+            with(true, true, false, false),
+            with(true, false, true, false),
+            with(false, true, false, true),
+        ] {
+            assert!(!is_launcher_chord(&press(k(), mods)), "{mods:?}");
+        }
+        assert!(!is_launcher_chord(&press(
+            Key::Text("j".to_owned()),
+            with(true, false, false, false)
+        )));
+    }
+}

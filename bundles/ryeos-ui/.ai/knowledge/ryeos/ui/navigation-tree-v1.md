@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-08T06:41:16Z:4f790999ef36e09092fd2e03b79e38b1b4ab2f709ed8f35e44b16fefcc22908a:IRNBPl2QohIfb+2XK2tUHtzDDKeVhJuUnQTnBBfaRT1uGToEAm8Y7dTv6AgehqffynVpMmc46caLr0L6Iq68AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T05:40:00Z:29a940ea2f133ce004c7b6480c9e46ebe7488a2492fcb3717666f2543f100b3e:ewnPUHEDjEhsRsa0S5k2Yi1Q4o1X8ePvlJqGZwHBX4DleyAXy4y61RE80r2lzi6JcvOEceBZsQZeGlVu+0FCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -518,4 +518,4 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 - `bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml`
 - `crates/clients/base/src/ui/model.rs`
 - `crates/clients/base/src/ui/view_model.rs`
-- `crates/clients/web/docs/web-parity.md`
+- `crates/clients/base/docs/adapter-parity.md`

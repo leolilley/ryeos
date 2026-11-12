@@ -9,6 +9,7 @@
 mod boot;
 mod field;
 mod icons;
+mod recovery;
 mod shell;
 mod theme;
 mod views;
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use rune::{AppSpec, Cx, El, KeyEvent, TextEdit, Tx};
+use ryeos_client_runtime::documents::DocumentOffer;
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
 use ryeos_client_base::ui::model::RyeOsInputAddress;
 use ryeos_client_base::ui::view_model::{RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsViewModel};
@@ -33,6 +35,10 @@ pub struct App {
     boot: Boot,
     phase: Phase,
     local: Local,
+    /// The view model of the core as it is now, built on first use after
+    /// anything that can change the core, and shared by every reader until
+    /// the next such change.
+    model: std::cell::RefCell<Option<std::rc::Rc<RyeOsViewModel>>>,
 }
 
 /// State only this renderer keeps: the text fields, and which tile's
@@ -46,6 +52,9 @@ pub struct Local {
     pub(crate) rename: Option<Rename>,
     /// Whether the system bar's Surface picker is open.
     pub(crate) surfaces_open: bool,
+    /// Whether the recovery screen is asking to confirm an independent
+    /// presentation.
+    pub(crate) confirming_independent: bool,
     scratch: TextEdit,
     /// Each split's main-axis length, by `shell::split_key`, as last laid out.
     pub(crate) split_extent: HashMap<String, f32>,
@@ -55,6 +64,11 @@ pub struct Local {
     field_queries: HashMap<String, TextEdit>,
     /// The `field-evidence:` keys of fields whose Evidence panel is open.
     pub(crate) evidence_open: std::collections::BTreeSet<String>,
+    /// Open grid transcripts by `field` transcript key, at their first row.
+    pub(crate) grid_transcripts: HashMap<String, u32>,
+    /// The selected rows' element keys as last revealed, so only a newly
+    /// selected row scrolls into view.
+    revealed: std::collections::BTreeSet<String>,
     /// The shell's size in points, as last laid out.
     pub(crate) viewport: Option<(f32, f32)>,
     /// Device pixels per point, as the last frame was drawn.
@@ -263,17 +277,32 @@ fn collect_tile_inputs<'a>(node: &'a RyeOsLayoutNodeVm, out: &mut Vec<&'a RyeOsI
     }
 }
 
-fn collect_fields<'a>(
-    vm: &'a RyeOsViewModel,
-    out: &mut Vec<(&'a ryeos_client_base::ids::RyeOsViewInstanceKey, &'a str)>,
-) {
-    use ryeos_client_base::ui::view_model::RyeOsViewVm;
-    let mut push = |key, view: &'a RyeOsViewVm| {
-        if let RyeOsViewVm::Field { field } = view {
-            out.push((key, field.search.query.as_str()));
+/// Every view the presentation mounts: docks, dialogs and the tiles of the
+/// active view set, each with its instance key.
+fn mounted_views(
+    vm: &RyeOsViewModel,
+) -> Vec<(
+    &ryeos_client_base::ids::RyeOsViewInstanceKey,
+    &ryeos_client_base::ui::view_model::RyeOsViewVm,
+)> {
+    fn walk<'a>(
+        node: &'a RyeOsLayoutNodeVm,
+        out: &mut Vec<(
+            &'a ryeos_client_base::ids::RyeOsViewInstanceKey,
+            &'a ryeos_client_base::ui::view_model::RyeOsViewVm,
+        )>,
+    ) {
+        match node {
+            RyeOsLayoutNodeVm::Split { first, second, .. } => {
+                walk(first, out);
+                walk(second, out);
+            }
+            RyeOsLayoutNodeVm::Tile {
+                instance_key, view, ..
+            } => out.push((instance_key, view)),
         }
-    };
-    for dock in [
+    }
+    let mut out: Vec<_> = [
         &vm.docks.top,
         &vm.docks.bottom,
         &vm.docks.left,
@@ -281,38 +310,87 @@ fn collect_fields<'a>(
     ]
     .into_iter()
     .flatten()
-    {
-        push(&dock.instance_key, &dock.view);
+    .map(|dock| (&dock.instance_key, &dock.view))
+    .collect();
+    out.extend(
+        vm.dialogs
+            .iter()
+            .map(|dialog| (&dialog.instance_key, &dialog.view)),
+    );
+    if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
+        walk(root, &mut out);
     }
-    for dialog in &vm.dialogs {
-        push(&dialog.instance_key, &dialog.view);
-    }
-    fn walk<'a>(
-        node: &'a RyeOsLayoutNodeVm,
-        push: &mut dyn FnMut(
-            &'a ryeos_client_base::ids::RyeOsViewInstanceKey,
-            &'a ryeos_client_base::ui::view_model::RyeOsViewVm,
-        ),
-    ) {
-        match node {
-            RyeOsLayoutNodeVm::Split { first, second, .. } => {
-                walk(first, push);
-                walk(second, push);
-            }
-            RyeOsLayoutNodeVm::Tile {
-                instance_key, view, ..
-            } => push(instance_key, view),
+    out
+}
+
+fn collect_fields<'a>(
+    vm: &'a RyeOsViewModel,
+    out: &mut Vec<(&'a ryeos_client_base::ids::RyeOsViewInstanceKey, &'a str)>,
+) {
+    use ryeos_client_base::ui::view_model::RyeOsViewVm;
+    for (key, view) in mounted_views(vm) {
+        if let RyeOsViewVm::Field { field } = view {
+            out.push((key, field.search.query.as_str()));
         }
     }
-    if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
-        walk(root, &mut push);
+}
+
+/// The element keys of every selected row, entry and section header, as the
+/// views key them.
+fn selected_keys(vm: &RyeOsViewModel) -> std::collections::BTreeSet<String> {
+    use ryeos_client_base::ui::view_model::RyeOsViewVm;
+    let mut keys = std::collections::BTreeSet::new();
+    for (instance, view) in mounted_views(vm) {
+        match view {
+            RyeOsViewVm::Rows { rows, .. } => keys.extend(
+                rows.iter()
+                    .filter(|row| row.selected)
+                    .map(|row| format!("item:{instance:?}:{}", row.id)),
+            ),
+            RyeOsViewVm::Table { rows, .. } => keys.extend(
+                rows.iter()
+                    .filter(|row| row.selected)
+                    .map(|row| format!("item:{instance:?}:{}", row.id)),
+            ),
+            RyeOsViewVm::Sections { sections, .. } => {
+                for section in sections {
+                    if section.header_selected {
+                        keys.insert(format!("section:{instance:?}:{}", section.id));
+                    }
+                    keys.extend(
+                        section
+                            .rows
+                            .iter()
+                            .filter(|row| row.selected)
+                            .map(|row| format!("item:{instance:?}:{}", row.id)),
+                    );
+                }
+            }
+            RyeOsViewVm::Timeline {
+                selected: Some(index),
+                entry_ids,
+                ..
+            } => {
+                let id = entry_ids
+                    .get(*index)
+                    .cloned()
+                    .unwrap_or_else(|| index.to_string());
+                keys.insert(format!("entry:{instance:?}:{id}"));
+            }
+            _ => {}
+        }
     }
+    keys
 }
 
 enum Phase {
     /// Establishing the session and claiming the seat.
     Starting,
     Running(Box<boot::Running>),
+    /// The seat cannot be driven; the operator chooses what happens next.
+    Recovering(Box<boot::Recovery>),
+    /// A recovery decision is being carried out.
+    Working,
     /// The page cannot continue; the message says why.
     Failed(String),
     /// A native drawing check over an in-memory core: no node, effects dropped.
@@ -326,22 +404,36 @@ impl App {
             boot: Boot::default(),
             phase: Phase::Starting,
             local: Local::default(),
+            model: Default::default(),
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn fixture() -> App {
-        let build = FIXTURE
-            .get()
-            .ok_or_else(|| "no fixture was given".to_owned());
+    fn fixture(core: Result<ryeos_client_base::ui::RyeOsCore, String>) -> App {
         App {
             boot: Boot::default(),
-            phase: match build.and_then(|build| build()) {
+            phase: match core {
                 Ok(core) => Phase::Fixture(Box::new(core)),
                 Err(message) => Phase::Failed(message),
             },
             local: Local::default(),
+            model: Default::default(),
         }
+    }
+
+    /// The view model being drawn, once there is a core.
+    pub fn view_model(&self) -> Option<std::rc::Rc<RyeOsViewModel>> {
+        if let Some(model) = &*self.model.borrow() {
+            return Some(model.clone());
+        }
+        let model = std::rc::Rc::new(self.core()?.envelope(Vec::new()).view_model);
+        *self.model.borrow_mut() = Some(model.clone());
+        Some(model)
+    }
+
+    /// The core may have changed: the next reader builds the model again.
+    fn invalidate_model(&self) {
+        self.model.borrow_mut().take();
     }
 
     /// The core being drawn, once there is one.
@@ -350,7 +442,27 @@ impl App {
             Phase::Running(running) => Some(running.core()),
             #[cfg(not(target_arch = "wasm32"))]
             Phase::Fixture(core) => Some(core),
-            Phase::Starting | Phase::Failed(_) => None,
+            Phase::Starting | Phase::Recovering(_) | Phase::Working | Phase::Failed(_) => None,
+        }
+    }
+
+    /// The presentation documents offered as links.
+    fn document_offers(&self) -> Vec<(DocumentOffer, Option<String>)> {
+        match &self.phase {
+            Phase::Running(running) => running.document_offers(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn retry_document(&mut self, id: u64) {
+        if let Phase::Running(running) = &mut self.phase {
+            running.retry_document(id);
+        }
+    }
+
+    pub(crate) fn dismiss_document(&mut self, id: u64) {
+        if let Phase::Running(running) = &self.phase {
+            running.dismiss_document(id);
         }
     }
 
@@ -362,14 +474,14 @@ impl App {
             Phase::Fixture(core) => {
                 core.dispatch(event);
             }
-            Phase::Starting | Phase::Failed(_) => {}
+            Phase::Starting | Phase::Recovering(_) | Phase::Working | Phase::Failed(_) => {}
         }
+        self.invalidate_model();
         self.sync_edits();
     }
 
     fn sync_edits(&mut self) {
-        if let Some(core) = self.core() {
-            let vm = core.envelope(Vec::new()).view_model;
+        if let Some(vm) = self.view_model() {
             self.local.edits.sync(&vm);
             self.local.sync_field_queries(&vm);
             self.local.drop_stale(&vm);
@@ -380,10 +492,9 @@ impl App {
     /// shell's focus handler does. Rune records focus on the field's buffer
     /// and has no focus callback, so the change is read here.
     fn sync_input_focus(&mut self) -> bool {
-        let Some(core) = self.core() else {
+        let Some(vm) = self.view_model() else {
             return false;
         };
-        let vm = core.envelope(Vec::new()).view_model;
         let mut mounted = Vec::new();
         collect_inputs(&vm, &mut mounted);
         let Some(address) = mounted
@@ -437,7 +548,7 @@ impl App {
 
     /// The event that focuses `instance`'s tile or dock, when it is not focused.
     fn focus_for(&self, instance: &RyeOsViewInstanceKey) -> Option<RyeOsUiEvent> {
-        let vm = self.core()?.envelope(Vec::new()).view_model;
+        let vm = self.view_model()?;
         let docks = [
             &vm.docks.top,
             &vm.docks.bottom,
@@ -551,6 +662,18 @@ impl App {
             .unwrap_or_default()
     }
 
+    pub(crate) fn toggle_grid_transcript(&mut self, key: String) {
+        if self.local.grid_transcripts.remove(&key).is_none() {
+            self.local.grid_transcripts.insert(key, 0);
+        }
+    }
+
+    pub(crate) fn set_grid_transcript(&mut self, key: String, row: u32) {
+        if let Some(open) = self.local.grid_transcripts.get_mut(&key) {
+            *open = row;
+        }
+    }
+
     pub(crate) fn toggle_evidence(&mut self, key: String) {
         if !self.local.evidence_open.remove(&key) {
             self.local.evidence_open.insert(key);
@@ -614,12 +737,13 @@ impl App {
 
 fn view(app: &App, cx: &mut Cx<App>) -> El {
     app.local.scale.set(cx.env().scale);
-    match (&app.phase, app.core()) {
+    match (&app.phase, app.view_model()) {
         (Phase::Failed(message), _) => shell::boot_screen(Some(message)),
-        (_, Some(core)) => {
-            let vm: RyeOsViewModel = core.envelope(Vec::new()).view_model;
-            shell::shell(&vm, &app.local)
+        (Phase::Recovering(recovery), _) => {
+            recovery::screen(recovery, app.local.confirming_independent)
         }
+        (Phase::Working, _) => recovery::working(),
+        (_, Some(vm)) => shell::shell(&vm, &app.local, &app.document_offers()),
         (_, None) => shell::boot_screen(None),
     }
 }
@@ -637,19 +761,23 @@ fn poll(app: &mut App, seconds: f64, tx: &mut Tx) -> bool {
     if changed {
         app.sync_edits();
     }
+    app.reveal_selection(tx);
     changed
 }
 
 fn advance(app: &mut App, _seconds: f64, tx: &mut Tx) -> bool {
     tx.wake_after(TICK);
+    // The runtime folds what its tasks produced into the core here.
+    app.invalidate_model();
     match &mut app.phase {
-        Phase::Starting => match app.boot.take() {
-            Some(Ok(running)) => {
-                app.phase = Phase::Running(Box::new(running));
-                true
-            }
-            Some(Err(message)) => {
-                app.phase = Phase::Failed(message);
+        Phase::Starting | Phase::Working => match app.boot.take() {
+            Some(outcome) => {
+                app.local.confirming_independent = false;
+                app.phase = match outcome {
+                    boot::Outcome::Running(running) => Phase::Running(running),
+                    boot::Outcome::Recovery(recovery) => Phase::Recovering(recovery),
+                    boot::Outcome::Failed(message) => Phase::Failed(message),
+                };
                 true
             }
             None => false,
@@ -657,18 +785,55 @@ fn advance(app: &mut App, _seconds: f64, tx: &mut Tx) -> bool {
         Phase::Running(running) => match running.poll() {
             Ok(changed) => changed,
             Err(message) => {
-                app.phase = Phase::Failed(message);
+                let Phase::Running(running) = std::mem::replace(&mut app.phase, Phase::Working)
+                else {
+                    return false;
+                };
+                app.phase = Phase::Recovering(boot::Recovery::lost(running, message));
                 true
             }
         },
-        Phase::Failed(_) => false,
+        Phase::Recovering(_) | Phase::Failed(_) => false,
         #[cfg(not(target_arch = "wasm32"))]
         Phase::Fixture(_) => false,
     }
 }
 
-fn on_key(app: &mut App, key: &KeyEvent, _tx: &mut Tx) -> bool {
-    app.core_key(key)
+impl App {
+    /// Scroll a newly selected row, entry or section header into view, as
+    /// keyboard selection moves it: the nearest scrolling list moves just far
+    /// enough, and a row that is already visible stays put.
+    fn reveal_selection(&mut self, tx: &mut Tx) {
+        let Some(vm) = self.view_model() else {
+            return;
+        };
+        let selected = selected_keys(&vm);
+        for key in selected.difference(&self.local.revealed) {
+            tx.scroll_into_view(key.clone());
+        }
+        self.local.revealed = selected;
+    }
+
+    /// Carry out a recovery decision. Only one runs at a time: the screen
+    /// shows that it is working until the outcome arrives.
+    pub(crate) fn recover(&mut self, action: boot::RecoveryAction) {
+        if !matches!(self.phase, Phase::Recovering(_)) {
+            return;
+        }
+        let Phase::Recovering(recovery) = std::mem::replace(&mut self.phase, Phase::Working) else {
+            return;
+        };
+        self.invalidate_model();
+        self.boot.recover(recovery, action);
+    }
+}
+
+fn on_key(app: &mut App, key: &KeyEvent, tx: &mut Tx) -> bool {
+    let taken = app.core_key(key);
+    if taken {
+        app.reveal_selection(tx);
+    }
+    taken
 }
 
 impl App {
@@ -690,9 +855,10 @@ impl App {
                 core.apply_key_command(command);
                 true
             }
-            Phase::Starting | Phase::Failed(_) => false,
+            Phase::Starting | Phase::Recovering(_) | Phase::Working | Phase::Failed(_) => false,
         };
         if taken {
+            self.invalidate_model();
             self.sync_edits();
         }
         taken
@@ -709,13 +875,6 @@ pub fn spec() -> AppSpec<App> {
     }
 }
 
-/// Builds the core a fixture run draws.
-#[cfg(not(target_arch = "wasm32"))]
-pub type FixtureCore = fn() -> Result<ryeos_client_base::ui::RyeOsCore, String>;
-
-#[cfg(not(target_arch = "wasm32"))]
-static FIXTURE: std::sync::OnceLock<FixtureCore> = std::sync::OnceLock::new();
-
 /// The shell over an in-memory core, for drawing checks without a node:
 /// events fold into the core and effects that would reach a node are
 /// dropped. Rune's own arguments apply (`--snap out.png --size 1280x800`
@@ -723,15 +882,36 @@ static FIXTURE: std::sync::OnceLock<FixtureCore> = std::sync::OnceLock::new();
 ///
 /// `fonts` adds font files: native Rune bundles Inter but not the data face.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn start_fixture(core: FixtureCore, fonts: &'static [&'static [u8]]) {
-    let _ = FIXTURE.set(core);
-    rune::run(AppSpec {
+pub fn start_fixture(
+    core: Result<ryeos_client_base::ui::RyeOsCore, String>,
+    fonts: &'static [&'static [u8]],
+) {
+    fixture_app(core, fonts).run();
+}
+
+/// The fixture shell as a windowless runtime at `size`, for tests that press,
+/// type and read the element tree.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fixture_runtime(
+    core: Result<ryeos_client_base::ui::RyeOsCore, String>,
+    size: (f32, f32),
+) -> rune::Runtime<App> {
+    fixture_app(core, &[]).headless_runtime(size, rune::Env::new(true, 1.0))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fixture_app(
+    core: Result<ryeos_client_base::ui::RyeOsCore, String>,
+    fonts: &'static [&'static [u8]],
+) -> rune::App<App> {
+    rune::App::new(AppSpec {
         fonts,
         poll: Some(poll),
         on_key: Some(on_key),
         families: ("Inter", "IBM Plex Mono"),
-        ..AppSpec::new("RyeOS fixture", (1280.0, 800.0), App::fixture, view)
-    });
+        ..AppSpec::new("RyeOS fixture", (1280.0, 800.0), App::new, view)
+    })
+    .init(move || App::fixture(core))
 }
 
 /// The page's entry point.

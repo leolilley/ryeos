@@ -14,7 +14,8 @@ use ryeos_client_base::ids::RyeOsViewInstanceKey;
 use ryeos_client_base::ui::event::FieldStepDirection;
 use ryeos_client_base::ui::field::{
     FieldEmphasis, FieldFill, FieldShape, FieldStroke, RyeOsArtifactPreviewVm, RyeOsFieldEntityVm,
-    RyeOsFieldExpansionVm, RyeOsFieldRelationVm, RyeOsFieldVm, RyeOsSourcePhase,
+    RyeOsFieldExpansionVm, RyeOsFieldRelationVm, RyeOsFieldVm, RyeOsIndexedGridVm,
+    RyeOsSourcePhase,
 };
 use ryeos_client_base::ui::view_model::RyeOsTone;
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
@@ -651,7 +652,7 @@ pub fn view(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey, local: &Local
     }
     if selected.is_some() || !field.compare.is_empty() || !field.warnings.is_empty() {
         root =
-            root.child(detail(field, instance, selected).pin(None, Some(58.0), Some(12.0), None));
+            root.child(detail(field, instance, selected, local).pin(None, Some(58.0), Some(12.0), None));
     }
     root
 }
@@ -1528,6 +1529,7 @@ fn detail(
     field: &RyeOsFieldVm,
     instance: &RyeOsViewInstanceKey,
     selected: Option<&RyeOsFieldEntityVm>,
+    local: &Local,
 ) -> El {
     let p = Palette::get();
     let mut aside = col()
@@ -1622,7 +1624,7 @@ fn detail(
             );
         }
         for preview in previews_for(selected) {
-            aside = aside.child(grid_preview(preview));
+            aside = aside.child(grid_preview(preview, local));
         }
     }
     let compared: Vec<&RyeOsFieldEntityVm> = field
@@ -1664,7 +1666,7 @@ fn detail(
                 );
             }
             for preview in previews {
-                article = article.child(grid_preview(preview));
+                article = article.child(grid_preview(preview, local));
             }
             section = section.child(article);
         }
@@ -1683,7 +1685,7 @@ fn detail(
 }
 
 /// An indexed grid preview, one filled square per cell.
-fn grid_preview(preview: &RyeOsArtifactPreviewVm) -> El {
+fn grid_preview(preview: &RyeOsArtifactPreviewVm, local: &Local) -> El {
     let p = Palette::get();
     let mut figure = col().gap(3.0).child(
         text(preview.label.clone())
@@ -1733,13 +1735,205 @@ fn grid_preview(preview: &RyeOsArtifactPreviewVm) -> El {
                 preview.label, grid.width, grid.height
             )),
     );
-    figure
+    figure.child(transcript(preview, grid, local))
+}
+
+/// The grid read cell by cell, a page of rows at a time, so a screen reader
+/// hears every admitted cell rather than one label for the whole board.
+fn transcript(preview: &RyeOsArtifactPreviewVm, grid: &RyeOsIndexedGridVm, local: &Local) -> El {
+    let p = Palette::get();
+    let key = format!("grid-transcript:{}", preview.id);
+    let open = local.grid_transcripts.get(&key).copied();
+    let toggle_key = key.clone();
+    let toggle = text(if open.is_some() {
+        "Hide grid cells"
+    } else {
+        "Read grid cells"
+    })
+    .font(theme::ui(11.0))
+    .color(p.accent_bright)
+    .key(format!("{key}:toggle"))
+    .role("button")
+    .expanded(open.is_some())
+    .on_press(move |app: &mut App| app.toggle_grid_transcript(toggle_key.clone()));
+    let mut block = col().gap(4.0).child(toggle);
+    let Some(page) = open.and_then(|row| transcript_page(grid, row, TRANSCRIPT_ROWS)) else {
+        return block;
+    };
+    let (previous_key, next_key) = (key.clone(), key.clone());
+    let previous = page.start.saturating_sub(TRANSCRIPT_ROWS);
+    let next = page.end;
+    let mut nav = row()
+        .gap(10.0)
+        .center_y()
+        .child(text("Previous rows").font(theme::ui(11.0)).color(if page.start == 0 {
+            p.faint
+        } else {
+            p.accent_bright
+        }).role("button").on_press(move |app: &mut App| {
+            app.set_grid_transcript(previous_key.clone(), previous)
+        }))
+        .child(
+            text(format!("Rows {}–{} of {}", page.start + 1, page.end, page.height))
+                .font(theme::data(10.0))
+                .color(p.muted)
+                .role("status"),
+        );
+    if page.end < page.height {
+        nav = nav.child(
+            text("Next rows")
+                .font(theme::ui(11.0))
+                .color(p.accent_bright)
+                .role("button")
+                .on_press(move |app: &mut App| app.set_grid_transcript(next_key.clone(), next)),
+        );
+    }
+    let mut rows = col()
+        .gap(2.0)
+        .label(format!("{} cells", preview.label))
+        .child(nav);
+    for (number, cells) in page.rows {
+        rows = rows.child(
+            text(format!("Row {number}: {}", cells.join(" | ")))
+                .font(theme::data(10.0))
+                .color(p.text)
+                .wrap_anywhere()
+                .selectable(true),
+        );
+    }
+    block = block.child(rows);
+    block
+}
+
+/// Rows a transcript page reads at once.
+const TRANSCRIPT_ROWS: u32 = 16;
+
+struct TranscriptPage {
+    /// Row number (from one) and its cells, each `column N: name`.
+    rows: Vec<(u32, Vec<String>)>,
+    start: u32,
+    end: u32,
+    height: u32,
+}
+
+/// One page of `grid`'s transcript from `requested_row`, or nothing for a grid
+/// whose cells do not match its declared size. Each cell names its palette
+/// label, else its glyph, else its index, and says when it changed.
+fn transcript_page(grid: &RyeOsIndexedGridVm, requested_row: u32, page_size: u32) -> Option<TranscriptPage> {
+    let (width, height) = (grid.width, grid.height);
+    if !(1..=512).contains(&width)
+        || !(1..=512).contains(&height)
+        || grid.cells.len() != (width as usize) * (height as usize)
+    {
+        return None;
+    }
+    let size = page_size.clamp(1, TRANSCRIPT_ROWS);
+    let start = requested_row.min(height - 1);
+    let end = (start + size).min(height);
+    let names: HashMap<u16, &str> = grid
+        .palette
+        .iter()
+        .map(|entry| {
+            let name = entry
+                .label
+                .as_deref()
+                .filter(|label| !label.is_empty())
+                .unwrap_or(entry.glyph.as_str());
+            (entry.index, name)
+        })
+        .collect();
+    let changed: std::collections::HashSet<u32> = grid.changed.iter().copied().collect();
+    let rows = (start..end)
+        .map(|row| {
+            let cells = (0..width)
+                .map(|column| {
+                    let offset = row * width + column;
+                    let index = grid.cells[offset as usize];
+                    let name = names
+                        .get(&index)
+                        .filter(|name| !name.is_empty())
+                        .map_or_else(|| index.to_string(), |name| (*name).to_owned());
+                    let mark = if changed.contains(&offset) { " (changed)" } else { "" };
+                    format!("column {}: {name}{mark}", column + 1)
+                })
+                .collect();
+            (row + 1, cells)
+        })
+        .collect();
+    Some(TranscriptPage {
+        rows,
+        start,
+        end,
+        height,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_client_base::ui::field::RyeOsGridPaletteEntryVm;
     use serde_json::{Value, json};
+
+    fn board(width: u32, height: u32, cells: Vec<u16>) -> RyeOsIndexedGridVm {
+        RyeOsIndexedGridVm {
+            width,
+            height,
+            cells,
+            palette: vec![
+                RyeOsGridPaletteEntryVm {
+                    index: 0,
+                    color: "#000000".into(),
+                    glyph: ".".into(),
+                    label: Some("empty".into()),
+                },
+                RyeOsGridPaletteEntryVm {
+                    index: 1,
+                    color: "#ffffff".into(),
+                    glyph: "#".into(),
+                    label: Some("wall".into()),
+                },
+            ],
+            changed: Vec::new(),
+            labels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_transcript_pages_every_cell_of_a_large_grid() {
+        let mut grid = board(64, 64, (0..4096).map(|offset| (offset % 2) as u16).collect());
+        grid.changed = vec![4095];
+        let first = transcript_page(&grid, 0, 16).unwrap();
+        assert_eq!(first.rows.len(), 16);
+        assert_eq!(first.rows[0].1.len(), 64);
+        assert_eq!(first.rows[0].1[0], "column 1: empty");
+        assert_eq!(first.rows[0].1[1], "column 2: wall");
+        let last = transcript_page(&grid, 48, 16).unwrap();
+        assert_eq!(last.end, 64);
+        let (number, cells) = last.rows.last().unwrap();
+        assert_eq!(*number, 64);
+        assert_eq!(cells.last().unwrap(), "column 64: wall (changed)");
+        let mut heard = std::collections::HashSet::new();
+        for start in (0..64).step_by(16) {
+            for (number, cells) in transcript_page(&grid, start, 16).unwrap().rows {
+                for (column, cell) in cells.iter().enumerate() {
+                    assert!(cell.starts_with(&format!("column {}: ", column + 1)));
+                    heard.insert((number, column));
+                }
+            }
+        }
+        assert_eq!(heard.len(), 4096);
+    }
+
+    #[test]
+    fn the_transcript_refuses_inconsistent_grids_and_bounds_its_pages() {
+        assert!(transcript_page(&board(2, 2, vec![0]), 0, 16).is_none());
+        assert!(transcript_page(&board(513, 1, vec![0; 513]), 0, 16).is_none());
+        let mut tall = board(1, 40, vec![3; 40]);
+        tall.palette.clear();
+        assert_eq!(transcript_page(&tall, 0, 999).unwrap().rows.len(), 16);
+        assert_eq!(transcript_page(&tall, 39, 16).unwrap().rows[0].1[0], "column 1: 3");
+        assert_eq!(transcript_page(&tall, 900, 16).unwrap().start, 39);
+    }
 
     fn entity(
         id: &str,

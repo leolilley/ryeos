@@ -1,10 +1,8 @@
-//! The RyeOS shell over an in-memory presentation, for drawing checks without
-//! a node or a seat:
-//!
-//!     cargo run -p ryeos-client-rune --example fixture -- --snap shell.png --size 1280x800
-//!
-//! The views are the bundle's own definitions; their sources are answered
-//! here with fixed records, through the same fetch effects a node answers.
+//! An in-memory RyeOS presentation for drawing and interaction checks without
+//! a node or a seat. The views are the bundle's own definitions; their
+//! sources are answered here with fixed records, through the same fetch
+//! effects a node answers. Shared by the `fixture` example and the headless
+//! tests.
 
 use ryeos_client_base::ids::{PresentationId, SurfaceInstanceId};
 use ryeos_client_base::presentation::UiCompositionPresentation;
@@ -40,19 +38,6 @@ const EXECUTION: &str =
 const BUILD_DEPLOY: &str = include_str!("../../base/tests/fixtures/field/build-deploy-live.json");
 const TIMELINE: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml");
-
-fn main() {
-    // RYEOS_FIXTURE_FONTS: colon-separated font files to add (native Rune has
-    // no IBM Plex Mono of its own; without it the data face falls back).
-    let fonts: Vec<&'static [u8]> = std::env::var("RYEOS_FIXTURE_FONTS")
-        .unwrap_or_default()
-        .split(':')
-        .filter(|path| !path.is_empty())
-        .filter_map(|path| std::fs::read(path).ok())
-        .map(|bytes| &*Box::leak(bytes.into_boxed_slice()))
-        .collect();
-    ryeos_client_rune::start_fixture(core, Box::leak(fonts.into_boxed_slice()));
-}
 
 fn view(source: &str) -> Result<Value, String> {
     serde_yaml::from_str(source).map_err(|error| format!("bundle view: {error}"))
@@ -124,12 +109,10 @@ fn execution() -> Result<Value, String> {
     Ok(definition)
 }
 
-fn scene() -> String {
-    std::env::var("RYEOS_FIXTURE_SCENE").unwrap_or_default()
-}
-
-fn core() -> Result<RyeOsCore, String> {
-    let field = scene() == "field";
+/// The presentation for `scene`: `"field"` docks the execution field,
+/// `"launcher"` opens the launcher, anything else is the default shell.
+pub fn core(scene: &str) -> Result<RyeOsCore, String> {
+    let field = scene == "field";
     let tiles = if field {
         json!([
             "view:ryeos/development/execution",
@@ -144,6 +127,10 @@ fn core() -> Result<RyeOsCore, String> {
             "master": { "side": "left", "arrange": "vertical", "ratio": 0.6, "count": 1 },
             "stack": { "arrange": "vertical" }, "insert": "end" },
         "tiles": tiles,
+        "navigation": [
+            { "id": "threads", "label": "Threads", "view": "view:ryeos/threads/history" },
+            { "id": "timeline", "label": "Timeline", "view": "view:ryeos/chain/timeline" }
+        ],
         "views": {
             "view:ryeos/threads/history": view(THREADS)?,
             "view:ryeos/development/execution": execution()?,
@@ -280,8 +267,8 @@ fn core() -> Result<RyeOsCore, String> {
         event: RyeOsUiEvent::FocusInput,
     });
     answered += answer(&mut core, effects);
-    // RYEOS_FIXTURE_SCENE picks what is open when the frame is drawn.
-    match scene().as_str() {
+    // The scene picks what is open when the frame is drawn.
+    match scene {
         "" | "field" => {}
         "launcher" => {
             let effects = core.dispatch(RyeOsEvent::Ui {

@@ -12,6 +12,8 @@ use ryeos_client_base::ui::view_model::{
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
+use ryeos_client_runtime::documents::{DocumentOffer, DocumentState};
+
 use crate::theme::{self, NAV_WIDTH, Palette, STATUS_HEIGHT, STRIP_HEIGHT, SYSTEM_HEIGHT};
 use crate::views;
 use crate::{App, Local, RenameTarget};
@@ -69,7 +71,11 @@ pub fn boot_screen(failure: Option<&str>) -> El {
 }
 
 /// The whole presentation.
-pub fn shell(vm: &RyeOsViewModel, local: &Local) -> El {
+pub fn shell(
+    vm: &RyeOsViewModel,
+    local: &Local,
+    documents: &[(DocumentOffer, Option<String>)],
+) -> El {
     let p = Palette::get();
     let chrome = &vm.presentation.chrome;
     let mut page = col()
@@ -84,8 +90,8 @@ pub fn shell(vm: &RyeOsViewModel, local: &Local) -> El {
     if local.narrow() && local.navigation_open && !vm.navigation.items.is_empty() {
         page = page.child(navigation_drawer(vm, local));
     }
-    if !vm.notices.is_empty() {
-        page = page.child(notices(&vm.notices));
+    if !vm.notices.is_empty() || !documents.is_empty() {
+        page = page.child(notices(&vm.notices, documents));
     }
     for dialog in &vm.dialogs {
         page = page.child(dialog_layer(dialog, local));
@@ -1048,12 +1054,15 @@ fn status_bar(model: &RyeOsStatusBarVm) -> El {
         )
 }
 
-fn notices(notices: &[RyeOsNoticeVm]) -> El {
+fn notices(notices: &[RyeOsNoticeVm], documents: &[(DocumentOffer, Option<String>)]) -> El {
     let p = Palette::get();
     let mut stack = col()
         .pin(None, None, Some(20.0), Some(STATUS_HEIGHT + 18.0))
         .w(390.0)
         .gap(8.0);
+    for (offer, link) in documents {
+        stack = stack.child(document_offer(offer, link.as_deref()));
+    }
     for notice in notices {
         let id = notice.id.clone();
         stack = stack.child(
@@ -1091,6 +1100,85 @@ fn notices(notices: &[RyeOsNoticeVm]) -> El {
         );
     }
     stack
+}
+
+/// A new presentation in its own document, offered as a link the operator
+/// opens when they choose. Nothing opens by itself, and dismissing the offer
+/// leaves whatever the node prepared in place.
+fn document_offer(offer: &DocumentOffer, link: Option<&str>) -> El {
+    let p = Palette::get();
+    let id = offer.id;
+    let (message, tone) = match &offer.state {
+        DocumentState::Preparing => (
+            "Preparing an independent presentation. No producer is claimed.".to_owned(),
+            RyeOsTone::Neutral,
+        ),
+        DocumentState::Ready { .. } if link.is_some() => (
+            "Ready. Open the prepared Surface when you choose.".to_owned(),
+            RyeOsTone::Good,
+        ),
+        DocumentState::Ready { .. } => (
+            "The prepared Surface has no address on this page.".to_owned(),
+            RyeOsTone::Warn,
+        ),
+        DocumentState::Unconfirmed { reason } => (
+            format!("Preparation is not confirmed: {reason}. Retry repeats the same request."),
+            RyeOsTone::Warn,
+        ),
+    };
+    let mut actions = row().gap(10.0).center_y();
+    if let Some(url) = link {
+        actions = actions.child(
+            text("Open Surface")
+                .font(theme::ui(12.0))
+                .color(p.accent_bright)
+                .key(format!("document:{id}:open"))
+                .href(url.to_owned()),
+        );
+    }
+    if offer.retryable {
+        actions = actions.child(
+            text("Retry")
+                .font(theme::ui(12.0))
+                .color(p.accent_bright)
+                .key(format!("document:{id}:retry"))
+                .role("button")
+                .on_press(move |app: &mut App| app.retry_document(id)),
+        );
+    }
+    row()
+        .key(format!("document:{id}"))
+        .role("status")
+        .label("Prepared presentation")
+        .w_full()
+        .padding(12.0)
+        .gap(12.0)
+        .fill(p.plane_raised)
+        .border(1.0, p.line_strong)
+        .border_sides([1.0, 1.0, 1.0, 3.0], p.notice_rule(tone))
+        .shadow(9.0, 30.0, rune::Color::BLACK.alpha(0.45))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(8.0)
+                .child(
+                    text(message)
+                        .font(theme::ui(12.0))
+                        .color(p.text)
+                        .wrap(),
+                )
+                .child(actions),
+        )
+        .child(
+            text("×")
+                .font(theme::ui(17.0))
+                .color(p.muted)
+                .key(format!("document:{id}:dismiss"))
+                .role("button")
+                .label("Dismiss link")
+                .on_press(move |app: &mut App| app.dismiss_document(id)),
+        )
 }
 
 fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
