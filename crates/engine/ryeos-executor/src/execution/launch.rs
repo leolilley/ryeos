@@ -4647,10 +4647,16 @@ async fn prepare_managed_launch_authority(
                         .and_then(|admission| admission.admitted_request_snapshot()),
                 ))
                 .await
-                .map_err(|error| {
-                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                .map_err(|error| match error {
+                    // A trust refusal inside composition (an ancestor or a
+                    // referenced item of a composed item) is the same typed
+                    // launch-policy refusal the root gate gives, not a fault.
+                    crate::augmentations::LaunchAugmentationError::EffectiveTrustRejected(
+                        refusal,
+                    ) => BuildAndLaunchError::LaunchPreparation(refusal),
+                    error => BuildAndLaunchError::Internal(anyhow::anyhow!(
                         "launch augmentation failed: {error}"
-                    ))
+                    )),
                 })?;
                 drop(augmentation_timer);
                 return Ok(audits);
