@@ -136,6 +136,8 @@ __pycache__/
 !configured-remote/test_qualification.sh
 !execute-stream/smoke.sh
 !installed-resume/smoke.sh
+!browser-smoke/smoke.sh
+!browser-smoke/smoke.mjs
 !development-toolchain-stage0/Cargo.toml
 !development-toolchain-stage0/README.md
 !development-toolchain-stage0/probe.sh
