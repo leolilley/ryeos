@@ -621,27 +621,35 @@ fn advance(app: &mut App, _seconds: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(app: &mut App, key: &KeyEvent, _tx: &mut Tx) -> bool {
-    let Some(event) = views::key_event(key) else {
-        return false;
-    };
-    let taken = match &mut app.phase {
-        Phase::Running(running) => running.apply_key(event),
-        #[cfg(not(target_arch = "wasm32"))]
-        Phase::Fixture(core) => {
-            use ryeos_client_base::ui::{RyeOsKeyCommand, ryeos_key_command};
-            let command = ryeos_key_command(event, core.key_context());
-            if matches!(command, RyeOsKeyCommand::Ignore | RyeOsKeyCommand::Quit) {
-                return false;
+    app.core_key(key)
+}
+
+impl App {
+    /// Run a key through the core's keymap. False when the core leaves it
+    /// alone, so Rune may use it.
+    pub(crate) fn core_key(&mut self, key: &KeyEvent) -> bool {
+        let Some(event) = views::key_event(key) else {
+            return false;
+        };
+        let taken = match &mut self.phase {
+            Phase::Running(running) => running.apply_key(event),
+            #[cfg(not(target_arch = "wasm32"))]
+            Phase::Fixture(core) => {
+                use ryeos_client_base::ui::{RyeOsKeyCommand, ryeos_key_command};
+                let command = ryeos_key_command(event, core.key_context());
+                if matches!(command, RyeOsKeyCommand::Ignore | RyeOsKeyCommand::Quit) {
+                    return false;
+                }
+                core.apply_key_command(command);
+                true
             }
-            core.apply_key_command(command);
-            true
+            Phase::Starting | Phase::Failed(_) => false,
+        };
+        if taken {
+            self.sync_edits();
         }
-        Phase::Starting | Phase::Failed(_) => false,
-    };
-    if taken {
-        app.sync_edits();
+        taken
     }
-    taken
 }
 
 pub fn spec() -> AppSpec<App> {

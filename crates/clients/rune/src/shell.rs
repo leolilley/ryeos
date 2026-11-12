@@ -1211,6 +1211,9 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
             });
         })
         .on_input_key(move |app: &mut App, event: &KeyEvent, _tx| {
+            if views::is_launcher_chord(event) {
+                return app.core_key(event);
+            }
             let mods = &event.mods;
             let bare = !(mods.shift || mods.alt || mods.ctrl || mods.logo);
             let action = match &event.key {

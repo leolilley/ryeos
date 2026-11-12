@@ -53,6 +53,18 @@ pub fn key_event(event: &KeyEvent) -> Option<RyeOsKeyEvent> {
     })
 }
 
+/// The launcher chord, K with exactly one of Ctrl and Alt: it reaches the
+/// core even from inside a text field, as in the browser shell.
+pub fn is_launcher_chord(event: &KeyEvent) -> bool {
+    let k = match &event.key {
+        Key::Text(typed) => typed.eq_ignore_ascii_case("k"),
+        Key::Command(ch) => ch.eq_ignore_ascii_case(&'k'),
+        _ => false,
+    };
+    let mods = &event.mods;
+    k && !mods.shift && !mods.logo && (mods.ctrl != mods.alt)
+}
+
 /// The uppercase data-face label used by tile and dock headers.
 pub fn header_label(label: &str, color: rune::Color) -> El {
     text(label.to_uppercase())

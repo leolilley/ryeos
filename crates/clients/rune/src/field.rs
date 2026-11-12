@@ -832,6 +832,9 @@ fn toolbar(
         });
     })
     .on_input_key(move |app: &mut App, key: &KeyEvent, _| {
+        if crate::views::is_launcher_chord(key) {
+            return app.core_key(key);
+        }
         let delta = match key.key {
             Key::Up => -1,
             Key::Down => 1,
