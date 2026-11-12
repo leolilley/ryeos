@@ -1,6 +1,8 @@
 //! Unified kind registry — one validated `KindSchema` per kind.
 //!
-//! Loaded from `*.kind-schema.yaml` files across the 3-tier space.
+//! Loaded from `*.kind-schema.yaml` files under each bundle root's
+//! `.ai/node/engine/kinds/`. Kind schemas are node-tier items; there is
+//! no project overlay.
 //! This is the single source of truth for kind metadata: directory name,
 //! default executor, file extensions, parsers, signature envelopes, and
 //! daemon resolution pipeline steps.
@@ -1870,9 +1872,9 @@ impl KindSchema {
 
 /// Unified kind registry — maps kind strings to `KindSchema`.
 ///
-/// Built in two stages:
-///   1. Base registry from bundle roots at engine startup
-///   2. Project overlay per request after `ProjectContext` materialization
+/// Built once, from bundle roots at engine startup (`load_base`).
+/// There is no per-project overlay stage; the project overlay path was
+/// removed.
 ///
 /// The loader uses raw filesystem paths — it must NOT depend on
 /// normal item resolution to avoid a bootstrap cycle.

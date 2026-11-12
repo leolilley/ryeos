@@ -10820,9 +10820,9 @@ pub async fn launch_follow_child(
     // Parent execution ceiling, built from the parent's live callback cap on the
     // hot launch so the child is clamped to the parent's hard limits and launched
     // at parent depth + 1 — the same context a normal callback-dispatched child
-    // gets. `None` on a reconcile relaunch (like `provenance_override`): a crashed
-    // follow child recovers through the general native-resume sweep as a root, the
-    // documented reconcile limit shared with every native-resume child.
+    // gets. `None` on a reconcile relaunch (like `provenance_override`): the
+    // persisted parent context recorded at birth is used instead; a child without
+    // one is refused.
     parent_context: Option<crate::dispatch::ParentExecutionContext>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     launch_follow_child_with_claim(

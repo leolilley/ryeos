@@ -7,13 +7,19 @@
 //!    via the verified-loader (signature + trust-class checked at boot).
 //! 2. Directive declares `model.tier: general`; `model_routing.yaml`
 //!    maps that tier to provider `mock`.
-//! 3. `crates/runtimes/directive/src/bootstrap.rs::resolve_provider`
-//!    picks the YAML up at spawn time and serialises it into the
-//!    runtime's `BootstrapConfig`.
-//! 4. `provider_adapter/http.rs::call_provider` reads
-//!    `auth.env_var`, calls `std::env::var(...)`, and adds
-//!    `<header_name>: <prefix><secret>` to the outbound request.
-//! 5. The daemon's runtime spawn (`execution/launch.rs::spawn_runtime`)
+//! 3. At launch preparation the directive launch handler
+//!    (`crates/tools/handler-bins/src/directive_launch.rs`) calls
+//!    `ryeos_directive_definition::prepare_directive_launch`, which
+//!    resolves the provider YAML into a `ResolvedProviderSnapshot`
+//!    shipped in the launch `runtime_data`. The runtime's
+//!    `crates/runtimes/directive/src/bootstrap.rs::bootstrap` consumes
+//!    that snapshot and never re-reads provider YAML from disk.
+//! 4. `crates/runtimes/directive/src/provider_adapter/prepared.rs::prepare_provider_request`
+//!    reads `auth.env_var`, calls `std::env::var(...)`, and freezes
+//!    `<header_name>: <prefix><secret>` into the prepared request
+//!    (the credential is fixed at prepare time).
+//! 5. The daemon's runtime spawn
+//!    (`ryeos-executor/src/execution/launch/runtime_request.rs::spawn_runtime`)
 //!    builds a closed env: an allowlisted parent snapshot + declared
 //!    secrets pulled from the sealed vault. After lillux's
 //!    `env_clear()` contract change the subprocess sees ONLY this

@@ -6240,7 +6240,7 @@ async fn dispatch_follow_actions(
                 )
             }
             reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
-                // Reconcile parity: a fresh relaunch, no parent clamp/depth.
+                // Relaunch under the persisted parent context (clamp and depth).
                 let outcome =
                     launch_follow_child(state.clone(), &child_thread_id, None, None).await;
                 (

@@ -3825,8 +3825,11 @@ pub enum FollowReconcileAction {
     /// stored): `ready`/`resuming`. Driven by `launch_follow_resume_successor`.
     Resume { follow_key: String },
     /// A `waiting` waiter whose CHILD row was created but never launched (crash in
-    /// the pre-launch window). Driven by `launch_follow_child(.., None, None)` — a
-    /// fresh detached launch with no parent clamp (reconcile parity).
+    /// the pre-launch window). Driven by `prepare_and_spawn_follow_child_recovery`
+    /// at startup and `launch_follow_child(.., None, None)` in periodic recovery:
+    /// a detached launch under the persisted parent context (hard limits, depth,
+    /// accounting scope) and `FollowChildHybrid` parent caps, the same clamp as
+    /// the hot path.
     RelaunchChild { child_thread_id: String },
 }
 
