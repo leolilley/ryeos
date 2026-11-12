@@ -56,16 +56,27 @@ const COMMAND_RELATIVE: &str = "bin/evaluate";
 const COMMAND_PATH: &str = "/ryeos/realizations/runtime/bin/evaluate";
 const PRODUCT_DESTINATION: &str = "/ryeos/realizations/runtime";
 
-/// The candidate: a statically linked image whose only behavior is exiting
-/// with status zero. Its identity carries no claim; the exchange does.
-pub fn exit_zero_image() -> Result<Vec<u8>> {
+/// The candidate: a statically linked image that reads its stdin to the end
+/// and exits with status zero. The launcher applies a direct command's
+/// sealed stdin completely or fails it, so the candidate must consume it.
+/// Its identity carries no claim; the exchange does.
+pub fn drain_stdin_exit_zero_image() -> Result<Vec<u8>> {
     ensure!(
         cfg!(target_arch = "x86_64"),
         "the minimal candidate image is only defined for x86_64 guests"
     );
-    let code: [u8; 12] = [
-        0xbf, 0, 0, 0, 0, // mov edi, 0
-        0xb8, 0x3c, 0, 0, 0, // mov eax, 60
+    let code: [u8; 32] = [
+        0x48, 0x83, 0xec, 0x40, // sub rsp, 64
+        // read_more:
+        0x31, 0xc0, // xor eax, eax (read)
+        0x31, 0xff, // xor edi, edi (fd 0)
+        0x48, 0x89, 0xe6, // mov rsi, rsp
+        0xba, 0x40, 0, 0, 0, // mov edx, 64
+        0x0f, 0x05, // syscall
+        0x48, 0x85, 0xc0, // test rax, rax
+        0x7f, 0xed, // jg read_more
+        0xb8, 0x3c, 0, 0, 0, // mov eax, 60 (exit)
+        0x31, 0xff, // xor edi, edi
         0x0f, 0x05, // syscall
     ];
     let total = 120 + code.len() as u64;
@@ -184,7 +195,7 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
     let (base, measurement) = base_snapshot(inputs.work)?;
 
     // Candidate product tree and its retained manifest record.
-    let image = exit_zero_image()?;
+    let image = drain_stdin_exit_zero_image()?;
     let product = inputs.work.create_child(OsStr::new("product"), 0o755)?;
     let bin = product.create_child(OsStr::new("bin"), 0o755)?;
     write_file(&bin, "evaluate", &image, 0o755)?;
@@ -510,4 +521,40 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
         resolver_bytes,
         hosts_bytes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn the_candidate_consumes_its_stdin_and_exits_zero() {
+        let directory = tempfile::tempdir().unwrap();
+        let pinned = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let image = drain_stdin_exit_zero_image().unwrap();
+        write_file(&pinned, "evaluate", &image, 0o755).unwrap();
+        // Many times its 64-byte buffer, and nothing at all.
+        for stdin in ["guest wire probe\n".repeat(640), String::new()] {
+            let result = lillux::run(lillux::SubprocessRequest {
+                cmd: directory.path().join("evaluate").display().to_string(),
+                argv0: None,
+                args: Vec::new(),
+                cwd: None,
+                envs: Vec::new(),
+                stdin_data: Some(stdin),
+                timeout: 10.0,
+                limits: None,
+                inherited_fds: Vec::new(),
+                inherited_fd_mappings: Vec::new(),
+                supervised_status: None,
+            });
+            assert!(
+                result.success && result.exit_code == 0 && !result.timed_out,
+                "{result:?}"
+            );
+        }
+    }
 }
