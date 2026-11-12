@@ -199,7 +199,7 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
         inputs.work,
         "product-manifest.json",
         &manifest_record,
-        0o400,
+        0o600,
     )?;
 
     // Protected supervisor bootstrap, launcher and supervisor members.
