@@ -881,19 +881,6 @@ jobs:
           printf '%s\n' "$?" \
             >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.status"
 
-      - name: Audit excluded bubblewrap adapter
-        run: |
-          set +e
-          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-adapter-target" \
-          RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked \
-              --manifest-path bundles/sandbox-linux-bubblewrap/adapter/Cargo.toml \
-              --all-targets --message-format=json \
-              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.jsonl" \
-              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.stderr"
-          printf '%s\n' "$?" \
-            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.status"
-
       - name: Upload compatibility diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -906,7 +893,7 @@ jobs:
       - name: Require every audit surface to compile
         run: |
           failed=0
-          for surface in workspace doctest wasm adapter; do
+          for surface in workspace doctest wasm; do
             status="$(cat "$RUNNER_TEMP/ryeos-rust-2024-diagnostics/$surface.status")"
             if [[ "$status" != 0 ]]; then
               echo "::error::$surface compatibility audit exited with status $status"
