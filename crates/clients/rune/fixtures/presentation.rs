@@ -43,8 +43,12 @@ fn view(source: &str) -> Result<Value, String> {
     serde_yaml::from_str(source).map_err(|error| format!("bundle view: {error}"))
 }
 
-/// What each view's source answers, by view ref.
-fn response(view_ref: &str) -> Option<Value> {
+/// What each view's source answers, by view ref. A `long` scene answers with
+/// enough threads and events that lists build only the rows in view.
+fn response(view_ref: &str, long: bool) -> Option<Value> {
+    if long {
+        return long_response(view_ref);
+    }
     Some(match view_ref {
         "view:ryeos/project/files" => json!({ "entries": [
             { "path": "Cargo.toml", "name": "Cargo.toml", "size": 6120, "is_dir": false },
@@ -73,8 +77,44 @@ fn response(view_ref: &str) -> Option<Value> {
     })
 }
 
+/// Rows past the length at which lists build only what is in view.
+const LONG_ROWS: usize = 200;
+
+fn long_response(view_ref: &str) -> Option<Value> {
+    Some(match view_ref {
+        "view:ryeos/threads/history" => {
+            let threads: Vec<Value> = (0..LONG_ROWS)
+                .map(|index| json!({
+                    "thread_id": format!("T-{index:04}"), "kind": "tool_run",
+                    "item_ref": "tool:ryeos/dev/gate", "project": { "name": "ryeos-next" },
+                    "status": "completed", "created_at": "2026-11-12T08:40:00Z"
+                }))
+                .collect();
+            json!({ "threads": threads, "coverage": { "complete": true, "returned": LONG_ROWS } })
+        }
+        "view:ryeos/chain/timeline" => {
+            // A turn boundary before each step keeps every step its own entry:
+            // consecutive outputs braid into one block.
+            let events: Vec<Value> = (0..LONG_ROWS)
+                .flat_map(|index| [
+                    json!({
+                        "event_type": "cognition_in", "chain_seq": 2 * index + 1,
+                        "payload": { "turn": index + 1 }
+                    }),
+                    json!({
+                        "event_type": "cognition_out", "chain_seq": 2 * index + 2,
+                        "payload": { "content": format!("Step {} of the run.", index + 1) }
+                    }),
+                ])
+                .collect();
+            json!({ "events": events })
+        }
+        _ => return None,
+    })
+}
+
 /// Answer the source fetches among `effects`; returns how many were answered.
-fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>) -> usize {
+fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>, long: bool) -> usize {
     let mut answered = 0;
     for effect in effects {
         let RyeOsEffectKind::FetchSource { request, .. } = &effect.kind else {
@@ -83,7 +123,7 @@ fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>) -> usize {
         let UiBindingCoordinate::Source { view_ref, .. } = &request.coordinate else {
             continue;
         };
-        let Some(data) = response(view_ref) else {
+        let Some(data) = response(view_ref, long) else {
             continue;
         };
         answered += 1;
@@ -96,9 +136,20 @@ fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>) -> usize {
                 error: None,
             },
         });
-        answered += answer(core, more);
+        answered += answer(core, more, long);
     }
     answered
+}
+
+/// The chain timeline. Its source names the input route's chain, which the
+/// fixture has no route for; the `long` scene names a chain directly so the
+/// timeline has events to show.
+fn timeline(long: bool) -> Result<Value, String> {
+    let mut definition = view(TIMELINE)?;
+    if long {
+        definition["sources"]["default"]["params"]["chain_root_id"] = json!("chain-long");
+    }
+    Ok(definition)
 }
 
 /// The execution field with its thread given directly: the fixture has no
@@ -130,7 +181,7 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         "views": {
             "view:ryeos/threads/history": view(THREADS)?,
             "view:ryeos/development/execution": execution()?,
-            "view:ryeos/chain/timeline": view(TIMELINE)?
+            "view:ryeos/chain/timeline": timeline(scene == "long")?
         }
     }))
     .map_err(|error| format!("surface fixture: {error}"))?;
@@ -257,20 +308,21 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     core.require_replayed_initialization()
         .map_err(|error| format!("fixture replay: {error}"))?;
     // As the runtime does after a start: the mounted views' first fetches.
+    let long = scene == "long";
     let effects = core.initial_effects();
-    let mut answered = answer(&mut core, effects);
+    let mut answered = answer(&mut core, effects, long);
     let effects = core.dispatch(RyeOsEvent::Ui {
         event: RyeOsUiEvent::FocusInput,
     });
-    answered += answer(&mut core, effects);
+    answered += answer(&mut core, effects, long);
     // The scene picks what is open when the frame is drawn.
     match scene {
-        "" | "field" => {}
+        "" | "field" | "long" => {}
         "launcher" => {
             let effects = core.dispatch(RyeOsEvent::Ui {
                 event: RyeOsUiEvent::OpenLauncher,
             });
-            answered += answer(&mut core, effects);
+            answered += answer(&mut core, effects, long);
         }
         other => return Err(format!("unknown fixture scene {other}")),
     }

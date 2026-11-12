@@ -9,6 +9,8 @@
 mod boot;
 mod field;
 mod icons;
+#[cfg(test)]
+mod probe;
 mod recovery;
 mod shell;
 mod theme;
@@ -417,6 +419,19 @@ impl App {
             local: Local::default(),
             model: Default::default(),
         }
+    }
+
+    /// Apply `f` to the view a mounted instance shows in the current model.
+    pub(crate) fn with_view<R>(
+        &self,
+        instance: &ryeos_client_base::ids::RyeOsViewInstanceKey,
+        f: impl FnOnce(&ryeos_client_base::ui::view_model::RyeOsViewVm) -> R,
+    ) -> Option<R> {
+        let vm = self.view_model()?;
+        mounted_views(&vm)
+            .into_iter()
+            .find(|(key, _)| *key == instance)
+            .map(|(_, view)| f(view))
     }
 
     /// The view model being drawn, once there is a core.

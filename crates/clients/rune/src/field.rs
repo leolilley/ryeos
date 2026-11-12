@@ -2131,4 +2131,413 @@ mod tests {
             ]
         );
     }
+
+    // ---- Zero-entity states, evidence, previews and the Activate control ----
+
+    use crate::probe::{runtime, says, texts, texts_under};
+    use ryeos_client_base::ui::field::RyeOsFieldSourceStatusVm;
+
+    fn instance() -> RyeOsViewInstanceKey {
+        let presentation =
+            ryeos_client_base::ids::PresentationId::try_new("11111111-1111-4111-8111-111111111111")
+                .unwrap();
+        RyeOsViewInstanceKey::shared_dock(&presentation, "top").unwrap()
+    }
+
+    fn source(
+        name: &str,
+        phase: &str,
+        truncated: bool,
+        error: Option<&str>,
+    ) -> RyeOsFieldSourceStatusVm {
+        serde_json::from_value(json!({
+            "name": name, "source_ref": format!("service:test/{name}"),
+            "subject_fingerprint": null, "revision": null, "phase": phase,
+            "truncated": truncated, "error": error, "evidence": [], "evidence_omitted": 0
+        }))
+        .unwrap()
+    }
+
+    /// The fixture with no entities at all, so only the sources speak.
+    fn bare(sources: Vec<RyeOsFieldSourceStatusVm>) -> RyeOsFieldVm {
+        let mut field = fixture();
+        field.entities.clear();
+        field.relations.clear();
+        field.selected = None;
+        field.compare.clear();
+        field.sources = sources;
+        field
+    }
+
+    fn same(left: Color, right: Color) -> bool {
+        format!("{left:?}") == format!("{right:?}")
+    }
+
+    fn title_of(field: &RyeOsFieldVm) -> Option<&'static str> {
+        empty_state(field).map(|(_, title, _)| title)
+    }
+
+    fn drawn(field: RyeOsFieldVm, evidence_open: bool) -> rune::Runtime<App> {
+        let instance = instance();
+        let mut local = Local::default();
+        if evidence_open {
+            local
+                .evidence_open
+                .insert(format!("field-evidence:{instance:?}"));
+        }
+        let local = std::rc::Rc::new(local);
+        runtime((1400.0, 900.0), move || view(&field, &instance, &local))
+    }
+
+    fn entity_mut<'a>(field: &'a mut RyeOsFieldVm, id: &str) -> &'a mut RyeOsFieldEntityVm {
+        field
+            .entities
+            .iter_mut()
+            .find(|entity| entity.id == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_field_with_entities_has_no_empty_state() {
+        let mut field = fixture();
+        field.sources = vec![source("s", "error", true, Some("boom"))];
+        assert!(empty_state(&field).is_none());
+    }
+
+    #[test]
+    fn an_error_outranks_every_other_source_state() {
+        let field = bare(vec![
+            source("a", "unresolved", false, None),
+            source("b", "loading", true, None),
+            source("c", "error", false, None),
+        ]);
+        let (tone, title, _) = empty_state(&field).unwrap();
+        assert_eq!(title, "Source evidence failed");
+        assert!(same(tone, Palette::get().red));
+        // A reported error counts even when the phase says ready.
+        let field = bare(vec![source("a", "ready", false, Some("denied"))]);
+        assert_eq!(title_of(&field), Some("Source evidence failed"));
+    }
+
+    #[test]
+    fn unresolved_outranks_pending_and_bounded() {
+        let field = bare(vec![
+            source("a", "loading", true, None),
+            source("b", "unresolved", false, None),
+        ]);
+        let (tone, title, _) = empty_state(&field).unwrap();
+        assert_eq!(title, "Source unresolved");
+        assert!(same(tone, Palette::get().yellow));
+    }
+
+    #[test]
+    fn pending_outranks_bounded_for_loading_and_refreshing() {
+        for phase in ["loading", "refreshing"] {
+            let field = bare(vec![
+                source("a", "ready", true, None),
+                source("b", phase, false, None),
+            ]);
+            let (tone, title, _) = empty_state(&field).unwrap();
+            assert_eq!(title, "Source evidence pending", "{phase}");
+            assert!(same(tone, Palette::get().yellow));
+        }
+    }
+
+    #[test]
+    fn a_bounded_ready_source_is_a_bounded_projection() {
+        let field = bare(vec![source("a", "ready", true, None)]);
+        let (tone, title, _) = empty_state(&field).unwrap();
+        assert_eq!(title, "Bounded projection");
+        assert!(same(tone, Palette::get().yellow));
+    }
+
+    #[test]
+    fn all_ready_sources_claim_nothing_about_retained_runs() {
+        let field = bare(vec![
+            source("a", "ready", false, None),
+            source("b", "ready", false, None),
+        ]);
+        let (tone, title, detail) = empty_state(&field).unwrap();
+        assert_eq!(title, "No entities in this projection");
+        assert!(detail.contains("does not establish"));
+        assert!(same(tone, Palette::get().muted));
+    }
+
+    #[test]
+    fn no_sources_leaves_availability_unknown() {
+        let field = bare(Vec::new());
+        let (tone, title, _) = empty_state(&field).unwrap();
+        assert_eq!(title, "No entities projected");
+        assert!(same(tone, Palette::get().muted));
+    }
+
+    #[test]
+    fn the_stage_draws_the_empty_state_as_a_status() {
+        let rt = drawn(bare(vec![source("a", "error", false, Some("boom"))]), false);
+        assert!(says(&rt, "Source evidence failed"));
+        assert!(
+            rt.elements()
+                .iter()
+                .any(|element| element.role == "status")
+        );
+        let rt = drawn(fixture(), false);
+        assert!(!says(&rt, "Source evidence failed"));
+        assert!(!says(&rt, "No entities projected"));
+    }
+
+    #[test]
+    fn a_field_with_no_evidence_draws_no_evidence_panel() {
+        let rt = drawn(fixture(), false);
+        assert!(!says(&rt, "EVIDENCE"));
+    }
+
+    #[test]
+    fn a_closed_evidence_panel_summarises_without_disclosing() {
+        let mut field = fixture();
+        field.sources = vec![source("build", "ready", true, Some("late"))];
+        field.replay.outside_cut = vec!["event-9".into()];
+        field.search.truncated = true;
+        field.expansions = vec![serde_json::from_value(json!({
+            "source": "s", "root_id": "h", "phase": "ready", "applied_depth": 2,
+            "entity_count": 7, "truncated": true, "can_continue": false
+        }))
+        .unwrap()];
+        let rt = drawn(field, false);
+        assert!(says(&rt, "EVIDENCE"));
+        assert!(says(
+            &rt,
+            "build ready bounded error · outside cut · bounded search · bounded expansion"
+        ));
+        for hidden in ["Outside replay cut", "Bounded search results", "event-9"] {
+            assert!(!says(&rt, hidden), "{hidden} stays behind the disclosure");
+        }
+    }
+
+    #[test]
+    fn omitted_evidence_references_are_counted_only_when_there_are_some() {
+        let mut field = fixture();
+        let mut with = source("build", "ready", false, None);
+        with.evidence = vec!["ref-one".into()];
+        with.evidence_omitted = 3;
+        field.sources = vec![with];
+        let rt = drawn(field.clone(), true);
+        assert!(says(&rt, "ref-one"));
+        assert!(says(
+            &rt,
+            "3 further entity evidence references omitted from this display."
+        ));
+        field.sources[0].evidence_omitted = 0;
+        let rt = drawn(field, true);
+        assert!(!texts(&rt).iter().any(|text| text.contains("omitted from this display")));
+    }
+
+    #[test]
+    fn a_truncated_or_failed_source_says_so_when_disclosed() {
+        let mut field = fixture();
+        field.sources = vec![source("build", "error", true, Some("denied by policy"))];
+        let rt = drawn(field, true);
+        assert!(says(&rt, "build · error"));
+        assert!(says(
+            &rt,
+            "Truncated response — this is not the complete retained field."
+        ));
+        assert!(says(&rt, "denied by policy"));
+    }
+
+    #[test]
+    fn events_outside_the_replay_cut_are_listed_with_their_bound() {
+        let mut field = fixture();
+        field.replay.outside_cut = vec!["event-9".into(), "event-10".into()];
+        let rt = drawn(field, true);
+        assert!(says(&rt, "Outside replay cut"));
+        assert!(says(
+            &rt,
+            "Concurrent retained context is not included in the selected braid cut."
+        ));
+        assert!(says(&rt, "event-9"));
+        assert!(says(&rt, "event-10"));
+    }
+
+    #[test]
+    fn a_bounded_search_discloses_that_matches_are_partial() {
+        let mut field = fixture();
+        field.search.truncated = true;
+        let rt = drawn(field.clone(), true);
+        assert!(says(&rt, "Bounded search results"));
+        assert!(says(
+            &rt,
+            "The visible matches are not the complete matching field."
+        ));
+        field.search.truncated = false;
+        field.sources = vec![source("build", "ready", false, None)];
+        let rt = drawn(field, true);
+        assert!(!says(&rt, "Bounded search results"));
+    }
+
+    #[test]
+    fn the_expansion_disclosure_follows_the_selected_entity_and_its_bound() {
+        let expansion = |root: &str, truncated: bool| {
+            serde_json::from_value(json!({
+                "source": "s", "root_id": root, "phase": "ready", "applied_depth": 2,
+                "entity_count": 7, "truncated": truncated, "can_continue": false
+            }))
+            .unwrap()
+        };
+        let mut field = fixture();
+        field.expansions = vec![expansion("h", true)];
+        let rt = drawn(field.clone(), true);
+        assert!(says(&rt, "Expansion · ready"));
+        assert!(says(&rt, "Applied depth 2; 7 retained entities."));
+        assert!(says(
+            &rt,
+            "Expansion is bounded — additional retained evidence may exist."
+        ));
+        field.expansions = vec![expansion("h", false)];
+        let rt = drawn(field.clone(), true);
+        assert!(says(&rt, "Applied depth 2; 7 retained entities."));
+        assert!(!texts(&rt).iter().any(|text| text.starts_with("Expansion is bounded")));
+        // An expansion rooted at another entity is not the selected one's.
+        field.expansions = vec![expansion("a", true)];
+        let rt = drawn(field, true);
+        assert!(!says(&rt, "Expansion · ready"));
+    }
+
+    fn preview(id: &str, entity: Option<&str>, grid: bool) -> RyeOsArtifactPreviewVm {
+        RyeOsArtifactPreviewVm {
+            id: id.into(),
+            entity_id: entity.map(str::to_owned),
+            kind: "grid".into(),
+            label: format!("{id} label"),
+            comparison_key: None,
+            grid: grid.then(|| board(2, 1, vec![0, 1])),
+        }
+    }
+
+    #[test]
+    fn the_selected_entity_shows_only_the_previews_it_owns() {
+        let mut field = fixture();
+        entity_mut(&mut field, "h").preview_ids = vec![
+            "p-own".into(),
+            "p-foreign".into(),
+            "p-orphan".into(),
+            "p-missing".into(),
+        ];
+        field.previews = vec![
+            preview("p-own", Some("h"), true),
+            // Listed by the entity, but owned by another.
+            preview("p-foreign", Some("a"), true),
+            preview("p-orphan", None, true),
+            // Owned by the entity, but the entity does not list it.
+            preview("p-unlisted", Some("h"), true),
+        ];
+        let rt = drawn(field, false);
+        let shown = texts(&rt);
+        assert!(shown.contains(&"p-own label".to_owned()));
+        for dropped in ["p-foreign label", "p-orphan label", "p-unlisted label"] {
+            assert!(!shown.contains(&dropped.to_owned()), "{dropped}");
+        }
+    }
+
+    #[test]
+    fn a_missing_grid_payload_stays_with_its_entity_in_compare() {
+        let mut field = fixture();
+        field.compare = vec!["a".into(), "b".into(), "c".into(), "ghost".into()];
+        entity_mut(&mut field, "a").preview_ids = vec!["pa".into()];
+        entity_mut(&mut field, "b").preview_ids = vec!["pb".into()];
+        entity_mut(&mut field, "c").preview_ids = vec!["pc".into()];
+        field.previews = vec![
+            preview("pa", Some("a"), true),
+            preview("pb", Some("b"), false),
+            // Owned by another entity, so "c" has no preview of its own.
+            preview("pc", Some("a"), true),
+        ];
+        let rt = drawn(field, false);
+        assert!(says(&rt, "Compared entities"));
+        let a = texts_under(&rt, "a (a) comparison");
+        assert!(a.contains(&"pa label".to_owned()), "{a:?}");
+        assert!(!a.contains(&"pc label".to_owned()), "{a:?}");
+        assert!(!a.iter().any(|text| text.contains("has no grid payload")));
+        let b = texts_under(&rt, "b (b) comparison");
+        assert!(b.contains(&"pb label".to_owned()), "{b:?}");
+        assert!(b.contains(&"This projected preview has no grid payload.".to_owned()));
+        let c = texts_under(&rt, "c (c) comparison");
+        assert_eq!(
+            c.iter()
+                .filter(|text| text.starts_with("No grid preview is present"))
+                .count(),
+            1,
+            "{c:?}"
+        );
+        assert!(!c.contains(&"pc label".to_owned()));
+        assert!(
+            texts_under(&rt, "ghost (ghost) comparison").is_empty(),
+            "an id the field does not hold draws nothing"
+        );
+    }
+
+    #[test]
+    fn the_artifact_coordinate_is_evidence_with_no_activation() {
+        let mut field = fixture();
+        field.relations.clear();
+        entity_mut(&mut field, "h").artifact_ref =
+            Some(ryeos_client_base::ui::field::RyeOsFieldArtifactRefVm {
+                thread_id: "T-build".into(),
+                artifact_id: 7,
+                content_hash: None,
+            });
+        let rt = drawn(field, false);
+        let shown = texts(&rt);
+        for expected in ["Thread", "T-build", "Artifact", "7", "Content hash", "Not recorded"] {
+            assert!(shown.contains(&expected.to_owned()), "{expected}");
+        }
+        let elements = rt.elements();
+        let detail = elements
+            .iter()
+            .find(|element| {
+                element
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("field-detail:"))
+            })
+            .expect("the detail panel is drawn");
+        let prefix = format!("{}/", detail.path);
+        let buttons = elements
+            .iter()
+            .filter(|element| element.path.starts_with(&prefix) && element.role == "button")
+            .count();
+        assert_eq!(buttons, 0, "the coordinate offers no control");
+    }
+
+    fn activate_button(rt: &rune::Runtime<App>) -> Option<bool> {
+        rt.elements()
+            .iter()
+            .find(|element| element.label.as_deref() == Some("Activate h"))
+            .map(|element| element.focusable)
+    }
+
+    #[test]
+    fn activate_appears_only_for_the_selected_entitys_admitted_intent() {
+        // No admitted intent on the selection: no control, even when another
+        // entity or a relation carries one.
+        let mut field = fixture();
+        entity_mut(&mut field, "a").activate_intent = Some(RyeOsUiIntent::Refresh);
+        for relation in &mut field.relations {
+            relation.activate_intent = Some(RyeOsUiIntent::Refresh);
+        }
+        let rt = drawn(field.clone(), false);
+        assert!(!says(&rt, "Activate"));
+        assert_eq!(activate_button(&rt), None);
+        // The selection's own intent admits the control, and it is usable.
+        entity_mut(&mut field, "h").activate_intent = Some(RyeOsUiIntent::Refresh);
+        let rt = drawn(field.clone(), false);
+        assert!(says(&rt, "Activate"));
+        assert_eq!(activate_button(&rt), Some(true));
+        // With nothing selected there is no Activate at all.
+        field.selected = None;
+        for entity in &mut field.entities {
+            entity.selected = false;
+        }
+        let rt = drawn(field, false);
+        assert!(!says(&rt, "Activate"));
+    }
 }
