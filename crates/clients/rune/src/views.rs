@@ -803,6 +803,7 @@ fn text_view(instance: &RyeOsViewInstanceKey, title: &str, lines: &[RyeOsTextLin
                 .font(theme::data(12.0))
                 .color(p.tone(line.tone, p.text))
                 .wrap_anywhere()
+                .selectable(true)
                 .w_full(),
         );
     }
@@ -857,6 +858,7 @@ fn document_view(
                     .font(theme::data(11.0))
                     .color(p.text)
                     .wrap_anywhere()
+                    .selectable(true)
                     .w_full()
                     .pt(18.0)
                     .px(20.0)
@@ -1173,6 +1175,7 @@ fn timeline_view(
         let content = match entry {
             RyeOsTimelineEntryVm::Block { text: body, tone } => {
                 text(theme::drawable(body, theme::Face::Ui).into_owned())
+                    .selectable(true)
                     .font(theme::ui(13.0))
                     .color(p.tone(*tone, p.text))
                     .wrap()

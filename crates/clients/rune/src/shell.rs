@@ -7,8 +7,8 @@ use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
     RyeOsDialogVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSessionVm,
-    RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsTileIntentVm, RyeOsTopBarVm, RyeOsViewModel,
-    RyeOsViewSetVm,
+    RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm,
+    RyeOsViewModel, RyeOsViewSetVm,
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
@@ -637,7 +637,13 @@ fn view_set(vm: &RyeOsViewModel, local: &Local) -> El {
         })
     );
     let docks = &vm.docks;
-    let gap = if maximized { 0.0 } else { 12.0 };
+    let gap = if maximized {
+        0.0
+    } else if local.width() <= crate::COMPACT {
+        8.0
+    } else {
+        12.0
+    };
     let mut middle = row().w_full().grow(1.0).min_h(0.0).min_w(0.0).gap(gap);
     if !maximized && let Some(left) = &docks.left {
         middle = middle.child(dock(left, true, local));
@@ -780,9 +786,9 @@ fn divider(
         el().w_full().h(1.0).fill(p.line)
     };
     let handle = if horizontal {
-        col().w(11.0).h_full().items_center()
+        col().w(DIVIDER).h_full().items_center()
     } else {
-        row().w_full().h(11.0).center_y()
+        row().w_full().h(DIVIDER).center_y()
     };
     handle
         .key(format!("{key}:divider"))
@@ -835,6 +841,10 @@ fn divider(
             true
         })
 }
+
+/// A split divider's thickness, and the gap either side of it.
+const DIVIDER: f32 = 11.0;
+const SPLIT_GAP: f32 = 3.0;
 
 /// Whether the focused tile is under `node`.
 fn holds_focus(node: &RyeOsLayoutNodeVm) -> bool {
@@ -899,12 +909,12 @@ fn layout(
                 .h_full()
                 .min_w(0.0)
                 .min_h(0.0)
-                .gap(3.0)
+                .gap(SPLIT_GAP)
                 .on_layout(move |app: &mut App, rect: [f32; 4]| {
-                    app.set_split_extent(
-                        extent_key.clone(),
-                        if horizontal { rect[2] } else { rect[3] },
-                    );
+                    // The ratio divides the two panes' length: the gaps and
+                    // the divider are not part of it.
+                    let length = if horizontal { rect[2] } else { rect[3] };
+                    app.set_split_extent(extent_key.clone(), length - 2.0 * SPLIT_GAP - DIVIDER);
                 })
                 .child(first)
                 .child(handle)
@@ -1049,6 +1059,11 @@ fn notices(notices: &[RyeOsNoticeVm]) -> El {
         stack = stack.child(
             row()
                 .key(format!("notice:{}", notice.id))
+                .role(if notice.tone == RyeOsTone::Danger {
+                    "alert"
+                } else {
+                    "status"
+                })
                 .w_full()
                 .padding(12.0)
                 .gap(12.0)
