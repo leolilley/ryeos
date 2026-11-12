@@ -36,7 +36,7 @@ tokio = { workspace = true, features = ["rt", "time"] }
 
 [dev-dependencies]
 ryeos-state = { workspace = true, features = ["test-support"] }
-ryeos-external-candidate-supervisor = { path = "../external-candidate-supervisor" }
+ryeos-external-candidate-supervisor = { path = "../external-candidate-supervisor", features = ["test-support"] }
 tempfile = { workspace = true }
 
 [lints]

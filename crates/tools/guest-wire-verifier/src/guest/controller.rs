@@ -241,9 +241,13 @@ impl Controller {
         }));
         let mut outbound = Vec::new();
         let mut acknowledgement = None;
+        // A leased guest's Ready is held, as the node's readiness gate holds
+        // it until the guest is admitted: the reply carries no acknowledgement
+        // and no owner frame, which the guest reads as idle.
+        let held = matches!(frame.payload, ExecutionChannelPayload::Ready { .. });
         // The supervisor suppresses acknowledgement of acknowledgements, so a
         // peer acknowledgement ends its chain here.
-        if !matches!(frame.payload, ExecutionChannelPayload::Acknowledge { .. }) {
+        if !held && !matches!(frame.payload, ExecutionChannelPayload::Acknowledge { .. }) {
             let owner = self.acknowledge(&frame, &digest, &binding)?;
             acknowledgement = Some(owner.digest.clone());
             outbound.push(ExternalChannelResponseFrame::new(
@@ -252,9 +256,24 @@ impl Controller {
                 &owner.wire,
             )?);
         }
+        // The capability report completes the leased guest's handshake; the
+        // owner then releases the candidate, which the guest launches only on
+        // Release.
+        if matches!(
+            frame.payload,
+            ExecutionChannelPayload::CapabilityReport { .. }
+        ) {
+            let release =
+                self.author(ExecutionChannelPayload::Release, frame.sequence, &binding)?;
+            outbound.push(ExternalChannelResponseFrame::new(
+                release.sequence,
+                release.digest,
+                &release.wire,
+            )?);
+        }
         let response = ExternalChannelExchangeResponse {
             schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
-            incoming_new: true,
+            incoming_new: !held,
             incoming_sequence: frame.sequence,
             incoming_frame_digest: self.last_supervisor_digest.clone().context("digest")?,
             acknowledgement_frame_digest: acknowledgement,
@@ -349,6 +368,24 @@ impl Controller {
         digest: &str,
         binding: &ExecutionChannelBinding,
     ) -> Result<OwnerFrame> {
+        self.author(
+            ExecutionChannelPayload::Acknowledge {
+                peer_frame_sequence: frame.sequence,
+                peer_frame_digest: digest.to_owned(),
+                application: ExecutionFrameApplication::Applied,
+            },
+            frame.sequence,
+            binding,
+        )
+    }
+
+    /// Sign the next owner frame carrying `payload`.
+    fn author(
+        &mut self,
+        payload: ExecutionChannelPayload,
+        acknowledged_peer_sequence: u64,
+        binding: &ExecutionChannelBinding,
+    ) -> Result<OwnerFrame> {
         let sequence = self.owner_sequence + 1;
         let owner = ExecutionFrame {
             schema: 1,
@@ -356,12 +393,8 @@ impl Controller {
             direction: ChannelDirection::OwnerToSupervisor,
             sequence,
             previous_frame_digest: self.last_owner_digest.clone(),
-            acknowledged_peer_sequence: frame.sequence,
-            payload: ExecutionChannelPayload::Acknowledge {
-                peer_frame_sequence: frame.sequence,
-                peer_frame_digest: digest.to_owned(),
-                application: ExecutionFrameApplication::Applied,
-            },
+            acknowledged_peer_sequence,
+            payload,
         };
         let signed = SignedExecutionFrame::sign(owner, binding, &self.key)?;
         let wire = lillux::canonical_json(&serde_json::to_value(&signed)?)?.into_bytes();
@@ -550,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_controller_attaches_the_workspace_client_and_acknowledges_ready() {
+    fn loopback_controller_holds_ready_and_releases_after_the_capability_report() {
         let pki = EphemeralPki::generate().unwrap();
         let server = LoopbackHttpsServer::bind(&pki).unwrap();
         let owner = lillux::crypto::generate_signing_key();
@@ -596,33 +629,70 @@ mod tests {
             let wire = lillux::canonical_json(&serde_json::to_value(&signed).unwrap())
                 .unwrap()
                 .into_bytes();
-            let first = channel.exchange(&wire).unwrap();
-            assert!(first.incoming_new);
-            assert_eq!(first.outbound_frames.len(), 1);
-            let owner_frame = SignedExecutionFrame::decode_and_verify(
-                &first.outbound_frames[0].canonical_wire,
+            // The supervisor's own leased-guest handshake: Ready must be held
+            // (no acknowledgement, no owner frame) and the report answered.
+            let report = ExecutionFrame {
+                schema: 1,
+                binding_digest: binding.digest().unwrap(),
+                direction: ChannelDirection::SupervisorToOwner,
+                sequence: 2,
+                previous_frame_digest: Some(lillux::sha256_hex(&wire)),
+                acknowledged_peer_sequence: 0,
+                payload: ExecutionChannelPayload::CapabilityReport {
+                    boot_id: "123e4567-e89b-12d3-a456-426614174000".into(),
+                    provided: Default::default(),
+                    missing: Default::default(),
+                },
+            };
+            let report = SignedExecutionFrame::sign(report, &binding, &supervisor_key).unwrap();
+            let report_wire = lillux::canonical_json(&serde_json::to_value(&report).unwrap())
+                .unwrap()
+                .into_bytes();
+            ryeos_external_candidate_supervisor::runtime::lease_handshake_for_test(
+                &mut channel,
                 &binding,
-                lillux::time::timestamp_millis(),
+                &wire,
+                &report_wire,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(20)),
             )
             .unwrap();
-            assert!(matches!(
-                owner_frame.frame().payload,
-                ExecutionChannelPayload::Acknowledge {
-                    application: ExecutionFrameApplication::Applied,
-                    ..
-                }
-            ));
-            // An exact replay is answered from the retained response.
-            let replay = channel.exchange(&wire).unwrap();
+            // The report's answer acknowledges it and releases the candidate;
+            // an exact replay is answered from the retained response.
+            let replay = channel.exchange(&report_wire).unwrap();
             assert!(!replay.incoming_new);
-            assert_eq!(replay.outbound_frames, first.outbound_frames);
+            let payloads = replay
+                .outbound_frames
+                .iter()
+                .map(|frame| {
+                    SignedExecutionFrame::decode_and_verify(
+                        &frame.canonical_wire,
+                        &binding,
+                        lillux::time::timestamp_millis(),
+                    )
+                    .unwrap()
+                    .frame()
+                    .payload
+                    .clone()
+                })
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                payloads.as_slice(),
+                [
+                    ExecutionChannelPayload::Acknowledge {
+                        peer_frame_sequence: 2,
+                        application: ExecutionFrameApplication::Applied,
+                        ..
+                    },
+                    ExecutionChannelPayload::Release,
+                ]
+            ));
             stop.store(true, std::sync::atomic::Ordering::Release);
             served.join().unwrap().unwrap();
             true
         });
         assert!(outcome);
         let observed = controller.outcome().unwrap();
-        assert_eq!(observed.frame_count, 2);
+        assert_eq!(observed.frame_count, 4);
         assert!(observed.applied_launch_receipt_digest.is_none());
         assert!(!observed.command_terminated);
         assert!(observed.launcher_spec_digest.is_some());
