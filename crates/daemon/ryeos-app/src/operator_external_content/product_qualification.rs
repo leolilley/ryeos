@@ -2663,7 +2663,7 @@ pub fn resolve_current_bundle_producer_recipe_for_purpose(
     scenario_id: &str,
 ) -> anyhow::Result<CurrentBundleProducerRecipe> {
     state.engine.with_checked_bundle_generation(|generation| {
-        require_consumer_content_generation(purpose.consumer_content(), generation)?;
+        require_admitted_purpose_generation(purpose, generation)?;
         resolve_current_bundle_producer_recipe_for_purpose_in_generation(
             state,
             generation,
@@ -2720,7 +2720,7 @@ fn resolve_current_bundle_producer_recipe_for_purpose_in_generation(
         .producer_recipe_sources()
         .get(scenario_id)
         .context("qualification purpose did not admit the selected producer scenario")?;
-    if current.source_identity()? != *admitted {
+    if current.source_identity()?.content_identity() != admitted.content_identity() {
         bail!("qualification producer recipe changed after root admission");
     }
     Ok(current)
@@ -2838,24 +2838,30 @@ fn require_admitted_bundle_generation(
     purpose: &ryeos_state::external_content::qualification_purpose::QualificationLaunchPurpose,
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
 ) -> anyhow::Result<()> {
-    let content = purpose
+    purpose
         .consumer_content
         .as_ref()
         .context("qualification-only root has no accepted Worker content")?;
-    require_consumer_content_generation(Some(content), generation)
+    require_admitted_purpose_generation(&purpose.execution_view()?, generation)
 }
 
 /// The launch-time half of [`require_admitted_bundle_generation`] for a
-/// purpose view; a purpose without consumer content admitted no generation.
-fn require_consumer_content_generation(
-    content: Option<&ProductQualificationConsumerContentIdentity>,
+/// purpose view: the consumer definitions and every producer recipe source
+/// the purpose admitted were resolved under this generation.
+fn require_admitted_purpose_generation(
+    purpose: &ryeos_state::external_content::qualification_execution::QualificationExecutionPurposeView<'_>,
     generation: &ryeos_engine::engine::CheckedEngineGeneration<'_>,
 ) -> anyhow::Result<()> {
-    if let Some(content) = content
-        && generation.request_engine_generation_identity()
-            != content.definitions.bundle_generation_identity
+    let current = generation.request_engine_generation_identity();
+    if purpose
+        .consumer_content()
+        .is_some_and(|content| content.definitions.bundle_generation_identity != current)
+        || purpose
+            .producer_recipe_sources()
+            .values()
+            .any(|source| source.bundle_generation_identity != current)
     {
-        bail!("qualification consumer changed its admitted Bundle generation");
+        bail!("qualification purpose changed its admitted Bundle generation");
     }
     Ok(())
 }
@@ -3863,7 +3869,7 @@ pub fn prepare_remote_consumer_verifier_for_purpose(
     protected_selection: &ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection,
 ) -> anyhow::Result<PreparedRemoteConsumerVerifier> {
     state.engine.with_checked_bundle_generation(|generation| {
-        require_consumer_content_generation(purpose.consumer_content(), generation)?;
+        require_admitted_purpose_generation(purpose, generation)?;
         // A probe scenario pins no producer, so there is no recipe to recheck.
         if purpose
             .policy_source()

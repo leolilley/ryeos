@@ -1202,9 +1202,11 @@ fn corroborate_qualification_worker_transcript(
             purpose.subject_manifest_hash(),
             &input.coordinate.scenario_id,
         )?;
-        if Some(
-            &verifier.retained_identity(purpose.policy_source(), &input.coordinate.scenario_id)?,
-        ) != purpose.remote_verifier_source(&input.coordinate.scenario_id)
+        let current_source =
+            verifier.retained_identity(purpose.policy_source(), &input.coordinate.scenario_id)?;
+        if !purpose
+            .remote_verifier_source(&input.coordinate.scenario_id)
+            .is_some_and(|retained| retained.same_signed_source(&current_source))
         {
             bail!("Q proof changed the accepted independent verifier source");
         }

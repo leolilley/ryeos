@@ -52,6 +52,46 @@ pub struct QualificationRemoteVerifierSource {
 }
 
 impl QualificationRemoteVerifierSource {
+    /// Equality over signed content. The producer source compares by its
+    /// content identity, never by the process-local Bundle generation it was
+    /// resolved under, so a retained source re-verifies after a restart.
+    pub fn same_signed_source(&self, other: &Self) -> bool {
+        let Self {
+            scenario_source_digest,
+            policy_resolution_blob_hash,
+            recipe_resolution_blob_hash,
+            producer_source,
+            remote_probe_input,
+            selection,
+            payload_bytes,
+            payload_mode,
+            signed_items,
+            signed_bundle_manifests,
+            signer_keys,
+            executor,
+            archive_member_digests,
+        } = self;
+        *scenario_source_digest == other.scenario_source_digest
+            && *policy_resolution_blob_hash == other.policy_resolution_blob_hash
+            && *recipe_resolution_blob_hash == other.recipe_resolution_blob_hash
+            && producer_source
+                .as_ref()
+                .map(ProductProducerRecipeSourceIdentity::content_identity)
+                == other
+                    .producer_source
+                    .as_ref()
+                    .map(ProductProducerRecipeSourceIdentity::content_identity)
+            && *remote_probe_input == other.remote_probe_input
+            && *selection == other.selection
+            && *payload_bytes == other.payload_bytes
+            && *payload_mode == other.payload_mode
+            && *signed_items == other.signed_items
+            && *signed_bundle_manifests == other.signed_bundle_manifests
+            && *signer_keys == other.signer_keys
+            && *executor == other.executor
+            && *archive_member_digests == other.archive_member_digests
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_hash(
             "retained policy resolution",
@@ -394,6 +434,25 @@ pub(crate) mod tests {
             .producer_scenarios
             .insert("remote_codex".into(), policy_scenario);
         (source, policy)
+    }
+
+    #[test]
+    fn signed_source_equality_ignores_only_the_process_local_generation() {
+        let (source, _) = fixture();
+        let mut restarted = source.clone();
+        restarted
+            .producer_source
+            .as_mut()
+            .unwrap()
+            .bundle_generation_identity = "generation-2".into();
+        assert!(source.same_signed_source(&restarted));
+        assert_ne!(source, restarted);
+        let mut changed = restarted.clone();
+        changed.producer_source.as_mut().unwrap().recipe_digest = "d".repeat(64);
+        assert!(!source.same_signed_source(&changed));
+        let mut changed = restarted;
+        changed.payload_bytes += 1;
+        assert!(!source.same_signed_source(&changed));
     }
 
     #[test]
