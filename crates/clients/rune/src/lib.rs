@@ -57,6 +57,8 @@ pub struct Local {
     pub(crate) evidence_open: std::collections::BTreeSet<String>,
     /// The shell's size in points, as last laid out.
     pub(crate) viewport: Option<(f32, f32)>,
+    /// Device pixels per point, as the last frame was drawn.
+    scale: std::cell::Cell<f32>,
     /// Whether the narrow layout's navigation drawer is open.
     pub(crate) navigation_open: bool,
 }
@@ -558,7 +560,11 @@ impl App {
     /// Record the shell's laid-out size and tell the core, as the browser
     /// shell does on a window resize.
     pub(crate) fn set_viewport(&mut self, width: f32, height: f32) {
-        if self.local.viewport == Some((width, height)) {
+        let scale = self.local.scale.get();
+        let same_ratio = self
+            .core()
+            .is_some_and(|core| core.runtime.viewport.device_pixel_ratio == scale);
+        if self.local.viewport == Some((width, height)) && (same_ratio || scale == 0.0) {
             return;
         }
         self.local.viewport = Some((width, height));
@@ -571,7 +577,11 @@ impl App {
         let viewport = ryeos_client_base::ui::model::BrowserViewport {
             width: width.round() as u32,
             height: height.round() as u32,
-            device_pixel_ratio: core.runtime.viewport.device_pixel_ratio,
+            device_pixel_ratio: if scale > 0.0 {
+                scale
+            } else {
+                core.runtime.viewport.device_pixel_ratio
+            },
         };
         self.dispatch(RyeOsEvent::Resize { viewport });
     }
@@ -602,7 +612,8 @@ impl App {
     }
 }
 
-fn view(app: &App, _cx: &mut Cx<App>) -> El {
+fn view(app: &App, cx: &mut Cx<App>) -> El {
+    app.local.scale.set(cx.env().scale);
     match (&app.phase, app.core()) {
         (Phase::Failed(message), _) => shell::boot_screen(Some(message)),
         (_, Some(core)) => {
@@ -618,6 +629,10 @@ fn setup(app: &mut App, waker: rune::runtime::Waker) {
 }
 
 fn poll(app: &mut App, seconds: f64, tx: &mut Tx) -> bool {
+    // A display change alters the pixel ratio without a new layout size.
+    if let Some((width, height)) = app.local.viewport {
+        app.set_viewport(width, height);
+    }
     let changed = app.sync_input_focus() | advance(app, seconds, tx);
     if changed {
         app.sync_edits();
