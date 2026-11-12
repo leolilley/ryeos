@@ -3259,4 +3259,31 @@ mod predecessor_shape_tests {
             .unwrap();
         assert_eq!(seat_kind(&state).unwrap(), policy.seat.kind);
     }
+
+    /// The seat profile a node admits seats under comes from the signed
+    /// surface kind, not from the daemon: a registry built from the shipped
+    /// kinds alone fences the policy's seat kind.
+    #[test]
+    fn the_signed_surface_kind_declares_the_fenced_seat_profile() {
+        use ryeos_engine::test_support::{core_bundle_root, live_trust_store, workspace_root};
+        let roots = [
+            core_bundle_root().join(".ai/node/engine/kinds"),
+            workspace_root().join("bundles/ryeos-ui/.ai/node/engine/kinds"),
+        ];
+        let kinds =
+            ryeos_engine::kind_registry::KindRegistry::load_base(&roots, &live_trust_store())
+                .expect("load the shipped kinds");
+        let profiles = ryeos_app::kind_profiles::KindProfileRegistry::build(Some(&kinds));
+        let (_directory, _store_owner, state) = crate::test_support::build_test_state();
+        let policy = state
+            .node_policy
+            .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
+            .unwrap();
+        let profile = profiles.get(&policy.seat.kind).expect("the seat kind has a profile");
+        assert!(!profile.root_executable);
+        assert!(profile.retirement_fence);
+        policy
+            .require_fenced_seat_kind(profiles.fenced_chain_kinds().unwrap())
+            .expect("the node policy's seat kind is fenced");
+    }
 }

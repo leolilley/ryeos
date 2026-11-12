@@ -2463,6 +2463,7 @@ strict_fields: warn
             },
             content: None,
             execution: None,
+            thread_profile: None,
             composed_value_contract: shape_from_yaml(contract_yaml),
             composer: IDENTITY_COMPOSER.to_string(),
             composer_config: serde_json::Value::Null,

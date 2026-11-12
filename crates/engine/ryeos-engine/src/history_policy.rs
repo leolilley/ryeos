@@ -702,6 +702,7 @@ mod tests {
                 effective_validator: None,
                 persistent_session: None,
             }),
+            thread_profile: None,
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
             composer: "handler:identity".to_string(),
             composer_config: Value::Null,

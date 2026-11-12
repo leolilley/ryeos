@@ -1824,6 +1824,7 @@ printf '%s\n' fixture
             effective_trust: Default::default(),
             content: None,
             execution: None,
+            thread_profile: None,
             composed_value_contract: ryeos_engine::contracts::ValueShape::any_mapping(),
             composer: "handler:ryeos/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,

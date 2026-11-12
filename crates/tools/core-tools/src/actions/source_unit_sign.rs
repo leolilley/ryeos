@@ -490,6 +490,7 @@ mod tests {
             effective_trust: Default::default(),
             content: None,
             execution: Some(execution),
+            thread_profile: None,
             composed_value_contract: ValueShape::any_mapping(),
             composer: "handler:test/identity".to_owned(),
             composer_config: serde_json::Value::Null,

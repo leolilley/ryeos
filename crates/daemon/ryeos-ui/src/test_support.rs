@@ -497,19 +497,11 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStor
     let (store_owner, node) = native.into_parts();
     let (config, identity, write_barrier) = node.into_parts();
     let engine = Arc::new(build_live_bundle_engine());
-    let kind_profiles = Arc::new(
-        ryeos_app::kind_profiles::KindProfileRegistry::build(Some(&engine.kinds))
-            .with_test_profile(
-                "seat_session",
-                ryeos_app::kind_profiles::ThreadKindProfile {
-                    root_executable: false,
-                    supports_interrupt: false,
-                    supports_continuation: false,
-                    supports_operator_followup: false,
-                    retirement_fence: true,
-                },
-            ),
-    );
+    // The seat profile comes from the signed surface kind, exactly as on a
+    // node: nothing is injected here.
+    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));

@@ -1,8 +1,19 @@
-# ryeos:signed:2026-11-08T06:40:44Z:879cccf224487f975f9d78cf5d368676d3567f8b311da42e71fc92e5269038e4:zFjOx9xZ7kK5D59POWlj7LlrS6Aw4ltnm9Ax6d7BHSTyb5LT/4VsuJfTNTnk46yvt60Mk/SqIZH+DjvcKjXrCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T04:42:05Z:f4e48482595df48799089553b1fae1d97beec789b4b8d2a875c727ad19ab86d8:wlWtl+IPH+blAuIFSeNm56VShS04OtVDFCEdFqwEqy7j5cxsJUff94KmJ4ScjTCzW5dWf9mM7FukVmRFFKIEDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "2.0.0"
+version: "2.1.0"
 location:
   directory: surfaces
+
+# A surface is never executed. Its seat (the operator presentation opened on
+# it) is a daemon-owned thread of this profile; terminal seat chains retire
+# through a retirement fence so their retained evidence outlives the chain.
+thread_profile:
+  name: seat_session
+  root_executable: false
+  supports_interrupt: false
+  supports_continuation: false
+  supports_operator_followup: false
+  retirement_fence: true
 
 formats:
   - extensions: [".yaml", ".yml"]
