@@ -23,14 +23,17 @@ use crate::signer::Signer;
 
 /// Retention policy for project snapshots.
 ///
-/// Two categories: manual pushes and auto snapshots (fold-back).
+/// Two categories: operator snapshots (`push`, `snapshot create`) and auto
+/// snapshots (fold-backs and every other source).
 /// HEAD is always kept regardless of policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionPolicy {
-    /// Max snapshots with source="push" or "manual" to keep per project.
+    /// Max operator snapshots (source `push` or `snapshot_create`) to keep per
+    /// project. The name predates `snapshot create`; it is a signed profile
+    /// field, so it keeps it.
     pub manual_pushes: usize,
-    /// Max snapshots with source="fold_back" or other auto sources to keep.
+    /// Max snapshots from every other source (fold-backs, sync, captures).
     pub auto_snapshots: usize,
 }
 
@@ -203,7 +206,7 @@ fn compact_single_project(
             continue;
         }
 
-        let is_manual = snap.source == "push" || snap.source == "manual";
+        let is_manual = ProjectSnapshot::is_operator_source(&snap.source);
         let limit = if is_manual {
             policy.manual_pushes
         } else {
@@ -815,6 +818,77 @@ mod tests {
             compact_projects(&cas_root, &refs_root, &trust_store, &signer, &policy, true).unwrap();
         // All manual, policy keeps 10 — nothing removed
         assert_eq!(result.snapshots_removed, 0);
+    }
+
+    #[test]
+    fn compact_keeps_snapshot_create_in_the_operator_bucket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let refs_root = tmp.path().join("refs");
+        fs::create_dir_all(&cas_root).unwrap();
+        fs::create_dir_all(&refs_root).unwrap();
+        let (signer, trust_store) = test_signer_and_trust();
+
+        // 3 operator snapshots, then 5 fold-backs on top; HEAD is the last.
+        let mut parent = write_project_snapshot(
+            &cas_root,
+            "created1",
+            ProjectSnapshot::SOURCE_SNAPSHOT_CREATE,
+            &[],
+        );
+        for label in ["created2", "created3"] {
+            parent = write_project_snapshot(
+                &cas_root,
+                label,
+                ProjectSnapshot::SOURCE_SNAPSHOT_CREATE,
+                &[&parent],
+            );
+        }
+        for label in ["fold1", "fold2", "fold3", "fold4", "fold5"] {
+            parent = write_project_snapshot(&cas_root, label, "fold_back", &[&parent]);
+        }
+        write_project_head(
+            &refs_root,
+            "fp:test-principal",
+            "test-proj",
+            &parent,
+            &signer,
+            &trust_store,
+        );
+
+        let policy = RetentionPolicy {
+            manual_pushes: 10,
+            auto_snapshots: 1,
+        };
+        let result =
+            compact_projects(&cas_root, &refs_root, &trust_store, &signer, &policy, true).unwrap();
+        // HEAD and one fold-back stay; three fold-backs go; every
+        // `snapshot create` survives.
+        assert_eq!(result.snapshots_removed, 3);
+    }
+
+    #[test]
+    fn only_push_and_snapshot_create_are_operator_sources() {
+        assert!(ProjectSnapshot::is_operator_source(
+            ProjectSnapshot::SOURCE_PUSH
+        ));
+        assert!(ProjectSnapshot::is_operator_source(
+            ProjectSnapshot::SOURCE_SNAPSHOT_CREATE
+        ));
+        for automatic in [
+            "fold_back",
+            "workspace_foldback",
+            "remote_ai_sync",
+            "external_candidate_terminal_capture",
+            "standalone",
+            "manual",
+            "manual_push",
+        ] {
+            assert!(
+                !ProjectSnapshot::is_operator_source(automatic),
+                "{automatic}"
+            );
+        }
     }
 
     #[test]

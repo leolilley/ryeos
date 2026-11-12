@@ -454,7 +454,7 @@ pub async fn push_project(
                 .cloned()
                 .collect(),
             created_at: lillux::time::iso8601_now(),
-            source: "push".to_string(),
+            source: ProjectSnapshot::SOURCE_PUSH.to_string(),
         };
         let (snapshot_hash, upload_closure) = {
             let guard = authority.acquire_shared_guard()?;
