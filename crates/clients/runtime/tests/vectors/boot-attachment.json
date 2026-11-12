@@ -10,7 +10,6 @@
         "$int": "1"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:62",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -24,7 +23,6 @@
         "$int": "9007199254740993"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:62",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -38,7 +36,6 @@
         "$int": "18446744073709551615"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:62",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -53,7 +50,6 @@
         "message": "authenticated browser session root attachment generation is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:68",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -68,7 +64,6 @@
         "message": "authenticated browser session root attachment generation is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:68",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -83,7 +78,6 @@
         "message": "authenticated browser session root attachment generation is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:68",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -98,7 +92,6 @@
         "message": "authenticated browser session root attachment generation is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:68",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -114,7 +107,6 @@
         "message": "authenticated browser session does not contain exactly one root attachment"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:74",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -145,7 +137,6 @@
         }
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:80",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -161,7 +152,6 @@
         "message": "prepared presentation root binding is stale or invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:90",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -178,7 +168,6 @@
         "message": "prepared presentation is not an exact authenticated membership"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:93",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -195,7 +184,6 @@
         "message": "prepared presentation selection is ambiguous or empty"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:93",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -212,7 +200,6 @@
         "message": "prepared presentation selection is ambiguous or empty"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:93",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -224,7 +211,6 @@
     "expected": {
       "ok": null
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:99",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -241,7 +227,6 @@
         "$int": "2000"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:101",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -259,7 +244,6 @@
         "message": "authenticated browser session signed seat append byte bound is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:101",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -277,7 +261,6 @@
         "message": "authenticated browser session signed seat append byte bound is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:101",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -295,7 +278,6 @@
         "message": "authenticated browser session signed seat append byte bound is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:101",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -313,7 +295,6 @@
         "message": "authenticated browser session signed seat append byte bound is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:101",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -329,7 +310,6 @@
         "message": "authenticated browser session signed seat append byte bound is invalid"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:101",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -344,7 +324,6 @@
         "message": "authenticated browser session does not contain exactly one root attachment"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:111",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -362,7 +341,6 @@
         "message": "binding attachment subject is required"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -378,7 +356,6 @@
         "message": "binding attachment subject is required"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -396,7 +373,6 @@
         "message": "binding attachment subject contradicts its project metadata or closed schema"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -415,7 +391,6 @@
         "message": "binding attachment subject contradicts its project metadata or closed schema"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -434,7 +409,6 @@
         "message": "binding attachment subject contradicts its project metadata or closed schema"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -449,7 +423,6 @@
     "expected": {
       "ok": "surface"
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -465,7 +438,6 @@
     "expected": {
       "ok": "surface"
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -484,7 +456,6 @@
         "message": "binding attachment subject contradicts its project metadata or closed schema"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -503,7 +474,6 @@
         "message": "binding attachment subject contradicts its project metadata or closed schema"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -522,7 +492,6 @@
         "message": "binding attachment subject contradicts its project metadata or closed schema"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -541,7 +510,6 @@
         "message": "binding attachment subject contradicts its project metadata or closed schema"
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:113",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -558,7 +526,6 @@
         "original_search_unchanged": true
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:47",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -575,7 +542,6 @@
         "original_search_unchanged": true
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:47",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   },
   {
@@ -592,7 +558,6 @@
         "original_search_unchanged": true
       }
     },
-    "source": "crates/clients/web/tests/boot-attachment.test.js:47",
     "provenance": "test-verbatim inputs (assertions per test); outputs computed"
   }
 ]

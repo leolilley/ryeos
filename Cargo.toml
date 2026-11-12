@@ -65,7 +65,6 @@ members = [
     "crates/host-adapters/render-sandbox-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
-    "crates/tools/ui-contract-exporter",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
     "crates/tools/modal-guest-launcher",

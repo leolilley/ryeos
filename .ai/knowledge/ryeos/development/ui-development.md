@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T00:28:38Z:6a0dbe1cade87765245e8cad5e1061d0f9ca63f64c85ad1421eb11f43735f468:pQijHXZtxriYOP17aaLXLwECeMBsWdc9nUlj7FWd6rupCYQg6iobdGMGqMJSBKXmwnxwXY05u00FxVNEjC6jDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:57:28Z:5cb8371db997be49b8f6993641f1588cc85084121ff224af3dc6cd907bdea640:eHdeXQsKlZ4zErXkwsZ7Ypz9FKR4MvqwtI0wJmmC11N9aosr2Re9VXA94nhpBi4hUcJ33X4dteSh25eaDinJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -479,9 +479,9 @@ The browser is a renderer, not a second application model:
 
 The installed closure is exactly `index.html`, `ryeos_boot.js`, `ryeos_rune.js`,
 `ryeos_rune_bg.wasm`, `rune_bridge.js` and `rune_platform.js`. There is no
-alternate browser renderer, compatibility bootstrap or runtime fallback. The
-Svelte sources under `crates/clients/web/browser/` remain in the tree, unserved,
-until they are deleted.
+alternate browser renderer, compatibility bootstrap or runtime fallback.
+`crates/clients/web/` is only the `web` launcher binary: it mints a launch URL
+and opens the browser.
 
 The renderer owns only drawing and input mechanics. Rust remains the sole owner
 of work, authority, navigation, layout and effect semantics. Renderer-local

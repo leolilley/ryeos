@@ -3576,16 +3576,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prettyplease"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
-dependencies = [
- "proc-macro2",
- "syn 3.0.3",
-]
-
-[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4037,7 +4027,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=c80e3813ee006a5bcbec1209cccf452a53a69e73#c80e3813ee006a5bcbec1209cccf452a53a69e73"
+source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
 dependencies = [
  "accesskit",
  "arboard",
@@ -4101,12 +4091,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/leolilley/rune?rev=c80e3813ee006a5bcbec1209cccf452a53a69e73#c80e3813ee006a5bcbec1209cccf452a53a69e73"
+source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=c80e3813ee006a5bcbec1209cccf452a53a69e73#c80e3813ee006a5bcbec1209cccf452a53a69e73"
+source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
 dependencies = [
  "wgpu",
 ]
@@ -4114,7 +4104,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=c80e3813ee006a5bcbec1209cccf452a53a69e73#c80e3813ee006a5bcbec1209cccf452a53a69e73"
+source = "git+https://github.com/leolilley/rune?rev=453221e3b65d04f1428ed0491451eefbde35de65#453221e3b65d04f1428ed0491451eefbde35de65"
 dependencies = [
  "taffy",
 ]
@@ -4535,22 +4525,16 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "dirs",
- "getrandom 0.2.17",
  "hex",
- "js-sys",
  "lillux",
  "rand 0.8.6",
  "reqwest",
  "ryeos-client-base",
  "ryeos-client-transport",
  "serde",
- "serde-wasm-bindgen",
  "serde_json",
  "tokio",
- "tracing",
  "tracing-subscriber",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -5406,15 +5390,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-ui-contract-exporter"
-version = "0.1.0"
-dependencies = [
- "prettyplease 0.3.0",
- "syn 3.0.3",
- "ts-typegen-build",
-]
-
-[[package]]
 name = "ryeos-ui-presentation-contract"
 version = "0.1.0"
 dependencies = [
@@ -5616,17 +5591,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -6537,16 +6501,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "ts-typegen-build"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2b48643d498972157c01b0fb9598567f149aab393d91182bf9291e832f0caf"
-dependencies = [
- "proc-macro2",
- "syn 3.0.3",
-]
 
 [[package]]
 name = "tungstenite"
@@ -7684,7 +7638,7 @@ dependencies = [
  "anyhow",
  "heck",
  "indexmap",
- "prettyplease 0.2.37",
+ "prettyplease",
  "syn 2.0.119",
  "wasm-metadata",
  "wit-bindgen-core",
@@ -7698,7 +7652,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c0f9bfd77e6a48eccf51359e3ae77140a7f50b1e2ebfe62422d8afdaffab17a"
 dependencies = [
  "anyhow",
- "prettyplease 0.2.37",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

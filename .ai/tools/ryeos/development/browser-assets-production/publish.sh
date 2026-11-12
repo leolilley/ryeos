@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-11T22:32:15Z:c1412beb510cbd5be833408a3d139c5655ef61f76030204f21d65e46bcb6ef60:Q92b+ilDjjxp087WioqJGRs2hmLkxSl+Q5OJiu37032jrdfk26s+v4mglJmy/f3k3ntjH+GbQmWQHtN5j+qTBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T12:57:28Z:3984884b6e28a44a12b0e276d1d444ce1fa4cd77342a7e0fd3aacdf4313f7c92:+hrPc0A9nUEpHNsHSVY6k+00k6OumBfXq2qWhIKr6NG29G0LTTTO5GKPkgN57sjoUNdFt+MdvJYe/07fqZ0fDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -14,12 +14,6 @@ package="$renderer/pkg"
 registry="$root/crates/daemon/ryeos-ui/generate_asset_registry.py"
 stage="$(mktemp -d "$renderer/.asset-stage.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
-
-if [[ "$mode" == "--check" ]]; then
-  cargo run -q -p ryeos-ui-contract-exporter -- --check
-else
-  cargo run -q -p ryeos-ui-contract-exporter
-fi
 
 # The Rune renderer's closed set: built with remapped paths and the exact
 # wasm-bindgen CLI the lock names (the build refuses any other version).

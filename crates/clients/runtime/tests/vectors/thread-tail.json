@@ -27,8 +27,7 @@
         }
       }
     },
-    "source": "crates/clients/web/tests/thread-tail.test.js:16",
-    "provenance": "test-verbatim (thread-tail.test.js:12-22)"
+    "provenance": "test-verbatim"
   },
   {
     "name": "other thread of same chain",
@@ -48,8 +47,7 @@
       "thread_id": "thread-b"
     },
     "expected": null,
-    "source": "crates/clients/web/tests/thread-tail.test.js:18",
-    "provenance": "test-verbatim (thread-tail.test.js:12-22)"
+    "provenance": "test-verbatim"
   },
   {
     "name": "other chain",
@@ -69,8 +67,7 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/tests/thread-tail.test.js:19",
-    "provenance": "test-verbatim (thread-tail.test.js:12-22)"
+    "provenance": "test-verbatim"
   },
   {
     "name": "frame without payload",
@@ -82,8 +79,7 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/tests/thread-tail.test.js:20",
-    "provenance": "test-verbatim (thread-tail.test.js:12-22)"
+    "provenance": "test-verbatim"
   },
   {
     "name": "envelope event_type differs from inner record event_type",
@@ -103,8 +99,7 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/tests/thread-tail.test.js:21",
-    "provenance": "test-verbatim (thread-tail.test.js:12-22)"
+    "provenance": "test-verbatim"
   },
   {
     "name": "null chain id",
@@ -124,7 +119,6 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/browser/runtime/thread-tail.ts:7",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -145,7 +139,6 @@
       "thread_id": ""
     },
     "expected": null,
-    "source": "crates/clients/web/browser/runtime/thread-tail.ts:7",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -156,7 +149,6 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/browser/runtime/thread-tail.ts:7",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -167,7 +159,6 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/browser/runtime/thread-tail.ts:7",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -181,7 +172,6 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/browser/runtime/thread-tail.ts:13",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -195,7 +185,6 @@
       "thread_id": "thread-a"
     },
     "expected": null,
-    "source": "crates/clients/web/browser/runtime/thread-tail.ts:12",
     "provenance": "derived (computed by running the TS function)"
   }
 ]

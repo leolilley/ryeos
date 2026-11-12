@@ -61,7 +61,6 @@
       ]
     },
     "test_expect": "one cancel proof staged; proof.schema==1n; completion.event_count==2n",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:58",
     "provenance": "test-verbatim"
   },
   {
@@ -105,7 +104,6 @@
       "order": []
     },
     "test_expect": "rejects /invalid shape or order/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:73",
     "provenance": "test-verbatim"
   },
   {
@@ -149,7 +147,6 @@
       "order": []
     },
     "test_expect": "rejects /invalid shape or order/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:73",
     "provenance": "test-verbatim"
   },
   {
@@ -193,7 +190,6 @@
       "order": []
     },
     "test_expect": "rejects /invalid shape or order/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:73",
     "provenance": "test-verbatim"
   },
   {
@@ -244,7 +240,6 @@
       ]
     },
     "test_expect": "rejects /negative proof refused/ (callback error surfaces unchanged)",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:82",
     "provenance": "test-verbatim"
   },
   {
@@ -304,7 +299,6 @@
       ]
     },
     "test_expect": "no proof staged; invalidations[0] matches /unsupported post-completion/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:87",
     "provenance": "test-verbatim"
   },
   {
@@ -367,7 +361,6 @@
       ]
     },
     "test_expect": "order == [['events',2],['proof','test-only-operation']]; event_count==2n",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:99",
     "provenance": "test-verbatim"
   },
   {
@@ -411,7 +404,6 @@
       "order": []
     },
     "test_expect": "rejects /invalid shape or order/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:111",
     "provenance": "test-verbatim"
   },
   {
@@ -455,7 +447,6 @@
       "order": []
     },
     "test_expect": "rejects /invalid shape or order/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:111",
     "provenance": "test-verbatim"
   },
   {
@@ -499,7 +490,6 @@
       "order": []
     },
     "test_expect": "rejects /invalid shape or order/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:111",
     "provenance": "test-verbatim"
   },
   {
@@ -550,7 +540,6 @@
       ]
     },
     "test_expect": "rejects /shared proof refused/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:121",
     "provenance": "test-verbatim"
   },
   {
@@ -610,7 +599,6 @@
       ]
     },
     "test_expect": "no proof staged; /unsupported post-completion/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:126",
     "provenance": "test-verbatim"
   },
   {
@@ -670,7 +658,6 @@
       ]
     },
     "test_expect": "event_count==2n; staged 2; invalidations[0] matches /invalidated/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:138",
     "provenance": "test-verbatim"
   },
   {
@@ -729,7 +716,6 @@
       ]
     },
     "test_expect": "order == ['stage','verified:4']; completion.thread_seq==3n",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:151",
     "provenance": "test-verbatim"
   },
   {
@@ -789,7 +775,6 @@
       ]
     },
     "test_expect": "completion.event_count==129n; staged.length==129",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:162",
     "provenance": "test-verbatim",
     "note": "event 'record' has thread_seq 2 and control 3; seqs 4..130 follow with prev_thread_event_hash chaining (hash = thread_seq as 64-hex, zero padded)"
   },
@@ -840,7 +825,6 @@
       ]
     },
     "test_expect": "rejects SeatHistoryIncompleteError /ended/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:186",
     "provenance": "test-verbatim"
   },
   {
@@ -891,7 +875,6 @@
       ]
     },
     "test_expect": "rejects SeatHistoryIncompleteError /invalidated/; stage saw 2 records",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:192",
     "provenance": "test-verbatim"
   },
   {
@@ -943,7 +926,6 @@
       ]
     },
     "test_expect": "rejects /aborted/; stage called exactly once",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:201",
     "provenance": "test-verbatim"
   },
   {
@@ -993,7 +975,6 @@
       ]
     },
     "test_expect": "rejects /does not match/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:212",
     "provenance": "test-verbatim"
   },
   {
@@ -1046,7 +1027,6 @@
       ]
     },
     "test_expect": "rejects /acknowledged producer claim/; staged 3 events (provisional)",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:217",
     "provenance": "test-verbatim"
   },
   {
@@ -1096,7 +1076,6 @@
       ]
     },
     "test_expect": "rejects /acknowledged producer claim/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:233",
     "provenance": "test-verbatim"
   },
   {
@@ -1146,7 +1125,6 @@
       ]
     },
     "test_expect": "rejects /acknowledged producer claim/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:240",
     "provenance": "test-verbatim"
   },
   {
@@ -1199,7 +1177,6 @@
       ]
     },
     "test_expect": "rejects /acknowledged producer claim/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:247",
     "provenance": "test-verbatim",
     "note": "Rust analogue: copy primitive control tip before invoking the stage callback / pass records by value"
   },
@@ -1256,7 +1233,6 @@
       ]
     },
     "test_expect": "rejects /acknowledged producer claim/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:263",
     "provenance": "test-verbatim",
     "note": "Rust analogue: the expected claim is copied by value at entry"
   },
@@ -1313,7 +1289,6 @@
       ]
     },
     "test_expect": "invalidations[0] matches /ended/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:281",
     "provenance": "test-verbatim"
   },
   {
@@ -1377,7 +1352,6 @@
       ]
     },
     "test_expect": "calls==1; the stream controller is closed afterwards (enqueue throws)",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:291",
     "provenance": "test-verbatim"
   },
   {
@@ -1441,7 +1415,6 @@
       ]
     },
     "test_expect": "calls==1",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:304",
     "provenance": "test-verbatim"
   },
   {
@@ -1517,7 +1490,6 @@
       ]
     },
     "test_expect": "3 deliveries; first thread_seq==4n; no invalidation",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:318",
     "provenance": "test-verbatim"
   },
   {
@@ -1590,7 +1562,6 @@
       ]
     },
     "test_expect": "seen operation ids == ['2222...','3333...']; no invalidation",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:333",
     "provenance": "test-verbatim",
     "note": "Rust analogue: deliver a copy / value; parser keeps its own cursor"
   },
@@ -1658,7 +1629,6 @@
       ]
     },
     "test_expect": "seen == ['2222...'] only; no invalidation",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:358",
     "provenance": "test-verbatim"
   },
   {
@@ -1725,7 +1695,6 @@
       ]
     },
     "test_expect": "invalidations[0] matches /reused an operation/",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:387",
     "provenance": "test-verbatim"
   },
   {
@@ -1788,7 +1757,6 @@
       ]
     },
     "test_expect": "invalidations[0] matches /invalid interval/; callback never invoked",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:376",
     "provenance": "test-verbatim"
   },
   {
@@ -1841,7 +1809,6 @@
       ]
     },
     "test_expect": "staged 2; completion.thread_seq==3n; no invalidation",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:400",
     "provenance": "test-verbatim",
     "note": "chunks is ONE string; replay it one character (UTF-16 code unit / ASCII byte) per network read"
   },
@@ -1894,7 +1861,6 @@
       ]
     },
     "test_expect": "rejects /frame exceeds bound/; stage saw only the earlier 2 events",
-    "source": "crates/clients/web/tests/seat-history-stream.test.js:413",
     "provenance": "test-verbatim",
     "note": "the literal text '{PADDING}' inside the JSON string is replaced by 17*1024*1024 'x' characters (bound is 16*1024*1024 bytes of raw frame text)"
   },
@@ -1950,7 +1916,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:97",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -1994,7 +1959,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:105",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2037,7 +2001,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:214",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2080,7 +2043,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:208",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2123,7 +2085,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:208",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2166,7 +2127,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:208",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2209,7 +2169,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:215",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2252,7 +2211,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:215",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2300,7 +2258,6 @@
         "stage:64"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:215",
     "provenance": "derived (computed by running the TS module)",
     "note": "ends at EOF without completion so outcome is the incomplete error; the point is the absence of 'invalid shape'"
   },
@@ -2344,7 +2301,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:220",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2387,7 +2343,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:222",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2430,7 +2385,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:229",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2478,7 +2432,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:230",
     "provenance": "derived (computed by running the TS module)",
     "note": "skip from 2 to 9 is allowed; incomplete at EOF"
   },
@@ -2522,7 +2475,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:230",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2570,7 +2522,6 @@
         "stage:1"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:363",
     "provenance": "derived (computed by running the TS module)",
     "note": "string decimal accepted"
   },
@@ -2614,7 +2565,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:363",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2657,7 +2607,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:363",
     "provenance": "derived (computed by running the TS module)",
     "note": "decodeJsonBody itself rejects the integer token before exactU64"
   },
@@ -2701,7 +2650,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:237",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2744,7 +2692,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:65",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2797,7 +2744,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:73",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2840,7 +2786,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:266",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2889,7 +2834,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:272",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2938,7 +2882,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:272",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -2987,7 +2930,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:266",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3036,7 +2978,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:280",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3085,7 +3026,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:277",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3134,7 +3074,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:279",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3183,7 +3122,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:281",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3232,7 +3170,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:276",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3275,7 +3212,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:296",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3334,7 +3270,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:205",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3385,7 +3320,6 @@
         "stage:2"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:160",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3428,7 +3362,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:351",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3471,7 +3404,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:351",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3514,7 +3446,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:353",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3557,7 +3488,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:355",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3600,7 +3530,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:354",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3643,7 +3572,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:350",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3702,7 +3630,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:193",
     "provenance": "derived (computed by running the TS module)",
     "note": "invalidations[0] message 'seat history requires a fresh paired proof'; class SeatHistoryReproofRequiredError (observed via onInvalidated error object; only the message is recorded here)"
   },
@@ -3762,7 +3689,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:205",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3805,7 +3731,6 @@
       "cancel_proofs": [],
       "order": []
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:291",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3864,7 +3789,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:326",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3923,7 +3847,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:324",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -3982,7 +3905,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:336",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -4041,7 +3963,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:336",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -4107,7 +4028,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:170",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -4166,7 +4086,6 @@
         "invalidated"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:174",
     "provenance": "derived (computed by running the TS module)"
   },
   {
@@ -4229,7 +4148,6 @@
         "verified:3"
       ]
     },
-    "source": "crates/clients/web/browser/runtime/seat-history-stream.ts:174",
     "provenance": "derived (computed by running the TS module)"
   }
 ]

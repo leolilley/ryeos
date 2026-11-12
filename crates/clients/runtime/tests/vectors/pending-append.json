@@ -9,8 +9,7 @@
     "expected": {
       "ok": "ryeos.ui.seat.pending.v2:session:A"
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1110",
-    "provenance": "test-verbatim key (session-idempotency.test.js:171); computed"
+    "provenance": "test-verbatim key; computed"
   },
   {
     "group": "storage_key",
@@ -22,7 +21,6 @@
     "expected": {
       "ok": "ryeos.ui.seat.pending.v2:a%2Fb%20c%3Ad:%C3%A9%F0%9F%98%80%3F%26%3D%23"
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1110",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -35,7 +33,6 @@
     "expected": {
       "ok": "ryeos.ui.seat.pending.v2::"
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1110",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -62,14 +59,13 @@
           }
         }
       ],
-      "operation_id_note": "operation_id is derived by the shared Rust bridge from the identity fields + payload_digest; here it is the stub value used by the TS tests (session-idempotency.test.js:71), not a real derivation"
+      "operation_id_note": "operation_id is derived by the shared Rust bridge from the identity fields + payload_digest; here it is the stub value used by the original browser tests, not a real derivation"
     },
     "expected": {
       "payload_digest": "f0bca117fb847109d2a3d0a5ab60042d5813d1e76c89fcf1ac87d3a532e6e350",
       "encoded_request": "{\"presentation_id\":\"A\",\"thread_id\":\"thread-A\",\"producer_incarnation\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"operation_id\":\"11111111-1111-8111-8111-111111111111\",\"first_engine_seq\":0,\"last_engine_seq\":0,\"event_count\":1,\"payload_digest\":\"f0bca117fb847109d2a3d0a5ab60042d5813d1e76c89fcf1ac87d3a532e6e350\",\"events\":[{\"engine_seq\":0,\"event_type\":\"seat.facet\",\"payload\":{\"draft\":\"retained\"}}]}",
       "stored_value": "{\"schema_version\":\"ryeos.ui.seat.pending-append.v3\",\"session_id\":\"session\",\"presentation_id\":\"A\",\"chain_root_id\":\"chain-A\",\"thread_id\":\"thread-A\",\"producer_incarnation\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"operation_id\":\"11111111-1111-8111-8111-111111111111\",\"first_engine_seq\":\"0\",\"last_engine_seq\":\"0\",\"event_count\":1,\"payload_digest\":\"f0bca117fb847109d2a3d0a5ab60042d5813d1e76c89fcf1ac87d3a532e6e350\",\"encoded_request\":\"{\\\"presentation_id\\\":\\\"A\\\",\\\"thread_id\\\":\\\"thread-A\\\",\\\"producer_incarnation\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"operation_id\\\":\\\"11111111-1111-8111-8111-111111111111\\\",\\\"first_engine_seq\\\":0,\\\"last_engine_seq\\\":0,\\\"event_count\\\":1,\\\"payload_digest\\\":\\\"f0bca117fb847109d2a3d0a5ab60042d5813d1e76c89fcf1ac87d3a532e6e350\\\",\\\"events\\\":[{\\\"engine_seq\\\":0,\\\"event_type\\\":\\\"seat.facet\\\",\\\"payload\\\":{\\\"draft\\\":\\\"retained\\\"}}]}\"}"
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:801-813,1255-1267,1269",
     "provenance": "derived (computed by running the TS function); encoded_request byte-exact from encodeJsonBody, digest from encodeSeatPayloadDigest(batch) (no hex given by tests: the test harness stubs the digest)"
   },
   {
@@ -94,7 +90,6 @@
         "encoded_request": "{\"presentation_id\":\"A\",\"thread_id\":\"thread-A\",\"producer_incarnation\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"operation_id\":\"11111111-1111-8111-8111-111111111111\",\"first_engine_seq\":0,\"last_engine_seq\":0,\"event_count\":1,\"payload_digest\":\"f0bca117fb847109d2a3d0a5ab60042d5813d1e76c89fcf1ac87d3a532e6e350\",\"events\":[{\"engine_seq\":0,\"event_type\":\"seat.facet\",\"payload\":{\"draft\":\"retained\"}}]}"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1283",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -106,7 +101,6 @@
     "expected": {
       "ok": null
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1285",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -121,7 +115,6 @@
         "message": "retained seat append is malformed: Expected property name or '}' in JSON at position 1"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1290",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -136,7 +129,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -151,7 +143,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1113",
     "provenance": "test-verbatim (test asserts /invalid schema/ and that storage is kept); message computed"
   },
   {
@@ -166,7 +157,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -181,7 +171,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -196,7 +185,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -211,7 +199,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -226,7 +213,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -241,7 +227,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -256,7 +241,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -271,7 +255,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -286,7 +269,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -301,7 +283,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -316,7 +297,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -331,7 +311,6 @@
         "message": "retained seat append has an invalid schema"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -357,7 +336,6 @@
         "extra": 1
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1293-1311",
     "provenance": "derived (computed by running the TS function)",
     "note": "loader does not close the record; only listed fields are checked"
   },
@@ -383,7 +361,6 @@
         "encoded_request": "{\"presentation_id\":\"A\",\"thread_id\":\"thread-A\",\"producer_incarnation\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"operation_id\":\"11111111-1111-8111-8111-111111111111\",\"first_engine_seq\":0,\"last_engine_seq\":0,\"event_count\":1,\"payload_digest\":\"f0bca117fb847109d2a3d0a5ab60042d5813d1e76c89fcf1ac87d3a532e6e350\",\"events\":[{\"engine_seq\":0,\"event_type\":\"seat.facet\",\"payload\":{\"draft\":\"retained\"}}]}"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1304",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -408,7 +385,6 @@
         "encoded_request": "{\"presentation_id\":\"A\",\"thread_id\":\"thread-A\",\"producer_incarnation\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"operation_id\":\"11111111-1111-8111-8111-111111111111\",\"first_engine_seq\":0,\"last_engine_seq\":0,\"event_count\":1,\"payload_digest\":\"f0bca117fb847109d2a3d0a5ab60042d5813d1e76c89fcf1ac87d3a532e6e350\",\"events\":[{\"engine_seq\":0,\"event_type\":\"seat.facet\",\"payload\":{\"draft\":\"retained\"}}]}"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1297",
     "provenance": "derived (computed by running the TS function)",
     "note": "regex only; later BigInt() use and request cross-check decide"
   },
@@ -448,7 +424,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -480,7 +455,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -512,7 +486,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -544,7 +517,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -576,7 +548,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -608,7 +579,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -640,7 +610,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -672,7 +641,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -704,7 +672,6 @@
         "message": "retained append contains an invalid staged event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -736,7 +703,6 @@
         "message": "retained append contains an invalid staged event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -768,7 +734,6 @@
         "message": "retained append contains an invalid staged event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -800,7 +765,6 @@
         "message": "invalid JSON at offset 1: expected object key"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -832,7 +796,6 @@
         "message": "retained append request differs from its exact staged interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1395",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -910,7 +873,6 @@
         "events_count": 1
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:75-86 (ack())",
     "provenance": "test-verbatim shape (ack helper); result computed"
   },
   {
@@ -1006,7 +968,6 @@
         "events_count": 1
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1111,7 +1072,6 @@
         "events_count": 2
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1189,7 +1149,6 @@
         "events_count": 1
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:742,904",
     "provenance": "test-verbatim mutation; result computed"
   },
   {
@@ -1267,7 +1226,6 @@
         "events_count": 1
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1343,7 +1301,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1417,7 +1374,6 @@
         "message": "seat service returned no receipt_thread_seq"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:763",
     "provenance": "test-verbatim mutation; result computed"
   },
   {
@@ -1492,7 +1448,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1567,7 +1522,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1642,7 +1596,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1717,7 +1670,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1792,7 +1744,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1867,7 +1818,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -1942,7 +1892,6 @@
         "message": "seat append acknowledgement does not match the submitted operation"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -2017,7 +1966,6 @@
         "message": "seat service returned an invalid exact integer for first_engine_seq"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -2092,7 +2040,6 @@
         "message": "seat append acknowledgement omitted its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2168,7 +2115,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2244,7 +2190,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2320,7 +2265,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2396,7 +2340,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2472,7 +2415,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2548,7 +2490,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2624,7 +2565,6 @@
         "message": "seat append acknowledgement receipt hash is invalid"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2700,7 +2640,6 @@
         "message": "seat append acknowledgement receipt is not adjacent to its event interval"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:911-930",
     "provenance": "test-verbatim mutation (expected error regex /authoritative|event interval|event links|receipt hash|receipt is not adjacent/); result computed",
     "test_regex": "authoritative|event interval|event links|receipt hash|receipt is not adjacent"
   },
@@ -2757,7 +2696,6 @@
         "message": "seat append acknowledgement omitted its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -2833,7 +2771,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -2908,7 +2845,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -2983,7 +2919,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3058,7 +2993,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3133,7 +3067,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3221,7 +3154,6 @@
         "events_count": 1
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3323,7 +3255,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3425,7 +3356,6 @@
         "message": "seat append acknowledgement event links are not contiguous"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3527,7 +3457,6 @@
         "message": "seat append acknowledgement event links are not contiguous"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3629,7 +3558,6 @@
         "message": "seat append acknowledgement event links are not contiguous"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3731,7 +3659,6 @@
         "message": "seat append acknowledgement changed its authoritative event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3806,7 +3733,6 @@
         "message": "seat append acknowledgement event interval underflows"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3908,7 +3834,6 @@
         "message": "seat append acknowledgement receipt is not adjacent to its event interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1315",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3926,7 +3851,6 @@
         }
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1437",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3946,7 +3870,6 @@
         }
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1437",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3968,7 +3891,6 @@
         }
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1437",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -3994,7 +3916,6 @@
         }
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1437",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4007,7 +3928,6 @@
         "message": "seat service returned a non-object response"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1437",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4020,7 +3940,6 @@
         "message": "seat service returned a non-object response"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1437",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4034,9 +3953,8 @@
         "$int": "5"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4050,9 +3968,8 @@
         "message": "seat service returned an invalid exact integer for f"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4063,9 +3980,8 @@
         "$int": "5"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4077,9 +3993,8 @@
         "message": "seat service returned an invalid exact integer for f"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4091,9 +4006,8 @@
         "message": "seat service returned an invalid exact integer for f"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4105,9 +4019,8 @@
         "message": "seat service returned an invalid exact integer for f"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4118,9 +4031,8 @@
         "$int": "5"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4132,9 +4044,8 @@
         "message": "seat service returned an invalid exact integer for f"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4145,9 +4056,8 @@
         "$int": "0"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4159,9 +4069,8 @@
         "message": "seat service returned an invalid exact integer for f"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4172,9 +4081,8 @@
         "$int": "18446744073709551616"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "parse_exact_integer",
@@ -4186,9 +4094,8 @@
         "message": "seat service returned an invalid exact integer for f"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1465",
     "provenance": "derived (computed by running the TS function)",
-    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, seat-history-stream.ts exactU64 has its own cap)"
+    "note": "accepts bigint>=0, safe non-negative Number, canonical decimal string; no u64 cap here (exactU64Field adds one, the history stream's exactU64 has its own cap)"
   },
   {
     "group": "wire_seat_events",
@@ -4222,7 +4129,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:617",
     "provenance": "test-verbatim (JSON.parse(encoded).events[0].engine_seq === '0'); result computed"
   },
   {
@@ -4293,7 +4199,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1480",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4331,7 +4236,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1488",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4362,7 +4266,6 @@
         "message": "captured event cannot be rebased to another producer interval"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1488",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4390,7 +4293,6 @@
         "message": "producer engine interval is exhausted"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1482",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4425,7 +4327,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1482",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4456,7 +4357,6 @@
         "message": "prepared operation differs from its reserved producer position"
       }
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1105",
     "provenance": "test-verbatim scenario (reserved producer position); result computed"
   },
   {
@@ -4497,7 +4397,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1490",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4528,7 +4427,6 @@
         "message": "prepared operation differs from its reserved producer position"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1491",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -4546,9 +4444,8 @@
     "expected": {
       "ok": 66
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1500",
     "provenance": "derived (computed by running the TS function)",
-    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum (session.ts:650)"
+    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum"
   },
   {
     "group": "encoded_seat_event_bytes",
@@ -4565,9 +4462,8 @@
     "expected": {
       "ok": 72
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1500",
     "provenance": "derived (computed by running the TS function)",
-    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum (session.ts:650)"
+    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum"
   },
   {
     "group": "encoded_seat_event_bytes",
@@ -4582,9 +4478,8 @@
     "expected": {
       "ok": 76
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1500",
     "provenance": "derived (computed by running the TS function)",
-    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum (session.ts:650)"
+    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum"
   },
   {
     "group": "encoded_seat_event_bytes",
@@ -4604,9 +4499,8 @@
         "message": "JSON body contains an unsafe integer; use BigInt for exact identity"
       }
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1500",
     "provenance": "derived (computed by running the TS function)",
-    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum (session.ts:650)"
+    "note": "uses the LOCAL event.seq (not the wire position); counts UTF-8 bytes of encodeJsonBody({engine_seq,event_type,payload}); pending limits 512 events / 524288 bytes are checked against the running sum"
   },
   {
     "group": "batch_plan",
@@ -4665,7 +4559,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1092",
     "provenance": "test-verbatim scenario (batches of 1, first_engine_seq '0' then '1'); sizes computed"
   },
   {
@@ -4725,7 +4618,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1121",
     "provenance": "test-verbatim scenario; sizes computed"
   },
   {
@@ -5193,7 +5085,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:27,732",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5252,7 +5143,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:363",
     "provenance": "test-verbatim scenario (first '18446744073709551613', last '...614', count 2); then the third event's batch starts at u64::MAX and errors"
   },
   {
@@ -5289,7 +5179,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:757",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5326,7 +5215,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:757",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5382,7 +5270,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:732-775 vs crates/clients/terminal/src/app/seat.rs:1825-1850",
     "provenance": "derived (computed by running the TS function)",
     "note": "TS sizes with the real sequence width; the TUI append_prefix_len sizes with engine_seq/first/last = u64::MAX (20 digits each) so it admits fewer events at this bound (see divergences.md)"
   },
@@ -5410,7 +5297,6 @@
       "all_bodies_identical": true,
       "delays_ms_between_attempts": []
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1131",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5442,7 +5328,6 @@
         200
       ]
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1170",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5476,7 +5361,6 @@
         800
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:836",
     "provenance": "derived (computed by running the TS function)",
     "test_expect": "5 encoded bodies all identical; surfaces as append_unknown (UnknownDeliveryError)"
   },
@@ -5511,7 +5395,6 @@
         800
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:782",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5545,7 +5428,6 @@
         800
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:801",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5575,7 +5457,6 @@
         100
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:879",
     "provenance": "derived (computed by running the TS function)",
     "test_expect": "encoded.length==2, bodies equal"
   },
@@ -5610,7 +5491,6 @@
         800
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:568",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5636,7 +5516,6 @@
       "all_bodies_identical": true,
       "delays_ms_between_attempts": []
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1170",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5662,7 +5541,6 @@
       "all_bodies_identical": true,
       "delays_ms_between_attempts": []
     },
-    "source": "crates/clients/web/browser/runtime/session.ts:1170",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -5692,7 +5570,6 @@
         100
       ]
     },
-    "source": "crates/clients/web/tests/session-idempotency.test.js:763",
     "provenance": "derived (computed by running the TS function)"
   }
 ]

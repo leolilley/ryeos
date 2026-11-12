@@ -220,7 +220,6 @@
         400
       ]
     },
-    "source": "crates/clients/web/tests/scoped-layout-preferences.test.js:36",
     "provenance": "test-verbatim step order (assertions listed in test_expect); outputs computed",
     "note": "test_expect: first observe (no key) returns false; observe after 'a-edited' returns true; after switching to surface-b the writes == [['surface-a','a-edited']] (predecessor flushed on scope change) and surface-b stays 'b-saved'; flush+timers write nothing and leave 0 timers; after 'b-edited' observe, then key cleared, writes == [['surface-a','a-edited'],['surface-b','b-edited']] and 0 timers; remount of surface-a with seed 'a-new-seed' leaves storage['surface-a']=='a-edited' even after flush"
   },
@@ -308,9 +307,8 @@
         400
       ]
     },
-    "source": "crates/clients/web/browser/runtime/layout-preferences.ts:69-110",
     "provenance": "derived",
-    "note": "delay default 400 ms (layout-preferences.ts:70)"
+    "note": "delay default 400 ms"
   },
   {
     "name": "debounce timer fires write",
@@ -396,7 +394,6 @@
         400
       ]
     },
-    "source": "crates/clients/web/browser/runtime/layout-preferences.ts:96",
     "provenance": "derived"
   },
   {
@@ -509,7 +506,6 @@
         400
       ]
     },
-    "source": "crates/clients/web/browser/runtime/layout-preferences.ts:127-133",
     "provenance": "derived",
     "note": "note the initial baseline equals persisted 'one'"
   },
@@ -595,7 +591,6 @@
         400
       ]
     },
-    "source": "crates/clients/web/browser/runtime/layout-preferences.ts:88-92",
     "provenance": "derived"
   },
   {
@@ -649,7 +644,6 @@
       ],
       "timer_delays_ms": []
     },
-    "source": "crates/clients/web/browser/runtime/layout-preferences.ts:122",
     "provenance": "derived"
   },
   {
@@ -725,7 +719,6 @@
       "errors": [],
       "timer_delays_ms": []
     },
-    "source": "crates/clients/web/browser/runtime/layout-preferences.ts:34-41",
     "provenance": "derived"
   }
 ]

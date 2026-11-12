@@ -8,7 +8,6 @@
     "expected": {
       "ok": "0"
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:46",
     "provenance": "test-verbatim"
   },
   {
@@ -20,7 +19,6 @@
     "expected": {
       "ok": "{}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:134",
     "provenance": "computed"
   },
   {
@@ -34,7 +32,6 @@
     "expected": {
       "ok": "{\"v\":18446744073709551615}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:19",
     "provenance": "computed"
   },
   {
@@ -48,7 +45,6 @@
     "expected": {
       "ok": "{\"v\":-9223372036854775808}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:19",
     "provenance": "computed"
   },
   {
@@ -63,7 +59,6 @@
         "message": "JSON integer is outside the daemon i64/u64 value domain"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:209",
     "provenance": "computed"
   },
   {
@@ -78,7 +73,6 @@
         "message": "JSON integer is outside the daemon i64/u64 value domain"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:209",
     "provenance": "computed"
   },
   {
@@ -93,7 +87,6 @@
         "message": "JSON body contains an unsafe integer; use BigInt for exact identity"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:103",
     "provenance": "computed"
   },
   {
@@ -108,7 +101,6 @@
         "message": "JSON body contains a non-finite number"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:102",
     "provenance": "computed"
   },
   {
@@ -120,7 +112,6 @@
     "expected": {
       "ok": "[1e-7]"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:106",
     "provenance": "computed",
     "note": "JS String(1e-7) === '1e-7'; serde_json spells it 1e-7 as well, but JS String(1e21) / String(0.000001) thresholds differ from Rust; this is why digests use bit patterns"
   },
@@ -133,7 +124,6 @@
     "expected": {
       "ok": "[0.000001]"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:106",
     "provenance": "computed"
   },
   {
@@ -150,7 +140,6 @@
         "message": "JSON contains an unpaired high surrogate"
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:48",
     "provenance": "test-verbatim"
   },
   {
@@ -174,7 +163,6 @@
         "message": "JSON contains an unpaired low surrogate"
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:49",
     "provenance": "test-verbatim"
   },
   {
@@ -187,7 +175,6 @@
     "expected": {
       "ok": "{\"b\":1,\"a\":2}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:125",
     "provenance": "computed"
   },
   {
@@ -199,7 +186,6 @@
     "expected": {
       "ok": "{\"é\":\"😀\"}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:98",
     "provenance": "computed"
   },
   {
@@ -220,7 +206,6 @@
     "expected": {
       "ok": "{\"a\":2,\"b\":1,\"\\u00e9\":3,\"\\uffff\":6,\"\\ud800\\udc00\":5,\"\\ud83d\\ude00\":4}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:138",
     "provenance": "computed",
     "note": "scalar order == UTF-8 byte order; UTF-16 code-unit order would put U+1F600 before U+FFFF"
   },
@@ -233,7 +218,6 @@
     "expected": {
       "ok": "{\"k\":\"\\u00e9\\ud83d\\ude00\\u0000\\u001f\\\"\\\\\\b\\f\\n\\r\\t/\"}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:152",
     "provenance": "computed"
   },
   {
@@ -255,7 +239,6 @@
     "expected": {
       "ok": "{\"a\":[1,null,true,false],\"z\":18446744073709551615}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:24",
     "provenance": "computed"
   },
   {
@@ -268,7 +251,6 @@
     "expected": {
       "ok": "{\"a\":{},\"b\":[]}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:24",
     "provenance": "computed"
   },
   {
@@ -283,7 +265,6 @@
         "message": "JSON body contains a cycle"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:116",
     "provenance": "computed"
   },
   {
@@ -298,7 +279,6 @@
         "message": "JSON body contains a non-record object"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:121",
     "provenance": "computed",
     "note": "Rust has no equivalent input; a Rust encoder only sees serde_json::Value"
   },
@@ -334,7 +314,6 @@
         ]
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:54",
     "provenance": "test-verbatim",
     "test_assertions": [
       "u64==18446744073709551615n",
@@ -358,7 +337,6 @@
         "message": "invalid JSON at offset 16: duplicate object key \"same\""
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:76",
     "provenance": "test-verbatim",
     "test_regex": "duplicate object key"
   },
@@ -372,7 +350,6 @@
         "message": "invalid JSON at offset 11: expected ',' or '}'"
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:77",
     "provenance": "test-verbatim",
     "test_regex": "trailing|expected"
   },
@@ -386,7 +363,6 @@
         "message": "invalid JSON at offset 6: number is outside the finite f64 domain"
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:78",
     "provenance": "test-verbatim",
     "test_regex": "finite f64"
   },
@@ -404,7 +380,6 @@
         }
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:85",
     "provenance": "test-verbatim"
   },
   {
@@ -423,7 +398,6 @@
         }
       }
     },
-    "source": "crates/clients/web/tests/transport-exactness.test.js:86",
     "provenance": "test-verbatim"
   },
   {
@@ -436,7 +410,6 @@
         "message": "invalid JSON at offset 20: integer is outside the daemon i64/u64 value domain"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:287",
     "provenance": "computed"
   },
   {
@@ -449,7 +422,6 @@
         "message": "invalid JSON at offset 20: integer is outside the daemon i64/u64 value domain"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:287",
     "provenance": "computed"
   },
   {
@@ -461,7 +433,6 @@
         "$number": "-0"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:285",
     "provenance": "computed"
   },
   {
@@ -471,7 +442,6 @@
     "expected": {
       "ok": 1
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:292",
     "provenance": "computed",
     "note": "decodes to JS Number 1; JS cannot tell 1.0 from 1, see divergences.md"
   },
@@ -482,7 +452,6 @@
     "expected": {
       "ok": 100
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:292",
     "provenance": "computed"
   },
   {
@@ -495,7 +464,6 @@
         "message": "invalid JSON at offset 2: trailing input"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:372",
     "provenance": "computed"
   },
   {
@@ -508,7 +476,6 @@
         "message": "invalid JSON at offset 2: unescaped control character in string"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:261",
     "provenance": "computed"
   },
   {
@@ -521,7 +488,6 @@
         "message": "invalid JSON at offset 2: invalid string escape"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:271",
     "provenance": "computed"
   },
   {
@@ -534,7 +500,6 @@
         "message": "invalid JSON at offset 2: invalid Unicode escape"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:267",
     "provenance": "computed"
   },
   {
@@ -548,7 +513,6 @@
         ]
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:259",
     "provenance": "computed",
     "note": "decode accepts it; encode would later refuse the resulting string"
   },
@@ -562,7 +526,6 @@
         "message": "invalid JSON at offset 0: expected a JSON value"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:367",
     "provenance": "computed"
   },
   {
@@ -579,7 +542,6 @@
         }
       ]
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:241",
     "provenance": "computed"
   },
   {
@@ -843,7 +805,6 @@
         ]
       ]
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:300",
     "provenance": "computed"
   },
   {
@@ -856,7 +817,6 @@
         "message": "invalid JSON at offset 129: container nesting exceeds the daemon JSON limit"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:300",
     "provenance": "computed"
   },
   {
@@ -869,7 +829,6 @@
         "message": "invalid JSON at offset 641: container nesting exceeds the daemon JSON limit"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:327",
     "provenance": "computed"
   },
   {
@@ -882,7 +841,6 @@
         "message": "invalid JSON at offset 5: expected ':'"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:340",
     "provenance": "computed"
   },
   {
@@ -895,7 +853,6 @@
         "message": "invalid JSON at offset 3: expected a JSON value"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:316",
     "provenance": "computed",
     "note": "after ',' whitespace then value() fails on ']'"
   },
@@ -909,7 +866,6 @@
         "message": "invalid JSON at offset 0: expected a JSON value"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:367",
     "provenance": "computed"
   },
   {
@@ -922,7 +878,6 @@
         "message": "invalid JSON at offset 0: expected a JSON value"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:367",
     "provenance": "computed"
   },
   {
@@ -935,7 +890,6 @@
         "message": "invalid JSON at offset 1: trailing input"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:280",
     "provenance": "computed",
     "note": "regex matches '1' then '.' is trailing"
   },
@@ -949,7 +903,6 @@
         "message": "invalid JSON at offset 0: expected true"
       }
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:247",
     "provenance": "computed"
   },
   {
@@ -959,7 +912,6 @@
     "expected": {
       "ok": "{\"a\":18446744073709551615,\"b\":0,\"c\":1e-7,\"d\":\"x\"}"
     },
-    "source": "crates/clients/web/browser/runtime/transport.ts:19,230",
     "provenance": "computed",
     "note": "-0 is rewritten to 0 and 1e-7 respelled by JS String()"
   }

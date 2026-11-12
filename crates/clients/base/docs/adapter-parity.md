@@ -58,7 +58,7 @@ shared-core behavior the adapter cannot currently originate.
 | [x] `RouteChanged` | native | gap | Browser hash is wired; TUI has no route adapter. |
 <!-- parity:RyeOsEvent:end -->
 
-Those two `gap` rows are the only recorded root-event gaps. Svelte migration
+Those two `gap` rows are the only recorded root-event gaps. A renderer change
 must not hide or widen them.
 
 Seat acknowledgement is not a serialized root event. The closed event router
@@ -233,7 +233,7 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 
 ## Migration rule
 
-A browser renderer (Rune, as Svelte before it) may replace browser presentation only. It must retain every checked row,
+A browser renderer may replace browser presentation only. It must retain every checked row,
 keep effects/events FIFO through WASM/core, and preserve the exceptions above.
 A browser-only store, command model, authority mode or product-specific route
 is a competing application model and fails this gate.

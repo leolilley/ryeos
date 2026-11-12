@@ -12,8 +12,7 @@
       "thread_id": "thread-A"
     },
     "expected": "renewed",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1027",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -30,8 +29,7 @@
       "thread_id": "thread-A"
     },
     "expected": "renewed",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1028",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -46,8 +44,7 @@
       "thread_id": "thread-A"
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1030",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -62,8 +59,7 @@
       "thread_id": "thread-A"
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1030",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -78,8 +74,7 @@
       "thread_id": "thread-A"
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1030",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -95,8 +90,7 @@
       "thread_id": "thread-A"
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1030",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -114,8 +108,7 @@
       "thread_id": "thread-A"
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1030",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -126,8 +119,7 @@
       "thread_id": "thread-A"
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1030",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchResponse",
@@ -146,7 +138,6 @@
       "thread_id": "thread-A"
     },
     "expected": "renewed",
-    "source": "crates/clients/web/browser/runtime/session.ts:1437",
     "provenance": "derived (computed by running the TS function)"
   },
   {
@@ -156,8 +147,7 @@
       "http_status": 403
     },
     "expected": "refused",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1033-1034",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchError",
@@ -166,8 +156,7 @@
       "http_status": 404
     },
     "expected": "refused",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1033-1034",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchError",
@@ -176,8 +165,7 @@
       "http_status": 409
     },
     "expected": "refused",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1033-1034",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchError",
@@ -186,8 +174,7 @@
       "http_status": 410
     },
     "expected": "refused",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1033-1034",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchError",
@@ -196,8 +183,7 @@
       "http_status": 400
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1033-1034",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchError",
@@ -206,8 +192,7 @@
       "http_status": 429
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1033-1034",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchError",
@@ -216,8 +201,7 @@
       "http_status": 500
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1033-1034",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   },
   {
     "function": "classifySeatTouchError",
@@ -226,7 +210,6 @@
       "error": "Error('offline')"
     },
     "expected": "retry",
-    "source": "crates/clients/web/tests/session-idempotency.test.js:1035",
-    "provenance": "test-verbatim (session-idempotency.test.js:1025-1035)"
+    "provenance": "test-verbatim"
   }
 ]

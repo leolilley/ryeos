@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-06T01:00:58Z:64af03e9d106e53bcff2442a4a1c8452d9920b0c646dfdcc029242e0387fbd61:5u+CfDbcaYPkNsdvBVMiINp1/e55MYeGZodCZtcTkz5kvvRXCvD7Hrs0nI9DrIPcz7p2RNhaV8LQ67OK+pSGBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:57:28Z:e739d8396ccf74c08e1a6c584008e8f361e501833a3643df79fe0217ec15a143:cgfjDHwOQJYMQpn782t/2tjjNTCwCneN3XKSDgO8zAIp4ELE9mLXVxFI9hSkYOHJezBWhyM4yLR79n8MegWsCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: language-neutral-integration-adapters
@@ -376,8 +376,8 @@ needs an explicit supported compatibility and evidence path.
 ## The UI precedent and its limit
 
 The UI already has a Rust-owned shared model, a typed Rust/WASM boundary,
-generated TypeScript contracts, a Svelte browser renderer and a Rust terminal
-renderer. Browser presentation changes can reuse the installed semantic core.
+a Rune browser renderer and a Rust terminal renderer, both over one Rust client
+runtime. Browser presentation changes can reuse the installed semantic core.
 See [UI development](../development/ui-development.md).
 
 The same development benefit is wanted here: reuse a stable installed native
