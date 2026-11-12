@@ -333,10 +333,29 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         Err(_) => bail!("loopback controller thread panicked"),
     }
     let outcome = controller.outcome()?;
-    ensure!(
-        outcome.command_terminated,
-        "the exchange ended before the direct command's terminal acknowledgement"
-    );
+    if !outcome.command_terminated {
+        // Everything here is fixture-local (ephemeral keys, loopback
+        // controller), so the owner's own diagnostics may travel with the
+        // refusal; without them a failed exchange cannot be told apart.
+        let stderr = owner_result.stderr.trim();
+        let start = (stderr.len().saturating_sub(1200)..=stderr.len())
+            .find(|index| stderr.is_char_boundary(*index))
+            .unwrap_or(stderr.len());
+        let tail = &stderr[start..];
+        bail!(
+            "the exchange ended before the direct command's terminal acknowledgement \
+             (frames {}, receipt {}, program {}, launcher spec {}, launcher occurrence {}; \
+             owner exit_code {} timed_out {}; owner stderr tail: {})",
+            outcome.frame_count,
+            outcome.applied_launch_receipt_digest.is_some(),
+            outcome.candidate_program_digest.is_some(),
+            outcome.launcher_spec_digest.is_some(),
+            outcome.launcher_occurrence_digest.is_some(),
+            owner_result.exit_code,
+            owner_result.timed_out,
+            tail
+        );
+    }
     let owner_exit = OwnerExit {
         success: owner_result.success && !owner_result.timed_out && owner_result.exit_code == 0,
         detail: format!(
