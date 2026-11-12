@@ -130,6 +130,15 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
     if let Some(input) = spec.input.filter(|input| !input.live_filter) {
         frame = frame.child(crate::shell::composer(input, local));
     }
+    if spec.focused {
+        // The focused frame's inner dashed rule, drawn over its content.
+        frame = frame.child(
+            el().pin(Some(3.0), Some(3.0), Some(3.0), Some(3.0))
+                .border(1.0, p.accent)
+                .border_dash(3.0, 3.0)
+                .a11y_hidden(),
+        );
+    }
     frame
 }
 
