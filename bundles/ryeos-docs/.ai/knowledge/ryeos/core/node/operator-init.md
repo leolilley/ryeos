@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:9cca1b98cd1e3bfcc47c0813b5286f6e6b70b4ab654f1f17339ef1ba2069dcda:GSqe6mlvCbOdyCKMjDtn8a67RMUUl9ML4TPp6qfP/+3peZ0YlXtZPxIHxhVSpLXvgquIQjedGOhaXD6mZtKfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:14:01Z:5c78a1f0aaf0e34a93ed629e7597a53ee485b018787c2e983a475d17e907441b:j9xrHNoISQoqTH5vKxq8cYZlPeCCSPrfedrER0amhncKzSTfLFwXQD08qZcgX1lm73VlYFh3yE8gztfPKoLPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -125,7 +125,11 @@ An execution-history schema cut is the offline operation
 the startup refusal reports. It runs only when the retained database is
 exactly `from` and the installed binary owns exactly `to`; every other pairing
 refuses. Project HEADs, node identity, trust, vault and stable credential
-profiles remain preserved.
+profiles remain preserved. Rerunning it once the database is already `to`
+reports `already_current`, changes nothing and inspects no history. A cut that
+would retire history refuses with `execution_history_scopes_unretired` while a
+process-scope obligation is unretired; start the node once so its recovery
+retires it, stop it, then rerun the cut.
 
 A startup does not re-seed a volume that is not fresh: when the installed
 bundle generation is absent but the app root holds a node identity or a
