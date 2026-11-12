@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T02:56:41Z:993f9a5af2cd25bf71ad03e6cf69375bc05026040a059f961196c307ff7601e2:ZZALqNRdWBkjL1C9fDQZ11kdnI04ghEkS1bmsss1cHkdfiG1PlI9yTXA683VQUKq7vSM+9ND8UbXuMF7BmWXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T10:13:58Z:97d123b07e0d0e24c3d1c8b03dfc940e815b0161f43ebb0115199e1c25b4741f:yVkd5MpzqC5q578ajqmau7PPIhvvDJ8uNcrI/rnQF5IuzLXyopQZfSvdEP9S3a4s2YmeXbKIqkeH/FIXU8F8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -120,9 +120,13 @@ that class may run:
 
 The rule holds on every path that runs something: direct tools, executor
 hops, in-process services, method dispatch (knowledge), compose, managed
-launches (directives, graphs), schedules and recovery. A refusal is a
-403 with code `effective_trust_unsigned` or `effective_trust_refused`,
-naming the class it saw and the classes admitted.
+launches (directives, graphs), schedules and recovery. It judges the
+launch root, each item it extends, and each item it references (for
+example knowledge pulled in through `references:`), every one against its
+own kind's lists: a pinned root cannot bring in an item its kind would not
+run. A refusal is a 403 with code `effective_trust_unsigned` or
+`effective_trust_refused`, naming the item, the class it saw and the
+classes admitted.
 
 **Each kind declares what it admits.** Every root-executable kind schema
 carries a signed `launch_trust` block:
