@@ -44,6 +44,122 @@ fn js_message(value: &JsValue) -> String {
         .unwrap_or_else(|| format!("{value:?}"))
 }
 
+/// The page's route: its location hash without the leading `#`.
+pub fn current_route() -> String {
+    window()
+        .location()
+        .hash()
+        .unwrap_or_default()
+        .trim_start_matches('#')
+        .to_owned()
+}
+
+/// A `hashchange` listener, removed when dropped.
+pub struct RouteListener {
+    callback: wasm_bindgen::closure::Closure<dyn FnMut()>,
+}
+
+impl Drop for RouteListener {
+    fn drop(&mut self) {
+        let _ = window().remove_event_listener_with_callback(
+            "hashchange",
+            self.callback.as_ref().unchecked_ref(),
+        );
+    }
+}
+
+/// Call `f` with the new route after every location hash change.
+pub fn on_route_change(f: impl Fn(String) + 'static) -> Result<RouteListener, RuntimeError> {
+    let callback = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || f(current_route()));
+    window()
+        .add_event_listener_with_callback("hashchange", callback.as_ref().unchecked_ref())
+        .map_err(|error| {
+            RuntimeError::BindingRequest(format!("route listener: {}", js_message(&error)))
+        })?;
+    Ok(RouteListener { callback })
+}
+
+/// The browser's side of the effects the runtime cannot perform itself:
+/// location hash navigation, clipboard copying, opening an external URL and
+/// navigating to a successor session's launch URL. Independent presentation
+/// documents need a prepare-first document host this page is not, and stay
+/// refused.
+pub fn web_adapter() -> crate::effects::AdapterHandler {
+    use ryeos_client_base::ui::{RyeOsEffect, RyeOsEffectKind};
+
+    use crate::effects::AdapterFuture;
+
+    fn host(what: &str, error: &JsValue) -> RuntimeError {
+        RuntimeError::BindingRequest(format!("{what}: {}", js_message(error)))
+    }
+
+    Rc::new(|effect: RyeOsEffect| -> AdapterFuture {
+        Box::pin(async move {
+            match effect.kind {
+                RyeOsEffectKind::SetLocationHash { hash } => {
+                    window()
+                        .location()
+                        .set_hash(&hash)
+                        .map_err(|error| host("location hash", &error))?;
+                    Ok(None)
+                }
+                RyeOsEffectKind::CopyToClipboard { text } => {
+                    let promise = window().navigator().clipboard().write_text(&text);
+                    JsFuture::from(promise)
+                        .await
+                        .map_err(|error| host("clipboard", &error))?;
+                    Ok(None)
+                }
+                RyeOsEffectKind::OpenUrl { url } => {
+                    // With noopener the call may return no window even when it
+                    // opened one: this records that the call returned, never
+                    // that a window was seen opening.
+                    window()
+                        .open_with_url_and_target_and_features(
+                            &url,
+                            "_blank",
+                            "noopener,noreferrer",
+                        )
+                        .map_err(|error| host("open URL", &error))?;
+                    Ok(Some(serde_json::json!({
+                        "action": "open_url", "dispatch": "returned", "opened": "unknown",
+                    })))
+                }
+                RyeOsEffectKind::ReplaceSession { launch_url, .. } => {
+                    let location = window().location();
+                    let base = location.href().map_err(|error| host("location", &error))?;
+                    let launch = web_sys::Url::new_with_base(&launch_url, &base)
+                        .map_err(|error| host("replacement launch URL", &error))?;
+                    let origin = location
+                        .origin()
+                        .map_err(|error| host("location", &error))?;
+                    if launch.origin() != origin || !launch.pathname().starts_with("/ui/launch/") {
+                        return Err(RuntimeError::BindingRequest(
+                            "replacement UI session has an invalid launch origin or path"
+                                .to_owned(),
+                        ));
+                    }
+                    let target =
+                        format!("{}{}{}", launch.pathname(), launch.search(), launch.hash());
+                    location
+                        .assign(&target)
+                        .map_err(|error| host("navigation", &error))?;
+                    Ok(None)
+                }
+                RyeOsEffectKind::OpenNewPresentationDocument { .. }
+                | RyeOsEffectKind::ShowPreparedPresentationDocument { .. } => {
+                    Err(RuntimeError::BindingRequest(
+                        "presentation document requires its prepare-first document host".to_owned(),
+                    ))
+                }
+                _ => Err(RuntimeError::BindingRequest(
+                    "this effect is not a browser host action".to_owned(),
+                )),
+            }
+        })
+    })
+}
+
 /// `text/event-stream` with optional parameters, and a body that is not
 /// declared empty.
 fn event_stream_response(response: &web_sys::Response) -> bool {

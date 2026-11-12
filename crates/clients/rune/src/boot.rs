@@ -86,12 +86,38 @@ async fn establish(wake: WakeFn) -> Outcome {
         None => StartMode::Fresh,
     };
     let viewport = platform.viewport();
-    let mut runtime = ClientRuntime::new(platform.clone(), wake, RetryPolicy::WEB);
+    let mut runtime = ClientRuntime::new(platform.clone(), wake.clone(), RetryPolicy::WEB)
+        .with_adapter(ryeos_client_runtime::platform::web::web_adapter());
     let (core, effects) = runtime
         .start(session, viewport, mode, CoreConfig::default())
         .await
         .map_err(|error| format!("The presentation could not be opened: {error}"))?;
-    Ok(Running::new(platform, runtime, core, effects))
+    // Hash routes reach the core once it is installed: the page's own first,
+    // then each change, folded in order by `poll`.
+    let routes: Rc<RefCell<Vec<String>>> = Rc::default();
+    let initial = ryeos_client_runtime::platform::web::current_route();
+    if !initial.is_empty() {
+        routes.borrow_mut().push(initial);
+    }
+    let queue = routes.clone();
+    let listener = ryeos_client_runtime::platform::web::on_route_change(move |route| {
+        queue.borrow_mut().push(route);
+        wake();
+    })
+    .map_err(|error| error.to_string())?;
+    let mut running = Running::new(platform, runtime, core, effects);
+    running.routes = Some(Routes {
+        queue: routes,
+        _listener: listener,
+    });
+    Ok(running)
+}
+
+/// Location hash changes waiting for the core.
+#[cfg(target_arch = "wasm32")]
+struct Routes {
+    queue: Rc<RefCell<Vec<String>>>,
+    _listener: ryeos_client_runtime::platform::web::RouteListener,
 }
 
 /// A claimed seat and its core.
@@ -100,6 +126,8 @@ pub struct Running {
     runtime: ClientRuntime<Host>,
     core: RyeOsCore,
     last_tick_ms: u64,
+    #[cfg(target_arch = "wasm32")]
+    routes: Option<Routes>,
 }
 
 impl Running {
@@ -117,6 +145,8 @@ impl Running {
             runtime,
             core,
             last_tick_ms: 0,
+            #[cfg(target_arch = "wasm32")]
+            routes: None,
         }
     }
 
@@ -158,6 +188,18 @@ impl Running {
             return Err(format!("The seat can no longer be driven: {stop:?}"));
         }
         let mut changed = changed;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let routes: Vec<String> = self
+                .routes
+                .as_ref()
+                .map(|routes| routes.queue.borrow_mut().drain(..).collect())
+                .unwrap_or_default();
+            for route in routes {
+                self.dispatch(RyeOsEvent::RouteChanged { route });
+                changed = true;
+            }
+        }
         let now_ms = self.platform.clock().now_ms();
         if now_ms.saturating_sub(self.last_tick_ms) >= super::TICK.as_millis() as u64 {
             self.last_tick_ms = now_ms;

@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use rune::{AppSpec, Cx, El, KeyEvent, TextEdit, Tx};
+use ryeos_client_base::ids::RyeOsViewInstanceKey;
 use ryeos_client_base::ui::model::RyeOsInputAddress;
 use ryeos_client_base::ui::view_model::{RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsViewModel};
 use ryeos_client_base::ui::{RyeOsEvent, RyeOsUiEvent};
@@ -147,6 +148,34 @@ impl Edits {
                 edit.set_caret(input.cursor.min(input.text.len()));
             }
         }
+    }
+}
+
+/// The mounted view an event acts on; dialogs are not frames and focus
+/// nothing.
+fn addressed_instance(event: &RyeOsUiEvent) -> Option<&RyeOsViewInstanceKey> {
+    use RyeOsUiEvent as E;
+    match event {
+        E::SetFieldSelection { instance_key, .. }
+        | E::MoveFieldSelection { instance_key, .. }
+        | E::SetFieldGroupCollapsed { instance_key, .. }
+        | E::SetFieldLayerVisible { instance_key, .. }
+        | E::SetFieldCursor { instance_key, .. }
+        | E::StepFieldCursor { instance_key, .. }
+        | E::SetFieldPlayback { instance_key, .. }
+        | E::SetFieldQuery { instance_key, .. }
+        | E::MoveFieldSearchMatch { instance_key, .. }
+        | E::ToggleFieldCompare { instance_key, .. }
+        | E::RequestFieldExpansion { instance_key, .. }
+        | E::ContinueFieldExpansion { instance_key, .. }
+        | E::ClearFieldExpansion { instance_key, .. }
+        | E::SetViewCursor { instance_key, .. }
+        | E::ChooseViewItem { instance_key, .. }
+        | E::ToggleViewItemExpansion { instance_key, .. }
+        | E::SetViewTreeItemCollapsed { instance_key, .. }
+        | E::ToggleViewSection { instance_key, .. }
+        | E::SetViewFold { instance_key, .. } => Some(instance_key),
+        _ => None,
     }
 }
 
@@ -313,8 +342,53 @@ impl App {
             .map(|edit| (edit.text.clone(), edit.focus))
     }
 
+    /// Send a UI event. An event addressed to a mounted view first focuses its
+    /// tile or dock, as a pointer press anywhere inside a frame does in the
+    /// browser shell; Rune does not pass a press on a child to its frame.
     pub(crate) fn ui(&mut self, event: RyeOsUiEvent) {
+        if let Some(focus) = addressed_instance(&event).and_then(|key| self.focus_for(key)) {
+            self.dispatch(RyeOsEvent::Ui { event: focus });
+        }
         self.dispatch(RyeOsEvent::Ui { event });
+    }
+
+    /// The event that focuses `instance`'s tile or dock, when it is not focused.
+    fn focus_for(&self, instance: &RyeOsViewInstanceKey) -> Option<RyeOsUiEvent> {
+        let vm = self.core()?.envelope(Vec::new()).view_model;
+        let docks = [
+            &vm.docks.top,
+            &vm.docks.bottom,
+            &vm.docks.left,
+            &vm.docks.right,
+        ];
+        if let Some(dock) = docks
+            .into_iter()
+            .flatten()
+            .find(|dock| &dock.instance_key == instance)
+        {
+            return (!dock.focused).then_some(RyeOsUiEvent::FocusDock { edge: dock.edge });
+        }
+        fn tile(
+            node: &RyeOsLayoutNodeVm,
+            instance: &RyeOsViewInstanceKey,
+        ) -> Option<(String, bool)> {
+            match node {
+                RyeOsLayoutNodeVm::Split { first, second, .. } => {
+                    tile(first, instance).or_else(|| tile(second, instance))
+                }
+                RyeOsLayoutNodeVm::Tile {
+                    instance_key,
+                    tile_id,
+                    focused,
+                    ..
+                } => (instance_key == instance).then(|| (tile_id.clone(), *focused)),
+            }
+        }
+        let root = vm.view_set.as_ref()?.root.as_ref()?;
+        let (tile_id, focused) = tile(root, instance)?;
+        (!focused).then_some(RyeOsUiEvent::FocusChanged {
+            target: Some(tile_id),
+        })
     }
 
     /// Open or close one tile's actions menu.
