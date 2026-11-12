@@ -1366,6 +1366,9 @@ fn release_under_guard(
     let released_hash = stage.store_object_admitted(guard, &cas, &released.to_value()?)?;
     let signer = crate::state_store::NodeIdentitySigner::from_identity(&state.identity);
     state.state_store.with_state_db(|db| {
+        // As bind does: never write a current-schema object into a namespace
+        // whose epoch is not this binary's.
+        db.ensure_current_external_content_binding_epoch(guard)?;
         db.advance_generic_head_ref(
             BINDING_HEAD_NAMESPACE,
             binding_subject_id,
