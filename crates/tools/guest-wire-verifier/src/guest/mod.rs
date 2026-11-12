@@ -1,6 +1,6 @@
 //! Guest role: runs inside a restored sandbox as the administrator. It
 //! re-measures the subject, reproduces it manifest-identically from its own
-//! owner bytes, binds that copy read-only in a private mount namespace,
+//! owner bytes, binds that copy in a private mount namespace,
 //! serves a loopback controller whose ephemeral key signs the occurrence
 //! assignment, runs the subject's owner exactly as shipped, and reports what
 //! happened. The product carries no controller key, so what runs is
@@ -246,10 +246,14 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         inodes: 1 << 16,
     };
     lillux::sandbox::enter_root_overlay_namespace(&[
+        // Writable, as a restored guest's runtime root is: before dropping to
+        // its account the owner grants that account read-only traversal of the
+        // root, which changes the root directory's permissions. The tree is
+        // this probe's private copy, so the subject is never touched.
         lillux::sandbox::RootOverlay::Bind {
             source: product.root(),
             target: Path::new(RUNTIME_ROOT),
-            read_only: true,
+            read_only: false,
         },
         lillux::sandbox::RootOverlay::Tmpfs {
             target: Path::new(ACTIVATION_ROOT),
