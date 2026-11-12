@@ -84,11 +84,13 @@ fn long_response(view_ref: &str) -> Option<Value> {
     Some(match view_ref {
         "view:ryeos/threads/history" => {
             let threads: Vec<Value> = (0..LONG_ROWS)
-                .map(|index| json!({
-                    "thread_id": format!("T-{index:04}"), "kind": "tool_run",
-                    "item_ref": "tool:ryeos/dev/gate", "project": { "name": "ryeos-next" },
-                    "status": "completed", "created_at": "2026-11-12T08:40:00Z"
-                }))
+                .map(|index| {
+                    json!({
+                        "thread_id": format!("T-{index:04}"), "kind": "tool_run",
+                        "item_ref": "tool:ryeos/dev/gate", "project": { "name": "ryeos-next" },
+                        "status": "completed", "created_at": "2026-11-12T08:40:00Z"
+                    })
+                })
                 .collect();
             json!({ "threads": threads, "coverage": { "complete": true, "returned": LONG_ROWS } })
         }
@@ -96,16 +98,18 @@ fn long_response(view_ref: &str) -> Option<Value> {
             // A turn boundary before each step keeps every step its own entry:
             // consecutive outputs braid into one block.
             let events: Vec<Value> = (0..LONG_ROWS)
-                .flat_map(|index| [
-                    json!({
-                        "event_type": "cognition_in", "chain_seq": 2 * index + 1,
-                        "payload": { "turn": index + 1 }
-                    }),
-                    json!({
-                        "event_type": "cognition_out", "chain_seq": 2 * index + 2,
-                        "payload": { "content": format!("Step {} of the run.", index + 1) }
-                    }),
-                ])
+                .flat_map(|index| {
+                    [
+                        json!({
+                            "event_type": "cognition_in", "chain_seq": 2 * index + 1,
+                            "payload": { "turn": index + 1 }
+                        }),
+                        json!({
+                            "event_type": "cognition_out", "chain_seq": 2 * index + 2,
+                            "payload": { "content": format!("Step {} of the run.", index + 1) }
+                        }),
+                    ]
+                })
                 .collect();
             json!({ "events": events })
         }

@@ -177,7 +177,10 @@ fn a_malformed_observation_record_is_refused() {
 
     let mut active_without_incarnation = active();
     active_without_incarnation["producer"] = json!({"kind": "active"});
-    refused_with(active_without_incarnation, "invalid exact producer observation");
+    refused_with(
+        active_without_incarnation,
+        "invalid exact producer observation",
+    );
 
     refused_with(json!([1]), "non-object");
 }

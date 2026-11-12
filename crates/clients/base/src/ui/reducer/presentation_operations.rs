@@ -943,7 +943,12 @@ mod tests {
                 Some(serde_json::json!("{record.document_placement}")),
                 Some("{record.opening_selection}"),
             ),
-            (&library, "open-reusable-surface", Some(placement.clone()), None),
+            (
+                &library,
+                "open-reusable-surface",
+                Some(placement.clone()),
+                None,
+            ),
             (
                 &library,
                 "import-reusable-surface-tabs",
@@ -951,7 +956,12 @@ mod tests {
                 None,
             ),
             (&projects, "open-project", Some(placement.clone()), None),
-            (&projects, "open-project-surface", Some(placement.clone()), None),
+            (
+                &projects,
+                "open-project-surface",
+                Some(placement.clone()),
+                None,
+            ),
         ] {
             let affordance = view["affordances"]
                 .as_array()
@@ -959,7 +969,10 @@ mod tests {
                 .iter()
                 .find(|affordance| affordance["id"] == id)
                 .unwrap_or_else(|| panic!("no shipped affordance {id}"));
-            assert_eq!(affordance["presentation_operation"], "surface_opening", "{id}");
+            assert_eq!(
+                affordance["presentation_operation"], "surface_opening",
+                "{id}"
+            );
             let args = &affordance["invoke"]["args"];
             if let Some(expected) = expected_placement {
                 assert_eq!(args["placement"], expected, "{id} placement");
@@ -971,7 +984,10 @@ mod tests {
         for view in [&surfaces, &library, &projects] {
             let text = serde_json::to_string(view).unwrap();
             for retired in ["\"open_surface\"", "import_surface_tabs"] {
-                assert!(!text.contains(retired), "a shipped view still names {retired}");
+                assert!(
+                    !text.contains(retired),
+                    "a shipped view still names {retired}"
+                );
             }
         }
     }

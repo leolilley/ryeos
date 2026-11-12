@@ -50,8 +50,8 @@ pub use bootstrap::{
     ClaimIntent, Claimed, ReplayOutput, ReproofOutput, RetainedClaim, SeatStart, claim_and_replay,
     read_session, replace_session_in_place, reproof_seat, session_unchanged,
 };
-pub use control::{observe_producer, relinquish_claimed_seat, relinquish_current, touch_seat};
 pub(crate) use control::{control_post, encode_control};
+pub use control::{observe_producer, relinquish_claimed_seat, relinquish_current, touch_seat};
 
 /// Frames of a platform's history streams.
 pub type Frames<P> = <<P as Platform>::Transport as Transport>::Frames;

@@ -201,7 +201,10 @@ fn a_destination_observation_needs_the_exact_source_producer() {
     other_thread.thread_id = "another-thread".to_owned();
     let cases = [
         ("no current producer", None),
-        ("another incarnation", Some(producer_of(&transfer.source, 'e'))),
+        (
+            "another incarnation",
+            Some(producer_of(&transfer.source, 'e')),
+        ),
         ("another thread", Some(other_thread)),
     ];
     for (what, current) in cases {
@@ -274,9 +277,21 @@ fn a_contact_checks_the_acting_seat_by_presentation_and_thread_not_incarnation()
     let mut other_thread = rotated_source.clone();
     other_thread.thread_id = "another-thread".to_owned();
     let refusals = [
-        ("commit as the destination", commit.clone(), Some(rotated_destination.clone())),
-        ("activate as the source", activate, Some(rotated_source.clone())),
-        ("another presentation", commit.clone(), Some(other_presentation)),
+        (
+            "commit as the destination",
+            commit.clone(),
+            Some(rotated_destination.clone()),
+        ),
+        (
+            "activate as the source",
+            activate,
+            Some(rotated_source.clone()),
+        ),
+        (
+            "another presentation",
+            commit.clone(),
+            Some(other_presentation),
+        ),
         ("another thread", commit.clone(), Some(other_thread)),
         ("no producer", commit, None),
     ];
@@ -371,10 +386,16 @@ fn a_preparation_needs_the_exact_source_producer_and_only_observes() {
     let mut other_presentation = producer_of(&transfer.source, 'a');
     other_presentation.presentation_id = "99999999-9999-4999-8999-999999999999".to_owned();
     let refusals = [
-        ("another incarnation", Some(producer_of(&transfer.source, 'e'))),
+        (
+            "another incarnation",
+            Some(producer_of(&transfer.source, 'e')),
+        ),
         ("another thread", Some(other_thread)),
         ("another presentation", Some(other_presentation)),
-        ("the destination's producer", Some(producer_of(&transfer.destination, 'a'))),
+        (
+            "the destination's producer",
+            Some(producer_of(&transfer.destination, 'a')),
+        ),
         ("no producer", None),
     ];
     for (what, current) in refusals {

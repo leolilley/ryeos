@@ -407,7 +407,10 @@ mod seat_delivery {
         assert!(!runtime.touch_inflight);
         assert!(drained.seat.ready);
         runtime.maybe_touch();
-        assert!(!runtime.touch_inflight, "the next renewal is a full interval away");
+        assert!(
+            !runtime.touch_inflight,
+            "the next renewal is a full interval away"
+        );
 
         platform.clock.set_now(2 * TOUCH_INTERVAL_MS + 2);
         runtime.maybe_touch();
@@ -523,7 +526,10 @@ mod seat_delivery {
         let mut core = core();
         let drained = runtime.drain(&mut core);
         assert!(!runtime.append_inflight);
-        let stop = drained.stop.clone().expect("the unknown outcome is reported");
+        let stop = drained
+            .stop
+            .clone()
+            .expect("the unknown outcome is reported");
         let StopReason::Unavailable(unavailable) = &stop else {
             panic!("{stop:?}");
         };
@@ -539,7 +545,13 @@ mod seat_delivery {
             platform.transport.calls_to(SEAT_APPEND_PATH)[0]
         );
         assert_eq!(
-            runtime.shared.delivery.borrow().pending.as_ref().map(|p| p.record.clone()),
+            runtime
+                .shared
+                .delivery
+                .borrow()
+                .pending
+                .as_ref()
+                .map(|p| p.record.clone()),
             Some(record)
         );
 
@@ -569,12 +581,21 @@ mod seat_delivery {
         start_append(&platform, &mut runtime, &who, vec![facet(0)]);
         platform.sim().run_for(50);
         assert!(!platform.transport.calls_to(SEAT_APPEND_PATH).is_empty());
-        let stored = platform.store.get(KEY).expect("retained before the first send");
+        let stored = platform
+            .store
+            .get(KEY)
+            .expect("retained before the first send");
         let mut core = core();
-        assert!(!runtime.may_close(&core), "an admitted append holds the close");
+        assert!(
+            !runtime.may_close(&core),
+            "an admitted append holds the close"
+        );
 
         let outcome = platform.sim().run(runtime.relinquish());
-        assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+        assert!(
+            matches!(outcome, Err(RuntimeError::Fatal(_))),
+            "{outcome:?}"
+        );
         assert!(!runtime.closing);
         assert!(platform.transport.calls_to(SEAT_OPEN_PATH).is_empty());
         assert!(platform.transport.calls_to(SEAT_CLOSE_PATH).is_empty());

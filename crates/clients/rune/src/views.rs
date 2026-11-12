@@ -641,7 +641,9 @@ fn virtual_list(
         .virtual_rows(
             count,
             estimate,
-            move |_: &App, index| std::borrow::Cow::Owned(keys.get(index).cloned().unwrap_or_default()),
+            move |_: &App, index| {
+                std::borrow::Cow::Owned(keys.get(index).cloned().unwrap_or_default())
+            },
             move |app: &App, index| {
                 app.with_view(&build_instance, |view| build(view, &build_instance, index))
                     .flatten()
@@ -1353,7 +1355,11 @@ fn timeline_view(
 const TIMELINE_ENTRY_ESTIMATE: f32 = 44.0;
 
 /// A timeline entry's key: its id, or its place when it has none.
-fn timeline_entry_key(instance: &RyeOsViewInstanceKey, timeline: &Timeline<'_>, index: usize) -> String {
+fn timeline_entry_key(
+    instance: &RyeOsViewInstanceKey,
+    timeline: &Timeline<'_>,
+    index: usize,
+) -> String {
     format!(
         "entry:{instance:?}:{}",
         timeline
@@ -1684,8 +1690,14 @@ mod tests {
             ..Mods::default()
         };
         let k = || Key::Text("k".to_owned());
-        assert!(is_launcher_chord(&press(k(), with(true, false, false, false))));
-        assert!(is_launcher_chord(&press(k(), with(false, true, false, false))));
+        assert!(is_launcher_chord(&press(
+            k(),
+            with(true, false, false, false)
+        )));
+        assert!(is_launcher_chord(&press(
+            k(),
+            with(false, true, false, false)
+        )));
         assert!(is_launcher_chord(&press(
             Key::Command('k'),
             with(true, false, false, false)
@@ -1719,8 +1731,7 @@ mod tests {
     use crate::probe::{runtime, says, texts};
 
     fn instance() -> RyeOsViewInstanceKey {
-        let presentation =
-            PresentationId::try_new("11111111-1111-4111-8111-111111111111").unwrap();
+        let presentation = PresentationId::try_new("11111111-1111-4111-8111-111111111111").unwrap();
         RyeOsViewInstanceKey::shared_dock(&presentation, "left").unwrap()
     }
 
@@ -1858,7 +1869,10 @@ mod tests {
         let rt = drawn(hierarchical());
         let (select, _) = find(&rt, "Select row: Alpha");
         let (toggle, _) = find(&rt, "Collapse descendants of Alpha");
-        assert!(!select.starts_with(&format!("{toggle}/")) && !toggle.starts_with(&format!("{select}/")));
+        assert!(
+            !select.starts_with(&format!("{toggle}/"))
+                && !toggle.starts_with(&format!("{select}/"))
+        );
         // A press at the centre of each lands on its own control.
         let centre = |path: &str| {
             let element = rt
@@ -1905,7 +1919,12 @@ mod tests {
         };
         let (blocked, fine) = (row("Blocked"), row("Fine"));
         assert!(!blocked.focusable && !fine.focusable);
-        assert!(blocked.opacity < fine.opacity, "{} vs {}", blocked.opacity, fine.opacity);
+        assert!(
+            blocked.opacity < fine.opacity,
+            "{} vs {}",
+            blocked.opacity,
+            fine.opacity
+        );
     }
 
     #[test]
@@ -1921,7 +1940,10 @@ mod tests {
         ]));
         assert!(says(&rt, "Path"));
         assert!(says(&rt, "/srv/data"));
-        assert!(!says(&rt, "Hidden primary"), "a detail record has no title line");
+        assert!(
+            !says(&rt, "Hidden primary"),
+            "a detail record has no title line"
+        );
         assert!(labelled_containing(&rt, "Hidden primary").is_empty());
     }
 

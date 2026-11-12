@@ -220,7 +220,9 @@ async fn act(wake: WakeFn, mut recovery: Box<Recovery>, action: RecoveryAction) 
         RecoveryAction::Choose(choice) => {
             let mode = match &recovery.held {
                 Held::Live(running) => running.runtime.reconnect_mode(&choice, &running.core),
-                Held::Unstarted(unstarted) => unstarted.runtime.reconnect_mode_without_core(&choice),
+                Held::Unstarted(unstarted) => {
+                    unstarted.runtime.reconnect_mode_without_core(&choice)
+                }
                 Held::Nothing => return Outcome::Recovery(recovery),
             };
             let mode = match mode {
@@ -257,14 +259,21 @@ fn writer_label(observation: &ryeos_client_base::ui::UiPresentationProducerObser
 /// Read the session and start: the page's own selection when `mode` is
 /// `None`, else exactly `mode` (a replacement the operator chose).
 #[cfg(target_arch = "wasm32")]
-async fn establish(wake: WakeFn, mode: Option<ryeos_client_runtime::runtime::StartMode>) -> Outcome {
+async fn establish(
+    wake: WakeFn,
+    mode: Option<ryeos_client_runtime::runtime::StartMode>,
+) -> Outcome {
     use ryeos_client_runtime::admission::{prepared_presentation_selection, query_values};
     use ryeos_client_runtime::platform::{Auth, EstablishMode};
     use ryeos_client_runtime::runtime::StartMode;
     use ryeos_client_runtime::seat::{RetainedClaim, RetryPolicy};
 
     let platform = Rc::new(Host::new());
-    let established = match platform.auth().establish(EstablishMode::CookiePresent).await {
+    let established = match platform
+        .auth()
+        .establish(EstablishMode::CookiePresent)
+        .await
+    {
         Ok(established) => established,
         Err(error) => {
             return Outcome::Failed(format!("The UI session could not be read: {error}"));
@@ -509,7 +518,10 @@ impl Running {
         } = self.runtime.drain(&mut self.core);
         self.runtime.submit(effects);
         if let Some(stop) = stop {
-            return Err(format!("The seat can no longer be driven: {}", readable(&stop)));
+            return Err(format!(
+                "The seat can no longer be driven: {}",
+                readable(&stop)
+            ));
         }
         let mut changed = changed;
         if let Some(documents) = self.runtime.documents()

@@ -1053,12 +1053,7 @@ fn document_offer(offer: &DocumentOffer, link: Option<&str>) -> El {
                 .grow(1.0)
                 .min_w(0.0)
                 .gap(8.0)
-                .child(
-                    text(message)
-                        .font(theme::ui(12.0))
-                        .color(p.text)
-                        .wrap(),
-                )
+                .child(text(message).font(theme::ui(12.0)).color(p.text).wrap())
                 .child(actions),
         )
         .child(

@@ -40,10 +40,10 @@ use crate::admission::{
     AdmissionTarget, check_admitted_session, exact_membership, retained_seat_binding,
 };
 use crate::api::{MAX_SEAT_BATCH_EVENTS, chain_events_stream_path, session_events_path};
+use crate::documents::DocumentOffers;
 use crate::effects::{
     AdapterHandler, EffectEnv, execute_batch, failure_result, unsupported_adapter,
 };
-use crate::documents::DocumentOffers;
 use crate::error::{RuntimeError, SeatOpenStage};
 use crate::history::{HistoryCompletion, LiveEvent, LiveHistory, SeatCoordinate};
 use crate::inbox::{Idle, Inbox, InboxPayload, Stream, StreamTag, TaskResult, WakeFn};

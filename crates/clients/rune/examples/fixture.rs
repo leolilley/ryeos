@@ -11,17 +11,23 @@
 #[path = "../fixtures/presentation.rs"]
 mod presentation;
 
+use std::sync::OnceLock;
+
+/// The font files, read once and held for the life of the process: the app
+/// spec borrows them for `'static`.
+static FONT_FILES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+static FONTS: OnceLock<Vec<&'static [u8]>> = OnceLock::new();
+
 fn main() {
-    let fonts: Vec<&'static [u8]> = std::env::var("RYEOS_FIXTURE_FONTS")
-        .unwrap_or_default()
-        .split(':')
-        .filter(|path| !path.is_empty())
-        .filter_map(|path| std::fs::read(path).ok())
-        .map(|bytes| &*Box::leak(bytes.into_boxed_slice()))
-        .collect();
+    let files = FONT_FILES.get_or_init(|| {
+        std::env::var("RYEOS_FIXTURE_FONTS")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|path| !path.is_empty())
+            .filter_map(|path| std::fs::read(path).ok())
+            .collect()
+    });
+    let fonts = FONTS.get_or_init(|| files.iter().map(Vec::as_slice).collect());
     let scene = std::env::var("RYEOS_FIXTURE_SCENE").unwrap_or_default();
-    ryeos_client_rune::start_fixture(
-        presentation::core(&scene),
-        Box::leak(fonts.into_boxed_slice()),
-    );
+    ryeos_client_rune::start_fixture(presentation::core(&scene), fonts.as_slice());
 }

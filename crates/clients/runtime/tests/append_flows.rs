@@ -158,12 +158,9 @@ fn an_unknown_outcome_blocks_the_seat_and_keeps_the_exact_retained_request() {
         .script(SEAT_APPEND_PATH, vec![Reply::Network]);
     let events = [event(7, 1)];
 
-    let outcome = platform.sim().run(send_append(
-        &shared,
-        &producer(),
-        &events,
-        RetryPolicy::WEB,
-    ));
+    let outcome = platform
+        .sim()
+        .run(send_append(&shared, &producer(), &events, RetryPolicy::WEB));
     assert!(
         matches!(outcome, Err(AppendFailure::Unknown(_))),
         "{outcome:?}"
@@ -203,12 +200,10 @@ fn an_unknown_outcome_blocks_the_seat_and_keeps_the_exact_retained_request() {
     );
 
     for again in [&events[..], &[event(7, 1), event(8, 2)][..]] {
-        let outcome = platform.sim().run(send_append(
-            &shared,
-            &producer(),
-            again,
-            RetryPolicy::WEB,
-        ));
+        let outcome =
+            platform
+                .sim()
+                .run(send_append(&shared, &producer(), again, RetryPolicy::WEB));
         assert!(
             matches!(outcome, Err(AppendFailure::Unknown(ref message)) if message.contains("blocked")),
             "{outcome:?}"
@@ -271,12 +266,7 @@ fn a_throttled_answer_then_the_acknowledgement_clears_storage_and_moves_the_fron
     );
     let verified = platform
         .sim()
-        .run(send_append(
-            &shared,
-            &producer(),
-            &events,
-            RetryPolicy::WEB,
-        ))
+        .run(send_append(&shared, &producer(), &events, RetryPolicy::WEB))
         .expect("the acknowledgement settles the append");
 
     let sent = platform.transport.calls_to(SEAT_APPEND_PATH);
@@ -315,9 +305,14 @@ fn a_throttled_answer_then_the_acknowledgement_clears_storage_and_moves_the_fron
         &[event(9, 3)],
         RetryPolicy::WEB,
     ));
-    let next: Value =
-        serde_json::from_str(platform.transport.calls_to(SEAT_APPEND_PATH).last().unwrap())
-            .unwrap();
+    let next: Value = serde_json::from_str(
+        platform
+            .transport
+            .calls_to(SEAT_APPEND_PATH)
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(next["first_engine_seq"], 5);
 }
 
@@ -336,7 +331,10 @@ fn a_refused_storage_write_fences_before_any_send() {
         &[event(0, 1)],
         RetryPolicy::WEB,
     ));
-    assert!(matches!(outcome, Err(AppendFailure::Fatal(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(AppendFailure::Fatal(_))),
+        "{outcome:?}"
+    );
     assert!(platform.transport.calls.borrow().is_empty());
     assert!(shared.delivery.borrow().blocked);
     assert!(shared.delivery.borrow().pending.is_none());
@@ -375,7 +373,10 @@ fn relinquishing_with_an_unresolved_append_keeps_the_retained_request() {
     let stored = platform.store.get(KEY).expect("retained");
 
     let outcome = platform.sim().run(relinquish_current(&shared));
-    assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(RuntimeError::Fatal(_))),
+        "{outcome:?}"
+    );
     assert!(platform.transport.calls_to(SEAT_OPEN_PATH).is_empty());
     assert!(platform.transport.calls_to(SEAT_CLOSE_PATH).is_empty());
     assert_eq!(platform.store.get(KEY), Some(stored));
@@ -576,7 +577,8 @@ fn a_changed_session_refuses_the_append_without_resending() {
         (
             "contradictory subject",
             |session| {
-                session["binding_attachments"][0]["subject"] = json!({"kind": "unregistered_project"});
+                session["binding_attachments"][0]["subject"] =
+                    json!({"kind": "unregistered_project"});
             },
             "binding attachment subject contradicts its project metadata or closed schema",
         ),

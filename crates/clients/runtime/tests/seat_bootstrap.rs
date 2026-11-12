@@ -9,9 +9,7 @@ mod common;
 mod seat_support;
 
 use common::sim::{FakePlatform, Reply};
-use ryeos_client_base::ui::{
-    SeatEventKind, UiSeatControlPredecessor, UiSeatProducerClaim,
-};
+use ryeos_client_base::ui::{SeatEventKind, UiSeatControlPredecessor, UiSeatProducerClaim};
 use ryeos_client_runtime::api::{
     SEAT_APPEND_PATH, SEAT_CLOSE_PATH, SEAT_OPEN_PATH, SEAT_REPLAY_PATH, SESSION_CURRENT_PATH,
 };
@@ -303,7 +301,10 @@ fn a_resume_claims_only_a_relinquished_writer_it_observed() {
         retained(RetainedClaim::ResumeRelinquished),
     );
     let message = refusal(outcome);
-    assert!(message.contains("exact Relinquished predecessor"), "{message}");
+    assert!(
+        message.contains("exact Relinquished predecessor"),
+        "{message}"
+    );
     assert_eq!(wire(&platform), ["open:observe"]);
 
     // Accepted: the claim is built from the observation.
@@ -340,7 +341,11 @@ fn a_resume_claims_only_a_relinquished_writer_it_observed() {
         json_of(&open_bodies(&platform, "claim")[0]),
         serde_json::to_value(&expected).unwrap()
     );
-    assert_eq!(count(&platform, "close"), 0, "a retained seat is left to its lease");
+    assert_eq!(
+        count(&platform, "close"),
+        0,
+        "a retained seat is left to its lease"
+    );
     assert!(runtime.producer().is_none());
 }
 
@@ -392,10 +397,16 @@ fn a_takeover_keeps_its_selected_predecessor_and_replays_the_prior_history() {
     )
     .expect("the takeover succeeds");
 
-    assert_eq!(wire(&platform), ["open:claim", "session", "history", "session"]);
+    assert_eq!(
+        wire(&platform),
+        ["open:claim", "session", "history", "session"]
+    );
     let claim = json_of(&open_bodies(&platform, "claim")[0]);
     assert_eq!(claim, serde_json::to_value(&request).unwrap());
-    assert_eq!(claim["predecessor"], json!({"kind": "control", "event_hash": hash(2)}));
+    assert_eq!(
+        claim["predecessor"],
+        json!({"kind": "control", "event_hash": hash(2)})
+    );
     assert_eq!(
         claim["claim"],
         json!({"kind": "takeover", "expected_producer_incarnation": hex('c')})
@@ -404,7 +415,10 @@ fn a_takeover_keeps_its_selected_predecessor_and_replays_the_prior_history() {
     // The whole prior history reached the private core.
     let events = core.seat.events();
     assert_eq!(events.len(), 2);
-    assert!(matches!(events[0].kind, SeatEventKind::PresentationInitialized(_)));
+    assert!(matches!(
+        events[0].kind,
+        SeatEventKind::PresentationInitialized(_)
+    ));
     assert!(matches!(&events[1].kind, SeatEventKind::Facet { key, .. } if key == "draft"));
     assert_eq!(core.acknowledged_seat_prefix_len(), 2);
 
@@ -448,7 +462,10 @@ fn an_unsettled_previous_append_stops_a_retained_start_before_the_claim() {
         RetryPolicy::WEB,
     ));
     assert!(matches!(appended, Err(AppendFailure::Unknown(_))));
-    assert!(platform.store.get(&key).is_some(), "the request is retained");
+    assert!(
+        platform.store.get(&key).is_some(),
+        "the request is retained"
+    );
 
     platform
         .transport
@@ -531,7 +548,13 @@ fn a_fresh_claim_refuses_provisional_mutations_and_gives_the_seat_back() {
     assert!(message.contains("retained history"), "{message}");
     assert_eq!(
         wire(&platform),
-        ["open:prepare", "open:observe", "open:claim", "open:observe", "close"]
+        [
+            "open:prepare",
+            "open:observe",
+            "open:claim",
+            "open:observe",
+            "close"
+        ]
     );
     assert!(runtime.producer().is_none());
 }

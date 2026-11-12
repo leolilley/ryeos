@@ -51,7 +51,11 @@ fn a_reproof_is_published_only_when_the_host_folds_it() {
     let drained = s.runtime.drain(&mut s.core);
     assert!(drained.stop.is_none());
     assert!(drained.seat.reproof_pending, "the wake is recorded");
-    assert_eq!(count(&s.platform, "history"), 1, "the proof task has not run yet");
+    assert_eq!(
+        count(&s.platform, "history"),
+        1,
+        "the proof task has not run yet"
+    );
 
     s.platform.sim().run_for(10);
     assert_eq!(count(&s.platform, "history"), 2);
@@ -149,7 +153,11 @@ fn a_reproof_waits_for_the_seat_to_settle() {
 
     let first = s.runtime.drain(&mut s.core);
     assert!(first.seat.reproof_pending);
-    assert_eq!(count(&s.platform, "history"), 1, "no proof over unsettled state");
+    assert_eq!(
+        count(&s.platform, "history"),
+        1,
+        "no proof over unsettled state"
+    );
     s.platform.sim().run_for(10);
     let second = s.runtime.drain(&mut s.core);
 
@@ -184,7 +192,10 @@ fn shared_for(s: &Started, frontier: u64) -> std::rc::Rc<SeatShared<common::sim:
 #[test]
 fn a_reproof_cannot_discard_an_unresolved_append() {
     let s = started();
-    let guard = s.core.begin_authenticated_reproof().expect("a settled core");
+    let guard = s
+        .core
+        .begin_authenticated_reproof()
+        .expect("a settled core");
     let shared = shared_for(&s, 0);
     s.platform
         .transport
@@ -218,7 +229,10 @@ fn a_reproof_cannot_discard_an_unresolved_append() {
     let message = refusal(outcome);
     assert!(message.contains("unresolved append"), "{message}");
     assert_eq!(s.platform.transport.calls.borrow().len(), sent);
-    assert!(shared.delivery.borrow().pending.is_some(), "the append stays");
+    assert!(
+        shared.delivery.borrow().pending.is_some(),
+        "the append stays"
+    );
 }
 
 /// If the membership is revoked before the proof is read, or while it is
@@ -227,7 +241,10 @@ fn a_reproof_cannot_discard_an_unresolved_append() {
 #[test]
 fn a_revoked_owner_publishes_and_stages_nothing() {
     let s = started();
-    let guard = s.core.begin_authenticated_reproof().expect("a settled core");
+    let guard = s
+        .core
+        .begin_authenticated_reproof()
+        .expect("a settled core");
     let shared = shared_for(&s, 0);
     let revoked = session_reply(&s.world.before);
     let sent_before = s.platform.transport.calls.borrow().len();
@@ -288,7 +305,10 @@ fn a_revoked_owner_publishes_and_stages_nothing() {
 #[test]
 fn the_original_claim_witness_is_kept_apart_from_the_frontier() {
     let s = started();
-    let guard = s.core.begin_authenticated_reproof().expect("a settled core");
+    let guard = s
+        .core
+        .begin_authenticated_reproof()
+        .expect("a settled core");
     let shared = shared_for(&s, 7);
     s.platform
         .transport

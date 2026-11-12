@@ -369,7 +369,12 @@ fn layout(field: &RyeOsFieldVm) -> Layout<'_> {
                     .get(&index)
                     .copied()
                     .unwrap_or(index as f32 * GROUP_WIDTH);
-                (20.0 + origin, 20.0, EMPTY_GROUP_WIDTH, GROUP_HEADER_HEIGHT + 12.0)
+                (
+                    20.0 + origin,
+                    20.0,
+                    EMPTY_GROUP_WIDTH,
+                    GROUP_HEADER_HEIGHT + 12.0,
+                )
             } else {
                 let min_x = members
                     .iter()
@@ -659,8 +664,12 @@ pub fn view(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey, local: &Local
         ));
     }
     if selected.is_some() || !field.compare.is_empty() || !field.warnings.is_empty() {
-        root =
-            root.child(detail(field, instance, selected, local).pin(None, Some(58.0), Some(12.0), None));
+        root = root.child(detail(field, instance, selected, local).pin(
+            None,
+            Some(58.0),
+            Some(12.0),
+            None,
+        ));
     }
     root
 }
@@ -1775,18 +1784,29 @@ fn transcript(preview: &RyeOsArtifactPreviewVm, grid: &RyeOsIndexedGridVm, local
     let mut nav = row()
         .gap(10.0)
         .center_y()
-        .child(text("Previous rows").font(theme::ui(11.0)).color(if page.start == 0 {
-            p.faint
-        } else {
-            p.accent_bright
-        }).role("button").on_press(move |app: &mut App| {
-            app.set_grid_transcript(previous_key.clone(), previous)
-        }))
         .child(
-            text(format!("Rows {}–{} of {}", page.start + 1, page.end, page.height))
-                .font(theme::data(10.0))
-                .color(p.muted)
-                .role("status"),
+            text("Previous rows")
+                .font(theme::ui(11.0))
+                .color(if page.start == 0 {
+                    p.faint
+                } else {
+                    p.accent_bright
+                })
+                .role("button")
+                .on_press(move |app: &mut App| {
+                    app.set_grid_transcript(previous_key.clone(), previous)
+                }),
+        )
+        .child(
+            text(format!(
+                "Rows {}–{} of {}",
+                page.start + 1,
+                page.end,
+                page.height
+            ))
+            .font(theme::data(10.0))
+            .color(p.muted)
+            .role("status"),
         );
     if page.end < page.height {
         nav = nav.child(
@@ -1828,7 +1848,11 @@ struct TranscriptPage {
 /// One page of `grid`'s transcript from `requested_row`, or nothing for a grid
 /// whose cells do not match its declared size. Each cell names its palette
 /// label, else its glyph, else its index, and says when it changed.
-fn transcript_page(grid: &RyeOsIndexedGridVm, requested_row: u32, page_size: u32) -> Option<TranscriptPage> {
+fn transcript_page(
+    grid: &RyeOsIndexedGridVm,
+    requested_row: u32,
+    page_size: u32,
+) -> Option<TranscriptPage> {
     let (width, height) = (grid.width, grid.height);
     if !(1..=512).contains(&width)
         || !(1..=512).contains(&height)
@@ -1862,7 +1886,11 @@ fn transcript_page(grid: &RyeOsIndexedGridVm, requested_row: u32, page_size: u32
                         .get(&index)
                         .filter(|name| !name.is_empty())
                         .map_or_else(|| index.to_string(), |name| (*name).to_owned());
-                    let mark = if changed.contains(&offset) { " (changed)" } else { "" };
+                    let mark = if changed.contains(&offset) {
+                        " (changed)"
+                    } else {
+                        ""
+                    };
                     format!("column {}: {name}{mark}", column + 1)
                 })
                 .collect();
@@ -1909,7 +1937,11 @@ mod tests {
 
     #[test]
     fn the_transcript_pages_every_cell_of_a_large_grid() {
-        let mut grid = board(64, 64, (0..4096).map(|offset| (offset % 2) as u16).collect());
+        let mut grid = board(
+            64,
+            64,
+            (0..4096).map(|offset| (offset % 2) as u16).collect(),
+        );
         grid.changed = vec![4095];
         let first = transcript_page(&grid, 0, 16).unwrap();
         assert_eq!(first.rows.len(), 16);
@@ -1940,7 +1972,10 @@ mod tests {
         let mut tall = board(1, 40, vec![3; 40]);
         tall.palette.clear();
         assert_eq!(transcript_page(&tall, 0, 999).unwrap().rows.len(), 16);
-        assert_eq!(transcript_page(&tall, 39, 16).unwrap().rows[0].1[0], "column 1: 3");
+        assert_eq!(
+            transcript_page(&tall, 39, 16).unwrap().rows[0].1[0],
+            "column 1: 3"
+        );
         assert_eq!(transcript_page(&tall, 900, 16).unwrap().start, 39);
     }
 
@@ -2275,11 +2310,7 @@ mod tests {
     fn the_stage_draws_the_empty_state_as_a_status() {
         let rt = drawn(bare(vec![source("a", "error", false, Some("boom"))]), false);
         assert!(says(&rt, "Source evidence failed"));
-        assert!(
-            rt.elements()
-                .iter()
-                .any(|element| element.role == "status")
-        );
+        assert!(rt.elements().iter().any(|element| element.role == "status"));
         let rt = drawn(fixture(), false);
         assert!(!says(&rt, "Source evidence failed"));
         assert!(!says(&rt, "No entities projected"));
@@ -2297,11 +2328,13 @@ mod tests {
         field.sources = vec![source("build", "ready", true, Some("late"))];
         field.replay.outside_cut = vec!["event-9".into()];
         field.search.truncated = true;
-        field.expansions = vec![serde_json::from_value(json!({
-            "source": "s", "root_id": "h", "phase": "ready", "applied_depth": 2,
-            "entity_count": 7, "truncated": true, "can_continue": false
-        }))
-        .unwrap()];
+        field.expansions = vec![
+            serde_json::from_value(json!({
+                "source": "s", "root_id": "h", "phase": "ready", "applied_depth": 2,
+                "entity_count": 7, "truncated": true, "can_continue": false
+            }))
+            .unwrap(),
+        ];
         let rt = drawn(field, false);
         assert!(says(&rt, "EVIDENCE"));
         assert!(says(
@@ -2328,7 +2361,11 @@ mod tests {
         ));
         field.sources[0].evidence_omitted = 0;
         let rt = drawn(field, true);
-        assert!(!texts(&rt).iter().any(|text| text.contains("omitted from this display")));
+        assert!(
+            !texts(&rt)
+                .iter()
+                .any(|text| text.contains("omitted from this display"))
+        );
     }
 
     #[test]
@@ -2395,7 +2432,11 @@ mod tests {
         field.expansions = vec![expansion("h", false)];
         let rt = drawn(field.clone(), true);
         assert!(says(&rt, "Applied depth 2; 7 retained entities."));
-        assert!(!texts(&rt).iter().any(|text| text.starts_with("Expansion is bounded")));
+        assert!(
+            !texts(&rt)
+                .iter()
+                .any(|text| text.starts_with("Expansion is bounded"))
+        );
         // An expansion rooted at another entity is not the selected one's.
         field.expansions = vec![expansion("a", true)];
         let rt = drawn(field, true);
@@ -2487,7 +2528,14 @@ mod tests {
             });
         let rt = drawn(field, false);
         let shown = texts(&rt);
-        for expected in ["Thread", "T-build", "Artifact", "7", "Content hash", "Not recorded"] {
+        for expected in [
+            "Thread",
+            "T-build",
+            "Artifact",
+            "7",
+            "Content hash",
+            "Not recorded",
+        ] {
             assert!(shown.contains(&expected.to_owned()), "{expected}");
         }
         let elements = rt.elements();

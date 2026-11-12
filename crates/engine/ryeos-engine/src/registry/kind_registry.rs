@@ -5267,7 +5267,10 @@ composed_value_contract:
              supports_operator_followup: false\n  retirement_fence: true\n"
         );
         let schema = parse_kind_schema_content("surface.yaml", &yaml).unwrap();
-        assert!(schema.execution().is_none(), "the kind stays non-executable");
+        assert!(
+            schema.execution().is_none(),
+            "the kind stays non-executable"
+        );
         let profile = schema.thread_profile().expect("declared profile");
         assert_eq!(profile.name, "seat_session");
         assert!(!profile.root_executable);
@@ -5276,11 +5279,13 @@ composed_value_contract:
 
     #[test]
     fn a_non_executable_profile_may_not_claim_root_execution() {
-        let yaml = format!(
-            "{DATA_KIND}thread_profile:\n  name: seat_session\n  root_executable: true\n"
-        );
+        let yaml =
+            format!("{DATA_KIND}thread_profile:\n  name: seat_session\n  root_executable: true\n");
         let error = parse_kind_schema_content("surface.yaml", &yaml).unwrap_err();
-        assert!(error.to_string().contains("root_executable: false"), "{error}");
+        assert!(
+            error.to_string().contains("root_executable: false"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -5290,7 +5295,10 @@ composed_value_contract:
              thread_profile:\n  name: seat_session\n  root_executable: false\n"
         );
         let error = parse_kind_schema_content("surface.yaml", &yaml).unwrap_err();
-        assert!(error.to_string().contains("execution.thread_profile"), "{error}");
+        assert!(
+            error.to_string().contains("execution.thread_profile"),
+            "{error}"
+        );
     }
 
     fn parse_exec(yaml: &str) -> Result<Option<ExecutionSchema>, EngineError> {

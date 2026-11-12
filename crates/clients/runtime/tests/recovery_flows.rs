@@ -22,9 +22,7 @@ use ryeos_client_runtime::recovery::{
     ReconnectChoice, ensure_settled, ensure_settled_without_core, observe_for_reconnect,
     observe_without_core,
 };
-use ryeos_client_runtime::seat::{
-    AppendFailure, RetryPolicy, SeatShared, SeatStart, send_append,
-};
+use ryeos_client_runtime::seat::{AppendFailure, RetryPolicy, SeatShared, SeatStart, send_append};
 use serde_json::{Value, json};
 
 const PRESENTATION: &str = "22222222-2222-4222-8222-222222222222";
@@ -128,7 +126,10 @@ fn seat_with_unknown_append(platform: &Rc<FakePlatform>) -> Rc<SeatShared<FakePl
         &[event],
         RetryPolicy::WEB,
     ));
-    assert!(matches!(outcome, Err(AppendFailure::Unknown(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(AppendFailure::Unknown(_))),
+        "{outcome:?}"
+    );
     assert!(shared.delivery.borrow().blocked);
     assert!(shared.delivery.borrow().pending.is_some());
     assert!(platform.store.get(KEY).is_some(), "the request is retained");
@@ -173,7 +174,10 @@ fn an_unknown_append_prevents_observation_without_a_core() {
     let outcome = platform
         .sim()
         .run(observe_without_core(&shared, RetryPolicy::WEB));
-    assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(RuntimeError::Fatal(_))),
+        "{outcome:?}"
+    );
 
     assert!(platform.transport.calls_to(SEAT_OPEN_PATH).is_empty());
     let lookups = bodies(&platform, SEAT_REPLAY_PATH);
@@ -223,9 +227,7 @@ fn an_unconfirmed_receipt_blocks_observation_and_keeps_the_record() {
         Reply::Ok(json!({"result": {"receipt_status": "found"}}).to_string()),
         Reply::Ok(json!({"receipt_status": "found", "receipt": null}).to_string()),
         Reply::Ok(json!({"receipt_status": "mystery", "receipt": null}).to_string()),
-        Reply::Ok(
-            json!({"receipt_status": "not_found", "receipt": null, "extra": 1}).to_string(),
-        ),
+        Reply::Ok(json!({"receipt_status": "not_found", "receipt": null, "extra": 1}).to_string()),
         Reply::Status(404),
     ];
     for reply in replies {
@@ -327,7 +329,10 @@ fn observing_without_a_core_refuses_a_live_producer() {
     let outcome = platform
         .sim()
         .run(observe_without_core(&shared, RetryPolicy::WEB));
-    assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(RuntimeError::Fatal(_))),
+        "{outcome:?}"
+    );
     assert!(platform.transport.calls.borrow().is_empty());
 }
 
@@ -339,12 +344,18 @@ fn observing_needs_a_retained_presentation() {
     let outcome = platform
         .sim()
         .run(observe_without_core(&shared, RetryPolicy::WEB));
-    assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(RuntimeError::Fatal(_))),
+        "{outcome:?}"
+    );
     let mut core = core();
     let outcome = platform
         .sim()
         .run(observe_for_reconnect(&shared, &mut core, RetryPolicy::WEB));
-    assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(RuntimeError::Fatal(_))),
+        "{outcome:?}"
+    );
     assert!(platform.transport.calls.borrow().is_empty());
 }
 
@@ -399,6 +410,9 @@ fn a_runtime_without_a_prepared_presentation_offers_only_an_independent_start() 
     ));
 
     let outcome = platform.sim().run(runtime.observe_reconnect_without_core());
-    assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(RuntimeError::Fatal(_))),
+        "{outcome:?}"
+    );
     assert!(platform.transport.calls.borrow().is_empty());
 }

@@ -3279,7 +3279,9 @@ mod predecessor_shape_tests {
             .node_policy
             .require::<ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy>()
             .unwrap();
-        let profile = profiles.get(&policy.seat.kind).expect("the seat kind has a profile");
+        let profile = profiles
+            .get(&policy.seat.kind)
+            .expect("the seat kind has a profile");
         assert!(!profile.root_executable);
         assert!(profile.retirement_fence);
         policy

@@ -17,7 +17,9 @@ use ryeos_client_base::ui::{
     SeatEvent, SeatEventKind, UiBindingAttachmentCoordinate, UiSeatControlPredecessor,
     UiSeatControlRequest,
 };
-use ryeos_client_runtime::api::{SEAT_APPEND_PATH, SEAT_CLOSE_PATH, SEAT_OPEN_PATH, SEAT_TOUCH_PATH};
+use ryeos_client_runtime::api::{
+    SEAT_APPEND_PATH, SEAT_CLOSE_PATH, SEAT_OPEN_PATH, SEAT_TOUCH_PATH,
+};
 use ryeos_client_runtime::error::RuntimeError;
 use ryeos_client_runtime::history::SeatCoordinate;
 use ryeos_client_runtime::seat::{
@@ -151,11 +153,27 @@ fn a_touch_sends_the_producer_and_classifies_every_answer() {
     other_thread["thread_id"] = json!("another");
 
     let cases: Vec<(&str, Reply, TouchOutcome)> = vec![
-        ("exact", Reply::Ok(touched().to_string()), TouchOutcome::Renewed),
+        (
+            "exact",
+            Reply::Ok(touched().to_string()),
+            TouchOutcome::Renewed,
+        ),
         ("wrapped", Reply::Ok(wrapped), TouchOutcome::Renewed),
-        ("not touched", Reply::Ok(false_ack.to_string()), TouchOutcome::Retry),
-        ("extra field", Reply::Ok(extra.to_string()), TouchOutcome::Retry),
-        ("another seat", Reply::Ok(other_thread.to_string()), TouchOutcome::Retry),
+        (
+            "not touched",
+            Reply::Ok(false_ack.to_string()),
+            TouchOutcome::Retry,
+        ),
+        (
+            "extra field",
+            Reply::Ok(extra.to_string()),
+            TouchOutcome::Retry,
+        ),
+        (
+            "another seat",
+            Reply::Ok(other_thread.to_string()),
+            TouchOutcome::Retry,
+        ),
         ("server error", Reply::Status(500), TouchOutcome::Retry),
         ("lost network", Reply::Network, TouchOutcome::Retry),
         ("unreadable", Reply::Unreadable, TouchOutcome::Retry),
@@ -258,7 +276,10 @@ fn a_relinquish_that_is_never_answered_stays_fenced() {
         .script(SEAT_CLOSE_PATH, vec![Reply::Network]);
 
     let outcome = platform.sim().run(relinquish_current(&shared));
-    assert!(matches!(outcome, Err(RuntimeError::Network { .. })), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(RuntimeError::Network { .. })),
+        "{outcome:?}"
+    );
 
     let sent = platform.transport.calls_to(SEAT_CLOSE_PATH);
     assert_eq!(sent.len(), 5);
@@ -356,15 +377,17 @@ fn local_mutation_stays_fenced_while_the_observation_is_awaited() {
 fn a_fence_during_the_observation_wait_is_not_undone_by_a_failed_observation() {
     let platform = FakePlatform::new();
     let shared = seat(&platform);
-    platform.transport.script(
-        SEAT_OPEN_PATH,
-        vec![Reply::Network, Reply::Status(404)],
-    );
+    platform
+        .transport
+        .script(SEAT_OPEN_PATH, vec![Reply::Network, Reply::Status(404)]);
 
     let mut relinquish = pin!(relinquish_current(&shared));
     let mut context = Context::from_waker(Waker::noop());
     assert!(relinquish.as_mut().poll(&mut context).is_pending());
-    assert!(shared.fence(&producer()), "the producer being relinquished is fenced");
+    assert!(
+        shared.fence(&producer()),
+        "the producer being relinquished is fenced"
+    );
 
     let outcome = loop {
         if let Poll::Ready(outcome) = relinquish.as_mut().poll(&mut context) {
@@ -394,7 +417,10 @@ fn a_second_relinquish_after_an_unknown_outcome_reports_it_and_sends_nothing() {
         .transport
         .script(SEAT_CLOSE_PATH, vec![Reply::Network]);
     let first = platform.sim().run(relinquish_current(&shared));
-    assert!(matches!(first, Err(RuntimeError::Network { .. })), "{first:?}");
+    assert!(
+        matches!(first, Err(RuntimeError::Network { .. })),
+        "{first:?}"
+    );
     let calls = platform.transport.calls.borrow().len();
 
     let second = platform.sim().run(relinquish_current(&shared));

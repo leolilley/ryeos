@@ -181,10 +181,7 @@ fn the_field_scene_draws_its_execution_entities() {
         field["entities"].as_array().map_or(0, Vec::len),
         "every entity is drawn"
     );
-    let first = entities
-        .iter()
-        .map(|rect| rect[0])
-        .fold(f32::MAX, f32::min);
+    let first = entities.iter().map(|rect| rect[0]).fold(f32::MAX, f32::min);
     assert!(
         first < stage[0] + stage[2] / 2.0,
         "the authored first group opens the stage, not an empty one ({first} in {stage:?})"
@@ -253,7 +250,10 @@ fn a_launcher_dialog_opens_moves_chooses_and_closes() {
     let first = selected_position(&launcher_rows(&model(&rt)));
     bare_key(&mut rt, Key::Down);
     let second = selected_position(&launcher_rows(&model(&rt)));
-    assert!(second > first, "Down moved the selection ({first} then {second})");
+    assert!(
+        second > first,
+        "Down moved the selection ({first} then {second})"
+    );
     bare_key(&mut rt, Key::Up);
     let back = selected_position(&launcher_rows(&model(&rt)));
     assert!(back < second, "Up moved it back ({second} then {back})");
@@ -275,7 +275,11 @@ fn the_launcher_opens_from_the_status_bar_and_closes_from_its_control() {
     let mut rt = shell("", (1280.0, 800.0));
     assert!(model(&rt).dialogs.is_empty());
     press(&mut rt, "shell:launch");
-    assert_eq!(model(&rt).dialogs.len(), 1, "the status bar opened the launcher");
+    assert_eq!(
+        model(&rt).dialogs.len(),
+        1,
+        "the status bar opened the launcher"
+    );
     assert!(
         keyed_between(&rt, "dialog:", ":close").is_some(),
         "the open dialog draws its close control"
@@ -328,7 +332,10 @@ fn the_status_bar_shows_only_its_segments() {
     let vm = model(&rt);
     let status = &vm.presentation.chrome.status_bar;
     let Some([_, top, _, height]) = keyed(&rt, "shell:launch") else {
-        assert!(!status.visible, "a visible status bar draws its launch control");
+        assert!(
+            !status.visible,
+            "a visible status bar draws its launch control"
+        );
         return;
     };
     assert!(status.visible);
@@ -347,7 +354,10 @@ fn the_status_bar_shows_only_its_segments() {
     for segment in &expected {
         assert!(shown.contains(segment), "segment {segment:?} in {shown:?}");
     }
-    assert!(shown.contains(&"RYEOS".to_owned()), "the launch control's name");
+    assert!(
+        shown.contains(&"RYEOS".to_owned()),
+        "the launch control's name"
+    );
     let others: Vec<&String> = shown
         .iter()
         .filter(|text| *text != "RYEOS" && !expected.contains(text))
@@ -445,7 +455,11 @@ fn long_lists_build_only_the_rows_in_view_and_the_feed_opens_at_its_end() {
         built_entries > 0 && built_entries < entries,
         "{built_entries} of {entries} entries built"
     );
-    let texts: Vec<String> = rt.elements().into_iter().filter_map(|element| element.text).collect();
+    let texts: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.text)
+        .collect();
     // The long fixture's last step.
     let last = "Step 200 of the run.".to_owned();
     assert!(texts.contains(&last), "the feed opens at its newest entry");

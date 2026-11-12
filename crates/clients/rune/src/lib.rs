@@ -20,11 +20,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use rune::{AppSpec, Cx, El, KeyEvent, TextEdit, Tx};
-use ryeos_client_runtime::documents::DocumentOffer;
 use ryeos_client_base::ids::RyeOsViewInstanceKey;
 use ryeos_client_base::ui::model::RyeOsInputAddress;
 use ryeos_client_base::ui::view_model::{RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsViewModel};
 use ryeos_client_base::ui::{RyeOsEvent, RyeOsUiEvent};
+use ryeos_client_runtime::documents::DocumentOffer;
 
 pub use boot::Boot;
 
