@@ -216,6 +216,31 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
             && product.manifest_hash() == subject.manifest_hash,
         "probe product differs from the subject owner product"
     );
+    // A restored guest holds the product as the snapshot archive installs it
+    // (bin 0755, owner 0755, profile 0644), not in the node-private storage
+    // form the producer writes; the owner reads it as its unprivileged
+    // account after the account transition, so the copy takes the guest form.
+    let copy_bin = product
+        .root()
+        .open_child_directory(OsStr::new("bin"))?
+        .context("probe product has no bin directory")?;
+    copy_bin.set_mode(0o755)?;
+    copy_bin
+        .open_pinned_regular(OsStr::new(OWNER_NAME), false)?
+        .context("probe product has no owner executable")?
+        .set_mode(0o755)?;
+    product
+        .root()
+        .open_pinned_regular(OsStr::new("guest-owner-profile.json"), false)?
+        .context("probe product has no owner profile")?
+        .set_mode(0o644)?;
+    ensure!(
+        ObservedGuestRuntime::observe(product.root())?
+            .measure_exact_owner_product()?
+            .manifest_hash
+            == subject.manifest_hash,
+        "probe product in guest form differs from the subject owner product"
+    );
 
     // 4. Loopback controller identity and the controller-side fixtures.
     let pki = EphemeralPki::generate()?;
