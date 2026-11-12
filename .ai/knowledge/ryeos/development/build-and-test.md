@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:fd35e5b39449dcd03da6acd6ee9fd5edfaa02e9760e511e444c0f5f96aebdac1:3T4XO2S3U/RUulP9h5qH6zhplz+tGCtzTuH71fGPoxKCEaMlK7R9JBj/DpxvhP+CGtd2VAyc1E/BXUkw/VDbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:14:08Z:860ae7a8138d6e0f7a923ffc25448d7865c204725f6108c9be32181617b4ce46:Ncf88uSfgPrTnAS43KOD7ptcIDaJTRIEuKVXd0hVaEkZMCtxc9F0/S6NvIzaK6vvip8n6Hp/0lY668CAKjgRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -211,7 +211,10 @@ ryeos execute tool:ryeos/core/identity/public_key
 script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
 
-The generated isolation policy is disabled by default. `node doctor` uses the
+The isolation mode comes from the init profile passed as `--node-profile`.
+`install-local-direct.sh` passes its bundle set's profile (`full` by default,
+whose `local` lane selects disabled); `--node-profile development` selects
+enforce. `node doctor` uses the
 production policy loader; after changing mode or policy contents, restart the
 node before judging execution behavior. See [Execution
 Isolation](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md).
