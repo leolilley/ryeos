@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:29Z:6d03f4867932cd5814b75d68245a1be98c180f9ae2c4d40c4c56e2e71259e877:32JSpowXvSNph7wkNYEH/fy2MvNsKcvSt901fzV4nu8x0WMwqi8DAF2VUjtglpdtS3SkFK/Bbq7Ae6Lxgb8PAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:57:18Z:6e6d79f2d1684bb998d577a13a8dd016740cedd62483d3ee36602915588bf559:JEBslUZHFSf1uhoNWDmEau3hLB0JaRrjfMooPk0u4URYufOKuyD+OnmixjB86kAYgGBKntJMZzdPmo3wYREXAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, resolution, canonical-refs, spaces, bundles]
@@ -30,6 +30,8 @@ Resolution searches:
 3. Installed system bundles, as registered under daemon state
 
 First match wins. Bundle order is a daemon bootstrap concern, but each installed bundle remains a signed `.ai/` tree and contributes sections independently.
+
+The path of a ref never names a bundle. `config:codex/foo` is `.ai/config/codex/foo.yaml` in whichever root holds it first; `codex` is a directory. A downstream bundle that adds items, such as a site bundle of signed policies, should use a directory no other installed bundle uses, so its refs cannot shadow or be shadowed by a shipped item. A shadowed candidate is recorded in the resolution, not refused.
 
 ## Format selection
 

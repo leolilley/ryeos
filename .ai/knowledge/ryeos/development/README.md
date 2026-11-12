@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:15a0fbabfbd26b8fd08542e4056ed45760b4c5f4ba60891df027dedaec36ce8f:Aj+wDeuqV6hmea26QJ37b1mhI96VljarC4VOK6gba6uWm67HJ/pixVtMElZuoKPIMwoRhBukPJOC+e2SvS2nBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:57:18Z:fef1821f78076e38f35a1b0d3bfd269aa7b71f5e77e1548e7a69c76d48069136:+2kpuefUbJ5B1HDsv6mmxii+z18kRa25FQgIdAB6a/XLW9x5h3NP/l8hABuR8fyysGfLghYR4lfTH2N2DIvSDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
@@ -49,6 +49,9 @@ contributor guide rather than duplicating the product documentation.
 - `steering-graph-interrupt-and-cancel-path`: an implementation decision record.
 - `admitted-execution-recovery`: a contributor-facing map of the recovery code
   and the invariants changes to that code must preserve.
+- `signed-offline-operations` and `remote-qualification-testimony`: design
+  rationale, threat model and invariants for stopped-node changes and for
+  qualifications that cross between nodes.
 - `ui-design-system`: the governing Gruvbox visual language, nested-view-set
   direction, component anatomy, contextual-input rules, renderer/content
   ownership and visual review criteria. Read it before implementing or restyling
