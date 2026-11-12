@@ -46,12 +46,10 @@ use ryeos_state::{CasMutationGuard, PinnedStateAuthority};
 
 use super::content_qualification::{load_current_qualified_content, prepare_source};
 use super::product_qualification::{
-    CurrentVerifierContent, CurrentVerifierContext, load_current_qualification,
-    require_current_consumer_content_for_selection, require_unguarded_resolution,
-    resolve_consumer_definition_in_generation, resolve_current_bundle_qualification_policy,
-    resolve_current_bundle_verifier_identity_against_admitted,
-    verify_current_external_runtime_qualification, verify_current_product_qualification_for_export,
-    with_state_guard,
+    load_current_qualification, require_current_consumer_content_for_selection,
+    require_unguarded_resolution, resolve_consumer_definition_in_generation,
+    resolve_current_bundle_qualification_policy, verify_current_external_runtime_qualification,
+    verify_current_product_qualification_for_export, with_state_guard,
 };
 use super::product_receipt::{ProductSourceVerification, load_product_source};
 use crate::handler_context::HandlerContext;
@@ -668,33 +666,14 @@ pub(crate) fn verify_current_remote_selection_testimony(
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
     }
     relationship.validate_compatible_product_evidence(&product.evidence)?;
-    // The verifier is resolved, never run: the digests the origin recorded
-    // must be what this node's installed signed verifier resolves to.
-    // Resolved without the origin's sealed launch capsule, which this node
-    // never holds: the verifier Tool is resolved from the installed signed
-    // bundle by ref and parameters alone, as a content qualification does.
-    let current_verifier = resolve_current_bundle_verifier_identity_against_admitted(
-        state,
-        authority,
-        context,
-        &origin_policy.policy.verifier_ref,
-        &origin_policy.policy.verifier_parameters,
-        CurrentVerifierContext {
-            content: CurrentVerifierContent::Root(None),
-            logical_project_root: None,
-            binding_subject_authority: None,
-            sealed_request: None,
-            project_context_resolver: None,
-            pinned_admission: None,
-        },
-        None,
-    )?;
-    ensure!(
-        current_verifier.artifact_identity == evidence.verifier.artifact_identity
-            && current_verifier.effective_definition_digest
-                == evidence.verifier.effective_definition_digest,
-        "remote product testimony names a verifier this node does not resolve"
-    );
+    // The verifier ran on the origin, never here. Which verifier this node
+    // trusts is the operator's signed acceptance policy: `admit` above requires
+    // the evidence's verifier definition and artifact digests to be listed in
+    // it, and `require_origin_policy` pins the verifier ref and parameters
+    // through the byte-identical signed qualification policy. Re-deriving the
+    // origin's artifact identity here is not possible: it binds the origin's
+    // own product selections and pinned project snapshot, which a controller
+    // never holds.
     require_current_consumer_content_for_selection(
         state,
         authority,
