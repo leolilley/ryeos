@@ -1063,3 +1063,79 @@ async fn binding_reuse_rejects_lying_payloads_in_both_manifest_tiers() {
         assert!(format!("{error:#}").contains("size"));
     }
 }
+
+/// Find the binding-epoch file under the test's state root.
+fn binding_epoch_file(root: &std::path::Path) -> std::path::PathBuf {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_name() == "external-content-bindings.epoch" {
+                return entry.path();
+            }
+        }
+    }
+    panic!(
+        "no external-content-bindings.epoch under {}",
+        root.display()
+    );
+}
+
+fn overwrite(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = std::fs::metadata(path).unwrap().permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[tokio::test]
+async fn release_refuses_a_binding_namespace_at_another_epoch() {
+    let (tmp, _store_owner, state, context, binding_hash, _manifest_hash) = fixture(false);
+    external_content_import::handle(
+        request(&binding_hash, 11),
+        context.clone(),
+        Arc::clone(&state),
+    )
+    .await
+    .unwrap();
+    let authority = state.state_store.pinned_state_authority().unwrap();
+    let binding = ExternalContentBinding::from_value(
+        &authority
+            .cas_store()
+            .unwrap()
+            .get_object(&binding_hash)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let release = || {
+        ryeos_app::operator_external_content::release(
+            Arc::clone(&state),
+            context.clone(),
+            ryeos_app::operator_external_content::ReleaseRequest {
+                binding_subject_id: binding.binding_subject_id.clone(),
+            },
+        )
+    };
+
+    let epoch_file = binding_epoch_file(tmp.path());
+    let current = std::fs::read_to_string(&epoch_file).unwrap();
+    let stored: u32 = current.trim().parse().unwrap();
+    // Simulated drift: the namespace claims a predecessor epoch.
+    overwrite(&epoch_file, &format!("{}\n", stored - 1));
+    let error = release().await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("explicit reset is required"),
+        "{error:#}"
+    );
+
+    // Nothing was written: with the epoch restored, the release is a real
+    // first release, not an idempotent replay.
+    overwrite(&epoch_file, &current);
+    let released = release().await.unwrap();
+    assert!(!released.idempotent);
+}
