@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-03T11:56:15Z:c1eea05ce7744baf8051ffa5b2280551c687ecd5890b0c8c982de6b9ec626119:lIH050NQeGegwi4YEQZeX9ainsbI/TcWw2Hh54Yv7fpHQkahLbdGqVrE9mHkR7s1pLOdEW8hIGfvhILcjyRdBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:06:51Z:b55e627e732bcfa71be70f320b89cebe999fd832e01039d4641f4915dd0e2e5d:LSeM20oRaC28gcnGARZF8lxHsq7wMqjZL77leRSLZKgYT7qKuAKFSgjm7cSisBEPk51hJccgXik9VNL7mNMIDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
@@ -150,7 +150,7 @@ first). Retention is by timestamp, not traversal order.
 
 ```rust
 struct RetentionPolicy {
-    manual_pushes: usize,   // authored limit for "push" and "manual" sources
+    manual_pushes: usize,   // authored limit for "push" and "snapshot_create" sources
     auto_snapshots: usize,  // authored limit for "fold_back" and other auto sources
 }
 ```

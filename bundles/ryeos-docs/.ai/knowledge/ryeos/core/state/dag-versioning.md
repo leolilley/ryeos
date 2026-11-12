@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:98863be9c6aed7135a0c31898bbc49302a125d95123795ee311e02c70151b8df:Fwj3RKgOJXPgMXZMXCfudJcaIRMLCz+jZ+r+jzjmV4N3+CceYRFQJGMmOY2m9+GDPTKEIaqPhmnxCMJgWF6mBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:06:51Z:003200f5cf9c0af0805dae3c5b42ec7e214c4cb72a0c80376d881b9dc85140d2:ycJKc5qJ7yTCitZOzMwJRj1i0uZM4fuSoQuTzLiXXYlqlCHAGgjAGoNToT/R1lyOTG8ncnBxetA8Te0wi37cDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -43,8 +43,8 @@ categories:
 
 | Field | Default | Matches |
 |---|---|---|
-| `manual_pushes` | 10 | Snapshots with `source == "push"` or `source == "manual"` |
-| `auto_snapshots` | 30 | Snapshots with `source == "fold_back"` or other auto sources |
+| `manual_pushes` | 10 | Operator snapshots: `source == "push"` or `source == "snapshot_create"` (`ryeos snapshot create`) |
+| `auto_snapshots` | 30 | Every other source: fold-backs, remote sync, captures, and any unknown source |
 
 The head snapshot is **always** kept regardless of policy.
 
