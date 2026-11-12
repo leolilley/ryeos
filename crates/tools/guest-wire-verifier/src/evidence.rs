@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-pub const EVIDENCE_SCHEMA: &str = "ryeos.guest_wire_evidence.v2";
+pub const EVIDENCE_SCHEMA: &str = "ryeos.guest_wire_evidence.v3";
 pub const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +87,10 @@ pub struct GuestWireEvidence {
     pub applied_launch_receipt_digest: String,
     pub candidate_program_digest: String,
     pub owner_exit: OwnerExit,
+    /// The archive members' digests under the field every consumer verifier's
+    /// evidence uses (`CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD`), which the
+    /// node checks against the retained signed source.
+    #[serde(rename = "archive_member_digests")]
     pub member_digests: BTreeMap<String, String>,
     pub schema_pins: SchemaPins,
 }
@@ -321,5 +325,18 @@ pub(crate) mod tests {
         value["extra"] = serde_json::json!(1);
         let bytes = ryeos_external_execution_contract::canonical_json(&value).unwrap();
         assert!(GuestWireEvidence::parse_and_verify(&bytes, &expected()).is_err());
+    }
+
+    #[test]
+    fn archive_member_digests_travel_under_the_node_checked_field() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&evidence().canonical_bytes().unwrap()).unwrap();
+        let field =
+            ryeos_external_execution::restoration_verifier_delivery::CONSUMER_EVIDENCE_ARCHIVE_MEMBERS_FIELD;
+        assert_eq!(
+            value[field],
+            serde_json::to_value(expected().member_digests).unwrap()
+        );
+        assert!(value.get("member_digests").is_none());
     }
 }
