@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:3d7e3ae559afd0f34ef0f9e8b17a075be6ad4b321a63441d445e84c6207b32dc:pRZUCQMM5ZB7hqe5WHN0w97oYNHTwGCrcZOU1sh60E3Ck1o/egGj3BH0zw962u4Utq1/DtRmCYMQ3FT+B0aVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:01:20Z:10246ee5637537fc49a8e35c058370c6b5c55c6009e70d07cfe4dc72caf67e89:s3CD9aoKighSfXWh6UR80oejlULblm6RL4btjWWQthsu4k748tzs/y6y8b/1HCT8+YmTaH638/rw6/JpqqAxAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -72,17 +72,18 @@ Events are stored as CAS objects in canonical JSON. Each event contains:
 | Tier | CAS Stored? | SQLite Indexed? | Survives Crash? | Use Cases |
 |---|---|---|---|---|
 | `Durable` | Yes | Yes | Yes | Lifecycle events, artifacts, tool dispatch |
-| `Journal` | Yes | No | Yes | Audit trail, progressive events |
-| `Ephemeral` | No | No | No | Token deltas, streaming snapshots |
+| `Journal` | Yes | No | Yes | Available; no event type is assigned it today |
+| `Ephemeral` | No | No | No | Token deltas, stream snapshots, reasoning, observations, foreach progress |
 
 Only durable events appear in the SQLite projection. Journal events are
 recoverable from CAS during a projection rebuild but are not queryable
 at runtime. Ephemeral events are transient — they exist only in the
 broadcast stream and are not persisted.
 
-High-frequency progressive events are assigned journal tier:
-`token_delta`, `stream_snapshot`, `cognition_reasoning`,
-`graph_foreach_iteration`. All other events are durable.
+High-frequency progressive events are ephemeral: `token_delta`,
+`stream_snapshot`, `cognition_reasoning`, `observation` and
+`graph_foreach_iteration` reach live subscribers only and are never
+persisted. All other events are durable.
 
 ## Replay
 
