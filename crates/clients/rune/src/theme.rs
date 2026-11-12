@@ -93,3 +93,56 @@ pub const STRIP_HEIGHT: f32 = 53.0;
 pub const STATUS_HEIGHT: f32 = 27.0;
 pub const NAV_WIDTH: f32 = 205.0;
 pub const HEADER_HEIGHT: f32 = 34.0;
+
+/// Which embedded face a string is set in.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Face {
+    Ui,
+    Data,
+}
+
+/// Core-projected text with each symbol its face lacks replaced by one it has.
+/// On the web Rune draws only from its embedded faces, so a missing symbol
+/// would show as a missing glyph; the core's strings are shared with the
+/// terminal and stay as they are.
+pub fn drawable(text: &str, face: Face) -> std::borrow::Cow<'_, str> {
+    let swap = |ch: char| -> Option<&'static str> {
+        match (ch, face) {
+            // Neither face has the small triangles.
+            ('▸', _) => Some("›"),
+            ('▾', Face::Ui) => Some("⌄"),
+            ('▾', Face::Data) => Some("↓"),
+            // Inter has no partial block; IBM Plex Mono does.
+            ('▍', Face::Ui) => Some("|"),
+            // IBM Plex Mono has no erase-left key symbol.
+            ('⌫', Face::Data) => Some("Bksp"),
+            _ => None,
+        }
+    };
+    if !text.chars().any(|ch| swap(ch).is_some()) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match swap(ch) {
+            Some(with) => out.push_str(with),
+            None => out.push(ch),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Face, drawable};
+
+    #[test]
+    fn missing_symbols_are_swapped_for_the_face_in_use() {
+        assert_eq!(drawable("Earlier ▸", Face::Data), "Earlier ›");
+        assert_eq!(drawable("▍ working…", Face::Ui), "| working…");
+        assert_eq!(drawable("▍ working…", Face::Data), "▍ working…");
+        assert_eq!(drawable("⌫ back", Face::Data), "Bksp back");
+        assert_eq!(drawable("▾ open", Face::Data), "↓ open");
+        assert_eq!(drawable("plain", Face::Ui), "plain");
+    }
+}

@@ -83,6 +83,42 @@ impl Local {
             .unwrap_or_else(|| TextEdit::new(query))
     }
 
+    /// Forget an open menu or an unfinished rename whose subject the core no
+    /// longer shows: a menu whose tile lost its actions, a view-set rename
+    /// once that tab is not active, a Surface rename once it cannot be renamed.
+    fn drop_stale(&mut self, vm: &RyeOsViewModel) {
+        if let Some(key) = &self.menu {
+            let root = vm.view_set.as_ref().and_then(|set| set.root.as_ref());
+            if root
+                .and_then(|root| shell::menu_intents(root, key))
+                .is_none()
+            {
+                self.menu = None;
+            }
+        }
+        let live = match self.rename.as_ref().map(|rename| &rename.target) {
+            None => true,
+            Some(RenameTarget::ViewSet(id)) => vm
+                .presentation
+                .chrome
+                .top_bar
+                .tabs
+                .iter()
+                .any(|tab| tab.active && tab.view_set_id == *id),
+            Some(RenameTarget::Surface(ryeos_client_base::ui::RyeOsUiIntent::RenameSurface {
+                surface_instance_id,
+                ..
+            })) => vm.session.surfaces.iter().any(|surface| {
+                surface.surface_instance_id == *surface_instance_id
+                    && surface.rename_intent.is_some()
+            }),
+            Some(RenameTarget::Surface(_)) => false,
+        };
+        if !live {
+            self.rename = None;
+        }
+    }
+
     /// Match every mounted field's search buffer to the core's query.
     fn sync_field_queries(&mut self, vm: &RyeOsViewModel) {
         let mut mounted = Vec::new();
@@ -141,8 +177,20 @@ impl Edits {
             .map(|input| input_key(&input.address))
             .collect();
         self.0.retain(|key, _| keys.contains(key));
+        // A dialog's field takes focus when the dialog opens, as in the
+        // browser shell; other fields wait for a press.
+        let dialog_inputs: Vec<String> = vm
+            .dialogs
+            .iter()
+            .filter_map(|dialog| dialog.input.as_ref())
+            .map(|input| input_key(&input.address))
+            .collect();
         for (key, input) in keys.into_iter().zip(mounted) {
+            let opening = !self.0.contains_key(&key) && dialog_inputs.contains(&key);
             let edit = self.0.entry(key).or_insert_with(|| TextEdit::new(""));
+            if opening {
+                edit.focused = true;
+            }
             if edit.text != input.text {
                 edit.replace_text(input.text.clone());
                 edit.set_caret(input.cursor.min(input.text.len()));
@@ -322,6 +370,7 @@ impl App {
             let vm = core.envelope(Vec::new()).view_model;
             self.local.edits.sync(&vm);
             self.local.sync_field_queries(&vm);
+            self.local.drop_stale(&vm);
         }
     }
 

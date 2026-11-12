@@ -976,7 +976,10 @@ fn layout(
 }
 
 /// The intents of the mounted tile whose actions menu key is `key`.
-fn menu_intents<'a>(node: &'a RyeOsLayoutNodeVm, key: &str) -> Option<&'a [RyeOsTileIntentVm]> {
+pub(crate) fn menu_intents<'a>(
+    node: &'a RyeOsLayoutNodeVm,
+    key: &str,
+) -> Option<&'a [RyeOsTileIntentVm]> {
     match node {
         RyeOsLayoutNodeVm::Split { first, second, .. } => {
             menu_intents(first, key).or_else(|| menu_intents(second, key))
@@ -1017,7 +1020,7 @@ fn status_bar(model: &RyeOsStatusBarVm) -> El {
     }
     bar.child(el().grow(1.0))
         .child(
-            text(model.key_hint.to_uppercase())
+            text(theme::drawable(&model.key_hint, theme::Face::Data).to_uppercase())
                 .font(theme::data(9.0))
                 .color(p.faint),
         )
@@ -1193,18 +1196,25 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
             });
         })
         .on_input_key(move |app: &mut App, event: &KeyEvent, _tx| {
+            let mods = &event.mods;
+            let bare = !(mods.shift || mods.alt || mods.ctrl || mods.logo);
             let action = match &event.key {
-                Key::Up if live => RyeOsInputAction::NavigateSelection { delta: -1 },
-                Key::Down if live => RyeOsInputAction::NavigateSelection { delta: 1 },
-                Key::Enter if live && !event.mods.shift => RyeOsInputAction::ActivateSelection,
-                // Shift+Enter is a newline; Alt+Enter submits as an interrupt.
-                Key::Enter if !event.mods.shift => {
-                    if !submit_enabled {
+                Key::Up if live && bare => RyeOsInputAction::NavigateSelection { delta: -1 },
+                Key::Down if live && bare => RyeOsInputAction::NavigateSelection { delta: 1 },
+                Key::Enter if live => RyeOsInputAction::ActivateSelection,
+                // Alt+Enter submits as an interrupt.
+                Key::Enter if !mods.shift && submit_enabled => RyeOsInputAction::Submit {
+                    interrupt: mods.alt,
+                },
+                // With nothing to submit, Return writes a line break, as
+                // Shift+Return does.
+                Key::Enter if !mods.shift => {
+                    let edit_key = crate::input_key(&key_address);
+                    app.edit_mut(&edit_key).insert("\n");
+                    let Some((text, cursor)) = app.edit_state(&edit_key) else {
                         return true;
-                    }
-                    RyeOsInputAction::Submit {
-                        interrupt: event.mods.alt,
-                    }
+                    };
+                    RyeOsInputAction::SetText { text, cursor }
                 }
                 _ => return false,
             };

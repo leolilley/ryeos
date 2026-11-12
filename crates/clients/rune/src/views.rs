@@ -472,10 +472,12 @@ pub fn actions_menu(key: &str, intents: &[RyeOsTileIntentVm]) -> El {
 pub fn body(view: &RyeOsViewVm, instance: &RyeOsViewInstanceKey, local: &crate::Local) -> El {
     match view {
         RyeOsViewVm::Placeholder { title, message } => empty_state(title, message),
-        RyeOsViewVm::RequiredSubject { title, input, .. } => empty_state(
+        RyeOsViewVm::RequiredSubject {
             title,
-            &format!("This view needs a {input} before it can show anything."),
-        ),
+            input,
+            facets,
+            actions,
+        } => required_subject(title, input, facets, actions),
         RyeOsViewVm::Rows {
             title,
             source_status,
@@ -699,9 +701,16 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
                 .py(7.0)
                 .child(
                     el().w(24.0).child(
-                        text(item.glyph.clone().unwrap_or_else(|| "◇".to_owned()))
-                            .font(theme::ui(13.0))
-                            .color(p.yellow),
+                        text(
+                            item.glyph
+                                .as_deref()
+                                .map_or("◇".into(), |glyph| {
+                                    theme::drawable(glyph, theme::Face::Ui)
+                                })
+                                .into_owned(),
+                        )
+                        .font(theme::ui(13.0))
+                        .color(p.yellow),
                     ),
                 )
                 .child(copy);
@@ -1162,12 +1171,14 @@ fn timeline_view(
         let expandable = timeline.expandable.get(index).copied().unwrap_or(false);
         let expanded = timeline.expanded.get(index).copied().unwrap_or(false);
         let content = match entry {
-            RyeOsTimelineEntryVm::Block { text: body, tone } => text(body.clone())
-                .font(theme::ui(13.0))
-                .color(p.tone(*tone, p.text))
-                .wrap()
-                .grow(1.0)
-                .min_w(0.0),
+            RyeOsTimelineEntryVm::Block { text: body, tone } => {
+                text(theme::drawable(body, theme::Face::Ui).into_owned())
+                    .font(theme::ui(13.0))
+                    .color(p.tone(*tone, p.text))
+                    .wrap()
+                    .grow(1.0)
+                    .min_w(0.0)
+            }
             RyeOsTimelineEntryVm::Line {
                 primary,
                 meta,
@@ -1180,9 +1191,11 @@ fn timeline_view(
                 tone,
                 ..
             } => entry_line(summary, meta.as_deref(), p.tone(*tone, p.text), 400.0),
-            RyeOsTimelineEntryVm::Separator { label } => text(label.to_uppercase())
-                .font(theme::data(9.0))
-                .color(p.faint),
+            RyeOsTimelineEntryVm::Separator { label } => {
+                text(theme::drawable(label, theme::Face::Data).to_uppercase())
+                    .font(theme::data(9.0))
+                    .color(p.faint)
+            }
         };
         let mut button = row()
             .grow(1.0)
@@ -1243,7 +1256,7 @@ fn timeline_view(
 fn entry_line(primary: &str, meta: Option<&str>, ink: rune::Color, weight: f32) -> El {
     let p = Palette::get();
     let mut line = row().grow(1.0).min_w(0.0).gap(12.0).center_y().child(
-        text(primary.to_owned())
+        text(theme::drawable(primary, theme::Face::Ui).into_owned())
             .font(rune::tok::TextStyle::new(13.0, weight).family(theme::UI))
             .color(ink)
             .wrap()
@@ -1354,6 +1367,79 @@ fn source_status(status: &RyeOsSourceStatusVm) -> El {
         .px(9.0)
         .py(6.0)
         .role("status")
+}
+
+/// A view waiting for a subject: what it needs, and the open selections that
+/// can supply it.
+fn required_subject(
+    title: &str,
+    input: &str,
+    facets: &[String],
+    actions: &[RyeOsTileIntentVm],
+) -> El {
+    let p = Palette::get();
+    let mut block = col()
+        .w_full()
+        .grow(1.0)
+        .justify_center()
+        .gap(12.0)
+        .padding(48.0)
+        .role("status")
+        .label(title.to_owned())
+        .child(
+            text("UNRESOLVED VIEW")
+                .font(theme::data(9.0).tracking(1.2))
+                .color(p.accent_bright),
+        )
+        .child(
+            text(title.to_owned())
+                .font(theme::ui(32.0))
+                .color(p.text)
+                .wrap()
+                .w_full(),
+        )
+        .child(
+            text(format!("{input} needs {}.", facets.join(", ")))
+                .font(theme::ui(13.0))
+                .color(p.muted)
+                .wrap()
+                .max_w(560.0),
+        );
+    if actions.is_empty() {
+        return block.child(
+            text("Select a compatible subject in another open set.")
+                .font(theme::data(10.0))
+                .color(p.faint),
+        );
+    }
+    let mut choices = row()
+        .flex_wrap()
+        .gap(8.0)
+        .mt(8.0)
+        .role("group")
+        .label("Compatible current selections");
+    for action in actions {
+        let intent = action.intent.clone();
+        choices = choices.child(
+            text(action.label.clone())
+                .font(theme::ui(13.0))
+                .color(p.text)
+                .px(12.0)
+                .py(9.0)
+                .border(1.0, p.line_strong)
+                .fill(p.plane)
+                .hover(p.plane_selected)
+                .role("button")
+                .label(action.title.clone())
+                .on_press(move |app: &mut App| {
+                    app.ui(RyeOsUiEvent::Activate {
+                        intent: intent.clone(),
+                    });
+                }),
+        );
+    }
+    block = block.child(choices);
+    block
 }
 
 fn empty_state(title: &str, message: &str) -> El {
