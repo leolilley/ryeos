@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T22:13:02Z:f13141cec580b69e411ab78bf5e1e560e6f33f5db188d495cb22d304ca27ff61:XbQRR2KpZxpr7NwAZ7DsmeAhbL2jyvaFyRuMI99WM/pKAsw0/aouqo2xqdgvzSvyMzvn9lBc4bmU/5Q3/d8bBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T04:16:48Z:5d90ea86d0026cf0c3000da88b971555b5dfd5ac9a1c4b1d7ee3242c5fe1ab51:jl/aG5XIMtvrM4GwsfF24oeynnD3wAWW/yZyZbQqXxQo/3hDIs90ANySI2bmn29iWQ7ApVSZmQVcl53RNCaMDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -145,9 +145,6 @@ policies:
       graph:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       knowledge: []
-      # The operator's site bundle of consumer acceptance policies, installed
-      # with `ryeos bundle install` after init; it registers no commands.
-      f5r-site: []
   execution:
     schema: 4
     max_live_fanout: 8
