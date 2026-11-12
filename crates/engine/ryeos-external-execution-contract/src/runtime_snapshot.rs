@@ -12,7 +12,7 @@ use crate::canonical_json;
 
 pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 5;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
-pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v5";
+pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v6";
 pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 1;
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL: &str =

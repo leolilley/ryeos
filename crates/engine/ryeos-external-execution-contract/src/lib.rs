@@ -43,7 +43,7 @@ use zeroize::Zeroize as _;
 /// private mailbox parent is exactly this path.
 pub const GUEST_OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
 
-pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v2";
+pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v3";
 pub const PROVIDER_DECLARATION_PROTOCOL: &str = "ryeos.external-execution.provider-declaration.v2";
 pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =
     "ryeos.external-execution.provider-configuration.v1";

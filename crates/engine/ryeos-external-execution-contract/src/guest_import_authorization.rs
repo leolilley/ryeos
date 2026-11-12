@@ -22,7 +22,7 @@ pub const MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES: usize =
     MAX_GUEST_OCCURRENCE_ASSIGNMENT_BYTES + 256;
 pub const MAX_GUEST_IMPORT_AUTHORIZATION_BYTES: usize = 256 * 1024;
 const SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-guest-import-authorization.v1\0";
-const ASSIGNMENT_SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-guest-occurrence-assignment.v1\0";
+const ASSIGNMENT_SIGNATURE_DOMAIN: &[u8] = b"ryeos.external-guest-occurrence-assignment.v2\0";
 
 /// Independent placement coordinates held by the guest's trusted runtime.
 /// Constructing this from the ticket, upload, or signed document itself would
