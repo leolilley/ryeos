@@ -194,6 +194,14 @@ pub enum LargeObjectIntegrityFinding {
         file_sha256: String,
         error: String,
     },
+    /// An entry in the object namespace that the store did not write: not a
+    /// regular file, or not named by a 64-hex digest. Scrub reports it and
+    /// leaves it alone; sweep still refuses until an operator removes it.
+    ForeignEntry {
+        /// The entry name; bytes that are not UTF-8 are escaped.
+        name: String,
+        entry_type: String,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1113,10 +1121,18 @@ impl LargeObjectStore {
     pub fn scrub_all(&self) -> anyhow::Result<LargeObjectScrubReport> {
         let mut report = LargeObjectScrubReport::default();
         for entry in self.objects.entries_no_follow()? {
-            if entry.entry_type != lillux::PinnedEntryType::Regular {
-                continue;
-            }
-            let Some(name) = entry.name.to_str().map(str::to_owned) else {
+            let name = entry
+                .name
+                .to_str()
+                .filter(|name| lillux::cas::valid_hash(name))
+                .map(str::to_owned);
+            let (lillux::PinnedEntryType::Regular, Some(name)) = (entry.entry_type, name) else {
+                report
+                    .findings
+                    .push(LargeObjectIntegrityFinding::ForeignEntry {
+                        name: escaped_entry_name(&entry.name),
+                        entry_type: entry_type_name(entry.entry_type).to_owned(),
+                    });
                 continue;
             };
             let findings = self.scrub_object(&name)?;
@@ -1331,6 +1347,34 @@ fn hash_file_range(file: &mut fs::File, start: u64, len: u64) -> anyhow::Result<
 fn read_exact_len(file: &mut fs::File, buffer: &mut [u8]) -> anyhow::Result<()> {
     file.read_exact(buffer)
         .map_err(|error| anyhow::anyhow!("short read while verifying staged ingest: {error}"))
+}
+
+/// An entry name for a finding: UTF-8 as is, other bytes escaped.
+fn escaped_entry_name(name: &OsStr) -> String {
+    match name.to_str() {
+        Some(name) => name.to_owned(),
+        None => {
+            use std::os::unix::ffi::OsStrExt as _;
+            name.as_bytes()
+                .iter()
+                .flat_map(|byte| std::ascii::escape_default(*byte))
+                .map(char::from)
+                .collect()
+        }
+    }
+}
+
+fn entry_type_name(entry_type: lillux::PinnedEntryType) -> &'static str {
+    match entry_type {
+        lillux::PinnedEntryType::Directory => "directory",
+        lillux::PinnedEntryType::Regular => "regular",
+        lillux::PinnedEntryType::Symlink => "symlink",
+        lillux::PinnedEntryType::CharacterDevice => "character_device",
+        lillux::PinnedEntryType::BlockDevice => "block_device",
+        lillux::PinnedEntryType::Fifo => "fifo",
+        lillux::PinnedEntryType::Socket => "socket",
+        lillux::PinnedEntryType::Other => "other",
+    }
 }
 
 fn require_store_hash(value: &str) -> anyhow::Result<()> {
@@ -1629,6 +1673,43 @@ mod tests {
                 LargeObjectIntegrityFinding::MissingSidecar { .. }
             )),
             "got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn scrub_reports_foreign_entries_and_still_verifies_real_objects() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let (dir, store) = store(8);
+        let ingested =
+            ingest(&store, &write_source(&dir, "payload.bin", &[6u8; 24]), None).unwrap();
+        let objects = dir.path().join("large-objects/objects");
+        fs::write(objects.join("not-a-hash"), b"stray").unwrap();
+        fs::create_dir(objects.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&ingested.file_sha256, objects.join("link")).unwrap();
+        fs::write(objects.join(OsStr::from_bytes(b"bad\xff")), b"stray").unwrap();
+
+        let report = store.scrub_all().unwrap();
+        assert_eq!(report.objects_verified, 1);
+        assert_eq!(report.bytes_verified, 24);
+        let mut foreign = report
+            .findings
+            .iter()
+            .map(|finding| match finding {
+                LargeObjectIntegrityFinding::ForeignEntry { name, entry_type } => {
+                    (name.as_str(), entry_type.as_str())
+                }
+                other => panic!("unexpected finding {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        foreign.sort();
+        assert_eq!(
+            foreign,
+            [
+                ("bad\\xff", "regular"),
+                ("link", "symlink"),
+                ("not-a-hash", "regular"),
+                ("sub", "directory"),
+            ]
         );
     }
 
