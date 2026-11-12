@@ -1,6 +1,6 @@
 //! Descriptor-relative, private staging of one external guest-input package.
 //!
-//! This is not a Render adapter, a qualification verdict, or a Ready claim.
+//! This is not a provider adapter, a qualification verdict, or a Ready claim.
 //! It checks the wire and exact base CAS closure before returning a pinned
 //! private tree. Product/source authority and fixed-FD supervisor installation
 //! remain separate joined checks.
@@ -440,7 +440,7 @@ pub(crate) fn recover_ticketed_guest_import(
         expected.maximum_regular_bytes,
     )?;
     ensure!(
-        manifest.framed_bytes()? == ticket.framed_bytes
+        ticket.framed_bytes <= manifest.framed_bytes_bound()?
             && manifest.total_regular_bytes == ticket.regular_bytes,
         "recovered guest manifest contradicts retained package bounds"
     );
@@ -517,6 +517,7 @@ impl<R: Read> Read for DeadlineReader<'_, R> {
                 "guest upload staging deadline expired",
             ));
         }
+        lillux::progress::beat();
         self.inner.read(buffer)
     }
 }
@@ -565,7 +566,9 @@ fn stage_guest_package_in_private_root<R: Read>(
     for links in product_symlinks.values() {
         ryeos_state::objects::validate_internal_symlink_graph(links.iter().copied())?;
     }
-    for entry in &manifest.entries {
+    let plan = manifest.payload_plan();
+    for (index, entry) in manifest.entries.iter().enumerate() {
+        lillux::progress::beat();
         let path = entry.path();
         let (parent_path, child_name) = match path.rsplit_once('/') {
             Some((parent_path, name)) => (Some(parent_path), name),
@@ -577,14 +580,34 @@ fn stage_guest_package_in_private_root<R: Read>(
                 let created = directory.create_child(OsStr::new(child_name), 0o700)?;
                 created.set_mode(*mode)?;
             }
-            GuestStagingEntry::RegularFile { mode, .. } => {
-                ensure!(
-                    stream.next_file().is_some_and(|next| next.path() == path),
-                    "guest staging file order changed"
-                );
+            GuestStagingEntry::RegularFile {
+                mode,
+                bytes,
+                sha256,
+                ..
+            } => {
                 let mut file =
                     directory.open_regular_create(OsStr::new(child_name), true, true, 0o600)?;
-                stream.copy_next_file(&mut file)?;
+                match plan.origin(index) {
+                    None => {
+                        ensure!(
+                            stream.next_file().is_some_and(|next| next.path() == path),
+                            "guest staging file order changed"
+                        );
+                        stream.copy_next_file(&mut file)?;
+                    }
+                    // Identical content crossed the wire once; take it from
+                    // the earlier staged file and prove the same bytes again.
+                    Some(origin) => {
+                        copy_staged_payload(stage, manifest.entries[origin].path(), &mut file)?;
+                        let (digest, _) =
+                            lillux::digest_open_regular_file_stable_exact(&file, *bytes)?;
+                        ensure!(
+                            digest == *sha256,
+                            "guest staging shared payload changed its bytes"
+                        );
+                    }
+                }
                 lillux::set_open_regular_file_mode(&file, *mode)?;
                 file.sync_all()?;
             }
@@ -622,6 +645,24 @@ fn stage_guest_package_in_private_root<R: Read>(
     sidecar.sync_all()?;
     stage.sync_tree_with_symlinks_bounded(staging_budget(), 4096)?;
     Ok((manifest, base))
+}
+
+/// Copy one already staged regular file into `file`, both reached through
+/// the retained stage root. The caller re-verifies the written digest.
+fn copy_staged_payload(
+    stage: &lillux::PinnedDirectory,
+    origin: &str,
+    file: &mut std::fs::File,
+) -> Result<()> {
+    let (parent_path, name) = match origin.rsplit_once('/') {
+        Some((parent_path, name)) => (Some(parent_path), name),
+        None => (None, origin),
+    };
+    let source = open_staged_parent(stage, parent_path)?
+        .open_regular(OsStr::new(name), false)?
+        .context("guest staging shared payload origin disappeared")?;
+    std::io::copy(&mut &source, file)?;
+    Ok(())
 }
 
 /// Reopen each component through the retained root descriptor. Holding one
@@ -732,6 +773,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 request_timeout_ms: 10_000,
                 maximum_response_bytes: 1024 * 1024,
+                max_clock_skew_ms: None,
             }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-staging-test".into(),
@@ -861,7 +903,7 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: manifest.total_regular_bytes,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap(),
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap(),
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
@@ -959,7 +1001,9 @@ mod tests {
         let mut entries = directory_entries;
         entries.extend(file_entries);
         let mut bootstrap = b"boot".to_vec();
-        let config = b"cfg".to_vec();
+        // The configuration carries the launcher's bytes: identical content
+        // crosses the wire once and is materialized twice with its own modes.
+        let config = b"start".to_vec();
         let launcher = b"start".to_vec();
         let supervisor = b"runrun".to_vec();
         let product_manifest_object = ryeos_state::objects::ExternalContentManifestObject {
@@ -1252,7 +1296,7 @@ mod tests {
             supervisor_sha256: &manifest.supervisor_sha256,
             launcher_sha256: &manifest.launcher_sha256,
             maximum_regular_bytes: manifest.total_regular_bytes,
-            maximum_framed_bytes: manifest.framed_bytes().unwrap() + 128,
+            maximum_framed_bytes: manifest.framed_bytes_bound().unwrap() + 128,
         };
         let mut stream =
             GuestStagingStreamWriter::new(Vec::new(), manifest.clone(), &expected).unwrap();
@@ -2584,24 +2628,37 @@ mod tests {
             )
             .join("supervisor")
         );
-        assert_eq!(mounted_request.mounts.len(), 3);
+        assert_eq!(mounted_request.mounts.len(), 4);
         assert_eq!(
             mounted_request.mounts[0].access,
             lillux::LinuxSandboxMountAccess::ReadOnly
         );
+        // The private parent is the sole writable mount, at its fixed path.
         assert_eq!(
             mounted_request.mounts[1].destination,
-            std::path::PathBuf::from("/etc/resolv.conf")
+            std::path::PathBuf::from(
+                ryeos_external_execution_contract::guest_supervisor_descriptors::SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION
+            )
+        );
+        assert_eq!(
+            mounted_request.mounts[1].access,
+            lillux::LinuxSandboxMountAccess::Writable
         );
         assert_eq!(
             mounted_request.mounts[2].destination,
+            std::path::PathBuf::from("/etc/resolv.conf")
+        );
+        assert_eq!(
+            mounted_request.mounts[3].destination,
             std::path::PathBuf::from("/etc/hosts")
         );
         assert!(
             mounted_request
                 .mounts
                 .iter()
-                .all(|mount| { mount.access == lillux::LinuxSandboxMountAccess::ReadOnly })
+                .enumerate()
+                .all(|(index, mount)| index == 1
+                    || mount.access == lillux::LinuxSandboxMountAccess::ReadOnly)
         );
         assert_eq!(
             mounted_request
@@ -2618,7 +2675,7 @@ mod tests {
                 .all(|(source, _)| *source != mounted_request.mounts[0].source_fd)
         );
         let native_refusal = mounted
-            .prepare_held_in_dedicated_owner()
+            .prepare_held_in_dedicated_owner(None)
             .err()
             .expect("a structural source fixture must not reach native held launch");
         assert!(format!("{native_refusal:#}").contains("source was not sealed"));
@@ -3163,7 +3220,7 @@ mod tests {
         .unwrap();
         assert!(format!("{size_error:#}").contains("budget"));
         let short_frame = GuestStagingExpected {
-            maximum_framed_bytes: produced_manifest.framed_bytes().unwrap() - 1,
+            maximum_framed_bytes: produced_manifest.framed_bytes_bound().unwrap() - 1,
             ..produced_expected
         };
         assert!(

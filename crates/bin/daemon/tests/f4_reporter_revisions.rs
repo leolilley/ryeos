@@ -60,13 +60,14 @@ fn canonical(value: &Value) -> String {
 /// The refusal evidence must name the signature or trust failure, which is
 /// what distinguishes a tampered or unsigned copy from any other failure.
 fn assert_names_trust_failure(name: &str, evidence: &str) {
-    const MARKERS: [&str; 6] = [
+    const MARKERS: [&str; 7] = [
         "signature missing",
         "signature verification failed",
         "content hash mismatch",
         "untrusted signer",
         "is not trusted",
-        "no verified signer fingerprint",
+        "is unsigned",
+        "has trust class",
     ];
     let lowered = evidence.to_lowercase();
     assert!(

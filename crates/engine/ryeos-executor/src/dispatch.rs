@@ -373,16 +373,13 @@ pub struct DispatchRequest<'a> {
 fn check_dispatch_capabilities(
     caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
     request: &DispatchRequest<'_>,
+    declares_pushed_head: bool,
 ) -> Result<(), DispatchError> {
     let is_pushed = matches!(
         request.provenance.project_source(),
         ProjectSourceKind::PushedHead
     );
-    if is_pushed && !caps.allows_pushed_head {
-        return Err(DispatchError::CapabilityRejected {
-            reason: "pushed_head not yet supported for native runtimes".into(),
-        });
-    }
+    check_pushed_head_capability(caps, is_pushed, declares_pushed_head)?;
     if request.target_site_id.is_some() && !caps.allows_target_site {
         return Err(DispatchError::CapabilityRejected {
             reason: "remote execution not yet supported for native runtimes".into(),
@@ -391,6 +388,49 @@ fn check_dispatch_capabilities(
     if request.launch_mode == "detached" && !caps.allows_detached {
         return Err(DispatchError::CapabilityRejected {
             reason: "detached mode not yet supported for native runtimes".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Whether the launched item declares the pinned snapshot project lane,
+/// evaluated only when it can matter: the protocol gates a pushed head on the
+/// declaration and the project source is a pushed head. Otherwise the field is
+/// never read, so a stray value on an ungated launch cannot fail it.
+pub(crate) fn pushed_head_declaration_if_gated(
+    caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
+    is_pushed: bool,
+    execution: &ExecutionSchema,
+    composed: &serde_json::Value,
+) -> Result<bool, ryeos_engine::error::EngineError> {
+    if is_pushed && caps.allows_pushed_head && caps.pushed_head_requires_declaration {
+        execution.project_pushed_head_declaration(composed)
+    } else {
+        Ok(false)
+    }
+}
+
+/// A pushed-head project source needs the protocol to allow it and, when the
+/// protocol requires a declaration, the launched item to have declared the
+/// pinned-snapshot project source through its kind's signed projection.
+fn check_pushed_head_capability(
+    caps: &ryeos_engine::protocol_vocabulary::ProtocolCapabilities,
+    is_pushed: bool,
+    declares_pushed_head: bool,
+) -> Result<(), DispatchError> {
+    if !is_pushed {
+        return Ok(());
+    }
+    if !caps.allows_pushed_head {
+        return Err(DispatchError::CapabilityRejected {
+            reason: "pushed_head not yet supported for native runtimes".into(),
+        });
+    }
+    if caps.pushed_head_requires_declaration && !declares_pushed_head {
+        return Err(DispatchError::CapabilityRejected {
+            reason:
+                "pushed_head requires the launched item to declare the pinned snapshot project lane"
+                    .into(),
         });
     }
     Ok(())
@@ -1292,6 +1332,7 @@ fn project_method_payload(
     ctx: &ExecutionContext,
     request: &DispatchRequest<'_>,
     admitted_root: Option<&ryeos_app::thread_lifecycle::RootExecutionAdmission>,
+    node_policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
 ) -> Result<Value, DispatchError> {
     if ctx
         .plan_ctx
@@ -1356,7 +1397,9 @@ fn project_method_payload(
             };
 
             crate::execution::launch::enforce_effective_trust(
-                resolution_output.effective_trust_class,
+                &ctx.engine.kinds,
+                node_policy,
+                &resolution_output,
                 &canonical_ref.to_string(),
                 kind,
             )?;
@@ -1380,18 +1423,16 @@ fn project_method_payload(
                 )
             })?;
             // Corpus scope changes the projected payload, not the trust
-            // boundary: the invoked root remains executable authority and
-            // receives the same typed unsigned-policy rejection as every
-            // other subprocess launch.
-            if matches!(
-                root.trust_class,
-                ryeos_engine::contracts::TrustClass::Unsigned
-            ) {
-                return Err(crate::execution::launch::effective_trust_unsigned_error(
-                    &canonical_ref.to_string(),
-                    kind,
-                ));
-            }
+            // boundary: the invoked root remains executable authority and is
+            // judged by the same launch trust gate as every other launch.
+            crate::execution::launch_trust_gate::enforce_direct_root(
+                &ctx.engine.kinds,
+                node_policy,
+                &canonical_ref.to_string(),
+                kind,
+                root.resolved.source_space,
+                root.launch_trust_class(),
+            )?;
 
             let (items_by_ref, edges) = project_corpus(kind, request, ctx, admitted_root)?;
             serde_json::json!({ "items_by_ref": items_by_ref, "edges": edges })
@@ -2018,6 +2059,7 @@ pub(crate) async fn dispatch_method(
             ctx,
             request,
             Some(&root_admission),
+            &state.node_policy,
         )?;
         method_runtime_config_snapshot_off_thread(
             kind,
@@ -2046,7 +2088,9 @@ pub(crate) async fn dispatch_method(
     // boundary.
     match method_decl.scope {
         MethodScope::SingleRoot => crate::execution::launch::enforce_effective_trust(
-            root_admission.resolution_output().effective_trust_class,
+            &ctx.engine.kinds,
+            &state.node_policy,
+            root_admission.resolution_output(),
             &canonical_ref.to_string(),
             kind,
         )?,
@@ -2058,15 +2102,14 @@ pub(crate) async fn dispatch_method(
                         .to_string(),
                 )
             })?;
-            if matches!(
-                root.trust_class,
-                ryeos_engine::contracts::TrustClass::Unsigned
-            ) {
-                return Err(crate::execution::launch::effective_trust_unsigned_error(
-                    &canonical_ref.to_string(),
-                    kind,
-                ));
-            }
+            crate::execution::launch_trust_gate::enforce_direct_root(
+                &ctx.engine.kinds,
+                &state.node_policy,
+                &canonical_ref.to_string(),
+                kind,
+                root.resolved.source_space,
+                root.launch_trust_class(),
+            )?;
         }
     }
 
@@ -2345,6 +2388,7 @@ pub(crate) async fn dispatch_method(
             ctx,
             request,
             Some(&root_admission),
+            &state.node_policy,
         )?;
         root_admission
             .ensure_matches_subject(&ctx.engine, history_subject, thread_profile_str)
@@ -2354,7 +2398,7 @@ pub(crate) async fn dispatch_method(
         }
 
         let callback = ryeos_runtime::envelope::EnvelopeCallback {
-            socket_path: state.config.uds_path.clone(),
+            socket_path: state.config.runtime_uds_path(),
             token: cap.token.clone(),
         };
         let runtime_config = method_runtime_config_snapshot_off_thread(
@@ -2485,6 +2529,11 @@ pub(crate) async fn dispatch_method(
             item_ref: runtime_item_ref.clone(),
             thread_id: thread_id.clone(),
             project_path: request.project_path.to_path_buf(),
+            runtime_state_root: request
+                .provenance
+                .state_root_override()
+                .unwrap_or(request.project_path)
+                .to_path_buf(),
             acting_principal: request.acting_principal.to_string(),
             cas_root: state
                 .state_store
@@ -2612,6 +2661,7 @@ pub(crate) async fn dispatch_method(
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     checkpoint_authority: None,
+                    captured_callback_socket: false,
                     daemon_socket_path: callback_ipc_requested
                         .then_some(envelope.callback.socket_path.as_path()),
                     bundle_roots: &bundle_roots,
@@ -3062,6 +3112,14 @@ pub async fn dispatch_service(
                 })?,
             };
             refuse_in_process_node_requirements(&verified.resolved, item_ref)?;
+            // A service the gate would refuse is refused here too, so neither
+            // help output nor validation describes an inadmissible item.
+            let admitted = crate::execution::launch_trust_gate::admit_verified_service(
+                &verified,
+                &ctx.engine.kinds,
+                &state.node_policy,
+                state.service_descriptors,
+            )?;
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the
             // handler body must NEVER be reached because it will fail on
@@ -3069,22 +3127,13 @@ pub async fn dispatch_service(
             if request.validate_only {
                 let description = verified.resolved.metadata.description.clone();
                 let input_schema = verified.resolved.metadata.extra.get("schema").cloned();
-                let endpoint = verified
-                    .resolved
-                    .metadata
-                    .extra
-                    .get("endpoint")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let required_caps = ryeos_app::service_registry::extract_required_caps(
-                    &verified.resolved.metadata.extra,
-                );
+                let required_caps = admitted.required_caps;
 
                 return Ok(json!({
                     "validated": true,
                     "item_ref": item_ref,
                     "kind": canonical.kind,
-                    "executor_ref": endpoint.unwrap_or_default(),
+                    "executor_ref": admitted.endpoint,
                     "trust_class": format!("{:?}", verified.trust_class),
                     "description": description,
                     "schema": input_schema,
@@ -3472,35 +3521,41 @@ fn reject_tool_declared_capabilities(
 /// (parse, bundle-id grammar, signed-manifest backing, subset check).
 fn derive_manifest_runtime_caps(
     resolved_item: &ResolvedItem,
+    trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
     let requires_value = resolved_item.metadata.extra.get("requires");
     reject_tool_declared_capabilities(requires_value, item_ref)?;
+    if resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Node {
+        return Err(DispatchError::InvalidRef(
+            item_ref.to_string(),
+            "node-local configuration cannot be dispatched as a tool".to_string(),
+        ));
+    }
     // Tool schemas use the identity composer and have no inheritance chain, so
-    // a node-verified installed root item is the complete effective trust
-    // provenance. Managed graph/directive launches pass their actual composed
-    // trust fold at their callsite below.
-    mint_runtime_capability_caps(
-        requires_value,
-        resolved_item,
-        match resolved_item.source_space {
-            ryeos_engine::contracts::ItemSpace::Bundle => {
-                ryeos_engine::resolution::TrustClass::TrustedBundle
-            }
-            ryeos_engine::contracts::ItemSpace::Project => {
-                ryeos_engine::resolution::TrustClass::TrustedProject
-            }
-            ryeos_engine::contracts::ItemSpace::Node => {
-                return Err(DispatchError::InvalidRef(
-                    item_ref.to_string(),
-                    "node-local configuration cannot be dispatched as a tool".to_string(),
-                ));
-            }
-        },
-        &ctx.engine,
-    )
-    .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
+    // the root item's own verified class is its complete effective trust: a
+    // project tool that is unsigned or signed by an unpinned key mints no
+    // runtime caps from its project manifest.
+    mint_runtime_capability_caps(requires_value, resolved_item, trust_class, &ctx.engine)
+        .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
+}
+
+/// The class a test fixture item carries when it stands for a signed,
+/// pinned item of its space.
+#[cfg(test)]
+fn fixture_trust(item: &ResolvedItem) -> ryeos_engine::resolution::TrustClass {
+    match item.source_space {
+        ryeos_engine::contracts::ItemSpace::Bundle => {
+            ryeos_engine::resolution::TrustClass::TrustedBundle
+        }
+        ryeos_engine::contracts::ItemSpace::Project => {
+            ryeos_engine::resolution::TrustClass::TrustedProject
+        }
+        ryeos_engine::contracts::ItemSpace::Node => {
+            ryeos_engine::resolution::TrustClass::TrustedNode
+        }
+    }
 }
 
 /// Judge a tool item's `requires.node` list and its declared credential
@@ -3538,10 +3593,11 @@ fn admit_tool_node_requirements(
 fn admit_tool_launch(
     node: &impl ryeos_app::node_requirement_admission::NodeCapabilitySource,
     resolved_item: &ResolvedItem,
+    trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
-    let caps = derive_manifest_runtime_caps(resolved_item, item_ref, ctx)?;
+    let caps = derive_manifest_runtime_caps(resolved_item, trust_class, item_ref, ctx)?;
     admit_tool_node_requirements(node, resolved_item, item_ref)?;
     Ok(caps)
 }
@@ -4721,6 +4777,7 @@ pub async fn prepare_admitted_launch_contract(
             trust_store: &request_snapshot.trust_store,
             principal: &ctx.plan_ctx.requested_by,
             subject_resolution_authority: &subject_authority,
+            node_policy: Some(&state.node_policy),
             resolution_cache: Some(
                 crate::execution::launch_preparation::PreparedResolutionCacheContext {
                     cache: &state.resolution_cache,
@@ -4923,6 +4980,7 @@ fn prepare_launch_contract_with_cache(
             subject_resolution_authority: &ctx.plan_ctx.subject_resolution_authority,
             resolution_cache,
             ref_binding_resolution_timings: None,
+            node_policy: None,
         },
     )
     .map(Some)
@@ -5936,6 +5994,12 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                         &subject.resolved,
                         &subject.resolved.canonical_ref.to_string(),
                     )?;
+                    crate::execution::launch_trust_gate::admit_verified_service(
+                        &subject,
+                        &ctx.engine.kinds,
+                        &state.node_policy,
+                        state.service_descriptors,
+                    )?;
                     return finish_root_dispatch_preflight(
                         RootDispatchClass::InProcess,
                         LaunchContractApplicability::NonEnvelope {
@@ -5982,7 +6046,25 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                             // prove fails before a thread_id is minted, not in
                             // the background after 202.
                             if let Some(v) = verified.as_ref() {
-                                admit_tool_launch(state, &v.resolved, &hop_ref.to_string(), ctx)?;
+                                // The root is judged before any admission is
+                                // minted, so an inadmissible tool is refused
+                                // before its secrets are looked up or a
+                                // thread id exists.
+                                crate::execution::launch_trust_gate::enforce_direct_root(
+                                    &ctx.engine.kinds,
+                                    &state.node_policy,
+                                    &hop_ref.to_string(),
+                                    &hop_ref.kind,
+                                    v.resolved.source_space,
+                                    v.launch_trust_class(),
+                                )?;
+                                admit_tool_launch(
+                                    state,
+                                    &v.resolved,
+                                    v.launch_trust_class(),
+                                    &hop_ref.to_string(),
+                                    ctx,
+                                )?;
                                 // A method-dispatch wrapper's accepted form is
                                 // a pre-minted target method thread, not a
                                 // wrapper subprocess thread. Resolve the chain
@@ -6506,6 +6588,62 @@ async fn dispatch_by(
 mod tests {
     use super::*;
 
+    fn capabilities(
+        allows: bool,
+        requires_declaration: bool,
+    ) -> ryeos_engine::protocol_vocabulary::ProtocolCapabilities {
+        ryeos_engine::protocol_vocabulary::ProtocolCapabilities {
+            allows_pushed_head: allows,
+            allows_target_site: false,
+            allows_detached: false,
+            pushed_head_requires_declaration: requires_declaration,
+        }
+    }
+
+    #[test]
+    fn the_declaration_is_read_only_for_a_gated_pushed_head() {
+        let mut execution = exec_with_methods(&["run"], None);
+        execution.pushed_head_declaration =
+            Some(ryeos_engine::kind_registry::PushedHeadDeclarationDecl {
+                path: vec!["project_lane".to_owned()],
+            });
+        let stray = serde_json::json!({"project_lane": "live"});
+        let declared = serde_json::json!({"project_lane": "pinned_snapshot"});
+        let gated = capabilities(true, true);
+        // Ungated protocol, or not a pushed head: never evaluated, even when malformed.
+        assert!(
+            !pushed_head_declaration_if_gated(&capabilities(true, false), true, &execution, &stray)
+                .unwrap()
+        );
+        assert!(!pushed_head_declaration_if_gated(&gated, false, &execution, &stray).unwrap());
+        // Gated pushed head: read, and a malformed value is refused.
+        assert!(pushed_head_declaration_if_gated(&gated, true, &execution, &declared).unwrap());
+        assert!(pushed_head_declaration_if_gated(&gated, true, &execution, &stray).is_err());
+        assert!(
+            !pushed_head_declaration_if_gated(&gated, true, &execution, &serde_json::json!({}))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_pushed_head_needs_the_protocol_and_when_required_the_item_declaration() {
+        // not a pushed head: nothing is checked
+        assert!(check_pushed_head_capability(&capabilities(false, false), false, false).is_ok());
+        // closed protocol refuses regardless of any declaration
+        assert!(check_pushed_head_capability(&capabilities(false, false), true, true).is_err());
+        // open protocol without a declaration requirement admits every item
+        assert!(check_pushed_head_capability(&capabilities(true, false), true, false).is_ok());
+        // declaration-gated protocol admits only the declaring item
+        assert!(check_pushed_head_capability(&capabilities(true, true), true, true).is_ok());
+        let refused = check_pushed_head_capability(&capabilities(true, true), true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("declare the pinned snapshot project lane"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn direct_product_selection_requires_kind_contract_and_direct_root_targets() {
         use ryeos_state::external_content::products::composition::{
@@ -6735,6 +6873,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: subprocess
@@ -6767,6 +6908,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: in_process
@@ -7239,8 +7383,13 @@ runtime_authority:
             })),
         );
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec![
@@ -7270,8 +7419,13 @@ runtime_authority:
             } } }
         }));
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.author.knowledge.runtime-authored/*".to_string()]
@@ -7318,9 +7472,14 @@ runtime_authority:
         // automatic grant.
         let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
         assert!(
-            derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-                .unwrap()
-                .is_empty()
+            derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -7354,8 +7513,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("not declared in the signed manifest"),
@@ -7379,8 +7543,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec![
@@ -7404,8 +7573,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.create.project-snapshots.live".to_string()]
@@ -7428,8 +7602,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.author.knowledge.runtime-authored/foo".to_string()],
@@ -7453,8 +7632,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("not declared in the signed manifest"),
@@ -7482,8 +7666,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("not declared in the signed manifest"),
@@ -7506,8 +7695,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("required signed bundle manifest is missing"),
@@ -7544,8 +7738,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("identity mismatch"), "got: {err}");
     }
 
@@ -7595,8 +7794,13 @@ runtime_authority:
             } } }
         }));
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
@@ -7644,8 +7848,13 @@ runtime_authority:
             } } }
         }));
 
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
@@ -7675,8 +7884,13 @@ runtime_authority:
             })),
         );
 
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("contradicts typed bundle root"),
             "source-space labels alone must not establish installed provenance: {err}"
@@ -7700,8 +7914,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("unsafe character"), "got: {err}");
 
         let resolved = resolved_tool_with_extra(
@@ -7715,8 +7934,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("must match [A-Za-z0-9_]+"),
             "got: {err}"
@@ -7739,8 +7963,13 @@ runtime_authority:
                 } } }
             })),
         );
-        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap_err();
+        let err = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("at least one operation"),
             "got: {err}"
@@ -7780,8 +8009,13 @@ runtime_authority:
             "token bundle identity must follow the resolved canonical ref, not item_ref"
         );
         // Caps are minted under that same identity.
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()]
@@ -7799,6 +8033,9 @@ location:
 resolution: []
 effective_trust:
   include_references: false
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
 execution:
   terminator:
     kind: subprocess
@@ -7888,8 +8125,13 @@ requires:
         resolved.resolved_item.metadata = metadata;
 
         // 5. Exact manifest-backed subset is derived end-to-end.
-        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-            .unwrap();
+        let caps = derive_manifest_runtime_caps(
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+        )
+        .unwrap();
         assert_eq!(
             caps,
             vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
@@ -7970,9 +8212,13 @@ requires:
                 "tool:example-bundle/send",
                 requires_extra(json!({ "capabilities": { "declared": declared } })),
             );
-            let err =
-                derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-                    .unwrap_err();
+            let err = derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx,
+            )
+            .unwrap_err();
             assert!(
                 err.to_string()
                     .contains("cannot self-declare action authority"),
@@ -7997,9 +8243,14 @@ requires:
         );
 
         assert!(
-            derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
-                .unwrap()
-                .is_empty()
+            derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -8055,6 +8306,7 @@ requires:
         let caps = admit_tool_launch(
             &node_reporting(report),
             &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
         )
@@ -8066,6 +8318,7 @@ requires:
         admit_tool_launch(
             &ryeos_app::extension_state::ExtensionState::new(),
             &plain.resolved_item,
+            fixture_trust(&plain.resolved_item),
             &plain.item_ref,
             &ctx,
         )
@@ -8093,6 +8346,7 @@ requires:
         let error = admit_tool_launch(
             &node_reporting(report),
             &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
         )
@@ -8116,6 +8370,7 @@ requires:
         let error = admit_tool_launch(
             &ryeos_app::extension_state::ExtensionState::new(),
             &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
         )
@@ -8454,6 +8709,7 @@ requires:
             effect_class_ceiling: None,
             workspace_access: None,
             network_authority_ceiling: None,
+            pushed_head_declaration: None,
             filesystem_authority_ceiling: None,
             target: None,
             endpoint: None,

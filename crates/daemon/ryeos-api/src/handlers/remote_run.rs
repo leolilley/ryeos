@@ -67,7 +67,7 @@ pub async fn handle(
     let contact_deadline = remote_contact_deadline(&req, &ctx);
     authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
     req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
-        .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error}")))?;
+        .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error:#}")))?;
     let report =
         config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())
             .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
@@ -83,7 +83,7 @@ pub async fn handle(
 
     req.execution_policy
         .validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if req.execution_policy.target != ryeos_app::execution_policy::ExecutionTarget::Here {
         return Err(HandlerError::BadRequest(
             "remote run receives a destination-local policy; target must be `here`".to_string(),
@@ -148,7 +148,7 @@ pub async fn handle(
         retained_current_head || req.outbound_principal == OutboundPrincipal::ConfiguredOperator;
     let client = if use_configured_operator {
         RemoteClient::from_remote_cfg_as_configured_operator(&state, &remote_cfg, &ctx)
-            .map_err(|error| HandlerError::Forbidden(error.to_string()))?
+            .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?
     } else {
         RemoteClient::from_remote_cfg(&state, &remote_cfg)
     };

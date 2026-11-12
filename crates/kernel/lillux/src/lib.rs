@@ -12,14 +12,26 @@ pub mod inherited_pipes;
 pub mod invocation;
 pub mod json;
 pub mod local_ipc;
+
+/// Signal numbers applications name when asking Lillux-owned process
+/// authorities to signal; the OS spelling stays here.
+#[cfg(unix)]
+pub mod signal {
+    pub const SIGKILL: i32 = libc::SIGKILL;
+    pub const SIGTERM: i32 = libc::SIGTERM;
+    pub const SIGUSR1: i32 = libc::SIGUSR1;
+}
 pub mod locks;
 pub mod loopback;
 pub mod network;
 pub mod platform;
 pub mod process_control;
+pub mod progress;
+pub mod root_enclosure;
 pub mod sandbox;
 pub mod secure_fs;
 pub mod signature;
+pub mod stderr_tail;
 pub mod subordinate_process;
 pub mod task;
 pub mod test_hooks;
@@ -100,7 +112,7 @@ pub use process_control::{
     require_administrator,
 };
 pub use process_control::{
-    ExactProcessIdentity, ExactProcessRoot, QuiescedProcessGroup, QuiescedProcesses,
+    ExactProcessIdentity, ExactProcessRoot, GroupBasis, QuiescedProcessGroup, QuiescedProcesses,
     capture_current_process_identity, capture_exact_process_identity, diagnostic_process_is_live,
     diagnostic_process_matches_executable_name, prepare_process_group_controller,
     quiesce_exact_process_group,
@@ -134,7 +146,7 @@ pub use secure_fs::{
     collect_regular_files_no_follow, current_user_home,
     digest_open_regular_file_stable_chunked_exact, digest_open_regular_file_stable_exact,
     ensure_open_regular_file_unchanged, inspect_optional_entry_no_follow,
-    matches_pinned_regular_file_identity, matches_regular_file_identity,
+    matches_pinned_regular_file_identity, matches_regular_file_identity, normalized_portable_mode,
     normalized_portable_regular_mode, observe_open_file_identity, observe_open_regular_file,
     open_mount_entry_kind, open_pinned_regular_file_no_follow, path_owner_ids,
     path_pin_open_regular_file, pin_canonical_mount_source, pinned_regular_file_identity,
@@ -144,8 +156,8 @@ pub use secure_fs::{
     read_optional_regular_file_no_follow, read_regular_file_bounded_no_follow,
     read_regular_file_no_follow, read_regular_file_to_string_no_follow,
     require_effective_user_owned_executable, require_effective_user_owned_regular,
-    same_open_file_identity, set_open_regular_file_mode, visit_regular_files_no_follow,
-    visit_regular_files_no_follow_bounded,
+    require_unwritable_by_effective_user, same_open_file_identity, set_open_regular_file_mode,
+    visit_regular_files_no_follow, visit_regular_files_no_follow_bounded,
 };
 #[cfg(target_os = "linux")]
 pub use secure_fs::{
@@ -178,10 +190,6 @@ pub use sandbox::{
     write_inherited_descriptor,
 };
 
-pub use identity::envelope::{
-    AadFields, Envelope, InspectResult, OpenResult, ValidateResult, inspect_envelope,
-    open_envelope, seal_envelope, validate_envelope_env,
-};
 pub fn run(request: SubprocessRequest) -> SubprocessResult {
     exec::lib_run(request)
 }

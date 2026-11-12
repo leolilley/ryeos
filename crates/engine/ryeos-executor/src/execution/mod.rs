@@ -26,6 +26,7 @@ pub mod launch;
 pub(crate) mod launch_claim;
 pub mod launch_envelope;
 pub mod launch_preparation;
+pub(crate) mod launch_trust_gate;
 pub mod lillux_bridge;
 pub mod limits;
 pub mod persistent_session;
@@ -2183,6 +2184,21 @@ fn require_bound_scopes_quiescence_qualified(
     identities: &[ryeos_app::process::ExecutionProcessIdentity],
     qualified: &std::collections::BTreeSet<lillux::ProcessScopeCapability>,
 ) -> Result<()> {
+    // A PID-namespace-contained execution can be terminated and settled but
+    // never frozen, whatever the node qualified for cgroup scopes.
+    if let Some((scoped, refusal)) = identities.iter().find_map(|identity| {
+        identity
+            .process_scope
+            .as_ref()
+            .and_then(lillux::ProcessScopeRecovery::quiescence_refusal)
+            .map(|refusal| (identity, refusal))
+    }) {
+        anyhow::bail!(
+            "workspace quiescence refused before any process group was stopped: the execution \
+             with process group leader {} cannot be quiesced: {refusal}",
+            scoped.group_leader_pid
+        );
+    }
     match identities
         .iter()
         .find(|identity| identity.process_scope.is_some())
@@ -2609,6 +2625,36 @@ mod pinned_child_authority_tests {
         let qualified: std::collections::BTreeSet<_> =
             [lillux::ProcessScopeCapability::Quiescence].into();
         require_bound_scopes_quiescence_qualified(&targets, &qualified).unwrap();
+    }
+
+    #[test]
+    fn pid_namespace_contained_borrower_is_refused_workspace_quiescence_by_name() {
+        let boot = "00000000-0000-4000-8000-000000000000";
+        let scope: lillux::ProcessScopeRecovery = serde_json::from_value(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+            "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                "init_pid": 40, "init_start_time_ticks": 200,
+                "namespace": {"device": 1, "inode": 2}}
+        }))
+        .unwrap();
+        let targets = [bound_identity(None, 39), bound_identity(Some(scope), 49)];
+        // Even a node that qualified scope quiescence cannot freeze this
+        // execution: containment by namespace init is not a writer barrier.
+        let qualified: std::collections::BTreeSet<_> =
+            [lillux::ProcessScopeCapability::Quiescence].into();
+        let message = format!(
+            "{:#}",
+            require_bound_scopes_quiescence_qualified(&targets, &qualified).unwrap_err()
+        );
+        assert!(
+            message.contains("before any process group was stopped"),
+            "{message}"
+        );
+        assert!(message.contains("cannot quiesce"), "{message}");
+        assert!(message.contains("process group leader 49"), "{message}");
+        // Strict groups alone are unaffected.
+        require_bound_scopes_quiescence_qualified(&targets[..1], &qualified).unwrap();
     }
 
     #[test]

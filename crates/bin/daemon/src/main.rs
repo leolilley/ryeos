@@ -181,8 +181,8 @@ impl Drop for LifecycleExitGuard {
     }
 }
 
-/// Main owns the original exclusion/lifecycle guards and Render custody outside
-/// the run future, retaining them until the selected root and Render owners close.
+/// Main owns the original exclusion/lifecycle guards and host-adapter custody outside
+/// the run future, retaining them until the selected root and host-adapter owners close.
 #[derive(Default)]
 struct NativeFinalizerAttempts(u8);
 
@@ -1183,6 +1183,11 @@ impl DaemonSelectedComposition {
         // Retain actual partial owners before allocating a propagation error.
         // Do not format/copy the original failure before composition custody.
         self.native_failure = Some(error);
+        // The propagated error names only the retention, so this is the one
+        // record of what actually refused the start.
+        if let Some(retained) = &self.native_failure {
+            tracing::error!(error = %format!("{retained:#}"), "live native startup refused");
+        }
         anyhow::anyhow!("live native startup refused; original failure custody retained")
     }
 
@@ -1382,14 +1387,15 @@ impl DaemonSelectedComposition {
             latched.notify.notify_one();
         }))?;
         let margin = Arc::clone(&signal);
-        factory.arm_service_window_timers(Box::new(move || {
-            margin
-                .margin_reached
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+        factory.arm_service_window_timers(Box::new(move |kind| {
+            margin.note_margin(kind);
             margin.notify.notify_one();
         }))?;
         let latch = factory.service_refusal_latch();
         self.service_stop.latch = Some(Arc::clone(&latch));
+        if let Ok(ready) = factory.ready_factory() {
+            spawn_native_work_watch(ready);
+        }
         tokio::spawn(async move {
             let mut stop_requested = false;
             loop {
@@ -1397,16 +1403,15 @@ impl DaemonSelectedComposition {
                 if !stop_requested {
                     tracing::warn!(
                         latched = signal.latched.load(std::sync::atomic::Ordering::SeqCst),
-                        margin_reached = signal
-                            .margin_reached
-                            .load(std::sync::atomic::Ordering::SeqCst),
+                        margin_reached = signal.margin().map(|kind| kind.name()),
                         "native service latch or planned window requests an orderly stop"
                     );
                     ryeosd::request_shutdown();
                     stop_requested = true;
                 }
-                if latch.bits() & ryeos_node::native_capacity::service_refusal::FACT != 0 {
-                    record_service_refusal_inhibition(&state_dir);
+                let bits = latch.bits();
+                if bits & ryeos_node::native_capacity::service_refusal::FACT != 0 {
+                    record_service_refusal_inhibition(&state_dir, bits);
                     break;
                 }
             }
@@ -2623,6 +2628,10 @@ impl DaemonSelectedComposition {
         // Retry the actual retained transition, not bootstrap or a replacement
         // service. Every effect still checks its original clock/account. An
         // expired/refused cleanup grant cannot be refreshed by this supervisor.
+        // The first refusal is logged, then at most one every few seconds:
+        // the custody exit reports which owners stayed retained, and this
+        // says why without logging every 100 ms retry.
+        let mut last_logged: Option<Instant> = None;
         while self.has_unresolved_custody() {
             if self.native_finalizer_attempts.exhausted() {
                 return Err(self.unresolved_native_custody());
@@ -2643,8 +2652,11 @@ impl DaemonSelectedComposition {
             if !retry_authorized {
                 return Err(self.unresolved_native_custody());
             }
-            if self.advance_native_shutdown_on_settlement_stack().is_err() {
-                tracing::debug!("original native recovery transition remains pending");
+            if let Err(error) = self.advance_native_shutdown_on_settlement_stack()
+                && last_logged.is_none_or(|at| at.elapsed() >= Duration::from_secs(5))
+            {
+                tracing::warn!(error = %format!("{error:#}"), "native settlement retry refused; custody remains pending");
+                last_logged = Some(Instant::now());
             }
             if self.has_unresolved_custody() {
                 if self.native_finalizer_attempts.exhausted() {
@@ -2907,7 +2919,7 @@ impl DaemonSelectedComposition {
     /// `failure` is the error that ended the run, when there is one; it
     /// decides whether a startup failure inhibits the restart.
     fn record_exit(&mut self, reason: &str, error: Option<&str>, failure: Option<&anyhow::Error>) {
-        // Root closure and Render drain are distinct: callers reach the normal
+        // Root closure and host-adapter drain are distinct: callers reach the normal
         // exit only after complete_shutdown_drain has returned, never on HOLD.
         self.close_after_run();
         // A marker recorded before operator target retirement is final unless
@@ -3046,8 +3058,41 @@ impl ServiceStopOutcome {
 #[derive(Default)]
 struct ServiceStopSignal {
     latched: std::sync::atomic::AtomicBool,
-    margin_reached: std::sync::atomic::AtomicBool,
+    // 0 until a planned margin is reached, then the first margin's code.
+    margin_reached: std::sync::atomic::AtomicU8,
     notify: tokio::sync::Notify,
+}
+
+impl ServiceStopSignal {
+    const MARGIN_TIME: u8 = 1;
+    const MARGIN_WORK: u8 = 2;
+
+    /// Record the planned margin that was reached; the first one is kept.
+    fn note_margin(&self, kind: ryeos_node::native_capacity::PlannedMargin) {
+        use ryeos_node::native_capacity::PlannedMargin;
+        let code = match kind {
+            PlannedMargin::Time => Self::MARGIN_TIME,
+            PlannedMargin::Work => Self::MARGIN_WORK,
+        };
+        let _ = self.margin_reached.compare_exchange(
+            0,
+            code,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    fn margin(&self) -> Option<ryeos_node::native_capacity::PlannedMargin> {
+        use ryeos_node::native_capacity::PlannedMargin;
+        match self
+            .margin_reached
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Self::MARGIN_TIME => Some(PlannedMargin::Time),
+            Self::MARGIN_WORK => Some(PlannedMargin::Work),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -3073,12 +3118,7 @@ impl ServiceStopState {
         let bits = self.latch.as_ref().map_or(0, |latch| latch.observe());
         if bits & service_refusal::FACT != 0 {
             Some(ServiceStopOutcome::ServiceRefusalStop)
-        } else if bits & service_refusal::WINDOW_EDGE != 0
-            || self
-                .signal
-                .margin_reached
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        } else if bits & service_refusal::WINDOW_EDGE != 0 || self.signal.margin().is_some() {
             Some(ServiceStopOutcome::ServiceWindowRollover)
         } else {
             None
@@ -3091,23 +3131,72 @@ impl ServiceStopState {
     fn rollover_claim(&self) -> Option<ryeos_node::native_capacity::RolloverClaim> {
         use ryeos_node::native_capacity::service_refusal;
         let bits = self.latch.as_ref().map_or(0, |latch| latch.observe());
+        // A stop on the planned edge alone is the time margin's rollover.
+        let margin = self
+            .signal
+            .margin()
+            .unwrap_or(ryeos_node::native_capacity::PlannedMargin::Time);
         (bits & service_refusal::FACT == 0
             && matches!(
                 self.outcome(),
                 Some(ServiceStopOutcome::ServiceWindowRollover)
             ))
-        .then_some(ryeos_node::native_capacity::RolloverClaim { latch_bits: bits })
+        .then_some(ryeos_node::native_capacity::RolloverClaim {
+            latch_bits: bits,
+            margin,
+        })
     }
 }
 
 /// Record the restart inhibition for a fact refusal the service latch just
 /// reported. The first recorded cause is kept, so the stop's later record of
 /// the same refusal changes nothing.
-fn record_service_refusal_inhibition(state_dir: &std::path::Path) {
+/// Report how much of the incarnation's prepaid native work service SQL has
+/// spent, once at each threshold, so an incarnation that will not reach its
+/// window edge is visible long before its work runs out.
+fn spawn_native_work_watch(factory: Arc<lillux_sqlite::OriginalNativeFactory>) {
+    const THRESHOLDS_PERCENT: [u64; 3] = [50, 75, 90];
+    tokio::spawn(async move {
+        let mut reported = 0usize;
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        while reported < THRESHOLDS_PERCENT.len() {
+            tick.tick().await;
+            let Ok(snapshot) = factory.budget_snapshot() else {
+                return;
+            };
+            let service_limit = snapshot
+                .allocator_steps_limit
+                .saturating_sub(snapshot.cleanup_reserved);
+            if service_limit == 0 {
+                return;
+            }
+            let spent_percent = snapshot.allocator_steps.saturating_mul(100) / service_limit;
+            while reported < THRESHOLDS_PERCENT.len()
+                && spent_percent >= THRESHOLDS_PERCENT[reported]
+            {
+                tracing::warn!(
+                    allocator_steps = snapshot.allocator_steps,
+                    service_limit,
+                    spent_percent,
+                    "native work spent by service SQL passed a threshold of this incarnation's allowance"
+                );
+                reported += 1;
+            }
+        }
+    });
+}
+
+fn record_service_refusal_inhibition(state_dir: &std::path::Path, bits: u8) {
+    let detail = if bits & ryeos_node::native_capacity::service_refusal::WORK_EXHAUSTED != 0 {
+        "this incarnation spent its prepaid native work before its service-window edge"
+    } else {
+        "native service refused a durable admission fact"
+    };
     match lifecycle_marker::inhibit_restart(
         state_dir,
         ServiceStopOutcome::ServiceRefusalStop.reason(),
-        Some("native service refused a durable admission fact"),
+        Some(detail),
     ) {
         Ok(()) => tracing::warn!(
             "restart inhibited before the drain; the next start is refused until `ryeos node allow-restart`"
@@ -3370,8 +3459,8 @@ fn check_service_catalog_entry(
     let endpoint = match ryeos_api::registry::extract_endpoint(&verified.resolved.metadata.extra) {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            let message = format!("endpoint extraction failed: {error}");
-            tracing::error!(service = desc.service_ref, %error, %message);
+            let message = format!("endpoint extraction failed: {error:#}");
+            tracing::error!(service = desc.service_ref, error = %format!("{error:#}"), %message);
             return ServiceCatalogCheck::Failed(message);
         }
     };
@@ -3786,6 +3875,7 @@ async fn run(
     if let Some(config::DaemonCommand::BuildInfo {
         revision,
         profile,
+        features,
         json,
     }) = &cli.command
     {
@@ -3794,13 +3884,23 @@ async fn run(
             println!("{}", build.revision);
         } else if *profile {
             println!("{}", build.profile);
+        } else if *features {
+            for feature in bootstrap::compiled_features() {
+                println!("{feature}");
+            }
         } else if *json {
-            println!("{}", serde_json::to_string(&build)?);
+            let mut value = serde_json::to_value(&build)?;
+            value["compiled_features"] = serde_json::json!(bootstrap::compiled_features());
+            println!("{}", serde_json::to_string(&value)?);
         } else {
             println!("version: {}", build.version);
             println!("revision: {}", build.revision);
             println!("build_date: {}", build.build_date);
             println!("profile: {}", build.profile);
+            println!(
+                "compiled_features: {}",
+                bootstrap::compiled_features().join(", ")
+            );
         }
         return Ok(());
     }
@@ -4045,7 +4145,8 @@ async fn run(
     );
 
     let early_startup = async {
-        process::remove_stale_socket(&config.uds_path)?;
+        let runtime_uds_path = config.runtime_uds_path();
+        process::remove_stale_sockets(&[&config.uds_path, &runtime_uds_path])?;
         ensure_runtime_paths(&config)?;
         let daemon_json_path = config.app_root.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json_path);
@@ -4059,12 +4160,32 @@ async fn run(
         let actual_bind = tcp_listener
             .local_addr()
             .with_context(|| format!("failed to read local_addr after binding {}", config.bind))?;
-        let uds_listener = UnixListener::bind(&config.uds_path)
-            .with_context(|| format!("failed to bind {}", config.uds_path.display()))?;
-        Ok::<_, anyhow::Error>((tcp_listener, uds_listener, daemon_json_path, actual_bind))
+        // Both sockets are created owner-only. Cleanup guards the first socket
+        // before the second is bound, so a failed second bind leaves no stale
+        // control socket behind.
+        let uds_listener = bind_owner_private_listener(&config.uds_path)?;
+        let discovery_cleanup =
+            startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?;
+        let runtime_uds_listener = bind_owner_private_listener(&runtime_uds_path)?;
+        let discovery_cleanup = discovery_cleanup.with_runtime_socket(runtime_uds_path)?;
+        Ok::<_, anyhow::Error>((
+            tcp_listener,
+            uds_listener,
+            runtime_uds_listener,
+            discovery_cleanup,
+            daemon_json_path,
+            actual_bind,
+        ))
     }
     .await;
-    let (tcp_listener, uds_listener, daemon_json_path, actual_bind) = match early_startup {
+    let (
+        tcp_listener,
+        uds_listener,
+        runtime_uds_listener,
+        _discovery_cleanup,
+        daemon_json_path,
+        actual_bind,
+    ) = match early_startup {
         Ok(value) => value,
         Err(error) => {
             let detail = format!("{error:#}");
@@ -4073,20 +4194,6 @@ async fn run(
         }
     };
     config.bind = actual_bind;
-    let _discovery_cleanup =
-        startup::DiscoveryCleanup::new(config.uds_path.clone(), daemon_json_path.clone())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&config.uds_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| {
-                format!(
-                    "failed to set socket permissions on {}",
-                    config.uds_path.display()
-                )
-            })?;
-    }
 
     // daemon.json is an early discovery hint.  Live lifecycle truth always
     // comes from the UDS, and started_at is process start (never ready time).
@@ -4121,8 +4228,9 @@ async fn run(
     let startup = startup::StartupCoordinator::bootstrap(lifecycle_identity, process_started)?;
     let recovery_execution_release = ryeos_app::recovery_execution_gate::arm();
     let http_state = startup.http_state();
-    let mut uds_task = tokio::spawn(uds::server::serve_dynamic(
+    let mut uds_task = tokio::spawn(uds::server::serve_dynamic_pair(
         uds_listener,
+        runtime_uds_listener,
         startup.uds_state(),
     ));
     let shutdown = shutdown_signal();
@@ -4288,7 +4396,7 @@ async fn run(
                         ) {
                             Ok(false) => continue,
                             Err(error) => {
-                                failed.push((service_ref, error.to_string()));
+                                failed.push((service_ref, format!("{error:#}")));
                                 continue;
                             }
                             Ok(true) => {}
@@ -4432,6 +4540,10 @@ async fn run(
                 max_live_fanout = execution_limits.max_live_fanout,
                 "node execution limits armed"
             );
+            node_policy_snapshot
+                .require::<ryeos_node_runtime::node_policy::sections::launch_trust::NodeLaunchTrustPolicy>()?
+                .check_against_kinds(&engine.kinds)
+                .context("node launch_trust policy does not fit the installed kinds")?;
             tracing::info!(
                 max_private_materialization_copy_bytes = private_copy_limit,
                 "node private materialization limit armed"
@@ -4680,7 +4792,7 @@ async fn run(
             let accounting = match state_store.live_accounting_native_admission() {
                 Err(error) => {
                     tracing::error!(
-                        %error,
+                        error = %format!("{error:#}"),
                         "accounting ledger admission refused; hard-budget admission is disabled"
                     );
                     None
@@ -4712,7 +4824,7 @@ async fn run(
                             }
                             Err(error) => {
                                 tracing::error!(
-                                    %error,
+                                    error = %format!("{error:#}"),
                                     "accounting ledger failed startup verification; hard-budget \
                                      admission is disabled"
                                 );
@@ -4822,6 +4934,12 @@ async fn run(
                         config.app_root.clone(),
                         format!("sha256:{}", node_policy_snapshot.generation_digest()),
                     )));
+                    // A fresh external placement is admitted only while this
+                    // incarnation's remaining prepaid native work and service
+                    // window cover what the placement's binding declares.
+                    if let Some(factory) = composition.native_factory.clone() {
+                        ext.insert(Arc::new(native_service_headroom_reader(factory)));
+                    }
                     let publication_policy = node_policy_snapshot
                         .require::<ryeos_node_runtime::node_policy::sections::bundle_publication::BundlePublicationPolicy>()?
                         .clone();
@@ -4962,7 +5080,7 @@ async fn run(
                 shutdown_signal().await;
                 if let Err(error) = admission_store.close_process_attachment_admission() {
                     tracing::error!(
-                        error = %error,
+                        error = %format!("{error:#}"),
                         "failed to close process attachment admission from shutdown signal"
                     );
                 }
@@ -5091,6 +5209,9 @@ async fn run(
             startup.progress(|snapshot| {
                 snapshot.recovery_threads = Some(active_reconcile.active_thread_ids.len() as u64);
             })?;
+            advance_external_candidate_cleanups_after_reconcile(app_state)
+                .await
+                .context("advance predecessor external candidate cleanups")?;
             let recovery_thread_targets = active_reconcile.active_thread_ids;
             let resume_intents = active_reconcile.resume_intents;
             if ryeosd::shutdown_requested() {
@@ -5399,7 +5520,7 @@ async fn run(
             if result.is_ok() {
                 result = work_result;
             } else if let Err(error) = work_result {
-                tracing::error!(%error, "daemon work also failed while handling listener loss");
+                tracing::error!(error = %format!("{error:#}"), "daemon work also failed while handling listener loss");
             }
         }
 
@@ -5634,6 +5755,11 @@ async fn run(
         Some(ServiceStopOutcome::ServiceWindowRollover) => {
             tracing::warn!(
                 shutdown_outcome = "service_window_rollover",
+                planned_margin = composition
+                    .service_stop
+                    .signal
+                    .margin()
+                    .map_or("edge", |kind| kind.name()),
                 "native service window rolled over; orderly stop complete and the next incarnation may start"
             );
         }
@@ -5641,7 +5767,9 @@ async fn run(
     }
     match daemon_result.as_ref() {
         Ok(()) => tracing::info!(reason = exit_reason, "daemon exiting"),
-        Err(error) => tracing::error!(reason = exit_reason, error = %error, "daemon exiting"),
+        Err(error) => {
+            tracing::error!(reason = exit_reason, error = %format!("{error:#}"), "daemon exiting")
+        }
     }
     if startup_cancelled {
         Ok(())
@@ -5837,7 +5965,7 @@ async fn dispatch_resume_intents(
             Err(error) => {
                 tracing::error!(
                     thread_id,
-                    error = %error,
+                    error = %format!("{error:#}"),
                     "resume parameters could not be reconstructed; recording an owner-fenced refusal"
                 );
                 let outcome =
@@ -6190,13 +6318,13 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     }
     if let Err(error) = recover_durable_project_head_reconciliations(&state).await {
         tracing::error!(
-            error = %error,
+            error = %format!("{error:#}"),
             "initial remote project-head reconciliation failed; durable jobs remain retryable"
         );
     }
     if let Err(error) = recover_durable_worker_result_pulls(&state).await {
         tracing::error!(
-            error = %error,
+            error = %format!("{error:#}"),
             "initial hosted worker-result pull recovery failed; durable jobs remain retryable"
         );
     }
@@ -6251,7 +6379,7 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         let pass_result = run_periodic_recovery_pass(&state).await;
         if let Err(error) = pass_result {
             tracing::error!(
-                error = %error,
+                error = %format!("{error:#}"),
                 "periodic recovery pass failed; durable recovery state preserved and daemon remains available"
             );
         }
@@ -6296,9 +6424,10 @@ async fn run_bootstrap_source_cleanup_recovery(state: AppState) -> Result<()> {
 /// Settle the predecessor controller generation before Ready can release new
 /// external execution. Import runs first so a sealed result that was already
 /// delivered remains authoritative; fencing then makes every surviving
-/// occurrence cleanup-only. Cleanup failures remain durably quarantined and
-/// are retried by the periodic pass, but discovery/fencing failures abort
-/// startup rather than admitting work beside an unfenced predecessor.
+/// occurrence cleanup-only. Discovery/fencing failures abort startup rather
+/// than admitting work beside an unfenced predecessor. The retained cleanups
+/// themselves advance in [`advance_external_candidate_cleanups_after_reconcile`],
+/// once thread reconciliation has settled the predecessor's local rows.
 async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()> {
     let recovered = state
         .external_candidate_imports
@@ -6327,15 +6456,26 @@ async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()
         );
     }
 
+    Ok(())
+}
+
+/// Advance every retained external candidate cleanup once, still before
+/// Ready. This runs after thread reconciliation on purpose: a quarantined
+/// allocation cannot settle while its placement keeps a local Worker row or
+/// an open connector, and those rows are what thread reconciliation settles
+/// for a dead daemon generation. A pass before that point refuses every such
+/// cleanup and leaves it to the periodic pass. Cleanup failures remain
+/// durably quarantined and are retried periodically. Bootstrap sources are
+/// already durably fenced by their own journal; their provider cleanup runs
+/// after Ready under a separate supervised owner, so a provider timeout
+/// cannot hold the startup gate.
+async fn advance_external_candidate_cleanups_after_reconcile(state: &AppState) -> Result<()> {
     log_external_candidate_cleanup_recovery(
         recover_external_candidate_cleanups_async(state.clone())
             .await
             .context("advance startup external candidate cleanup")?,
         "startup",
     );
-    // Bootstrap sources are already durably fenced by their own journal.
-    // Their provider cleanup runs after Ready under a separate supervised
-    // owner, so a provider timeout cannot hold the startup gate.
     Ok(())
 }
 
@@ -7033,6 +7173,29 @@ fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
 /// nothing this daemon does while it runs makes them stand. Only a failure
 /// to read the report file, the node identity or the host generation is an
 /// unreadable report, which a later attempt may read.
+/// What remains of the live native factory's prepaid work and service
+/// window, read at each admission. The work left is the envelope less the
+/// cleanup reserve less what service SQL has spent; the time left runs to
+/// the deadline by which this incarnation's service SQL must end. Once the
+/// factory refuses service, every read refuses, and so does every fresh
+/// placement.
+fn native_service_headroom_reader(
+    factory: Arc<ryeos_node::native_capacity::LiveNativeFactory>,
+) -> ryeos_app::native_headroom::NativeServiceHeadroomReader {
+    ryeos_app::native_headroom::NativeServiceHeadroomReader::new(move || {
+        let budget = factory.ready_factory()?.budget_snapshot()?;
+        let work_steps = budget
+            .allocator_steps_limit
+            .saturating_sub(budget.cleanup_reserved)
+            .saturating_sub(budget.allocator_steps);
+        let service_seconds = factory.original_sql_deadline()?.remaining().as_secs();
+        Ok(ryeos_app::native_headroom::NativeServiceHeadroom {
+            work_steps,
+            service_seconds,
+        })
+    })
+}
+
 fn node_capability_report_reader(
     app_root: std::path::PathBuf,
     policy_generation: String,
@@ -7943,6 +8106,13 @@ async fn shutdown_signal() {
     ryeosd::request_shutdown();
 }
 
+/// Bind an owner-only Unix listener and hand it to the async runtime.
+fn bind_owner_private_listener(path: &std::path::Path) -> Result<UnixListener> {
+    let listener = lillux::local_ipc::bind_owner_private_unix_listener(path)
+        .with_context(|| format!("failed to bind {}", path.display()))?;
+    UnixListener::from_std(listener).with_context(|| format!("failed to adopt {}", path.display()))
+}
+
 fn ensure_runtime_paths(config: &Config) -> Result<()> {
     if let Some(parent) = config.db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -7958,6 +8128,17 @@ fn ensure_runtime_paths(config: &Config) -> Result<()> {
             .with_context(|| format!("configured uds parent is absent: {}", parent.display()))?
             .ensure_path_binding()
             .with_context(|| format!("configured uds parent changed: {}", parent.display()))?;
+    }
+    // The callback-only socket is derived beside the control socket and is
+    // longer by its suffix, so a control path that fits can still leave it
+    // unaddressable. Refuse before binding, naming the budget.
+    let runtime_uds_path = config.runtime_uds_path();
+    if !lillux::local_ipc::local_endpoint_path_addressable(&runtime_uds_path) {
+        anyhow::bail!(
+            "callback socket path {} exceeds the {}-byte local socket limit; configure a shorter uds_path",
+            runtime_uds_path.display(),
+            lillux::local_ipc::max_local_endpoint_path_bytes()
+        );
     }
     Ok(())
 }

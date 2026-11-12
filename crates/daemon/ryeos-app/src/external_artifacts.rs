@@ -926,7 +926,7 @@ mod tests {
         let spec_bytes = b"{}";
         let spec_hash = lillux::sha256_hex(spec_bytes);
         let declaration = ExternalLifecycleAdapterDeclaration {
-            id: "render-sandbox-early-access".to_owned(),
+            id: "test-backend".to_owned(),
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.to_owned(),
             targets: vec![target.to_owned()],
             adapter: "adapter".to_owned(),
@@ -942,9 +942,10 @@ mod tests {
             capabilities: [LifecycleCapability::ExactAllocationReconciliation]
                 .into_iter()
                 .collect(),
+            relay_scope_setting: None,
         };
         let manifest = ryeos_bundle::manifest::BundleManifest {
-            name: "render-sandbox".to_owned(),
+            name: "test-bundle".to_owned(),
             version: "1.0.0".to_owned(),
             description: String::new(),
             provides_kinds: vec![],
@@ -966,7 +967,7 @@ mod tests {
         );
         let verified = ryeos_bundle::manifest::verify_retained_manifest_bytes(
             signed.as_bytes(),
-            "render-sandbox",
+            "test-bundle",
             &lillux::crypto::fingerprint(&verifier),
             &verifier,
         )
@@ -986,7 +987,7 @@ mod tests {
         let mut source = RetainedLifecycleArtifacts {
             schema: RETAINED_LIFECYCLE_ARTIFACTS_SCHEMA,
             kind: RETAINED_LIFECYCLE_ARTIFACTS_KIND.to_owned(),
-            bundle_name: "render-sandbox".to_owned(),
+            bundle_name: "test-bundle".to_owned(),
             signed_bundle_manifest_blob_hash: lillux::sha256_hex(signed.as_bytes()),
             bundle_manifest_body_digest: verified.body_digest,
             signer_fingerprint: lillux::crypto::fingerprint(&verifier),

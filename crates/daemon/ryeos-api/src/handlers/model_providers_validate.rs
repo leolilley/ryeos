@@ -58,10 +58,10 @@ pub async fn handle(
             .map_err(|error| HandlerError::Internal(error.to_string()))?;
     provider
         .validate(&format!(" for '{}'", req.provider_id))
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let setup = provider
         .setup_projection(&req.provider_id)
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let validation = setup.validation.ok_or_else(|| {
         HandlerError::BadRequest(format!(
             "provider '{}' does not declare a validation operation",
@@ -89,7 +89,7 @@ pub async fn handle(
         .unwrap_or_else(|| provider.clone());
     runtime_provider
         .validate(&format!(" for '{}' validation", req.provider_id))
-        .map_err(|error| HandlerError::Internal(error.to_string()))?;
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let credential = match setup.credential {
         Some(credential) => Some(
             ryeos_app::vault::read_named_secret(
@@ -97,7 +97,7 @@ pub async fn handle(
                 &ctx.fingerprint,
                 &credential.secret_name,
             )
-            .map_err(|error| HandlerError::Internal(error.to_string()))?
+            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
             .ok_or_else(|| {
                 HandlerError::BadRequest(format!(
                     "provider '{}' credential '{}' is not configured",

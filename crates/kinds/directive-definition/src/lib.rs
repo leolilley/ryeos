@@ -1898,7 +1898,10 @@ pub fn prepare_directive_launch(
             target.model_name, target.provider_id
         ))
         .map_err(|error| {
-            DirectivePreparationError::configuration("provider_config_invalid", error.to_string())
+            DirectivePreparationError::configuration(
+                "provider_config_invalid",
+                format!("{error:#}"),
+            )
         })?;
     validate_reasoning_selection(
         target.reasoning.as_ref(),
@@ -1911,7 +1914,7 @@ pub fn prepare_directive_launch(
         ResolvedProviderSnapshot::compute_hash(&resolved_provider).map_err(|error| {
             DirectivePreparationError::internal(
                 "provider_config_hash_failed",
-                format!("could not hash resolved provider config: {error}"),
+                format!("could not hash resolved provider config: {error:#}"),
             )
         })?;
 

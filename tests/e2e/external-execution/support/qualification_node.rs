@@ -465,8 +465,8 @@ pub fn start_bundle_node(
         )
         .unwrap();
     std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
-    std::fs::create_dir_all(state.config.uds_path.parent().unwrap()).unwrap();
-    let listener = tokio::net::UnixListener::bind(&state.config.uds_path).unwrap();
+    std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
+    let listener = tokio::net::UnixListener::bind(state.config.runtime_uds_path()).unwrap();
     let isolation_policy = composed_isolation_policy();
     install_bundle_engine(
         state,
@@ -479,7 +479,7 @@ pub fn start_bundle_node(
     let app_root = state.config.app_root.clone();
     state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
         &app_root,
-        &state.config.uds_path,
+        &state.config.runtime_uds_path(),
         &daemon_isolation_roots(),
         &trust,
         isolation_policy,

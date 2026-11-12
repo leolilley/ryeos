@@ -121,6 +121,13 @@ impl RunitService {
     }
 
     fn control(&self, operation: &str) -> Result<()> {
+        self.control_with(&[operation], 5.0)
+    }
+
+    /// Run `sv` with `options` ahead of the service directory, bounded by
+    /// `timeout` seconds.
+    fn control_with(&self, options: &[&str], timeout: f64) -> Result<()> {
+        let operation = options.join(" ");
         self.directory.ensure_path_binding()?;
         // The selected account receives traversal, not read/list access, to
         // runit's root-owned `supervise` directory. Do not reopen it through
@@ -134,14 +141,17 @@ impl RunitService {
         let result = crate::run(SubprocessRequest {
             cmd: executable.path().to_string_lossy().into_owned(),
             argv0: Some("sv".to_owned()),
-            args: vec![
-                operation.to_owned(),
-                directory.path().to_string_lossy().into_owned(),
-            ],
+            args: options
+                .iter()
+                .map(|option| (*option).to_owned())
+                .chain(std::iter::once(
+                    directory.path().to_string_lossy().into_owned(),
+                ))
+                .collect(),
             cwd: None,
             envs: vec![],
             stdin_data: None,
-            timeout: 5.0,
+            timeout,
             limits: Some(SubprocessLimits {
                 max_stdout_bytes: Some(16 * 1024),
                 max_stderr_bytes: Some(16 * 1024),
@@ -176,6 +186,19 @@ impl HostServiceController for RunitService {
         // runsv `o` marks the service wanted down without sending TERM/CONT
         // to the running process; `down` would signal it mid-exit.
         self.control("once")
+    }
+    fn force_down(&self) -> Result<()> {
+        // `down` records the want; `kill` has runsv send its own child the
+        // definitive signal, so the exact service process ends and nothing
+        // relaunches it.
+        self.control("down")?;
+        self.control("kill")
+    }
+    fn wait_down(&self, timeout: std::time::Duration) -> Result<()> {
+        // `sv -w N down` records the want and exits zero only once runsv
+        // reports the service down; on timeout it exits non-zero.
+        let seconds = timeout.as_secs().max(1);
+        self.control_with(&["-w", &seconds.to_string(), "down"], seconds as f64 + 5.0)
     }
     fn capture_upgrade_state(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(RunitUpgradeState {

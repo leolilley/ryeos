@@ -26,31 +26,31 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let scheduler = crate::api_state::selected_scheduler(state.as_ref())
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let _read_guard = scheduler
         .acquire_read()
         .await
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let db = scheduler.scheduler_db();
     ryeos_scheduler_contract::validate_schedule_id(&req.schedule_id)
-        .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
+        .map_err(|e| HandlerError::BadRequest(format!("{e:#}")))?;
 
     let spec = db
         .get_spec(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
     ctx.require_owner(Some(spec.execution.principal_id()))?;
 
     let last_fire = db
         .get_last_fire(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let total_fires = db
         .count_fires(&req.schedule_id, None)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let cursor = db
         .get_cursor(&req.schedule_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .filter(|cursor| cursor.spec_hash == spec.spec_hash);
     let now = lillux::time::timestamp_millis();
     let plan = planning::plan_schedule(&spec, last_fire.as_ref(), now);

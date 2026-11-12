@@ -12,7 +12,7 @@
 //!
 //! What the operator states is the provider facts (an installed binding to
 //! take them from, or backend, account, owner and API trust roots outright),
-//! the Render sandbox settings, the provider declaration id, the signed
+//! the adapter settings, the provider declaration id, the signed
 //! qualification policy reference, and the identities of the runtime product
 //! being qualified. Everything else is read from the node: the requirement
 //! digest and Worker profile hash from the signed policy the installed bundles
@@ -33,10 +33,10 @@ use serde_json::Value;
 
 use super::compose::{
     BundleArtifactFacts, CLEANUP_PROOF, ComposeLimits, ComposeTransportRequest,
-    ProducerSourceFacts, RELAY_NETWORK_POLICY, RENDER_BACKEND_ID, STORAGE_POLICY,
-    SelectedTransport, admit_signed_binding, bundle_artifact_facts, load_node_identity,
-    publish_signed_document, read_installed_binding, select_transport, sign_node_document,
-    validate_document_id, with_installed_bundles,
+    ProducerSourceFacts, RELAY_NETWORK_POLICY, STORAGE_POLICY, SelectedTransport,
+    admit_signed_binding, bundle_artifact_facts, load_node_identity, publish_signed_document,
+    read_installed_binding, select_transport, sign_node_document, validate_document_id,
+    with_installed_bundles,
 };
 use super::{
     BindingDocument, ExternalQualificationStructuredSessionBinding, ExternalWorkloadBinding,
@@ -53,9 +53,9 @@ use ryeos_state::external_execution::admission::{
 
 /// Schema of a qualification-only binding over the controller file relay.
 const QUALIFICATION_BINDING_SCHEMA: u32 = 18;
-/// Schema of the Render sandbox settings the installed adapter accepts.
-const RENDER_SETTINGS_SCHEMA: u64 = 2;
-/// Most trust roots the Render settings carry.
+/// Schema of the settings the installed adapter accepts.
+const QUALIFICATION_SETTINGS_SCHEMA: u64 = 2;
+/// Most trust roots the adapter settings carry.
 const MAX_SETTINGS_TLS_ROOTS: usize = 8;
 /// Largest signed qualification policy document the composer reads.
 const MAX_POLICY_BYTES: u64 = 1024 * 1024;
@@ -67,7 +67,7 @@ pub struct QualificationBindingRequest<'a> {
     /// it is rewritten.
     pub state_lock: &'a ryeos_node_runtime::state_lock::StateLock,
     pub id: String,
-    /// Where backend, account, Render owner and API trust roots come from.
+    /// Where backend, account, relay owner and API trust roots come from.
     pub facts_source: ProducerFactsSource,
     /// Reference of the signed qualification policy the installed bundles
     /// carry, as `config:<category>/<name>`.
@@ -208,17 +208,22 @@ pub(crate) fn compose_with_inputs(
     policy: &QualificationPolicyFacts,
 ) -> Result<QualificationBindingReport> {
     check_stated(&request)?;
-    ensure!(
-        facts.backend == RENDER_BACKEND_ID,
-        "a qualification session is placed over the controller file relay, which only the \
-         `{RENDER_BACKEND_ID}` backend provides; got `{}`",
-        facts.backend
-    );
+    // The backend must be installed, and must declare the relay scope setting
+    // that marks it as providing the controller file relay.
+    let artifacts =
+        bundle_artifact_facts(resolved, &request.provider_declaration_id, &facts.backend)?;
+    let scope_key = artifacts.relay_scope_setting.clone().with_context(|| {
+        format!(
+            "a qualification session is placed over the controller file relay, which the \
+             installed `{}` backend does not declare",
+            facts.backend
+        )
+    })?;
     let owner_id = facts
         .settings
-        .get("owner_id")
+        .get(scope_key.as_str())
         .and_then(Value::as_str)
-        .context("provider settings have no owner_id")?;
+        .with_context(|| format!("provider settings have no {scope_key}"))?;
     ensure!(
         identifier(owner_id, 256),
         "owner id must be 1..=256 characters of A-Z a-z 0-9 _ -"
@@ -229,23 +234,21 @@ pub(crate) fn compose_with_inputs(
         .and_then(Value::as_array)
         .filter(|roots| !roots.is_empty())
         .context(
-            "provider settings carry no tls_roots_der_base64; the Render sandbox settings need \
+            "provider settings carry no tls_roots_der_base64; the adapter settings need \
              the provider API trust roots",
         )?;
     ensure!(
         roots.len() <= MAX_SETTINGS_TLS_ROOTS && roots.iter().all(|root| root.as_str().is_some()),
         "provider settings must carry at most {MAX_SETTINGS_TLS_ROOTS} base64 trust roots"
     );
-    let settings = serde_json::json!({
-        "schema": RENDER_SETTINGS_SCHEMA,
-        "owner_id": owner_id,
+    let mut settings = serde_json::json!({
+        "schema": QUALIFICATION_SETTINGS_SCHEMA,
         "plan": request.plan,
         "region": request.region,
         "snapshot_id": request.snapshot_id,
         "tls_roots_der_base64": roots,
     });
-    let artifacts =
-        bundle_artifact_facts(resolved, &request.provider_declaration_id, &facts.backend)?;
+    settings[scope_key.as_str()] = Value::String(owner_id.to_owned());
     let declaration = resolved
         .provider_configurations
         .declaration_for_provider(&request.provider_declaration_id)?;
@@ -263,14 +266,19 @@ pub(crate) fn compose_with_inputs(
         artifacts.supervisor_artifact_bytes,
         artifacts.launcher_artifact_bytes,
     )?;
-    crate::external_placement::require_qualification_channel_limits(limits.max_transfer_bytes)?;
-    let transport = select_transport(
-        &ComposeTransportRequest::FileRelay {
-            owner_workspace_id: owner_id.to_owned(),
-            private_mailbox_parent: request.private_mailbox_parent.clone(),
-        },
-        &settings,
+    // A qualification session names the snapshot's own guest owner, produced
+    // on this node: its absence is a broken binding, not an unknown capacity.
+    super::compose::require_guest_owner_stages_largest_package(
+        request.app_root,
+        &request.guest_runtime_manifest_hash,
+        &limits,
+        true,
     )?;
+    crate::external_placement::require_qualification_channel_limits(limits.max_transfer_bytes)?;
+    let transport = select_transport(&ComposeTransportRequest::FileRelay {
+        owner_workspace_id: owner_id.to_owned(),
+        private_mailbox_parent: request.private_mailbox_parent.clone(),
+    })?;
     let document = qualification_binding_document(
         &request,
         &facts,
@@ -316,6 +324,11 @@ fn qualification_binding_document(
         provider_configuration_destination,
         limits,
     } = parts;
+    super::require_relay_scope(
+        &transport.selection,
+        artifacts.relay_scope_setting.as_deref(),
+        &settings,
+    )?;
     let document = BindingDocument {
         kind: "node".into(),
         schema: QUALIFICATION_BINDING_SCHEMA,
@@ -363,6 +376,7 @@ fn qualification_binding_document(
         contact_timeout_seconds: limits.contact_timeout_seconds,
         observation_timeout_seconds: limits.observation_timeout_seconds,
         cleanup_timeout_seconds: limits.cleanup_timeout_seconds,
+        native_work_steps: Some(limits.native_work_steps),
         max_workspace_bytes: limits.max_workspace_bytes,
         max_export_bytes: limits.max_export_bytes,
         max_transfer_bytes: limits.max_transfer_bytes,
@@ -533,6 +547,7 @@ pub(crate) fn read_installed_policy_facts(
 
 #[cfg(test)]
 mod tests {
+    use super::super::compose::TEST_BACKEND_ID;
     use super::*;
     use crate::external_placement::compose_test_support as installed;
     use crate::node_config::sections::external_execution::compose::tests::root_pem;
@@ -550,6 +565,7 @@ mod tests {
         lock: ryeos_node_runtime::state_lock::StateLock,
         connector: PathBuf,
         adapter: PathBuf,
+        owner_runtime: String,
     }
 
     fn stopped_node() -> StoppedNode {
@@ -566,12 +582,50 @@ mod tests {
         installed::write_executable(&connector, b"connector executable bytes");
         let adapter = root.path().join("configuration-adapter");
         installed::write_executable(&adapter, b"configuration adapter executable bytes");
+        let owner_runtime = store_guest_owner_runtime(root.path(), 4 * 1024 * 1024 * 1024);
         StoppedNode {
             root,
             lock,
             connector,
             adapter,
+            owner_runtime,
         }
+    }
+
+    /// A guest owner runtime manifest holding only its profile, stored where
+    /// compose reads it; its private source holds the largest default package.
+    fn store_guest_owner_runtime(root: &std::path::Path, private_source_max_bytes: u64) -> String {
+        use ryeos_state::objects::{
+            EXTERNAL_CONTENT_MANIFEST_KIND, EXTERNAL_CONTENT_TREE_SCHEMA,
+            ExternalContentManifestEntry, ExternalContentManifestEntryKind,
+            ExternalContentManifestObject,
+        };
+        let cas = lillux::CasStore::new(
+            ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf())
+                .state()
+                .join("objects"),
+        );
+        let profile = format!(
+            r#"{{"account":{{"gid":65534,"implementation":"unix","uid":65534}},"owner_timeout_seconds":600,"private_source_max_bytes":{private_source_max_bytes},"private_source_max_inodes":4096,"schema":2}}"#
+        );
+        let profile = profile.as_bytes();
+        let blob = cas.store_blob(profile).unwrap();
+        let manifest = ExternalContentManifestObject {
+            schema: EXTERNAL_CONTENT_TREE_SCHEMA.to_owned(),
+            kind: EXTERNAL_CONTENT_MANIFEST_KIND.to_owned(),
+            entries: vec![ExternalContentManifestEntry {
+                path: "guest-owner-profile.json".to_owned(),
+                kind: ExternalContentManifestEntryKind::File,
+                mode: Some(0o644),
+                blob_hash: Some(blob),
+                size: Some(profile.len() as u64),
+                target: None,
+            }],
+            entry_count: 1,
+            total_bytes: profile.len() as u64,
+        };
+        cas.store_object(&serde_json::to_value(&manifest).unwrap())
+            .unwrap()
     }
 
     fn identity(node: &StoppedNode) -> ryeos_node_runtime::identity::NodeIdentity {
@@ -587,8 +641,8 @@ mod tests {
             protocol: ryeos_external_execution_contract::PROVIDER_DECLARATION_PROTOCOL.to_owned(),
             targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
             connector: "provider-connector".to_owned(),
-            connector_process_group:
-                ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::New,
+            connector_descendants:
+                ryeos_external_execution_contract::ExternalProviderConnectorDescendants::Contained,
             configuration_adapter: "provider-configuration".to_owned(),
             configuration_destination: "environments.toml".to_owned(),
             qualification_request_binding_protocol: binding_protocol.map(str::to_owned),
@@ -603,7 +657,7 @@ mod tests {
         let (connector_hash, _) = installed::connector_coordinate(&node.connector);
         let backends = if backend {
             vec![installed::CoordinateOnlyBackend::shared(
-                RENDER_BACKEND_ID,
+                TEST_BACKEND_ID,
                 &"d".repeat(64),
                 SETTINGS_SCHEMA,
                 &"1".repeat(64),
@@ -637,8 +691,8 @@ mod tests {
 
     fn facts() -> ProducerSourceFacts {
         ProducerSourceFacts {
-            backend: RENDER_BACKEND_ID.into(),
-            account: "render-test".into(),
+            backend: TEST_BACKEND_ID.into(),
+            account: "test-account".into(),
             adapter_artifact_hash: "d".repeat(64),
             settings: serde_json::json!({
                 "schema": 2,
@@ -668,12 +722,13 @@ mod tests {
             policy_ref: "config:codex/consumer-qualification-policy".into(),
             provider_declaration_id: PROVIDER_ID.into(),
             runtime_manifest_hash: "c".repeat(64),
-            guest_runtime_manifest_hash: "9".repeat(64),
+            guest_runtime_manifest_hash: node.owner_runtime.clone(),
             runtime_member_sha256: "e".repeat(64),
             snapshot_id: "snp-exact".into(),
             plan: "standard".into(),
             region: "oregon".into(),
-            private_mailbox_parent: "/run/ryeos/private-relay".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
             capacity_group: "qualification-workers".into(),
             credential_generation: super::super::compose::fresh_credential_generation().unwrap(),
             limits: ComposeLimits::default(),
@@ -708,7 +763,7 @@ mod tests {
         let node = stopped_node();
         let report = compose(&node, |_| {}).unwrap();
         assert_eq!(report.id, BINDING_ID);
-        assert_eq!(report.backend, RENDER_BACKEND_ID);
+        assert_eq!(report.backend, TEST_BACKEND_ID);
         assert_eq!(report.requirement_digest, "a".repeat(64));
         assert_eq!(report.worker_profile_hash, "b".repeat(64));
         assert_eq!(report.snapshot_id, "snp-exact");
@@ -729,8 +784,8 @@ mod tests {
         assert_eq!(document.max_export_bytes, 0);
         assert!(document.runtime_qualification.is_none());
         assert!(document.runtime_content_qualification.is_none());
-        assert_eq!(document.guest_runtime_manifest_hash, "9".repeat(64));
-        assert_eq!(report.guest_runtime_manifest_hash, "9".repeat(64));
+        assert_eq!(document.guest_runtime_manifest_hash, node.owner_runtime);
+        assert_eq!(report.guest_runtime_manifest_hash, node.owner_runtime);
         assert_eq!(document.network_policy, RELAY_NETWORK_POLICY);
         assert_eq!(document.settings_schema_digest, SETTINGS_SCHEMA);
         assert_eq!(document.settings["owner_id"], "usr-test");
@@ -774,6 +829,28 @@ mod tests {
         let loaded =
             admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity).unwrap();
         assert_eq!(loaded.document.max_export_bytes, 0);
+    }
+
+    #[test]
+    fn a_guest_owner_that_cannot_stage_the_largest_package_is_refused() {
+        let node = stopped_node();
+        let small = store_guest_owner_runtime(node.root.path(), 32 * 1024 * 1024);
+        let refused = format!(
+            "{:#}",
+            compose(&node, |r| r.guest_runtime_manifest_hash = small.clone()).unwrap_err()
+        );
+        assert!(
+            refused.contains("cannot stage the largest package this binding admits"),
+            "{refused}"
+        );
+        let absent = format!(
+            "{:#}",
+            compose(&node, |r| r.guest_runtime_manifest_hash = "a".repeat(64)).unwrap_err()
+        );
+        assert!(
+            absent.contains("is not in this node's content store"),
+            "{absent}"
+        );
     }
 
     #[test]
@@ -833,6 +910,10 @@ mod tests {
         assert!(
             refused(&|r| r.private_mailbox_parent = "/run/../x".into()).contains("mailbox parent")
         );
+        assert!(
+            refused(&|r| r.private_mailbox_parent = "/run/ryeos/private-relay".into())
+                .contains("guest owner's occurrence root")
+        );
         assert!(refused(&|r| r.limits.max_active = 0).contains("limits"));
         assert!(!published(&node));
     }
@@ -855,7 +936,7 @@ mod tests {
         };
         let mut other_backend = facts();
         other_backend.backend = "another-backend".into();
-        assert!(compose_facts(other_backend).contains("controller file relay"));
+        assert!(compose_facts(other_backend).contains("`another-backend` is not installed"));
         let mut no_owner = facts();
         no_owner
             .settings
@@ -918,7 +999,7 @@ mod tests {
                 &|_| {},
                 policy()
             )
-            .contains("`render-sandbox-early-access` is not installed")
+            .contains("`test-lease-backend` is not installed")
         );
         // A canary-requesting policy needs the provider's opt-in; one that
         // asks for no canary does not.
@@ -977,8 +1058,8 @@ mod tests {
         // provider facts, which here are stated and need the adapter.
         let mut req = request(&node, BINDING_ID);
         req.facts_source = ProducerFactsSource::Standalone(StandaloneProducerFacts {
-            backend: "render".into(),
-            account: "render-test".into(),
+            backend: TEST_BACKEND_ID.into(),
+            account: "test-account".into(),
             owner_id: "usr-test".into(),
             roots_pem: root_pem(),
         });
@@ -999,8 +1080,8 @@ mod tests {
         let (owner, generation, backend, account) = loaded.credential_coordinates();
         assert_eq!(owner, report.capacity_owner);
         assert_eq!(generation, report.credential_generation);
-        assert_eq!(backend, RENDER_BACKEND_ID);
-        assert_eq!(account, "render-test");
+        assert_eq!(backend, TEST_BACKEND_ID);
+        assert_eq!(account, "test-account");
         assert_eq!(
             super::super::compose::installed_binding_credential_generation(
                 node.root.path(),

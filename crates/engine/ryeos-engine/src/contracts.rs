@@ -3158,6 +3158,21 @@ pub struct VerifiedItem {
     pub pinned_version: Option<PinnedVersion>,
 }
 
+impl VerifiedItem {
+    /// The launch trust class of this item: its signature verdict combined
+    /// with the space it came from.
+    pub fn launch_trust_class(&self) -> crate::resolution::TrustClass {
+        use crate::resolution::TrustClass as LaunchTrustClass;
+        match (self.trust_class, self.resolved.source_space) {
+            (TrustClass::Trusted, ItemSpace::Bundle) => LaunchTrustClass::TrustedBundle,
+            (TrustClass::Trusted, ItemSpace::Project) => LaunchTrustClass::TrustedProject,
+            (TrustClass::Trusted, ItemSpace::Node) => LaunchTrustClass::TrustedNode,
+            (TrustClass::Untrusted, _) => LaunchTrustClass::UntrustedProject,
+            (TrustClass::Unsigned, _) => LaunchTrustClass::Unsigned,
+        }
+    }
+}
+
 // ── Launch mode ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

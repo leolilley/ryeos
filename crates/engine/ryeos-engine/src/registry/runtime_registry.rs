@@ -950,7 +950,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
         "launch_contract.primary_allowed_spaces",
         &contract.primary_allowed_spaces,
     )?;
-    validate_non_empty_unique(
+    validate_trust_list(
         yaml_path,
         "launch_contract.primary_allowed_trust",
         &contract.primary_allowed_trust,
@@ -1023,7 +1023,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             &format!("launch_contract.ref_bindings.{name}.allowed_spaces"),
             &binding.allowed_spaces,
         )?;
-        validate_non_empty_unique(
+        validate_trust_list(
             yaml_path,
             &format!("launch_contract.ref_bindings.{name}.allowed_trust"),
             &binding.allowed_trust,
@@ -1093,7 +1093,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             &format!("launch_contract.config_inputs.{name}.allowed_spaces"),
             allowed_spaces,
         )?;
-        validate_non_empty_unique(
+        validate_trust_list(
             yaml_path,
             &format!("launch_contract.config_inputs.{name}.allowed_trust"),
             allowed_trust,
@@ -1212,7 +1212,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             "launch_contract.execution_dependencies.allowed_spaces",
             &dependency_policy.allowed_spaces,
         )?;
-        validate_non_empty_unique(
+        validate_trust_list(
             yaml_path,
             "launch_contract.execution_dependencies.allowed_trust",
             &dependency_policy.allowed_trust,
@@ -1381,7 +1381,7 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             |error| EngineError::RuntimeYamlInvalid {
                 path: yaml_path.to_owned(),
                 reason: format!(
-                    "launch_contract.evidence_attachments.destination_prefix is invalid: {error}"
+                    "launch_contract.evidence_attachments.destination_prefix is invalid: {error:#}"
                 ),
             },
         )?;
@@ -1503,6 +1503,20 @@ fn validate_launch_contract_kinds(
                 ),
             );
         }
+    }
+    Ok(())
+}
+
+/// A declared trust list: non-empty, unique, and never admitting unsigned
+/// work. Unsigned items are refused at every launch whatever a contract says.
+fn validate_trust_list(
+    yaml_path: &Path,
+    field: &str,
+    values: &[TrustClass],
+) -> Result<(), EngineError> {
+    validate_non_empty_unique(yaml_path, field, values)?;
+    if values.contains(&TrustClass::Unsigned) {
+        return runtime_yaml_error(yaml_path, format!("{field} may not admit `unsigned`"));
     }
     Ok(())
 }

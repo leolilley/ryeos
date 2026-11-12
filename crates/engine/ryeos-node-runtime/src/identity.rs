@@ -85,10 +85,11 @@ impl PublicIdentityDoc {
         )?;
         // Exactly the existing authoring contract in build_public_identity_at;
         // do not introduce a second signature envelope for host supervision.
-        let payload = serde_json::to_vec(&serde_json::json!({
+        let payload = lillux::canonical_json(&serde_json::json!({
             "kind": self.kind, "principal_id": self.principal_id,
             "signing_key": self.signing_key, "created_at": self.created_at,
-        }))?;
+        }))?
+        .into_bytes();
         key.verify_strict(&payload, &signature)
             .context("invalid public node identity self-signature")?;
         Ok(fingerprint)
@@ -203,7 +204,7 @@ impl NodeIdentity {
             "signing_key": signing_key_str,
             "created_at": now,
         });
-        let payload = serde_json::to_vec(&unsigned)?;
+        let payload = lillux::canonical_json(&unsigned)?.into_bytes();
         let signature: Signature = self.signing_key.sign(&payload);
         Ok(PublicIdentityDoc {
             kind: "identity/v1".to_string(),

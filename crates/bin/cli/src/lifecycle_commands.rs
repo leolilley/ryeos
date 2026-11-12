@@ -687,6 +687,13 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
     let installed = ryeos_node_runtime::node_policy::generation::policy_directory(&app_root)
         .join(format!("{}.yaml", args.section));
 
+    // Applying `native_capacity` also amends the capacity issuance to the
+    // new policy; the operation reports that amendment beside the install.
+    let capacity_amendment = applied
+        .result
+        .get("capacity_amendment")
+        .filter(|value| !value.is_null())
+        .cloned();
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "status": "installed",
@@ -694,12 +701,29 @@ fn run_node_policy_apply_command(argv: &[String], console: &crate::tty::Console)
             "path": installed,
             "signer_fingerprint": applied.result["signer_fingerprint"],
             "receipt": applied.receipt.digest()?,
+            "capacity_amendment": capacity_amendment,
         }))?;
     } else {
         console.text(&format!(
             "Installed signed node policy: {}\n",
             installed.display()
         ))?;
+        if let Some(amendment) = &capacity_amendment {
+            let already = amendment["already_applied"].as_bool().unwrap_or(false);
+            console.text(&format!(
+                "Capacity issuance {} policy {}{}\n",
+                if already {
+                    "already carries"
+                } else {
+                    "amended to"
+                },
+                amendment["policy_digest"].as_str().unwrap_or("?"),
+                amendment["document_digest"]
+                    .as_str()
+                    .map(|digest| format!(" (document {digest})"))
+                    .unwrap_or_default()
+            ))?;
+        }
     }
     Ok(())
 }
@@ -1294,6 +1318,32 @@ fn run_execution_history_reset_command(
                         discard.reason
                     ),
                 },
+            },
+        ),
+        crate::tty::Row::key_value(
+            "Q local custody settled",
+            match &report.qualification_custody {
+                None => "none open".to_owned(),
+                Some(custody) => format!(
+                    "{} Q local start(s): {} workspace root(s) and {} state root(s) {}, {} absent; {} guest scratch row(s): {} root(s) {}, {} absent",
+                    custody.local_starts,
+                    custody.workspace_roots_removed,
+                    custody.state_roots_removed,
+                    if custody.performed {
+                        "removed"
+                    } else {
+                        "to remove"
+                    },
+                    custody.workspace_roots_absent + custody.state_roots_absent,
+                    custody.scratch_rows,
+                    custody.scratch_roots_removed,
+                    if custody.performed {
+                        "removed"
+                    } else {
+                        "to remove"
+                    },
+                    custody.scratch_roots_absent,
+                ),
             },
         ),
         crate::tty::Row::key_value("reservation released", report.released_sha256.clone()),
@@ -2315,6 +2365,11 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // The wall clock the node issues external execution windows from. Always
+    // reported; a node policy that requires a synchronized clock turns an
+    // unsatisfied reading into a failure.
+    checks.push(wall_clock_check(&config.app_root, initialized));
+
     if initialized {
         match ryeos_app::bundle_transaction::inspect_bundle_transactions(&config.app_root) {
             Ok(diagnostics) if !diagnostics.invalid.is_empty() => checks.push(check(
@@ -2467,6 +2522,36 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     "error": format!("{e}"),
                     "note": "with no daemon running this is usually a stale socket file — remove it",
                 }));
+            }
+        }
+        // The callback-only socket sandboxed tools are handed; a node cannot
+        // start unless this one binds too.
+        let runtime_uds_path = config.runtime_uds_path();
+        if !lillux::local_ipc::local_endpoint_path_addressable(&runtime_uds_path) {
+            status = FAIL;
+            detail.insert("uds_runtime".into(), serde_json::json!({
+                "path": runtime_uds_path,
+                "error": "path exceeds the local socket length limit",
+                "note": "configure a shorter uds_path; the callback socket is the control socket's name plus `-runtime`",
+            }));
+        } else {
+            match std::os::unix::net::UnixListener::bind(&runtime_uds_path) {
+                Ok(l) => {
+                    drop(l);
+                    let _ = std::fs::remove_file(&runtime_uds_path);
+                    detail.insert(
+                        "uds_runtime".into(),
+                        serde_json::json!({ "path": runtime_uds_path, "status": "bindable" }),
+                    );
+                }
+                Err(e) => {
+                    status = FAIL;
+                    detail.insert("uds_runtime".into(), serde_json::json!({
+                        "path": runtime_uds_path,
+                        "error": format!("{e}"),
+                        "note": "with no daemon running this is usually a stale socket file — remove it",
+                    }));
+                }
             }
         }
         checks.push(check("sockets", status, serde_json::Value::Object(detail)));
@@ -2640,6 +2725,78 @@ fn durable_identity_check(
             "durable_identity",
             FAIL,
             serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
+/// The node's wall-clock trust against the clock requirement its signed
+/// execution policy declares, if any. Reporting needs no policy: without one
+/// (or without an initialized node) the row is informational.
+fn wall_clock_check(
+    app_root: &std::path::Path,
+    initialized: bool,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    let trust = lillux::time::wall_clock_trust();
+    let requirement = if initialized {
+        (|| -> Result<_> {
+            let isolation =
+                ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(
+                    app_root,
+                )?;
+            let node_trust = isolation
+                .registered_generation_node_trust()
+                .context("retained isolation generation omitted node trust")?;
+            let policy = crate::node_descriptors::load_verified_policy_snapshot_with_trust(
+                app_root, node_trust,
+            )?;
+            Ok(policy
+                .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()?
+                .external_wall_clock_requirement)
+        })()
+    } else {
+        Ok(None)
+    };
+    let synced = matches!(trust, lillux::time::WallClockTrust::Synced { .. });
+    match requirement {
+        Ok(Some(requirement)) => match requirement.require(&trust) {
+            Ok(()) => check(
+                "wall_clock",
+                OK,
+                serde_json::json!({ "trust": trust, "requirement": requirement }),
+            ),
+            Err(error) => check(
+                "wall_clock",
+                FAIL,
+                serde_json::json!({
+                    "trust": trust,
+                    "requirement": requirement,
+                    "message": format!("{error:#}"),
+                    "fix": "synchronize this host's clock, or change `external_wall_clock_requirement` in the signed execution policy",
+                }),
+            ),
+        },
+        Ok(None) if synced => check(
+            "wall_clock",
+            OK,
+            serde_json::json!({ "trust": trust, "requirement": "none (report only)" }),
+        ),
+        Ok(None) => check(
+            "wall_clock",
+            WARN,
+            serde_json::json!({
+                "trust": trust,
+                "requirement": "none (report only)",
+                "note": "external execution windows are issued from this clock; guests tolerate a declared skew",
+            }),
+        ),
+        Err(error) => check(
+            "wall_clock",
+            WARN,
+            serde_json::json!({
+                "trust": trust,
+                "note": format!("the clock requirement could not be read: {error:#}"),
+            }),
         ),
     }
 }

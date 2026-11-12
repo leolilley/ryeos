@@ -606,7 +606,8 @@ const COMPILED_FEATURES: [(&str, bool); 6] = [
     ("scheduling", cfg!(feature = "scheduling")),
 ];
 
-fn compiled_features() -> Vec<String> {
+/// The optional Cargo features this binary was compiled with, in table order.
+pub fn compiled_features() -> Vec<String> {
     COMPILED_FEATURES
         .iter()
         .filter(|(_, compiled)| *compiled)
@@ -623,9 +624,11 @@ pub fn load_node_config_two_phase(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
+    // Isolation pins the callback-only socket: a sandboxed tool is shown that
+    // endpoint and never the operator control socket.
     load_node_config_two_phase_with_socket(
         config,
-        Some(&config.uds_path),
+        Some(&config.runtime_uds_path()),
         None,
         provider_environment,
     )
@@ -645,9 +648,11 @@ pub fn load_node_config_two_phase_with_host_runtime(
     Arc<NodePolicySnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
+    // Isolation pins the callback-only socket: a sandboxed tool is shown that
+    // endpoint and never the operator control socket.
     load_node_config_two_phase_with_socket(
         config,
-        Some(&config.uds_path),
+        Some(&config.runtime_uds_path()),
         host_runtime,
         provider_environment,
     )
@@ -835,6 +840,7 @@ fn load_node_config_two_phase_with_socket(
             ryeos_engine::isolation::IsolationRuntime::resolve_compiled_policy_for_daemon(
                 app_root,
                 daemon_socket,
+                Some(&config.uds_path),
                 node_policy
                     .require::<ryeos_engine::isolation::IsolationPolicy>()?
                     .clone(),
@@ -1250,5 +1256,27 @@ mod tests {
             app_root.join(AI_DIR).join("config/keys/trusted"),
             expected_trust_dir
         );
+    }
+}
+
+#[cfg(test)]
+mod runtime_socket_pin_tests {
+    /// Isolation must pin the callback-only socket for both daemon snapshot
+    /// constructors and withhold the control socket; the full snapshot cannot
+    /// be built without a node, so the choice is pinned at its source. The
+    /// patterns are assembled so this test does not match itself.
+    #[test]
+    fn bootstrap_pins_the_runtime_socket_and_withholds_the_control_socket() {
+        let source: String = include_str!("bootstrap.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let pinned = format!("Some(&config.{}()),", "runtime_uds_path");
+        assert_eq!(source.matches(&pinned).count(), 2);
+        let control = format!("Some(&config.{}),", "uds_path");
+        // The control path appears once: as the socket withheld from mounts.
+        assert_eq!(source.matches(&control).count(), 1);
+        let withheld = format!("daemon_socket,{control}node_policy");
+        assert!(source.contains(&withheld));
     }
 }

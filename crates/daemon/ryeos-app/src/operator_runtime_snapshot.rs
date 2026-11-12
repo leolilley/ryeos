@@ -887,17 +887,84 @@ fn create_qualification_occurrence_checked(
                     .state_store
                     .bind_snapshot_qualification_occurrence(&occurrence)
             }
-            RuntimeSnapshotQualificationAdapterResponse::Uncertain { .. } => state
-                .state_store
-                .quarantine_snapshot_qualification_attempt(&request.intent.operation_id),
+            RuntimeSnapshotQualificationAdapterResponse::Uncertain { reason, .. } => {
+                quarantine_qualification(
+                    state,
+                    &request.intent.operation_id,
+                    &uncertainty_text(reason.as_ref()),
+                )
+            }
         },
         Err(error) => {
-            state
-                .state_store
-                .quarantine_snapshot_qualification_attempt(&request.intent.operation_id)?;
+            quarantine_qualification(
+                state,
+                &request.intent.operation_id,
+                &contact_error_text(&error),
+            )?;
             Err(error)
         }
     }
+}
+
+const MAX_QUARANTINE_REASON_BYTES: usize = 2048;
+
+fn bounded_text(text: &str) -> String {
+    let mut end = text.len().min(MAX_QUARANTINE_REASON_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// The logged reason for an adapter `uncertain` result.
+fn uncertainty_text(
+    reason: Option<&ryeos_external_execution_contract::UncertaintyReason>,
+) -> String {
+    match reason {
+        Some(reason) => bounded_text(&format!("{}: {}", reason.class.as_str(), reason.detail)),
+        None => "adapter reported uncertain without a reason".to_owned(),
+    }
+}
+
+/// The logged reason for a contact that failed with an error.
+fn contact_error_text(error: &anyhow::Error) -> String {
+    bounded_text(&format!("contact error: {error:#}"))
+}
+
+fn quarantine_qualification(
+    state: &AppState,
+    operation_id: &str,
+    reason: &str,
+) -> Result<SnapshotQualificationRecord> {
+    let record = state
+        .state_store
+        .quarantine_snapshot_qualification_attempt(operation_id)?;
+    tracing::warn!(
+        operation_id,
+        from = "attempt_pending",
+        to = "quarantined",
+        reason,
+        "snapshot qualification create attempt quarantined"
+    );
+    Ok(record)
+}
+
+fn quarantine_verifier(
+    state: &AppState,
+    operation_id: &str,
+    reason: &str,
+) -> Result<RestoredVerifierAttemptRecord> {
+    let record = state
+        .state_store
+        .quarantine_restored_verifier_attempt(operation_id)?;
+    tracing::warn!(
+        operation_id,
+        from = "attempt_pending",
+        to = "quarantined",
+        reason,
+        "restored verifier attempt quarantined"
+    );
+    Ok(record)
 }
 
 /// Execute one independently admitted verifier inside the exact restored
@@ -1077,20 +1144,26 @@ fn verify_qualification_occurrence_under_contact_gate(
                     .state_store
                     .bind_restored_verifier_observation(&observation)
             }
-            RestoredVerifierAdapterResponse::Uncertain { .. } => state
-                .state_store
-                .quarantine_restored_verifier_attempt(&request.intent.operation_id),
+            RestoredVerifierAdapterResponse::Uncertain { reason, .. } => quarantine_verifier(
+                state,
+                &request.intent.operation_id,
+                &uncertainty_text(reason.as_ref()),
+            ),
             RestoredVerifierAdapterResponse::ConsumerObserved { .. } => {
-                state
-                    .state_store
-                    .quarantine_restored_verifier_attempt(&request.intent.operation_id)?;
+                quarantine_verifier(
+                    state,
+                    &request.intent.operation_id,
+                    "owner measurement contact returned consumer evidence",
+                )?;
                 anyhow::bail!("owner measurement contact returned consumer evidence")
             }
         },
         Err(error) => {
-            state
-                .state_store
-                .quarantine_restored_verifier_attempt(&request.intent.operation_id)?;
+            quarantine_verifier(
+                state,
+                &request.intent.operation_id,
+                &contact_error_text(&error),
+            )?;
             Err(error)
         }
     }
@@ -1205,8 +1278,10 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
             nonce_hex: hex::encode(lillux::crypto::generate_random_bytes::<32>()),
             guest_runtime_manifest_hash: source.intent.guest_runtime_manifest_hash.clone(),
         },
+        // The first contact delivers the consumer archive, which outlasts a
+        // plain provider round trip; the profile's delivery budget bounds it.
         attempt_deadline_ms: started_at_ms
-            .checked_add(i64::from(profile.contact_timeout_seconds()) * 1000)
+            .checked_add(i64::from(profile.delivery_timeout_seconds()) * 1000)
             .context("consumer challenge deadline overflow")?,
     };
     intent.operation_id = intent.derived_operation_id()?;
@@ -1252,7 +1327,7 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
         .filter(|remaining| *remaining > 0)
         .context("consumer original preparation deadline expired")?;
     let remaining = lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?).min(
-        lillux::time::Duration::from_secs(u64::from(profile.contact_timeout_seconds()))
+        lillux::time::Duration::from_secs(u64::from(profile.delivery_timeout_seconds()))
             .saturating_sub(preparation_timer.elapsed()),
     );
     ensure!(
@@ -1639,9 +1714,11 @@ fn verify_consumer_occurrence_with_callback(
                 });
             };
             if deadline.has_elapsed() {
-                state
-                    .state_store
-                    .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                quarantine_verifier(
+                    state,
+                    &intent.operation_id,
+                    "consumer original deadline expired after contact claim",
+                )?;
                 anyhow::bail!("consumer original deadline expired after contact claim");
             }
             let attempted = state
@@ -1670,27 +1747,33 @@ fn verify_consumer_occurrence_with_callback(
                         match retained {
                             Ok(record) => Ok(record),
                             Err(error) => {
-                                state
-                                    .state_store
-                                    .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                                quarantine_verifier(
+                                    state,
+                                    &intent.operation_id,
+                                    &contact_error_text(&error),
+                                )?;
                                 Err(error)
                             }
                         }
                     }
-                    RestoredVerifierAdapterResponse::Uncertain { .. } => state
-                        .state_store
-                        .quarantine_restored_verifier_attempt(&intent.operation_id),
+                    RestoredVerifierAdapterResponse::Uncertain { reason, .. } => {
+                        quarantine_verifier(
+                            state,
+                            &intent.operation_id,
+                            &uncertainty_text(reason.as_ref()),
+                        )
+                    }
                     RestoredVerifierAdapterResponse::Observed { .. } => {
-                        state
-                            .state_store
-                            .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                        quarantine_verifier(
+                            state,
+                            &intent.operation_id,
+                            "consumer contact returned owner measurement",
+                        )?;
                         anyhow::bail!("consumer contact returned owner measurement")
                     }
                 },
                 Err(error) => {
-                    state
-                        .state_store
-                        .quarantine_restored_verifier_attempt(&intent.operation_id)?;
+                    quarantine_verifier(state, &intent.operation_id, &contact_error_text(&error))?;
                     Err(error)
                 }
             }
@@ -3145,6 +3228,26 @@ fn retained_snapshot_parent(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quarantine_reason_text_is_bounded_and_names_the_class() {
+        use ryeos_external_execution_contract::{UncertaintyClass, UncertaintyReason};
+        let reason = UncertaintyReason::new(UncertaintyClass::RunStatus, "run status 500");
+        assert_eq!(
+            super::uncertainty_text(Some(&reason)),
+            "run_status: run status 500"
+        );
+        assert_eq!(
+            super::uncertainty_text(None),
+            "adapter reported uncertain without a reason"
+        );
+        let error = anyhow::anyhow!("{}", "é".repeat(2000));
+        let text = super::contact_error_text(&error);
+        assert!(
+            text.len() <= super::MAX_QUARANTINE_REASON_BYTES
+                && text.starts_with("contact error: é")
+        );
+    }
+
     use super::*;
     use base64::Engine as _;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
@@ -3217,7 +3320,7 @@ mod tests {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: owner.clone(),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbx-source".into(),
             source_bootstrap_operation_id: Some("8".repeat(64)),
             source_created_at: Some("2026-09-29T00:00:00Z".into()),
@@ -3384,7 +3487,7 @@ mod tests {
                 &termination,
                 expected,
                 &identity,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
             )
         };
@@ -3453,7 +3556,7 @@ mod tests {
                 &late_terminal,
                 &source,
                 &identity,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
             )
             .is_err()
@@ -3486,7 +3589,7 @@ mod tests {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: owner.clone(),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbx-source".into(),
             source_bootstrap_operation_id: None,
             source_created_at: None,
@@ -3528,41 +3631,20 @@ mod tests {
             created_at_ms: now,
             updated_at_ms: now,
         };
-        validate_probe_snapshot_record(
-            &record,
-            &named,
-            proof,
-            &source,
-            "render-sandbox-early-access",
-            &owner,
-        )
-        .unwrap();
+        validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+            .unwrap();
         record.phase = RuntimeSnapshotPhase::Quarantined;
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "render-sandbox-early-access",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
         record.phase = RuntimeSnapshotPhase::Bound;
         record.intent.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: "f".repeat(64),
         };
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "render-sandbox-early-access",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
         record.intent.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: proof.evidence.product_witness_hash.clone(),
@@ -3578,7 +3660,7 @@ mod tests {
                 &named,
                 proof,
                 &source,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
             )
             .is_err()
@@ -3599,15 +3681,8 @@ mod tests {
         );
         record.locator.as_mut().unwrap().snapshot_id = "snp-other".into();
         assert!(
-            validate_probe_snapshot_record(
-                &record,
-                &named,
-                proof,
-                &source,
-                "render-sandbox-early-access",
-                &owner
-            )
-            .is_err()
+            validate_probe_snapshot_record(&record, &named, proof, &source, "test-backend", &owner)
+                .is_err()
         );
     }
 
@@ -3620,7 +3695,7 @@ mod tests {
             qualification_operation_id: "2".repeat(64),
             occurrence_id: "sbx-restored".into(),
             owner_principal: owner.clone(),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             provider_spec_digest: "3".repeat(64),
             attempt_deadline_ms: 1,
         };
@@ -3651,7 +3726,7 @@ mod tests {
                 retained,
                 qualification,
                 occurrence,
-                "render-sandbox-early-access",
+                "test-backend",
                 &owner,
                 hash,
             )

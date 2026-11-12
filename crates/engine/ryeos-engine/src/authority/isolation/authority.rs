@@ -140,6 +140,7 @@ pub struct IsolationDescriptorBoundCommand {
     identity: IsolationVerifiedCode,
     executable: lillux::InheritedDescriptorAuthority,
     file_identity: IsolationDescriptorFileIdentity,
+    host_origin: Option<PathBuf>,
 }
 
 /// Exact executable member of one already-admitted read-only realization
@@ -239,7 +240,21 @@ impl IsolationDescriptorBoundCommand {
             identity,
             executable,
             file_identity,
+            host_origin: None,
         }
+    }
+
+    /// Name the canonical host file these admitted bytes were captured from.
+    /// It grants nothing: disabled isolation may carry the bytes by that
+    /// inode only after re-digesting it and proving the daemon cannot change
+    /// it; otherwise the retained descriptor's bytes are sealed as before.
+    pub fn with_host_origin(mut self, host_origin: Option<PathBuf>) -> Self {
+        self.host_origin = host_origin;
+        self
+    }
+
+    pub fn host_origin(&self) -> Option<&Path> {
+        self.host_origin.as_deref()
     }
 
     pub fn identity(&self) -> &IsolationVerifiedCode {
@@ -824,6 +839,11 @@ pub struct IsolationLaunchContext<'a> {
     pub checkpoint_dir: Option<&'a Path>,
     pub checkpoint_authority: Option<&'a lillux::PinnedDirectory>,
     pub daemon_socket_path: Option<&'a Path>,
+    /// The daemon admitted `daemon_socket_path` as the callback socket of a
+    /// captured-compatible callback protocol. Under a captured filesystem
+    /// ceiling this admits exactly that one socket and nothing else ambient;
+    /// without it a captured launch carrying a socket is refused.
+    pub captured_callback_socket: bool,
     pub bundle_roots: &'a [PathBuf],
     pub node_trusted_keys_dir: Option<&'a Path>,
     pub verified_code: &'a [IsolationVerifiedCode],

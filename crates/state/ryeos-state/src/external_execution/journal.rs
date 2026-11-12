@@ -87,16 +87,56 @@ WHEN NEW.binding_digest != OLD.binding_digest OR NEW.direction != OLD.direction
  OR NOT ((OLD.application='pending' AND NEW.application='claimed')
      OR (OLD.application='pending' AND NEW.application='revoked'
          AND OLD.direction='owner_to_supervisor'
-         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes'),0))
+         AND COALESCE(json_extract(OLD.frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed'),0))
      OR (OLD.application='claimed' AND NEW.application='applied'))
 BEGIN SELECT RAISE(ABORT, 'external frame cannot be rewritten or reapplied'); END;
 "#;
+
+/// How a journal judges a frame's channel lifetime and execution deadline.
+/// The controller runtime database judges them on the controller's wall clock,
+/// which issued the binding. A guest journal judges them on the guest's own
+/// local window and never reads a wall clock it cannot vouch for.
+#[derive(Clone, Copy)]
+pub enum FrameLifetimeCheck<'a> {
+    ControllerWall,
+    GuestWindow(&'a super::guest_window::GuestChannelWindow),
+}
+
+impl FrameLifetimeCheck<'_> {
+    pub(super) fn decode_and_verify(
+        &self,
+        wire: &[u8],
+        binding: &ExecutionChannelBinding,
+    ) -> Result<AuthenticatedExecutionFrame> {
+        match self {
+            Self::ControllerWall => SignedExecutionFrame::decode_and_verify(
+                wire,
+                binding,
+                lillux::time::timestamp_millis(),
+            ),
+            Self::GuestWindow(window) => {
+                SignedExecutionFrame::decode_and_verify_in_guest_window(wire, binding, window)
+            }
+        }
+    }
+
+    fn execution_elapsed(&self, binding: &ExecutionChannelBinding) -> bool {
+        match self {
+            Self::ControllerWall => {
+                lillux::time::timestamp_millis() >= binding.execution_deadline_ms
+            }
+            Self::GuestWindow(window) => window.execution_elapsed(),
+        }
+    }
+}
 
 /// Protected owner-specific checks; none has a permissive default. Shared
 /// authentication, ordering, revocation and deadline checks cannot be replaced.
 /// Implementations query the supplied connection (the caller's transaction),
 /// never reconstruct authority from project files or another database.
 pub trait JournalOwner {
+    /// The clock authority this owner's journal judges frame lifetimes by.
+    fn frame_lifetime(&self) -> FrameLifetimeCheck<'_>;
     /// Check exact retained authority, including duplicate/idempotent requests.
     /// This must allow historical evidence under a quarantined/expired owner.
     fn require_owner(&self, conn: &Connection, binding: &ExecutionChannelBinding) -> Result<()>;
@@ -160,7 +200,9 @@ fn is_execution_input(direction: ChannelDirection, payload: &ExecutionChannelPay
     direction == ChannelDirection::OwnerToSupervisor
         && matches!(
             payload,
-            ExecutionChannelPayload::Release | ExecutionChannelPayload::ProtocolBytes { .. }
+            ExecutionChannelPayload::Release
+                | ExecutionChannelPayload::ProtocolBytes { .. }
+                | ExecutionChannelPayload::ProtocolInputClosed
         )
 }
 
@@ -222,8 +264,7 @@ pub fn record_revocation(
     wire: &[u8],
 ) -> Result<bool> {
     let binding = load_binding(tx, placement)?;
-    let verified =
-        SignedExecutionFrame::decode_and_verify(wire, &binding, lillux::time::timestamp_millis())?;
+    let verified = owner.frame_lifetime().decode_and_verify(wire, &binding)?;
     if verified.frame().direction != ChannelDirection::OwnerToSupervisor
         || !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel)
         || wire.len() as u64 > TERMINAL_CONTROL_BYTES
@@ -255,7 +296,7 @@ pub fn record_revocation(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
             AND direction='owner_to_supervisor'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed')",
             [binding.digest()?],
         )?;
     }
@@ -271,8 +312,7 @@ pub fn append_frame(
     wire: &[u8],
 ) -> Result<bool> {
     let binding = load_binding(tx, placement)?;
-    let now = lillux::time::timestamp_millis();
-    let verified = SignedExecutionFrame::decode_and_verify(wire, &binding, now)?;
+    let verified = owner.frame_lifetime().decode_and_verify(wire, &binding)?;
     let frame = verified.frame();
     if matches!(frame.payload, ExecutionChannelPayload::Cancel) {
         let retained: Option<String> = tx
@@ -374,7 +414,7 @@ pub fn append_frame(
     let next = ChannelPhase::parse(&state)?.advance(
         completion.as_deref(),
         &frame.payload,
-        now < binding.execution_deadline_ms,
+        !owner.frame_lifetime().execution_elapsed(&binding),
     )?;
     let ordinal: i64 = tx.query_row(
         "SELECT COALESCE(MAX(ordinal),0)+1 FROM external_execution_frame WHERE binding_digest=?1",
@@ -420,7 +460,7 @@ pub fn append_frame(
             "UPDATE external_execution_frame SET application='revoked'
             WHERE binding_digest=?1 AND application='pending'
             AND direction='owner_to_supervisor'
-            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+            AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed')",
             [&frame.binding_digest],
         )?;
     }
@@ -434,7 +474,7 @@ pub fn append_frame(
             tx.execute("UPDATE external_execution_frame SET application='revoked'
                 WHERE binding_digest=?1 AND application='pending'
                 AND direction='owner_to_supervisor'
-                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes')",
+                AND json_extract(frame_json,'$.frame.payload.kind') IN ('release','protocol_bytes','protocol_input_closed')",
                 [&frame.binding_digest])?;
         }
         ExecutionChannelPayload::Quiesce {
@@ -933,7 +973,7 @@ pub fn prepare_frame(
         signing_key,
     )?;
     let wire = lillux::canonical_json(&serde_json::to_value(signed)?)?.into_bytes();
-    SignedExecutionFrame::decode_and_verify(&wire, &binding, lillux::time::timestamp_millis())
+    owner.frame_lifetime().decode_and_verify(&wire, &binding)
 }
 
 /// Recover or author an exact signed acknowledgement of the peer frame's
@@ -1350,7 +1390,7 @@ pub fn claim_application(
         sequence,
         &stored_digest,
         wire.as_bytes(),
-        lillux::time::timestamp_millis(),
+        owner.frame_lifetime(),
     )?;
     owner.authorize_frame(tx, &binding, &verified.frame().payload)?;
     let non_input_observation = matches!(
@@ -1368,7 +1408,7 @@ pub fn claim_application(
     {
         bail!("external execution is durably revoked");
     }
-    if lillux::time::timestamp_millis() >= binding.execution_deadline_ms
+    if owner.frame_lifetime().execution_elapsed(&binding)
         && is_execution_input(direction, &verified.frame().payload)
     {
         bail!("external execution deadline passed before application");
@@ -1482,15 +1522,39 @@ pub fn finish_application(
     Ok(())
 }
 
-fn authenticate_retained_frame(
+/// What a retained frame is verified against: the instant it was issued, or a
+/// live lifetime check.
+enum RetainedFrameValidation<'a> {
+    At(i64),
+    Lifetime(FrameLifetimeCheck<'a>),
+}
+
+impl From<i64> for RetainedFrameValidation<'_> {
+    fn from(instant_ms: i64) -> Self {
+        Self::At(instant_ms)
+    }
+}
+
+impl<'a> From<FrameLifetimeCheck<'a>> for RetainedFrameValidation<'a> {
+    fn from(check: FrameLifetimeCheck<'a>) -> Self {
+        Self::Lifetime(check)
+    }
+}
+
+fn authenticate_retained_frame<'a>(
     binding: &ExecutionChannelBinding,
     direction: ChannelDirection,
     sequence: i64,
     stored_digest: &str,
     wire: &[u8],
-    validation_instant_ms: i64,
+    lifetime: impl Into<RetainedFrameValidation<'a>>,
 ) -> Result<AuthenticatedExecutionFrame> {
-    let verified = SignedExecutionFrame::decode_and_verify(wire, binding, validation_instant_ms)?;
+    let verified = match lifetime.into() {
+        RetainedFrameValidation::At(instant_ms) => {
+            SignedExecutionFrame::decode_and_verify(wire, binding, instant_ms)?
+        }
+        RetainedFrameValidation::Lifetime(check) => check.decode_and_verify(wire, binding)?,
+    };
     if verified.digest() != stored_digest
         || verified.frame().direction != direction
         || i64::try_from(verified.frame().sequence)? != sequence
@@ -2493,6 +2557,10 @@ mod tests {
     struct TestOwner;
 
     impl JournalOwner for TestOwner {
+        fn frame_lifetime(&self) -> FrameLifetimeCheck<'_> {
+            FrameLifetimeCheck::ControllerWall
+        }
+
         fn require_owner(
             &self,
             conn: &Connection,
@@ -4199,7 +4267,7 @@ mod tests {
                 },
             );
             append(conn, &binding, &ack).unwrap();
-            let (input, _) = wire(
+            let (input, input_digest) = wire(
                 &binding,
                 &owner,
                 ChannelDirection::OwnerToSupervisor,
@@ -4211,6 +4279,18 @@ mod tests {
                 },
             );
             append(conn, &binding, &input).unwrap();
+            // The owner's input closure is executable input too: the same
+            // gate holds it back, and pending it is revocable like bytes.
+            let (closure, _) = wire(
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                3,
+                Some(input_digest),
+                1,
+                ExecutionChannelPayload::ProtocolInputClosed,
+            );
+            append(conn, &binding, &closure).unwrap();
             conn.execute("UPDATE test_owner SET permits_input_transport=0", [])
                 .unwrap();
             assert!(
@@ -4980,6 +5060,50 @@ mod tests {
                 .unwrap();
             assert_eq!(application, "revoked");
             assert!(!ready_digest.is_empty());
+        });
+    }
+
+    #[test]
+    fn owner_revocation_is_admitted_after_the_channel_lifetime() {
+        let now = lillux::time::timestamp_millis();
+        let (journal, binding, owner, _supervisor) =
+            setup_with_window(now - 120_000, now - 90_000, now - 60_000);
+        let placement = binding.placement_thread_id.clone();
+        journal.sql(|conn| {
+            let tx =
+                Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+            assert!(
+                prepare_frame(
+                    &tx,
+                    &TestOwner,
+                    &placement,
+                    ChannelDirection::OwnerToSupervisor,
+                    &owner,
+                    ExecutionChannelPayload::Release,
+                )
+                .is_err()
+            );
+            let cancel = prepare_frame(
+                &tx,
+                &TestOwner,
+                &placement,
+                ChannelDirection::OwnerToSupervisor,
+                &owner,
+                ExecutionChannelPayload::Cancel,
+            )
+            .unwrap();
+            assert!(
+                record_revocation(&tx, &TestOwner, &placement, cancel.canonical().as_bytes())
+                    .unwrap()
+            );
+            tx.commit().unwrap();
+            let tx =
+                Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).unwrap();
+            assert!(
+                append_frame(&tx, &TestOwner, &placement, cancel.canonical().as_bytes()).unwrap()
+            );
+            tx.commit().unwrap();
+            assert!(revoked(conn, &binding.digest().unwrap()).unwrap());
         });
     }
 

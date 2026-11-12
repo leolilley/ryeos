@@ -410,7 +410,7 @@ fn store_realization_candidate(
                 .write_barrier
                 .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
                 .map_err(|error| {
-                    anyhow::anyhow!("cannot acquire realization write permit: {error}")
+                    anyhow::anyhow!("cannot acquire realization write permit: {error:#}")
                 })?;
             let cas = publication.authority().cas_store()?;
             let stored = publication
@@ -427,7 +427,7 @@ fn store_realization_candidate(
                 .write_barrier
                 .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
                 .map_err(|error| {
-                    anyhow::anyhow!("cannot acquire realization write permit: {error}")
+                    anyhow::anyhow!("cannot acquire realization write permit: {error:#}")
                 })?;
             let cas = authority.cas_store()?;
             let mut staged = authority

@@ -155,12 +155,12 @@ fn verify_operand(
 ) -> Result<(), ExecutionRealizationComparisonError> {
     realization.validate().map_err(|error| {
         ExecutionRealizationComparisonError(format!(
-            "{side} admitted execution realization is invalid: {error}"
+            "{side} admitted execution realization is invalid: {error:#}"
         ))
     })?;
     let observed = realization.content_hash().map_err(|error| {
         ExecutionRealizationComparisonError(format!(
-            "compute {side} admitted execution realization identity: {error}"
+            "compute {side} admitted execution realization identity: {error:#}"
         ))
     })?;
     if observed != expected_hash {

@@ -281,7 +281,7 @@ impl PersistentSessionRelayOwner for ExternalStructuredSessionRelayPump {
 impl Drop for ExternalStructuredSessionRelayPump {
     fn drop(&mut self) {
         if let Err(error) = self.stop_and_join_inner() {
-            tracing::error!(%error, "ordinary-session relay join failed");
+            tracing::error!(error = %format!("{error:#}"), "ordinary-session relay join failed");
         }
     }
 }

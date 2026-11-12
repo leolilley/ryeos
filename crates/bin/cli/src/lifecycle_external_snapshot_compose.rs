@@ -44,7 +44,7 @@ struct SnapshotComposeArgs {
     #[arg(long)]
     binding: Option<String>,
 
-    /// Lifecycle backend id; `render` selects render-sandbox-early-access.
+    /// Installed lifecycle adapter backend id.
     #[arg(long)]
     backend: Option<String>,
 
@@ -129,6 +129,11 @@ struct SnapshotQualificationComposeArgs {
     /// Seconds one provider contact may take; defaults to 60.
     #[arg(long)]
     contact_timeout_seconds: Option<u32>,
+
+    /// Seconds the contact that delivers a consumer verifier archive may
+    /// take, at least the contact budget and at most the lifetime; defaults to 600.
+    #[arg(long)]
+    delivery_timeout_seconds: Option<u32>,
 
     /// Longest lifetime of a qualification attempt in seconds; defaults to 900.
     #[arg(long)]
@@ -319,6 +324,7 @@ pub fn run_snapshot_qualification_compose(
             snapshot_binding: args.snapshot_binding.clone(),
             verifier: args.verifier.clone(),
             contact_timeout_seconds: args.contact_timeout_seconds,
+            delivery_timeout_seconds: args.delivery_timeout_seconds,
             maximum_lifetime_seconds: args.maximum_lifetime_seconds,
         })?,
         inputs,
@@ -476,7 +482,7 @@ mod tests {
 
     const STATED: [&str; 8] = [
         "--backend",
-        "render",
+        "test-backend",
         "--account",
         "acct",
         "--owner-id",
@@ -507,7 +513,7 @@ mod tests {
                 owner_id,
                 roots,
             } => {
-                assert_eq!(backend, "render");
+                assert_eq!(backend, "test-backend");
                 assert_eq!(account, "acct");
                 assert_eq!(owner_id, "usr-1");
                 assert_eq!(roots, PathBuf::from("roots.pem"));
@@ -552,7 +558,13 @@ mod tests {
             format!("{error:#}").contains("remove --backend"),
             "{error:#}"
         );
-        let mut partial = vec!["--app-root", app_root, "--json", "--backend", "render"];
+        let mut partial = vec![
+            "--app-root",
+            app_root,
+            "--json",
+            "--backend",
+            "test-backend",
+        ];
         partial.extend_from_slice(&PRODUCTION[..2]);
         partial.extend_from_slice(&PRODUCTION[4..]);
         let error = run_snapshot_compose(&argv(&partial), &console()).unwrap_err();
@@ -656,7 +668,7 @@ mod tests {
             id: "producer".into(),
             path: PathBuf::from("/srv/node/.ai/node/runtime_snapshot_production/producer.yaml"),
             source: "standalone".into(),
-            backend: "render-sandbox-early-access".into(),
+            backend: "test-backend".into(),
             account: "acct".into(),
             provider_group_id: "sbg-1".into(),
             credential_generation: "a".repeat(64),

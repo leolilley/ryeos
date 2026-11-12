@@ -22,6 +22,15 @@ const CONTROLLER_ROOT_FILE: &str = "controller-root.hex";
 const OWNER_PROFILE_FILE: &str = "guest-owner-profile.json";
 const MAX_OWNER_PROFILE_BYTES: u64 = 4 * 1024;
 
+/// Bytes of a framed guest package that never reach the private source: the
+/// owner stages `framed_bytes` minus this frame header.
+pub const GUEST_PACKAGE_FRAME_OVERHEAD_BYTES: u64 = 20;
+
+/// Inodes staging creates beside the manifest entries: the stage directory,
+/// its manifest sidecar and the base-install marker, plus slack for the
+/// private source root.
+const STAGE_BOOKKEEPING_INODES: u64 = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestOwnerRuntimeProfile {
@@ -58,6 +67,59 @@ impl GuestOwnerRuntimeProfile {
 
     pub fn owner_timeout_seconds(&self) -> f64 {
         f64::from(self.owner_timeout_seconds)
+    }
+
+    /// Read the profile of the guest owner runtime named by `manifest_hash`
+    /// from `cas`. `None` when the manifest is not held there.
+    pub fn from_cas(cas: &lillux::CasStore, manifest_hash: &str) -> Result<Option<Self>> {
+        let Some(value) = cas.get_object(manifest_hash)? else {
+            return Ok(None);
+        };
+        let manifest = ryeos_state::objects::ExternalContentManifestObject::from_value(&value)?;
+        let blob_hash = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == OWNER_PROFILE_FILE)
+            .and_then(|entry| entry.blob_hash.as_deref())
+            .context("guest runtime manifest has no owner profile")?;
+        let bytes = cas
+            .get_blob_bounded(blob_hash, MAX_OWNER_PROFILE_BYTES)?
+            .context("guest owner profile is missing from CAS")?;
+        let profile: Self = serde_json::from_slice(&bytes)?;
+        profile.validate()?;
+        Ok(Some(profile))
+    }
+
+    /// Refuse a package this profile's private source cannot stage. The
+    /// owner stages every manifest entry, so the check is on the framed size
+    /// the owner itself compares, the regular-file bytes and the inode count.
+    /// Each manifest entry (directories included) is one inode; the
+    /// bookkeeping allowance covers what staging adds beside them.
+    pub fn require_stages_package(
+        &self,
+        framed_bytes: u64,
+        regular_bytes: u64,
+        entries: u64,
+    ) -> Result<()> {
+        let stage_bytes = framed_bytes.saturating_sub(GUEST_PACKAGE_FRAME_OVERHEAD_BYTES);
+        ensure!(
+            stage_bytes <= self.private_source_max_bytes,
+            "the guest owner's private source ({} bytes) cannot hold the framed package ({stage_bytes} staged bytes)",
+            self.private_source_max_bytes
+        );
+        ensure!(
+            regular_bytes <= self.private_source_max_bytes,
+            "the guest owner's private source ({} bytes) cannot hold the package's {regular_bytes} regular-file bytes",
+            self.private_source_max_bytes
+        );
+        ensure!(
+            entries
+                .checked_add(STAGE_BOOKKEEPING_INODES)
+                .is_some_and(|inodes| inodes <= self.private_source_max_inodes),
+            "the guest owner's private source ({} inodes) cannot hold the package's {entries} entries plus staging bookkeeping",
+            self.private_source_max_inodes
+        );
+        Ok(())
     }
 }
 
@@ -183,6 +245,13 @@ impl ObservedGuestRuntime {
         Ok(())
     }
 
+    /// Re-anchor the runtime root's path binding after this process entered
+    /// its private mount namespace, then recheck the whole installed identity.
+    pub fn rebind_in_current_mount_namespace(&mut self) -> Result<()> {
+        self.root.rebind_in_current_mount_namespace()?;
+        self.recheck()
+    }
+
     /// A mutable occurrence journal or source may not become an ambient
     /// entry beneath the exact runtime tree used as the controller-root anchor.
     pub fn require_disjoint_directory_tree(&self, other: &lillux::PinnedDirectory) -> Result<()> {
@@ -191,7 +260,7 @@ impl ObservedGuestRuntime {
     }
 
     /// Refuse drift immediately before admitting the exact one-shot import.
-    /// This does not prove that Render supplied the qualified snapshot or that
+    /// This does not prove that the provider supplied the qualified snapshot or that
     /// the installed tree cannot change after this point.
     pub fn verify_import_documents(
         &self,
@@ -298,12 +367,15 @@ impl VerifiedGuestImportAuthorization {
         .collect()
     }
 
+    /// Freshness judged on this guest's wall clock, within the skew tolerance
+    /// the signed authorization declares.
     pub fn require_fresh_admission(&self) -> Result<()> {
         self.require_fresh_admission_at(lillux::time::timestamp_millis())
     }
 
-    pub(crate) fn require_fresh_admission_at(&self, now_ms: i64) -> Result<()> {
-        self.authorization.require_fresh_admission_at(now_ms)
+    pub(crate) fn require_fresh_admission_at(&self, guest_now_ms: i64) -> Result<()> {
+        self.authorization
+            .require_fresh_admission_on_guest(guest_now_ms, &lillux::time::wall_clock_trust())
     }
 }
 
@@ -482,6 +554,7 @@ mod tests {
                 guest_runtime_manifest_hash: digest('7'),
                 attachment_deadline_ms: 20_000,
                 admission_deadline_ms: 10_000,
+                max_clock_skew_ms: None,
                 nonce_sha256: digest('8'),
                 ticket,
                 guest_inputs: inputs,
@@ -631,7 +704,15 @@ mod tests {
             verify_guest_import_authorization(signed.clone(), &other.verifying_key(), &assignment,)
                 .is_err()
         );
-        assert!(verified.require_fresh_admission_at(10_000).is_err());
+        // The signed deadline is 10 000 ms; the authorization declares no
+        // tolerance, so the contract's fallback of 60 000 ms applies.
+        verified.require_fresh_admission_at(9_999).unwrap();
+        verified.require_fresh_admission_at(69_999).unwrap();
+        let refusal = verified.require_fresh_admission_at(70_000).unwrap_err();
+        assert!(
+            format!("{refusal:#}").contains("declared skew tolerance 60 s; guest clock trust:"),
+            "{refusal:#}"
+        );
         let different_occurrence = GuestOccurrenceAssignment {
             occurrence_id: "occ-2",
             ..assignment
@@ -791,7 +872,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            GuestOccurrenceOwner::begin_authorized_at(&occurrence, stale, 10_000).is_err(),
+            GuestOccurrenceOwner::begin_authorized_at(&occurrence, stale, 70_000).is_err(),
             "verified token created a new owner after its admission deadline"
         );
         assert!(
@@ -813,12 +894,64 @@ mod tests {
         let recovery =
             verify_guest_import_authorization(signed, &controller.verifying_key(), &assignment)
                 .unwrap();
-        assert!(recovery.require_fresh_admission_at(10_000).is_err());
+        assert!(recovery.require_fresh_admission_at(70_000).is_err());
         assert!(matches!(
             recover_guest_occurrence_authorized(&occurrence, &recovery)
                 .unwrap()
                 .phase(),
             GuestOccurrenceRecoveryPhase::ImportUncertain
         ));
+    }
+
+    fn ceiling_profile() -> GuestOwnerRuntimeProfile {
+        GuestOwnerRuntimeProfile {
+            schema: 2,
+            account: lillux::GuestRuntimeAccount::Unix {
+                uid: 65534,
+                gid: 65534,
+            },
+            private_source_max_bytes: 1000,
+            private_source_max_inodes: 100,
+            owner_timeout_seconds: 600,
+        }
+    }
+
+    #[test]
+    fn a_package_within_every_ceiling_is_staged() {
+        let profile = ceiling_profile();
+        profile.require_stages_package(900, 800, 10).unwrap();
+        profile.require_stages_package(0, 0, 0).unwrap();
+    }
+
+    #[test]
+    fn the_framed_size_is_compared_after_the_frame_header() {
+        let profile = ceiling_profile();
+        profile
+            .require_stages_package(1000 + GUEST_PACKAGE_FRAME_OVERHEAD_BYTES, 10, 1)
+            .unwrap();
+        let error = profile
+            .require_stages_package(1001 + GUEST_PACKAGE_FRAME_OVERHEAD_BYTES, 10, 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("framed package"));
+    }
+
+    #[test]
+    fn regular_bytes_over_the_ceiling_are_refused() {
+        let profile = ceiling_profile();
+        profile.require_stages_package(900, 1000, 1).unwrap();
+        let error = profile.require_stages_package(900, 1001, 1).unwrap_err();
+        assert!(error.to_string().contains("regular-file bytes"));
+    }
+
+    #[test]
+    fn entries_plus_bookkeeping_over_the_inode_ceiling_are_refused() {
+        let profile = ceiling_profile();
+        let fits = 100 - STAGE_BOOKKEEPING_INODES;
+        profile.require_stages_package(10, 10, fits).unwrap();
+        let error = profile
+            .require_stages_package(10, 10, fits + 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("inodes"));
+        assert!(profile.require_stages_package(10, 10, u64::MAX).is_err());
     }
 }

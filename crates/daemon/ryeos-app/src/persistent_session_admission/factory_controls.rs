@@ -138,6 +138,7 @@ pub(crate) fn populate_fixture(
         resource_authority: Some(resources.clone()),
         producer_resource_ceiling: None,
         external_lease_budget: None,
+        external_wall_clock_requirement: None,
     };
     policy.validate().unwrap();
     state.node_policy = Arc::new(
@@ -324,6 +325,7 @@ session:
             command: AdmittedDirectCommandClosure::ContentAddressed {
                 executable_blob_hash: executable_hash,
                 execution_path: path,
+                host_origin: None,
             },
             admitted_project_root: Some(PathBuf::from("/workspace")),
         },

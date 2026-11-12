@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-30T02:45:20Z:f4453d5e377853b23ef00c7029ff590214e925381a99225190dad4039ad9ed36:Mg/W6i0myNl0os+8QxZEraiZ5oiTfJj4gCTOd3tOo14mUs3bHXWcsvGarsVX1Mg+BpxCVwgdx7b4y67Kb6ffCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-05T21:01:02Z:7ee82333c3115ba37fab8905b560f5b49e7d4e5a2a08f530ba2e2a1d09c520e7:Mz6pAMUhg1wGp4XoksBmRiDq+8d8rtiKgMxlA6OwEd5LWNn8g09ilyLQZGJXRRoesWrfVMlq8DROIloZbrSPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 forced_login_method = "chatgpt"
 cli_auth_credentials_store = "file"
 model_provider = "openai"
@@ -10,7 +10,7 @@ approvals_reviewer = "user"
 # Authoring commands rely on the RyeOS execution boundary selected by the
 # worker protocol. Hard-contained nodes supply Lillux isolation; explicitly
 # opted-in trusted/disposable nodes accept the broader container boundary.
-default_permissions = "danger-full-access"
+default_permissions = ":danger-full-access"
 web_search = "disabled"
 allow_login_shell = false
 

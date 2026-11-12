@@ -1,5 +1,5 @@
-# ryeos:signed:2026-09-23T07:33:59Z:8eb82404032de67e1a299dad5ba58d62df850fde32d7a0dc28d9c0e0efec6c4d:dxtnbas7SvtrytrYCjESVaAcUmmkNBw8+oiH6VEr1LKE3YHR6BtmByJZ+t1p28uDM3YruReneZrs2GarbJiRBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 #!/usr/bin/env python3
+# ryeos:signed:2026-11-11T02:56:41Z:908ade3dcd3e4fd7c4141d4354671d0d9c4c4fd2d0da6eccdfa6e1fc0475d9a4:Y4Wrh8IfF9vgj/h33yscCL7AcQIJ/ixn0hHH9jcX0EWiwyL3bQoFADkWOh2A7nbZlUNLfckAxsFibHT88GNdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Data contracts for the explicit authoring worker/environment composition."""
 
 import copy
@@ -16,6 +16,11 @@ BUNDLE = Path(__file__).resolve().parent
 REPOSITORY = BUNDLE.parent.parent
 SOURCE = BUNDLE / ".ai/workers/codex/lib/hosted"
 AUTHORING_E2E = REPOSITORY / "tests/e2e/authoring-environment"
+# The authoring-tools runtime the local-class origin produced
+# (tests/e2e/development-cargo/remote-environment-preparation.json,
+# environment_production.runtime_manifest). The environments pin this
+# runtime; selection.json keeps the historical literal baseline's manifest.
+PINNED_RUNTIME_MANIFEST = "462135d8fd8f9df1101b9100ba3661baaba4a07c7070288262d7dd8b22a50050"
 
 
 def load(relative):
@@ -74,7 +79,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
                            "mount_root": "execution_runtime", "mount": "authoring-tools"}.items():
             self.assertEqual(content[key], value)
         self.assertNotIn("locator", content)
-        self.assertEqual(content["digest"], self.selection["expected_manifests"]["environment"])
+        self.assertEqual(content["digest"], PINNED_RUNTIME_MANIFEST)
         self.assertEqual(self.environment["configuration"]["executable_search"], [
             {"realization_id": "authoring-tools", "relative_directory": "bin"}
         ])
@@ -147,7 +152,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         self.assertEqual(actual["baseline_config"], "authoring.config.toml")
         actual["baseline_config"] = original["baseline_config"]
         self.assertIn('approval_policy="never"', actual["workload_args"])
-        self.assertIn('default_permissions="danger-full-access"', actual["workload_args"])
+        self.assertIn('default_permissions=":danger-full-access"', actual["workload_args"])
         self.assertFalse(any(arg.startswith("permissions=") for arg in actual["workload_args"]))
         actual["workload_args"] = original["workload_args"]
         original_routes = {route["id"]: route for route in original["routes"]}
@@ -155,7 +160,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
             if route["id"] in ("session.start", "session.resume"):
                 self.assertIn({
                     "pointer": "/response/result/activePermissionProfile/id",
-                    "equals": "danger-full-access",
+                    "equals": ":danger-full-access",
                 }, route["response_predicates"])
                 self.assertIn({
                     "pointer": "/response/result/approvalPolicy",
@@ -173,7 +178,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
     def test_authoring_baseline_is_explicitly_unattended_and_unconfined(self):
         actual = tomllib.loads((SOURCE / "authoring.config.toml").read_text())
         self.assertEqual(actual["approval_policy"], "never")
-        self.assertEqual(actual["default_permissions"], "danger-full-access")
+        self.assertEqual(actual["default_permissions"], ":danger-full-access")
         self.assertNotIn("permissions", actual)
         self.assertEqual(actual["shell_environment_policy"]["filters"]["TMPDIR"], "include")
         self.assertTrue(actual["features"]["code_mode_host"])
@@ -227,8 +232,12 @@ class AuthoringEnvironmentTests(unittest.TestCase):
                          "88e99105df613be12870b3ff6283af77c36d78075d741595a4d028c048a5f946")
         self.assertEqual(self.selection["input_files"], 107)
         self.assertEqual(self.selection["input_bytes"], 139930117)
+        # The environment now pins the local-class origin's runtime; the
+        # historical selection keeps the literal baseline's own manifest.
         self.assertEqual(self.environment["external_content"][0]["digest"],
-                         self.selection["expected_manifests"]["environment"])
+                         PINNED_RUNTIME_MANIFEST)
+        self.assertNotEqual(PINNED_RUNTIME_MANIFEST,
+                            self.selection["expected_manifests"]["environment"])
         for name, manifest in self.selection["expected_manifests"].items():
             self.assertRegex(manifest, r"^[0-9a-f]{64}$")
             self.assertEqual(manifest, self.selection["admitted_production_evidence"][

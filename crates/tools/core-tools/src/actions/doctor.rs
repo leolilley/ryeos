@@ -456,6 +456,7 @@ fn import_one(
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
+            captured_callback_socket: false,
             bundle_roots: isolation_bundle_roots,
             node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             verified_code: &isolation_verified_code,

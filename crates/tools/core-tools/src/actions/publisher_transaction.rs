@@ -154,7 +154,7 @@ pub(super) fn with_staged_bundle_generation<T>(
         tracing::warn!(
             old_generation = %staging.display(),
             live_generation = %bundle_root.display(),
-            error = %error,
+            error = %format!("{error:#}"),
             "publisher generation committed but local excluded content remains in the recoverable old generation"
         );
         cleanup.disarm();
@@ -168,7 +168,7 @@ pub(super) fn with_staged_bundle_generation<T>(
     if let Err(error) = remove_recovery_marker_exact(&recovery_marker) {
         tracing::warn!(
             path = %recovery_marker.display(),
-            error = %error,
+            error = %format!("{error:#}"),
             "publisher generation committed but recovery-marker cleanup failed"
         );
     }

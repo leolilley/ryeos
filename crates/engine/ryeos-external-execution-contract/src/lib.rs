@@ -6,7 +6,9 @@
 //! ambient path; its exact bounded contents are supplied out of band by the
 //! controller that admitted the adapter.
 
+pub mod clock_skew;
 pub mod guest_import_authorization;
+pub mod guest_owner_report;
 pub mod guest_supervisor_descriptors;
 pub mod lease_ready_inputs;
 pub mod length_prefixed;
@@ -23,6 +25,8 @@ pub mod restored_runtime_measurement;
 pub mod runtime_snapshot;
 pub mod runtime_snapshot_bootstrap;
 pub mod staging_package;
+pub mod uncertainty_reason;
+pub use uncertainty_reason::{MAX_UNCERTAINTY_DETAIL_BYTES, UncertaintyClass, UncertaintyReason};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -33,6 +37,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroize as _;
+
+/// Where the guest occurrence owner creates one private root per occurrence.
+/// A relay mailbox lives inside its occurrence's root, so a relay binding's
+/// private mailbox parent is exactly this path.
+pub const GUEST_OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
 
 pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v2";
 pub const PROVIDER_DECLARATION_PROTOCOL: &str = "ryeos.external-execution.provider-declaration.v2";
@@ -821,6 +830,10 @@ pub enum LifecycleCapability {
     ExactActivationReconciliation,
     IdempotentTermination,
     ExactTerminalObservation,
+    /// The adapter implements the journal-claimed occurrence file relay
+    /// operation, so a binding may select the controller file relay transport.
+    /// Admission must require this before relaying through the adapter.
+    ControllerFileRelay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -851,7 +864,7 @@ pub struct ExternalProviderDeclaration {
     pub protocol: String,
     pub targets: Vec<String>,
     pub connector: String,
-    pub connector_process_group: ExternalProviderConnectorProcessGroup,
+    pub connector_descendants: ExternalProviderConnectorDescendants,
     pub configuration_adapter: String,
     pub configuration_destination: String,
     /// Explicit opt-in on this same captured adapter, not a second executable.
@@ -859,14 +872,20 @@ pub struct ExternalProviderDeclaration {
     pub qualification_request_binding_protocol: Option<String>,
 }
 
-/// Process-control behavior of the signed provider's command environment.
-/// The controller must retain authority over every connector descendant;
-/// this is not a request to weaken its host isolation policy.
+/// Containment guarantee the signed provider's connector requires of the
+/// node for the processes it may leave behind. This is a declared need, not a
+/// host mode: the node reports which guarantees it can provide and admission
+/// compares the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ExternalProviderConnectorProcessGroup {
-    Inherited,
-    New,
+pub enum ExternalProviderConnectorDescendants {
+    /// Every descendant stays in the connector's process group; the
+    /// controller's group authority is sufficient.
+    InProcessGroup,
+    /// Descendants may leave the process group (new session, double fork,
+    /// nested PID namespace). The node must contain and provably settle every
+    /// one of them regardless.
+    Contained,
 }
 
 /// Signed bundle declaration for one external occurrence lifecycle adapter.
@@ -889,6 +908,11 @@ pub struct ExternalLifecycleAdapterDeclaration {
     pub snapshot_production_spec: Option<LifecycleProviderSpecIdentity>,
     pub settings_schema_digest: String,
     pub capabilities: BTreeSet<LifecycleCapability>,
+    /// The adapter-settings key whose string value must equal the relay
+    /// selection's workspace scope. Present exactly when the adapter declares
+    /// `controller_file_relay`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_scope_setting: Option<String>,
 }
 
 /// Bundle-relative identity of the closed provider behavior specification
@@ -976,6 +1000,22 @@ impl ExternalLifecycleAdapterDeclaration {
             !self.capabilities.is_empty(),
             "external lifecycle adapter declares no capabilities"
         );
+        match &self.relay_scope_setting {
+            Some(key) => {
+                bounded_identifier(key, 64, "external lifecycle relay scope setting")?;
+                ensure!(
+                    self.capabilities
+                        .contains(&LifecycleCapability::ControllerFileRelay),
+                    "a relay scope setting needs the controller file relay capability"
+                );
+            }
+            None => ensure!(
+                !self
+                    .capabilities
+                    .contains(&LifecycleCapability::ControllerFileRelay),
+                "the controller file relay capability needs a relay scope setting"
+            ),
+        }
         Ok(())
     }
 }
@@ -995,6 +1035,10 @@ pub struct ProviderConfigurationRequest {
     pub placement_thread_id: String,
     pub execution_binding_hash: String,
     pub connector_capability: String,
+    /// How long the workload may wait for the connector's first reply. The
+    /// reply can cross a relay whose round trips are far slower than a local
+    /// process, so a workload's default for a local peer does not apply.
+    pub connector_handshake_timeout_seconds: u64,
 }
 
 /// Controller-selected delivery of the already admitted connector image.
@@ -1042,6 +1086,10 @@ impl ProviderConfigurationRequest {
                 && self.connector_capability.len() <= 16 * 1024
                 && !self.connector_capability.chars().any(char::is_control),
             "provider connector capability is invalid"
+        );
+        ensure!(
+            (1..=3600).contains(&self.connector_handshake_timeout_seconds),
+            "provider connector handshake timeout is invalid"
         );
         Ok(())
     }
@@ -1253,7 +1301,7 @@ impl LifecycleGuestPackageDelivery {
         ensure!(
             self.descriptor > 2
                 && self.regular_bytes > 0
-                && self.framed_bytes >= self.regular_bytes.saturating_add(20)
+                && self.framed_bytes > 20
                 && self.framed_bytes <= 4 * 1024 * 1024 * 1024,
             "guest package delivery coordinate is invalid"
         );
@@ -1283,10 +1331,15 @@ pub enum LifecycleAdapterResponse {
         /// field name, the evidence may be a local pre-request transport fact
         /// rather than a response from the provider.
         provider_observation_digest: String,
+        /// Short diagnostic code. Compile-time words and status numbers only,
+        /// never provider text, credentials, URLs or settings.
+        reason: String,
     },
     AllocationPending {
         operation_id: String,
         request_digest: String,
+        /// Short diagnostic code; the same rule as on no-occurrence.
+        reason: String,
     },
     SupervisorStarted {
         operation_id: String,
@@ -1301,6 +1354,15 @@ pub enum LifecycleAdapterResponse {
     SupervisorPending {
         operation_id: String,
         activation_request_digest: String,
+        /// What first activation saw of the guest owner, when the adapter
+        /// reads its run stream. Reconciliation never carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest_owner: Option<guest_owner_report::GuestOwnerActivationReport>,
+        /// Why first activation came back before the owner reported, when a
+        /// step failed before or while its run stream was read: the step and
+        /// a bounded reason in fixed words. Reconciliation never carries one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contact_failure: Option<UncertaintyReason>,
     },
     OccurrenceTerminal {
         operation_id: String,
@@ -1579,6 +1641,19 @@ impl LifecycleAdapterRequest {
     }
 }
 
+/// A diagnostic code is a short token, so it cannot carry a provider body.
+pub(crate) fn diagnostic_reason(reason: &str) -> Result<()> {
+    ensure!(
+        !reason.is_empty()
+            && reason.len() <= 64
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'-')),
+        "allocation response carries an invalid diagnostic reason"
+    );
+    Ok(())
+}
+
 impl LifecycleAdapterResponse {
     pub fn validate_for(&self, request: &LifecycleAdapterRequest) -> Result<()> {
         request.validate()?;
@@ -1614,6 +1689,7 @@ impl LifecycleAdapterResponse {
                 Self::AllocationNoOccurrence {
                     request_digest,
                     provider_observation_digest,
+                    reason,
                     ..
                 },
             ) => {
@@ -1621,6 +1697,7 @@ impl LifecycleAdapterResponse {
                     request_digest == &reservation.request_digest,
                     "allocation response changed its request identity"
                 );
+                diagnostic_reason(reason)?;
                 digest(
                     provider_observation_digest,
                     "provider no-occurrence observation",
@@ -1629,13 +1706,17 @@ impl LifecycleAdapterResponse {
             (
                 LifecycleAdapterRequest::Allocate { reservation, .. }
                 | LifecycleAdapterRequest::ReconcileAllocation { reservation, .. },
-                Self::AllocationPending { request_digest, .. },
+                Self::AllocationPending {
+                    request_digest,
+                    reason,
+                    ..
+                },
             ) => {
                 ensure!(
                     request_digest == &reservation.request_digest,
                     "allocation response changed its request identity"
                 );
-                Ok(())
+                diagnostic_reason(reason)
             }
             (
                 LifecycleAdapterRequest::ActivateSupervisor { activation, .. }
@@ -1665,12 +1746,25 @@ impl LifecycleAdapterResponse {
                 | LifecycleAdapterRequest::ReconcileSupervisorActivation { activation, .. },
                 Self::SupervisorPending {
                     activation_request_digest,
+                    guest_owner,
+                    contact_failure,
                     ..
                 },
             ) => {
                 ensure!(
                     activation_request_digest == &activation.activation_request_digest,
                     "activation response changed its request identity"
+                );
+                ensure!(
+                    contact_failure
+                        .as_ref()
+                        .is_none_or(|failure| failure.detail.len() <= MAX_UNCERTAINTY_DETAIL_BYTES),
+                    "activation contact failure exceeds its detail bound"
+                );
+                ensure!(
+                    guest_owner.is_none()
+                        || matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
+                    "activation reconciliation carried a guest owner report"
                 );
                 Ok(())
             }
@@ -1814,8 +1908,13 @@ pub fn from_json_slice_strict<T: DeserializeOwned>(input: &[u8], maximum: usize)
     serde_json::from_value(value).context("decode lifecycle message")
 }
 
+/// The RyeOS canonical JSON bytes of `value`: Lillux's sole canonical encoding
+/// (object keys sorted, non-ASCII as lowercase `\u` escapes), so bytes hashed,
+/// signed, persisted or compared here agree with every other RyeOS producer.
+/// Typed values are encoded through their JSON value, never in struct field
+/// declaration order.
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(value)?)
+    lillux::canonical_json_bytes_bounded(value, usize::MAX)
 }
 
 fn validate_inspection_common(
@@ -2053,7 +2152,7 @@ mod tests {
         let request = LifecycleRuntimeProbeRequest {
             schema: 2,
             protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
-            adapter_id: "render-sandbox-early-access".into(),
+            adapter_id: "test-lease-backend".into(),
             adapter_artifact_hash: "a".repeat(64),
             settings_digest: "b".repeat(64),
             binding_hash: "c".repeat(64),
@@ -2061,7 +2160,7 @@ mod tests {
             runtime_source: runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
                 product_witness_hash: "e".repeat(64),
             },
-            account: "render-account".into(),
+            account: "test-account".into(),
             source: LifecycleRuntimeProbeSource {
                 manifest_hash: "f".repeat(64),
                 owner_executable_sha256: "1".repeat(64),
@@ -2695,7 +2794,7 @@ mod tests {
             protocol: PROVIDER_DECLARATION_PROTOCOL.into(),
             targets: vec!["x86_64-unknown-linux-gnu".into()],
             connector: "ryeos-external-candidate-connector".into(),
-            connector_process_group: ExternalProviderConnectorProcessGroup::New,
+            connector_descendants: ExternalProviderConnectorDescendants::Contained,
             configuration_adapter: "ryeos-codex-external-configuration".into(),
             configuration_destination: "environments.toml".into(),
             qualification_request_binding_protocol: None,
@@ -2740,8 +2839,24 @@ mod tests {
                 LifecycleCapability::ExactAllocationReconciliation,
                 LifecycleCapability::AuthoritativeNoOccurrence,
             ]),
+            relay_scope_setting: None,
         };
         lifecycle.validate().unwrap();
+        let mut relaying = lifecycle.clone();
+        relaying
+            .capabilities
+            .insert(LifecycleCapability::ControllerFileRelay);
+        assert!(relaying.validate().is_err(), "relay needs a scope setting");
+        relaying.relay_scope_setting = Some("workspace_id".into());
+        relaying.validate().unwrap();
+        let mut stray = lifecycle.clone();
+        stray.relay_scope_setting = Some("workspace_id".into());
+        assert!(
+            stray.validate().is_err(),
+            "scope setting needs the capability"
+        );
+        relaying.relay_scope_setting = Some("a b".into());
+        assert!(relaying.validate().is_err());
         let mut with_verifier = lifecycle.clone();
         with_verifier.restoration_verifier =
             Some("ryeos-external-guest-restoration-verifier".into());
@@ -2797,6 +2912,7 @@ mod tests {
         let wrong = LifecycleAdapterResponse::AllocationPending {
             operation_id: "allocation-1".into(),
             request_digest: "e".repeat(64),
+            reason: "create_no_response".into(),
         };
         assert!(wrong.validate_for(&request).is_err());
         let unknown = br#"{"operation":"allocate","common":{},"reservation":{},"extra":true}"#;

@@ -57,7 +57,7 @@ impl super::ThreadLifecycleService {
                 Ok(Some(plan)) => plan,
                 Ok(None) => continue,
                 Err(error) => {
-                    tracing::warn!(%root, %error, "fenced chain qualification retained for retry");
+                    tracing::warn!(%root, error = %format!("{error:#}"), "fenced chain qualification retained for retry");
                     continue;
                 }
             };
@@ -77,7 +77,7 @@ impl super::ThreadLifecycleService {
                     result.pending_retirements_recovered += retired.pending_retirements_recovered;
                 }
                 Err(error) => {
-                    tracing::warn!(%root, %error, "fenced chain retirement retained for retry");
+                    tracing::warn!(%root, error = %format!("{error:#}"), "fenced chain retirement retained for retry");
                 }
             }
         }

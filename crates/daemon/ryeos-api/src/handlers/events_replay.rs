@@ -41,7 +41,7 @@ pub async fn handle(
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     match thread {
         Some(detail) => {
@@ -58,7 +58,7 @@ pub async fn handle(
             after_chain_seq: req.after_chain_seq,
             limit: req.limit,
         })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     Ok(serde_json::json!({
         "events": result.events,

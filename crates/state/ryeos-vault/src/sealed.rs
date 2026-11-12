@@ -220,8 +220,31 @@ pub fn write_sealed_secrets(
         );
     }
 
+    ensure_private_store_directory(store_path)?;
     lillux::atomic_write_private(store_path, envelope_toml.as_bytes())
         .map_err(|e| anyhow!("vault: write sealed store {}: {e:#}", store_path.display()))
+}
+
+/// The store's directory holds the sealed store and the protected artifacts
+/// written beside it, which are admitted only from an exactly owner-private
+/// directory. Create it that way, and tighten one that a plain directory
+/// creation left wider.
+fn ensure_private_store_directory(store_path: &Path) -> Result<()> {
+    let directory = store_path
+        .parent()
+        .context("vault store has no parent directory")?;
+    let name = directory
+        .file_name()
+        .context("vault store directory has no name")?;
+    let parent = directory
+        .parent()
+        .context("vault store directory has no parent")?;
+    let parent = lillux::PinnedDirectory::open(parent)?
+        .with_context(|| format!("vault store parent {} is absent", parent.display()))?;
+    parent
+        .open_or_create_child(name, 0o700)?
+        .tighten_owner_private_directory()
+        .with_context(|| format!("protect vault store directory {}", directory.display()))
 }
 
 pub fn read_sealed_secrets(
@@ -327,6 +350,43 @@ mod tests {
         secrets.insert("API_TOKEN".to_string(), "hunter2".to_string());
         secrets.insert("DB_PASSWORD".to_string(), "p@ss word".to_string());
         secrets
+    }
+
+    /// The store directory is created owner-private, and one left wider by
+    /// an earlier plain directory creation is tightened on the next write.
+    #[test]
+    fn write_keeps_the_store_directory_owner_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let key = VaultSecretKey::generate();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mode =
+            |directory: &Path| std::fs::metadata(directory).unwrap().permissions().mode() & 0o7777;
+
+        let fresh = tmp.path().join("secrets");
+        write_sealed_secrets(
+            &fresh.join("store.enc"),
+            &key.public_key(),
+            &sample_secrets(),
+        )
+        .unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+
+        let wide = tmp.path().join("wide");
+        std::fs::create_dir(&wide).unwrap();
+        std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(mode(&wide), 0o755);
+        write_sealed_secrets(
+            &wide.join("store.enc"),
+            &key.public_key(),
+            &sample_secrets(),
+        )
+        .unwrap();
+        assert_eq!(mode(&wide), 0o700);
+        assert_eq!(
+            read_sealed_secrets(&wide.join("store.enc"), &key).unwrap(),
+            sample_secrets()
+        );
     }
 
     /// An envelope sealed to vault key A must not open with vault key

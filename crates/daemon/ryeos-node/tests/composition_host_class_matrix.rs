@@ -283,39 +283,39 @@ fn local_docker_oci_hook() -> Host {
 }
 
 /// A hosting provider's container with an attached volume and no swap lock.
-/// A Render service with a persistent disk proves the same facts (a volume
+/// A hosted service with a persistent disk proves the same facts (a volume
 /// mount, no scope delegation, no memory lock), so it is not a separate host.
-fn railway() -> Host {
+fn hosted_volume() -> Host {
     Host {
-        name: "railway",
+        name: "hosted-volume",
         facts: facts(volume()),
         scopes: false,
     }
 }
 
-/// A Render web service: the railway shape plus user, pid and mount
-/// namespaces, which Render containers allow and the node proves by probe.
-fn render_service() -> Host {
+/// A hosted web service: the hosted-volume shape plus user, pid and mount
+/// namespaces, which its containers allow and the node proves by probe.
+fn hosted_userns() -> Host {
     let mut base = facts(volume());
     base.unshare_user_pid_mount = ProbeOutcome::Allowed;
     base.unshare_user = ProbeOutcome::Allowed;
     Host {
-        name: "render-service",
+        name: "hosted-userns",
         facts: base,
         scopes: false,
     }
 }
 
-fn railway_no_volume() -> Host {
+fn hosted_no_volume() -> Host {
     Host {
-        name: "railway-no-volume",
+        name: "hosted-no-volume",
         facts: with_storage(facts(volume()), container_root()),
         scopes: false,
     }
 }
 
 /// A gVisor sandbox with no persistent disk; the node is its pid 1.
-fn render_sandbox() -> Host {
+fn hosted_ephemeral() -> Host {
     let mut base = with_storage(
         facts(volume()),
         storage("overlay", 0x794c7630, 20, "gvisor", true),
@@ -328,7 +328,7 @@ fn render_sandbox() -> Host {
         basis: "the node is pid 1 of its pid namespace".to_owned(),
     });
     Host {
-        name: "render-sandbox",
+        name: "hosted-ephemeral",
         facts: base,
         scopes: false,
     }
@@ -384,12 +384,12 @@ fn core_cases() -> Vec<(&'static str, Host, Expect)> {
         ("local", runit(), Expect::Admit),
         ("local", local_docker(), Expect::Refuse(SCOPE_TRIO)),
         ("local", local_docker_oci_hook(), Expect::Admit),
-        ("local", railway(), Expect::Refuse(SCOPE_TRIO)),
+        ("local", hosted_volume(), Expect::Refuse(SCOPE_TRIO)),
         ("hosted", local_docker(), Expect::Admit),
-        ("hosted", railway(), Expect::Admit),
-        ("hosted", railway_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
         ("hosted", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
-        ("hosted", render_sandbox(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
     ]
 }
 
@@ -454,11 +454,11 @@ fn standard_follows_the_host_class_matrix() {
         ("local", local_docker(), Expect::Admit),
         ("local", local_docker_oci_hook(), Expect::Admit),
         ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
-        ("local", railway(), Expect::Refuse(NO_ACCOUNTING)),
+        ("local", hosted_volume(), Expect::Refuse(NO_ACCOUNTING)),
         ("hosted", local_docker(), Expect::Admit),
-        ("hosted", railway(), Expect::Admit),
-        ("hosted", railway_no_volume(), Expect::Refuse(NO_DISK)),
-        ("hosted", render_sandbox(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
     ];
     for (class, host, expect) in &cases {
         check("standard", class, host, expect);
@@ -472,9 +472,9 @@ fn plain_local_cases() -> Vec<(&'static str, Host, Expect)> {
         ("local", runit(), Expect::Admit),
         ("local", local_docker(), Expect::Admit),
         ("local", local_docker_oci_hook(), Expect::Admit),
-        ("local", railway(), Expect::Refuse(NO_ACCOUNTING)),
+        ("local", hosted_volume(), Expect::Refuse(NO_ACCOUNTING)),
         ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
-        ("local", render_sandbox(), Expect::Refuse(NO_DISK)),
+        ("local", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
     ]
 }
 
@@ -492,11 +492,11 @@ fn the_hosted_compositions_follow_the_host_class_matrix() {
     let hosted_node: Vec<(&str, Host, Expect)> = vec![
         ("hosted", runit(), Expect::Admit),
         ("hosted", local_docker(), Expect::Admit),
-        ("hosted", railway(), Expect::Admit),
-        ("hosted", railway_no_volume(), Expect::Admit),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Admit),
         (
             "hosted",
-            render_sandbox(),
+            hosted_ephemeral(),
             Expect::Refuse(&["any_of(accounting, residency:swap_absent)"]),
         ),
     ];
@@ -505,10 +505,10 @@ fn the_hosted_compositions_follow_the_host_class_matrix() {
     }
     let hosted_workflow: Vec<(&str, Host, Expect)> = vec![
         ("hosted", local_docker(), Expect::Admit),
-        ("hosted", railway(), Expect::Admit),
-        ("hosted", railway_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
         ("hosted", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
-        ("hosted", render_sandbox(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
     ];
     for (class, host, expect) in &hosted_workflow {
         check("hosted-workflow", class, host, expect);
@@ -522,7 +522,7 @@ fn the_local_inference_and_scoped_compositions_follow_the_host_class_matrix() {
             ("local", runit(), Expect::Admit),
             ("local", local_docker(), Expect::Refuse(SCOPE_TRIO)),
             ("local", local_docker_oci_hook(), isolation),
-            ("local", railway(), Expect::Refuse(SCOPE_TRIO)),
+            ("local", hosted_volume(), Expect::Refuse(SCOPE_TRIO)),
         ]
     };
     for (profile, cases) in [
@@ -540,7 +540,12 @@ fn the_local_inference_and_scoped_compositions_follow_the_host_class_matrix() {
 
 #[test]
 fn the_release_authority_composition_needs_an_enclosure_limit_no_host_here_proves() {
-    for host in [runit(), local_docker(), local_docker_oci_hook(), railway()] {
+    for host in [
+        runit(),
+        local_docker(),
+        local_docker_oci_hook(),
+        hosted_volume(),
+    ] {
         check(
             "release-authority",
             "local",
@@ -560,16 +565,20 @@ fn the_release_authority_composition_needs_an_enclosure_limit_no_host_here_prove
 fn the_f5r_controller_node_follows_the_host_class_matrix() {
     let cases: Vec<(&str, Host, Expect)> = vec![
         ("hosted", local_docker(), Expect::Admit),
-        ("hosted", railway(), Expect::Admit),
-        ("hosted", railway_no_volume(), Expect::Refuse(NO_DISK)),
-        ("hosted", render_sandbox(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
         ("local", local_docker(), Expect::Admit),
-        ("local", railway(), Expect::Refuse(NO_ACCOUNTING)),
+        ("local", hosted_volume(), Expect::Refuse(NO_ACCOUNTING)),
         ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
         ("local", runit(), Expect::Refuse(NO_LOCAL_ENCLOSURE)),
         ("hosted", runit(), Expect::Refuse(NO_HOSTED_ENCLOSURE)),
-        ("hosted_enforced", render_service(), Expect::Admit),
-        ("hosted_enforced", render_sandbox(), Expect::Refuse(NO_DISK)),
+        ("hosted_enforced", hosted_userns(), Expect::Admit),
+        (
+            "hosted_enforced",
+            hosted_ephemeral(),
+            Expect::Refuse(NO_DISK),
+        ),
         (
             "hosted_enforced",
             runit(),
@@ -591,7 +600,11 @@ fn the_development_direct_class_admits_an_operator_host_without_a_scope_associat
             local_docker_no_volume(),
             Expect::Refuse(NO_DISK),
         ),
-        ("local_direct", railway(), Expect::Refuse(NO_ACCOUNTING)),
+        (
+            "local_direct",
+            hosted_volume(),
+            Expect::Refuse(NO_ACCOUNTING),
+        ),
     ];
     for (class, host, expect) in &cases {
         check("development", class, host, expect);
@@ -601,7 +614,7 @@ fn the_development_direct_class_admits_an_operator_host_without_a_scope_associat
 #[test]
 fn the_admission_names_the_proof_that_met_each_enclosure_entry() {
     let profile = load_profile("f5r-controller");
-    let admission = match_floor(&floor(&profile, "hosted"), &railway().capabilities());
+    let admission = match_floor(&floor(&profile, "hosted"), &hosted_volume().capabilities());
     assert!(admission.admitted, "{admission:#?}");
     let termination = &admission.met_by["termination:enclosure_trusted_init"];
     assert_eq!(termination.name, "termination:enclosure_trusted_init");
@@ -689,7 +702,7 @@ fn refusal_text(error: anyhow::Error) -> String {
 #[test]
 fn the_codex_controller_launch_is_judged_on_the_enclosure_each_host_proves() {
     let contract = codex_contract();
-    for host in [local_docker(), railway()] {
+    for host in [local_docker(), hosted_volume()] {
         let node = node_reporting(host.capabilities_with_credential_home());
         admit_structured_session_controller(&node, &contract)
             .unwrap_or_else(|error| panic!("{}: {error:#}", host.name));
@@ -697,9 +710,9 @@ fn the_codex_controller_launch_is_judged_on_the_enclosure_each_host_proves() {
             .unwrap_or_else(|error| panic!("{}: {error:#}", host.name));
     }
     for (host, unmet) in [
-        (railway_no_volume(), "persistence:durable_state"),
+        (hosted_no_volume(), "persistence:durable_state"),
         (local_docker_no_volume(), "persistence:durable_state"),
-        (render_sandbox(), "persistence:durable_state"),
+        (hosted_ephemeral(), "persistence:durable_state"),
     ] {
         let node = node_reporting(host.capabilities_with_credential_home());
         let text = refusal_text(admit_structured_session_controller(&node, &contract).unwrap_err());
@@ -720,7 +733,7 @@ fn the_codex_controller_launch_is_refused_on_bare_runit() {
 #[test]
 fn a_controller_whose_enclosure_is_unproven_refuses_the_codex_launch() {
     let contract = codex_contract();
-    let mut host = railway();
+    let mut host = hosted_volume();
     host.facts.enclosure_exit = None;
     host.facts.enclosure_exit_refusal =
         Some("the node is not pid 1 and its parent is not a trusted init".to_owned());
@@ -734,7 +747,7 @@ fn a_controller_whose_enclosure_is_unproven_refuses_the_codex_launch() {
 #[test]
 fn the_codex_login_is_refused_without_a_credential_private_home() {
     let contract = codex_contract();
-    let node = node_reporting(railway().capabilities());
+    let node = node_reporting(hosted_volume().capabilities());
     let text = refusal_text(
         admit_structured_session_start(&node, &contract, Some("credential_profile")).unwrap_err(),
     );
@@ -772,7 +785,7 @@ fn workloads_are_admitted_or_refused_on_what_the_host_proves() {
     let namespaces = shipped_probe_requires();
     // An item that declares no requirement, such as
     // `tool:ryeos/core/identity/public_key`, is admitted on every host.
-    for host in [runit(), local_docker(), railway(), render_sandbox()] {
+    for host in [runit(), local_docker(), hosted_volume(), hosted_ephemeral()] {
         let node = node_reporting(host.capabilities());
         admit_item_requirements(&node, "tool:ryeos/core/identity/public_key", &none)
             .unwrap_or_else(|error| panic!("{}: {error:#}", host.name));
@@ -781,7 +794,7 @@ fn workloads_are_admitted_or_refused_on_what_the_host_proves() {
     // host allows the unshare.
     let node = node_reporting(runit().capabilities());
     admit_item_requirements(&node, probe, &namespaces).unwrap();
-    for host in [local_docker(), railway()] {
+    for host in [local_docker(), hosted_volume()] {
         let node = node_reporting(host.capabilities());
         let text = refusal_text(admit_item_requirements(&node, probe, &namespaces).unwrap_err());
         assert!(

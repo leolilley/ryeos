@@ -53,6 +53,7 @@ fn policy() -> ProductQualificationPolicy {
         minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
         verifier_parameters: json!({"scope":"bounded_fixture"}),
         consumer_execution_context: None,
+        requires_guarantees: Vec::new(),
         producer_scenarios: BTreeMap::new(),
     }
 }
@@ -818,6 +819,44 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
     evidence.validate().unwrap();
     evidence.verifier.process_settlement_authority = None;
     assert!(evidence.validate().is_err());
+}
+
+#[test]
+fn containment_empty_settlement_is_ordered_between_the_trusted_group_and_a_scope() {
+    use VerifierProcessSettlementAuthority::{
+        ContainmentEmpty, ScopeEmpty, TrustedProcessGroupAbsent,
+    };
+    // (observed, minimum, accepted)
+    for (observed, minimum, accepted) in [
+        (ScopeEmpty, ScopeEmpty, true),
+        (ScopeEmpty, ContainmentEmpty, true),
+        (ScopeEmpty, TrustedProcessGroupAbsent, true),
+        (ContainmentEmpty, ScopeEmpty, false),
+        (ContainmentEmpty, ContainmentEmpty, true),
+        (ContainmentEmpty, TrustedProcessGroupAbsent, true),
+        (TrustedProcessGroupAbsent, ScopeEmpty, false),
+        (TrustedProcessGroupAbsent, ContainmentEmpty, false),
+        (TrustedProcessGroupAbsent, TrustedProcessGroupAbsent, true),
+    ] {
+        assert_eq!(
+            observed.satisfies(minimum),
+            accepted,
+            "{observed:?} against minimum {minimum:?}"
+        );
+    }
+    // The counterpart is data: a signed policy names it by its wire value.
+    assert_eq!(
+        serde_json::to_value(ContainmentEmpty).unwrap(),
+        json!("containment_empty")
+    );
+    let mut policy_wire = serde_json::to_value(policy()).unwrap();
+    policy_wire["minimum_verifier_process_settlement"] = json!("containment_empty");
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&policy_wire)
+            .unwrap()
+            .minimum_verifier_process_settlement,
+        ContainmentEmpty
+    );
 }
 
 #[test]
@@ -3041,4 +3080,25 @@ fn portable_consumer_identity_ignores_only_the_generation_identity() {
             changed.portable().digest().unwrap()
         );
     }
+}
+
+#[test]
+fn policy_required_guarantees_are_declared_data_and_absent_when_unset() {
+    let unset = serde_json::to_value(policy()).unwrap();
+    assert!(unset.get("requires_guarantees").is_none());
+    let mut declared = policy();
+    declared.requires_guarantees = serde_json::from_value(json!([
+        "isolation:enforced",
+        {"name": "sessions:trusted_process_group", "accept": ["trusted"]},
+    ]))
+    .unwrap();
+    let value = serde_json::to_value(&declared).unwrap();
+    assert_eq!(value["requires_guarantees"][0], "isolation:enforced");
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&value).unwrap(),
+        declared
+    );
+    let mut malformed = value;
+    malformed["requires_guarantees"] = json!([""]);
+    assert!(ProductQualificationPolicy::from_value(&malformed).is_err());
 }

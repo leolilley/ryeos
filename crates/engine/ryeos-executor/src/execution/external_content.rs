@@ -28,6 +28,18 @@ fn realization_mount_authority(
     }
 }
 
+/// A lease kept alive for a spawned process: an open cache-generation
+/// descriptor, or a large-object store lock that is closed in every fork
+/// child and released only when this value drops.
+pub(crate) enum RetainedLease {
+    Generation {
+        _descriptor: fs::File,
+    },
+    LargeObject {
+        _lock: lillux::locks::ForkClosedLockFile,
+    },
+}
+
 /// Descriptor-pinned materializations and their exact cache-generation
 /// leases. This value must live until the spawned process exits.
 pub(crate) struct BoundExternalRealizations {
@@ -45,7 +57,10 @@ pub(crate) struct BoundExternalRealizations {
     /// env (`RYEOS_EXTERNAL_REALIZATIONS`) so a runtime can reference the
     /// identity it executes under without re-observing any content.
     sealed_set_env: String,
-    _leases: Vec<fs::File>,
+    /// Node-owned runtime view that holds every entry at `<root>/<mount>`;
+    /// present only for the private-runtime-view binding.
+    runtime_view_root: Option<PathBuf>,
+    _leases: Vec<RetainedLease>,
 }
 
 // Count admission precedes decoding, quadratic canonical-set validation, and
@@ -203,6 +218,48 @@ impl BoundExternalRealizations {
         &self.sealed_set_env
     }
 
+    /// How the consumer locates the realized roots: a node-owned private view
+    /// is addressed through `RYEOS_EXTERNAL_ROOT`, every other binding uses the
+    /// fixed logical namespace.
+    pub(crate) fn delivery(&self) -> ryeos_state::objects::ExternalRealizationDelivery {
+        match self.binding_mode {
+            ExternalRealizationBinding::PrivateRuntimeView => {
+                ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot
+            }
+            _ => ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+        }
+    }
+
+    /// Spawn environment naming a private runtime view and its delivery. Empty
+    /// for every binding that is addressed through the fixed namespace.
+    pub(crate) fn delivery_env_bindings(
+        &self,
+    ) -> anyhow::Result<Vec<ryeos_app::env_contract::EnvBinding>> {
+        let Some(root) = self.runtime_view_root() else {
+            return Ok(Vec::new());
+        };
+        let root = root
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("private runtime view root is not valid UTF-8"))?;
+        Ok(vec![
+            ryeos_app::env_contract::EnvBinding::new(
+                "RYEOS_EXTERNAL_ROOT",
+                root,
+                ryeos_app::env_contract::EnvSourceDetail::EnginePlanEnv,
+            ),
+            ryeos_app::env_contract::EnvBinding::new(
+                "RYEOS_EXTERNAL_DELIVERY",
+                serde_json::to_string(&self.delivery())?,
+                ryeos_app::env_contract::EnvSourceDetail::EnginePlanEnv,
+            ),
+        ])
+    }
+
+    /// Absolute path of the private runtime view, when this binding used one.
+    pub(crate) fn runtime_view_root(&self) -> Option<&Path> {
+        self.runtime_view_root.as_deref()
+    }
+
     /// Bind a pre-admitted command coordinate to the exact materialized tree
     /// that this launch will mount. The realization set and mount vector are
     /// built in the same canonical order below; all portable identity remains
@@ -289,7 +346,7 @@ impl BoundExternalRealizations {
     ) -> (
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
         String,
-        Vec<fs::File>,
+        Vec<RetainedLease>,
     ) {
         (self.mounts, self.sealed_set_env, self._leases)
     }
@@ -299,7 +356,7 @@ impl BoundExternalRealizations {
     ) -> (
         RealizedExternalContentSet,
         Vec<lillux::InheritedDescriptorAuthority>,
-        Vec<fs::File>,
+        Vec<RetainedLease>,
     ) {
         (self.realized, self.guest_sources, self._leases)
     }
@@ -383,7 +440,7 @@ struct MaterializedExternalGeneration {
     root: lillux::PinnedDirectory,
     source_path: PathBuf,
     source: lillux::InheritedDescriptorAuthority,
-    leases: Vec<fs::File>,
+    leases: Vec<RetainedLease>,
 }
 
 impl MaterializedExternalGeneration {
@@ -571,8 +628,11 @@ impl ExternalMaterializationCache {
         let manifest_hash = closure.manifest_hash();
         let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
         let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
-        let lock =
-            locks.open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
+        let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+        let lock = locks
+            .open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?
+            .into_fork_closed_lock(&lease);
+        drop(lease);
         lock.lock_exclusive()?;
 
         let generation = match root.open_child_directory(OsStr::new(manifest_hash))? {
@@ -627,7 +687,9 @@ impl ExternalMaterializationCache {
             root: generation,
             source_path,
             source,
-            leases: vec![lease_lifeline],
+            leases: vec![RetainedLease::Generation {
+                _descriptor: lease_lifeline,
+            }],
         })
     }
 
@@ -678,8 +740,11 @@ impl ExternalMaterializationCache {
 
         let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
         let locks = root.open_or_create_child(OsStr::new(".locks"), 0o700)?;
-        let lock =
-            locks.open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?;
+        let lease = lillux::try_retain_fork_sensitive_descriptors()?;
+        let lock = locks
+            .open_pinned_regular_create(OsStr::new(manifest_hash), true, false, 0o600)?
+            .into_fork_closed_lock(&lease);
+        drop(lease);
         lock.lock_exclusive()?;
 
         let generation = match root.open_child_directory(OsStr::new(manifest_hash))? {
@@ -748,10 +813,12 @@ impl ExternalMaterializationCache {
             }
         };
         let mut retained_leases = Vec::with_capacity(large_sources.len() + 1);
-        retained_leases.push(generation_lease_lifeline);
+        retained_leases.push(RetainedLease::Generation {
+            _descriptor: generation_lease_lifeline,
+        });
         for leased in large_sources.into_values() {
             let (_, _, lease) = leased.into_parts();
-            retained_leases.push(lease);
+            retained_leases.push(RetainedLease::LargeObject { _lock: lease });
         }
         drop(lock);
         Ok(MaterializedExternalGeneration {
@@ -1433,6 +1500,25 @@ pub(crate) fn bind_retained_qualification_local_realizations(
     )
 }
 
+/// Redeem the accepted Q realization set as descriptor-pinned read-only
+/// isolation mounts for an enforced local Worker. Project mounts target the
+/// Worker's own workspace and fixed runtime mounts keep their signed
+/// execution-runtime coordinates; nothing is copied into a host view.
+pub(crate) fn bind_retained_qualification_isolated_realizations(
+    state: &ryeos_app::state::AppState,
+    realized: &ryeos_state::objects::ExternalContentRealizationSet,
+    workspace: &Path,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    require_isolation_realization_count(realized.iter().len())?;
+    bind_external_realization_set_with(
+        state,
+        realized.clone(),
+        workspace,
+        ExternalRealizationBinding::IsolationMounts,
+        None,
+    )
+}
+
 /// Exact project-relative roots populated from separately admitted external
 /// realizations. Native private-copy fold-back excludes these operational
 /// shadows so input realizations never become project output bytes.
@@ -1777,6 +1863,8 @@ fn bind_external_realization_set_with(
             })
             .transpose()?,
         sealed_set_env,
+        runtime_view_root: (binding == ExternalRealizationBinding::PrivateRuntimeView)
+            .then(|| project_path.to_path_buf()),
         _leases: leases,
     }))
 }

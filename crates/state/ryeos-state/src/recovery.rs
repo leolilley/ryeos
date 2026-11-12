@@ -67,7 +67,8 @@ static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     static SHARED_CAS_GUARD_DEPTH: Cell<usize> = const { Cell::new(0) };
     static EXCLUSIVE_CAS_GUARD_DEPTH: Cell<usize> = const { Cell::new(0) };
-    static CAS_GUARD_FILE: RefCell<Option<Rc<File>>> = const { RefCell::new(None) };
+    static CAS_GUARD_FILE: RefCell<Option<Rc<lillux::locks::ForkClosedLockFile>>> =
+        const { RefCell::new(None) };
     #[cfg(test)]
     static FAIL_AFTER_STAGING_PUBLICATION: Cell<bool> = const { Cell::new(false) };
 }
@@ -1030,7 +1031,7 @@ pub struct StagedCasRootLease {
     recovery: RecoveryStore,
     directory: lillux::PinnedDirectory,
     record: StagedCasRootsRecord,
-    lock_file: Option<File>,
+    lock_file: Option<lillux::locks::ForkClosedLockFile>,
     publication_uncertain: Cell<bool>,
 }
 
@@ -1057,7 +1058,7 @@ pub struct DurableCasUploadStage {
     recovery: RecoveryStore,
     directory: lillux::PinnedDirectory,
     record: DurableCasUploadRecord,
-    lock_file: Option<File>,
+    lock_file: Option<lillux::locks::ForkClosedLockFile>,
     publication_uncertain: Cell<bool>,
 }
 
@@ -1922,14 +1923,20 @@ impl PendingTransitionCursor {
 /// mark-and-sweep (exclusive). Publishers acquire this before their first CAS
 /// write and hold it through durable head publication.
 pub struct CasMutationGuard {
-    _file: Rc<File>,
-    // A CAS guard owns a descriptor-backed flock. Keep direct-attachment
-    // forks quiesced until the last clone of that lock authority is released,
-    // regardless of which application layer acquired the guard.
-    _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
+    // A CAS guard owns a descriptor-backed flock. Its descriptor is closed in
+    // every direct-attachment fork child, so holding the guard never keeps the
+    // node's fork window closed; the lock ends when the last clone drops.
+    _file: Rc<lillux::locks::ForkClosedLockFile>,
     exclusive: bool,
     depth: GuardDepth,
     _not_send: std::marker::PhantomData<Rc<()>>,
+}
+
+/// True while the calling thread holds any CAS mutation guard. Phases that
+/// start handler processes refuse under a guard: resolve first, then take it,
+/// so a guard is never held across process creation.
+pub fn cas_mutation_guard_held_on_current_thread() -> bool {
+    SHARED_CAS_GUARD_DEPTH.with(Cell::get) != 0 || EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get) != 0
 }
 
 impl CasMutationGuard {
@@ -1977,14 +1984,12 @@ impl CasMutationGuard {
     pub(crate) fn acquire_existing_shared_in_pinned_runtime(
         runtime: &lillux::PinnedDirectory,
     ) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
         if exclusive_depth != 0 {
             let file = current_guard_file_for_pinned_runtime(runtime)?;
             EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
             return Ok(Self {
                 _file: file,
-                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Exclusive,
                 _not_send: std::marker::PhantomData,
@@ -1996,29 +2001,23 @@ impl CasMutationGuard {
             SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
             return Ok(Self {
                 _file: file,
-                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Shared,
                 _not_send: std::marker::PhantomData,
             });
         }
 
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let recovery = runtime
             .open_child_directory(std::ffi::OsStr::new("recovery"))?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
         let file = recovery
             .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .context("acquire pinned CAS mutation/sweep lock");
-            }
-        }
-        #[cfg(not(unix))]
-        anyhow::bail!("CAS mutation/sweep locking is unavailable on this platform");
+        let file = lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        file.lock_shared()
+            .context("acquire pinned CAS mutation/sweep lock")?;
         let file = Rc::new(file);
         CAS_GUARD_FILE.with(|current| {
             let previous = current.borrow_mut().replace(Rc::clone(&file));
@@ -2027,7 +2026,6 @@ impl CasMutationGuard {
         SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
         Ok(Self {
             _file: file,
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive: false,
             depth: GuardDepth::Shared,
             _not_send: std::marker::PhantomData,
@@ -2052,9 +2050,6 @@ impl CasMutationGuard {
             Ok(())
         };
         check_deadline()?;
-        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
-            .context("retain pinned CAS guard descriptors before deadline")?;
-        check_deadline()?;
         let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
         if exclusive_depth != 0 {
             let file = current_guard_file_for_pinned_runtime(runtime)?;
@@ -2062,7 +2057,6 @@ impl CasMutationGuard {
             EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
             let guard = Self {
                 _file: file,
-                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Exclusive,
                 _not_send: std::marker::PhantomData,
@@ -2077,7 +2071,6 @@ impl CasMutationGuard {
             SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
             let guard = Self {
                 _file: file,
-                _fork_sensitive_descriptors: fork_sensitive_descriptors,
                 exclusive: false,
                 depth: GuardDepth::Shared,
                 _not_send: std::marker::PhantomData,
@@ -2086,6 +2079,8 @@ impl CasMutationGuard {
             return Ok(guard);
         }
 
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors_until(deadline)
+            .context("retain pinned CAS guard descriptors before deadline")?;
         let recovery = runtime
             .open_child_directory(std::ffi::OsStr::new("recovery"))?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock directory is absent"))?;
@@ -2093,8 +2088,10 @@ impl CasMutationGuard {
         let file = recovery
             .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
             .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?;
+        let file = lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
         check_deadline()?;
-        let file = lillux::locks::acquire_existing_shared_file_until(file, deadline)
+        file.lock_shared_until(deadline)
             .context("acquire pinned CAS mutation/sweep lock before deadline")?;
         check_deadline()?;
         let file = Rc::new(file);
@@ -2105,7 +2102,6 @@ impl CasMutationGuard {
         SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
         let guard = Self {
             _file: file,
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive: false,
             depth: GuardDepth::Shared,
             _not_send: std::marker::PhantomData,
@@ -2133,12 +2129,12 @@ impl CasMutationGuard {
         runtime: &lillux::PinnedDirectory,
         create: bool,
     ) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         if EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get) != 0
             || SHARED_CAS_GUARD_DEPTH.with(Cell::get) != 0
         {
             anyhow::bail!("pinned CAS mutation guard cannot be acquired reentrantly");
         }
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let recovery_name = std::ffi::OsStr::new("recovery");
         let recovery = if create {
             runtime.open_or_create_child(recovery_name, 0o700)?
@@ -2157,16 +2153,10 @@ impl CasMutationGuard {
                 .open_regular(lock_name, false)?
                 .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?
         };
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .context("acquire pinned CAS mutation/sweep lock");
-            }
-        }
-        #[cfg(not(unix))]
-        anyhow::bail!("CAS mutation/sweep locking is unavailable on this platform");
+        let file = lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        file.lock_exclusive()
+            .context("acquire pinned CAS mutation/sweep lock")?;
         let file = Rc::new(file);
         CAS_GUARD_FILE.with(|current| {
             let previous = current.borrow_mut().replace(Rc::clone(&file));
@@ -2175,7 +2165,6 @@ impl CasMutationGuard {
         EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(1));
         Ok(Self {
             _file: file,
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive: true,
             depth: GuardDepth::Exclusive,
             _not_send: std::marker::PhantomData,
@@ -2303,7 +2292,6 @@ impl CasMutationGuard {
 
     #[track_caller]
     fn acquire(runtime_state_dir: &Path, exclusive: bool, create_if_missing: bool) -> Result<Self> {
-        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         if exclusive {
             let exclusive_depth = EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get);
             if exclusive_depth != 0 {
@@ -2311,7 +2299,6 @@ impl CasMutationGuard {
                 EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
                 return Ok(Self {
                     _file: file,
-                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: true,
                     depth: GuardDepth::Exclusive,
                     _not_send: std::marker::PhantomData,
@@ -2330,7 +2317,6 @@ impl CasMutationGuard {
                 EXCLUSIVE_CAS_GUARD_DEPTH.with(|depth| depth.set(exclusive_depth + 1));
                 return Ok(Self {
                     _file: file,
-                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: false,
                     depth: GuardDepth::Exclusive,
                     _not_send: std::marker::PhantomData,
@@ -2342,7 +2328,6 @@ impl CasMutationGuard {
                 SHARED_CAS_GUARD_DEPTH.with(|depth| depth.set(shared_depth + 1));
                 return Ok(Self {
                     _file: file,
-                    _fork_sensitive_descriptors: fork_sensitive_descriptors,
                     exclusive: false,
                     depth: GuardDepth::Shared,
                     _not_send: std::marker::PhantomData,
@@ -2350,6 +2335,7 @@ impl CasMutationGuard {
             }
         }
 
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_path = runtime_state_dir
             .join(RECOVERY_DIRECTORY_NAME)
             .join(CAS_MUTATION_LOCK_FILENAME);
@@ -2374,21 +2360,14 @@ impl CasMutationGuard {
                 .open_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), true)?
                 .ok_or_else(|| anyhow::anyhow!("CAS mutation lock is absent"))?
         };
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let operation = if exclusive {
-                libc::LOCK_EX
-            } else {
-                libc::LOCK_SH
-            };
-            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .context("acquire CAS mutation/sweep lock");
-            }
+        let file = lillux::locks::ForkClosedLockFile::register(file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
+        if exclusive {
+            file.lock_exclusive()
+        } else {
+            file.lock_shared()
         }
-        #[cfg(not(unix))]
-        anyhow::bail!("CAS mutation/sweep locking is unavailable on this platform");
+        .context("acquire CAS mutation/sweep lock")?;
         let file = Rc::new(file);
         CAS_GUARD_FILE.with(|current| {
             let previous = current.borrow_mut().replace(Rc::clone(&file));
@@ -2403,7 +2382,6 @@ impl CasMutationGuard {
         };
         Ok(Self {
             _file: file,
-            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             exclusive,
             depth,
             _not_send: std::marker::PhantomData,
@@ -2431,7 +2409,9 @@ impl Drop for CasMutationGuard {
     }
 }
 
-fn current_guard_file_for(runtime_state_dir: &Path) -> Result<Rc<File>> {
+fn current_guard_file_for(
+    runtime_state_dir: &Path,
+) -> Result<Rc<lillux::locks::ForkClosedLockFile>> {
     let held = CAS_GUARD_FILE.with(|file| {
         file.borrow()
             .as_ref()
@@ -2464,7 +2444,9 @@ fn current_guard_file_for(runtime_state_dir: &Path) -> Result<Rc<File>> {
     Ok(held)
 }
 
-fn current_guard_file_for_pinned_runtime(runtime: &lillux::PinnedDirectory) -> Result<Rc<File>> {
+fn current_guard_file_for_pinned_runtime(
+    runtime: &lillux::PinnedDirectory,
+) -> Result<Rc<lillux::locks::ForkClosedLockFile>> {
     let held = CAS_GUARD_FILE.with(|file| {
         file.borrow()
             .as_ref()
@@ -2872,22 +2854,18 @@ impl RecoveryStore {
             .context("create staged CAS root directory")?;
         let lease_id = unique_id("staged");
         let lock_name = format!("{lease_id}.lock");
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_file = staged_directory.open_regular_create(
             std::ffi::OsStr::new(&lock_name),
             true,
             true,
             0o600,
         )?;
+        let lock_file =
+            lillux::locks::ForkClosedLockFile::register(lock_file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
         staged_directory.sync()?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(std::io::Error::last_os_error()).context("lock staged CAS root lease");
-            }
-        }
-        #[cfg(not(unix))]
-        anyhow::bail!("staged CAS root locking is unavailable on this platform");
+        lock_exclusive(&lock_file, "lock staged CAS root lease")?;
         let record = StagedCasRootsRecord {
             schema: STAGED_ROOTS_SCHEMA,
             lease_id,
@@ -2930,12 +2908,16 @@ impl RecoveryStore {
             .context("create durable CAS upload directory")?;
         let staging_id = unique_id("upload");
         let lock_name = format!("{staging_id}.lock");
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_file = durable_directory.open_regular_create(
             std::ffi::OsStr::new(&lock_name),
             true,
             true,
             0o600,
         )?;
+        let lock_file =
+            lillux::locks::ForkClosedLockFile::register(lock_file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
         durable_directory.sync()?;
         lock_exclusive(&lock_file, "lock durable CAS upload")?;
         let record = DurableCasUploadRecord {
@@ -2978,9 +2960,13 @@ impl RecoveryStore {
             .open_child_directory("durable-cas-uploads")?
             .ok_or_else(|| anyhow::anyhow!("durable CAS upload directory is absent"))?;
         let lock_name = format!("{staging_id}.lock");
+        let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
         let lock_file = directory
             .open_regular(std::ffi::OsStr::new(&lock_name), true)?
             .ok_or_else(|| anyhow::anyhow!("durable CAS upload lock is absent"))?;
+        let lock_file =
+            lillux::locks::ForkClosedLockFile::register(lock_file, &fork_sensitive_descriptors);
+        drop(fork_sensitive_descriptors);
         lock_exclusive(&lock_file, "lock durable CAS upload")?;
         let record_name = format!("{staging_id}.json");
         let record_path = directory.path().join(&record_name);
@@ -3948,14 +3934,10 @@ fn validate_staging_record_bytes(len: usize) -> Result<()> {
     Ok(())
 }
 
-fn lock_exclusive(file: &File, label: &str) -> Result<()> {
+fn lock_exclusive(file: &lillux::locks::ForkClosedLockFile, label: &str) -> Result<()> {
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| label.to_string());
-        }
-        Ok(())
+        file.lock_exclusive().with_context(|| label.to_string())
     }
     #[cfg(not(unix))]
     {
@@ -5384,6 +5366,34 @@ mod tests {
         drop(nested);
         assert_eq!(EXCLUSIVE_CAS_GUARD_DEPTH.with(Cell::get), 0);
         assert!(CAS_GUARD_FILE.with(|file| file.borrow().is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_guard_keeps_no_fork_lease_and_its_lock_ends_with_the_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        CasMutationGuard::ensure_anchor(temp.path()).unwrap();
+        let runtime = lillux::PinnedDirectory::open(temp.path()).unwrap().unwrap();
+        let guard =
+            CasMutationGuard::acquire_existing_exclusive_in_pinned_runtime(&runtime).unwrap();
+        // The guard is visible to phase admission, yet holding it closes no
+        // fork window: a long hold stalls no process creation on the node.
+        assert!(cas_mutation_guard_held_on_current_thread());
+        assert!(!lillux::current_thread_retains_fork_sensitive_descriptors());
+        // A fork child's inherited descriptor shares this open file
+        // description. The lock must end with the guard, not with the close.
+        let inherited_copy = guard._file.try_clone().unwrap();
+        drop(guard);
+        assert!(!cas_mutation_guard_held_on_current_thread());
+        let contender = runtime
+            .open_child_directory(std::ffi::OsStr::new(RECOVERY_DIRECTORY_NAME))
+            .unwrap()
+            .unwrap()
+            .open_pinned_regular(std::ffi::OsStr::new(CAS_MUTATION_LOCK_FILENAME), false)
+            .unwrap()
+            .unwrap();
+        assert!(contender.try_lock_exclusive().unwrap());
+        drop(inherited_copy);
     }
 
     #[cfg(unix)]

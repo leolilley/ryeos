@@ -39,6 +39,15 @@ pub trait HostServiceController: Send + Sync {
     /// supervisor does not restart it after its next exit. For a supervised
     /// process that is already exiting on its own and must not be restarted.
     fn inhibit_restart(&self) -> Result<()>;
+    /// Want the service down and have the supervisor end its exact process
+    /// with the definitive signal. The supervisor owns that process identity,
+    /// so no pid read from elsewhere is promoted into signal authority. Only
+    /// for a process a graceful request could not end.
+    fn force_down(&self) -> Result<()>;
+    /// Want the service down and return only once the supervisor reports its
+    /// process gone, or refuse when `timeout` passes first. A down request
+    /// alone returns while the process may still be exiting.
+    fn wait_down(&self, timeout: std::time::Duration) -> Result<()>;
     /// Opaque native boot disposition retained by a client's upgrade journal.
     fn capture_upgrade_state(&self) -> Result<serde_json::Value>;
     fn restore_upgrade_state(&self, state: &serde_json::Value) -> Result<()>;

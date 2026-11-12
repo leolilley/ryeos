@@ -1,7 +1,7 @@
 //! Produce a retained, credential-free guest-owner runtime from one exact
 //! RyeOS realization. The signed Tool pins the owner binary and supplies only
 //! the node's public root and an authored profile; this command never reads
-//! an installed Bundle pathname or qualifies a Render snapshot.
+//! an installed Bundle pathname or qualifies a provider snapshot.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;

@@ -3,6 +3,7 @@
 //! validation contract and RyeOS bootstrap mapping are not established.
 
 mod activation_contact;
+mod contact_failure;
 mod fail_class;
 mod lease;
 mod provider_spec;
@@ -57,8 +58,10 @@ const MAX_ROOTS: usize = 8;
 const MAX_ROOT_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_ROOT_BYTES: usize = 64 * 1024;
 const MAX_NETWORK_INPUT_BYTES: usize = 64 * 1024;
-const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+// A slow link or a busy provider is not a failure. Each call's absolute deadline
+// is the real bound; these only catch a connection that has stopped entirely.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Fixed part of the wait for a `/files/upload` reply, covering request
 /// handling that does not depend on the upload size.
 const UPLOAD_RESPONSE_WAIT_BASE: Duration = Duration::from_secs(15);
@@ -182,6 +185,7 @@ enum RenderSandboxStatus {
     Resuming,
     Running,
     Suspended,
+    Suspending,
     Terminated,
 }
 
@@ -265,6 +269,8 @@ struct RenderSandbox {
     id: String,
     #[serde(rename = "idleTimeoutSeconds")]
     idle_timeout_seconds: u32,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(rename = "networkPolicy")]
     network_policy: RenderNetworkPolicy,
     plan: RenderSandboxPlan,
@@ -283,13 +289,19 @@ const MAX_IDLE_TIMEOUT_SECONDS: u32 = 86_400;
 
 impl RenderSandbox {
     /// The provider-assigned attributes that no request field pins: a positive
-    /// idle timeout within one day and a well-formed sandbox group id. The
+    /// idle timeout within one day, a well-formed sandbox group id and, when
+    /// present, a bounded printable name. The
     /// idle timeout is independent of `timeoutSeconds` (the live service
     /// reports 900 for a 600 second lifetime).
     fn provider_attributes_valid(&self) -> bool {
         (1..=MAX_IDLE_TIMEOUT_SECONDS).contains(&self.idle_timeout_seconds)
             && valid_sandbox_group_id(&self.sandbox_group_id)
+            && self.name.as_deref().is_none_or(valid_sandbox_name)
     }
+}
+
+fn valid_sandbox_name(value: &str) -> bool {
+    value.len() <= 1024 && !value.chars().any(char::is_control)
 }
 
 fn valid_sandbox_group_id(value: &str) -> bool {
@@ -340,7 +352,8 @@ struct NoOccurrenceEvidence<'a> {
     request_digest: &'a str,
     snapshot_id: &'a str,
     guest_base_snapshot_hash: &'a str,
-    basis: &'static str,
+    basis: &'a str,
+    reason: &'a str,
 }
 
 struct SignalCancellation {
@@ -731,6 +744,7 @@ fn operate() -> Result<()> {
         } => LifecycleAdapterResponse::AllocationPending {
             operation_id: common.operation_id.clone(),
             request_digest: reservation.request_digest.clone(),
+            reason: "no_exact_reconciliation".to_owned(),
         },
         LifecycleAdapterRequest::ActivateSupervisor {
             common,
@@ -744,9 +758,11 @@ fn operate() -> Result<()> {
             // Once this call begins, any stage may have reached Render.
             // Even a complete run response is not authenticated Ready;
             // every transport outcome remains Pending for the original
-            // supervisor channel to settle. Reconciliation never calls
-            // this one-shot sequence again.
-            let _ = activation_contact::first_activation_contact(
+            // supervisor channel to settle. The guest owner's closed report
+            // rides along as testimony for the controller to record; a
+            // contact that failed before the run stream carries none.
+            // Reconciliation never calls this one-shot sequence again.
+            let (guest_owner, contact_failure) = match activation_contact::first_activation_contact(
                 &network,
                 &provider_spec,
                 &settings,
@@ -756,10 +772,18 @@ fn operate() -> Result<()> {
                 &input.package,
                 deadline,
                 &cancellation,
-            );
+            ) {
+                Ok(report) => (Some(report), None),
+                Err(error) => (
+                    None,
+                    Some(activation_contact::contact_failure_reason(&error, deadline)),
+                ),
+            };
             LifecycleAdapterResponse::SupervisorPending {
                 operation_id: common.operation_id.clone(),
                 activation_request_digest: activation.activation_request_digest.clone(),
+                guest_owner,
+                contact_failure,
             }
         }
         LifecycleAdapterRequest::ReconcileSupervisorActivation {
@@ -767,6 +791,8 @@ fn operate() -> Result<()> {
         } => LifecycleAdapterResponse::SupervisorPending {
             operation_id: common.operation_id.clone(),
             activation_request_digest: activation.activation_request_digest.clone(),
+            guest_owner: None,
+            contact_failure: None,
         },
         LifecycleAdapterRequest::Terminate {
             common,
@@ -991,19 +1017,34 @@ fn allocate(
     deadline: MonotonicDeadline,
     cancellation: &NetworkCancellation,
 ) -> LifecycleAdapterResponse {
-    let pending = || LifecycleAdapterResponse::AllocationPending {
+    let pending = |reason: String| LifecycleAdapterResponse::AllocationPending {
         operation_id: common.operation_id.clone(),
         request_digest: reservation.request_digest.clone(),
+        reason,
+    };
+    // Nothing has left this process, so no occurrence can come of this request.
+    let not_sent = |reason: &str| {
+        if provider_spec.allocation_no_occurrence_proof_enabled() {
+            allocation_no_occurrence(
+                common,
+                reservation,
+                settings,
+                "local_before_request",
+                reason,
+            )
+        } else {
+            pending(reason.to_owned())
+        }
     };
     let projection = match project_allocation(provider_spec, settings, reservation, lease_egress) {
         Ok(value) => value,
-        Err(_) => return pending(),
+        Err(_) => return not_sent("local_projection"),
     };
     let Some(route) = provider_spec.allocation_route() else {
-        return pending();
+        return not_sent("local_route");
     };
     let Ok((url, route_target)) = api_url(provider_spec, route, None, settings, None) else {
-        return pending();
+        return not_sent("local_route");
     };
     if validate_api_url(
         &url,
@@ -1013,10 +1054,10 @@ fn allocate(
     )
     .is_err()
     {
-        return pending();
+        return not_sent("local_route");
     }
     if !provider_spec.allocation_bind_proof_enabled() {
-        return pending();
+        return not_sent("local_bind_proof_disabled");
     }
     let body = CreateSandboxBody {
         owner_id: projection.owner_id.clone(),
@@ -1031,10 +1072,10 @@ fn allocate(
         snapshot_id: Some(projection.snapshot_id.clone()),
     };
     let Ok(body) = canonical_json(&body) else {
-        return pending();
+        return not_sent("local_body");
     };
     let Ok(credential) = read_credential() else {
-        return pending();
+        return not_sent("local_credential");
     };
     let response = match send_api_request(
         network,
@@ -1053,18 +1094,40 @@ fn allocate(
                 .is_some_and(|error| error.contact_state() == ContactState::NoRequestSent)
                 && provider_spec.allocation_no_occurrence_proof_enabled()
             {
-                return allocation_no_occurrence(common, reservation, settings);
+                return allocation_no_occurrence(
+                    common,
+                    reservation,
+                    settings,
+                    "transport_no_request_sent",
+                    "not_sent",
+                );
             }
             // The POST may have committed. Do not retry or search the broad list.
-            return pending();
+            return pending("create_no_response".to_owned());
         }
     };
+    // The provider's answer to this exact request, whatever its body format.
+    // This is unlike a 404 from a later lookup, which says nothing about a
+    // create that may have committed.
+    let status = response.status;
+    if create_status_refuses(status) && provider_spec.allocation_direct_refusal_proof_enabled() {
+        return allocation_no_occurrence(
+            common,
+            reservation,
+            settings,
+            "provider_refused_create",
+            &format!("create_refused:{status}"),
+        );
+    }
+    if status != 201 {
+        return pending(format!("create_status:{status}"));
+    }
     let (status, response_body) = match read_response(response) {
         Ok(value) => value,
-        Err(()) => return pending(),
+        Err(()) => return pending("create_response_unreadable".to_owned()),
     };
     let Some(sandbox) = accepted_create_response(status, &response_body, &projection) else {
-        return pending();
+        return pending("create_response_rejected".to_owned());
     };
     let response_sha256 = lillux::sha256_hex(&response_body);
     let evidence = AllocationEvidence {
@@ -1080,7 +1143,7 @@ fn allocate(
         response_sha256: &response_sha256,
     };
     let Ok(evidence_bytes) = canonical_json(&evidence) else {
-        return pending();
+        return pending("evidence_unencodable".to_owned());
     };
     LifecycleAdapterResponse::AllocationBound {
         operation_id: common.operation_id.clone(),
@@ -1118,15 +1181,23 @@ fn project_allocation(
     )
 }
 
+/// A refusal the provider gives this create request means it made no sandbox.
+/// Statuses that can mean "try again, it may have landed" are left out, and so
+/// is every 5xx: those stay an unknown outcome.
+fn create_status_refuses(status: u16) -> bool {
+    matches!(
+        status,
+        400 | 401 | 402 | 403 | 404 | 405 | 409 | 410 | 413 | 415 | 422 | 429
+    )
+}
+
 fn allocation_no_occurrence(
     common: &ryeos_external_execution_contract::LifecycleOperationCommon,
     reservation: &ryeos_external_execution_contract::AllocationReservation,
     settings: &Settings,
+    basis: &str,
+    reason: &str,
 ) -> LifecycleAdapterResponse {
-    let pending = || LifecycleAdapterResponse::AllocationPending {
-        operation_id: common.operation_id.clone(),
-        request_digest: reservation.request_digest.clone(),
-    };
     let evidence = NoOccurrenceEvidence {
         schema: 2,
         provider: "render-sandbox-early-access",
@@ -1135,15 +1206,21 @@ fn allocation_no_occurrence(
         request_digest: &reservation.request_digest,
         snapshot_id: &settings.snapshot_id,
         guest_base_snapshot_hash: &reservation.base_snapshot_hash,
-        basis: "transport_no_request_sent",
+        basis,
+        reason,
     };
     let Ok(evidence_bytes) = canonical_json(&evidence) else {
-        return pending();
+        return LifecycleAdapterResponse::AllocationPending {
+            operation_id: common.operation_id.clone(),
+            request_digest: reservation.request_digest.clone(),
+            reason: "evidence_unencodable".to_owned(),
+        };
     };
     LifecycleAdapterResponse::AllocationNoOccurrence {
         operation_id: common.operation_id.clone(),
         request_digest: reservation.request_digest.clone(),
         provider_observation_digest: lillux::sha256_hex(&evidence_bytes),
+        reason: reason.to_owned(),
     }
 }
 
@@ -1757,6 +1834,16 @@ mod offline_fixture_tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
+    fn only_a_direct_refusal_of_the_create_proves_no_sandbox() {
+        for status in [400, 401, 403, 404, 409, 422, 429] {
+            assert!(create_status_refuses(status), "{status}");
+        }
+        for status in [200, 201, 202, 302, 408, 425, 500, 502, 503, 504] {
+            assert!(!create_status_refuses(status), "{status}");
+        }
+    }
+
+    #[test]
     fn package_handoff_requires_original_mode_0400_inode_and_exact_bytes() {
         use ryeos_external_execution_contract::LifecycleGuestPackageDelivery;
 
@@ -1912,6 +1999,7 @@ mod offline_fixture_tests {
                 guest_runtime_manifest_hash: digest('9'),
                 attachment_deadline_ms,
                 admission_deadline_ms: attachment_deadline_ms,
+                max_clock_skew_ms: None,
                 nonce_sha256: digest('0'),
                 ticket,
                 guest_inputs: inputs,
@@ -2442,6 +2530,22 @@ mod offline_fixture_tests {
             from_json_slice_strict(running, usize::try_from(MAX_API_RESPONSE_BYTES).unwrap())
                 .unwrap();
         assert_eq!(polled.status, RenderSandboxStatus::Running);
+        // The provider's later `name` label parses on both shapes; a field it
+        // has not declared stays refused.
+        let mut named: serde_json::Value = serde_json::from_slice(created).unwrap();
+        named["name"] = serde_json::json!("label");
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_some());
+        named["name"] = serde_json::Value::Null;
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_some());
+        named["name"] = serde_json::json!("");
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_some());
+        named["name"] = serde_json::json!("bad\nlabel");
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_none());
+        named["name"] = serde_json::json!("x".repeat(1025));
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_none());
+        named["name"] = serde_json::json!("label");
+        named["undeclared"] = serde_json::json!(true);
+        assert!(accepted_create_response(201, named.to_string().as_bytes(), &projection).is_none());
         let mut altered: serde_json::Value = serde_json::from_slice(created).unwrap();
         altered["idleTimeoutSeconds"] = serde_json::json!(0);
         assert!(

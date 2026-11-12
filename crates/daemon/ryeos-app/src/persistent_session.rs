@@ -502,6 +502,11 @@ struct SessionProcess {
     initial_observation_sink: Mutex<Option<PersistentSessionObservationSink>>,
     reader_failure: Mutex<Option<String>>,
     running: Mutex<Option<ryeos_engine::dispatch::RunningExecution>>,
+    /// Exit status of a process that ended on its own and was already reaped
+    /// by a natural-exit observation. Its presence is exit proof for the
+    /// process (never for cleanup it did not settle), so retirement runs the
+    /// remaining settlement without a second reap.
+    natural_exit: Mutex<Option<String>>,
     /// Once ownership was consumed by an abort attempt whose reap proof
     /// failed, absence of `running` must never be reinterpreted as proof.
     cleanup_unproved: Mutex<Option<String>>,
@@ -597,6 +602,20 @@ impl SessionProcess {
             .map_or(PersistentSessionRelayHealth::Live, |health| {
                 health.snapshot()
             })
+    }
+
+    /// The process ended on its own or its channel can never carry another
+    /// frame, so no request can ever be served again.
+    fn has_ended(&self) -> bool {
+        self.natural_exit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+            || self
+                .reader_failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
     }
 
     fn relay_failed(&self) -> bool {
@@ -806,13 +825,98 @@ impl SessionProcess {
             });
         }
         match owned.wait_for_natural_exit(Duration::from_millis(200)) {
-            Ok(completion) => Some(process_completion_diagnostic(&completion)),
+            Ok(completion) => {
+                self.record_natural_exit(&completion);
+                Some(process_completion_diagnostic(&completion))
+            }
             Err(still_running) => {
                 let diagnostic = still_running.stderr_diagnostic_tail();
                 *running = Some(still_running);
                 diagnostic
             }
         }
+    }
+
+    fn record_natural_exit(&self, completion: &ryeos_engine::contracts::ExecutionCompletion) {
+        let status = completion
+            .error
+            .as_ref()
+            .and_then(|error| error.get("exit_code"))
+            .and_then(Value::as_i64)
+            .map_or_else(
+                || format!("{:?}", completion.status),
+                |code| format!("exit code {code}"),
+            );
+        self.natural_exit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert(status);
+    }
+
+    /// Reap the process if it has already ended on its own and say how. A
+    /// live process keeps its owner untouched. The exit status is bounded and
+    /// carries no process output.
+    fn observe_natural_exit(&self) -> Option<String> {
+        if let Some(status) = self
+            .natural_exit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return Some(status);
+        }
+        if self
+            .pooled_start
+            .as_ref()
+            .is_some_and(|start| start.has_original_trusted_obligation())
+        {
+            return None;
+        }
+        let mut running = self
+            .running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned = running.take()?;
+        if owned.has_selected_original_launch_context() {
+            *running = Some(owned);
+            return None;
+        }
+        match owned.wait_for_natural_exit(Duration::from_millis(1)) {
+            Ok(completion) => {
+                drop(running);
+                self.record_natural_exit(&completion);
+                self.natural_exit
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            }
+            Err(still_running) => {
+                *running = Some(still_running);
+                None
+            }
+        }
+    }
+
+    /// Bounded, output-free reason this process can no longer serve: its exit
+    /// status when it ended, else the failure that closed its channel.
+    fn exit_reason(&self) -> Option<String> {
+        let natural = self
+            .natural_exit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let reason = match natural {
+            Some(status) => format!("process exited ({status})"),
+            None => {
+                let failure = self
+                    .reader_failure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()?;
+                format!("session channel failed ({failure})")
+            }
+        };
+        Some(bounded_reason(reason))
     }
 
     fn retire(&self) -> Result<()> {
@@ -879,14 +983,24 @@ impl SessionProcess {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        let Some(running) = running else {
-            return attempt.finish(Err(
-                "persistent-session running owner was absent before checked reap proof".to_owned(),
-            ));
-        };
-        if let Err(error) = safe_checked_reap(running) {
-            let reason = format!("persistent-session cleanup could not be proved: {error}");
-            return attempt.finish(Err(reason));
+        match running {
+            Some(running) => {
+                if let Err(error) = safe_checked_reap(running) {
+                    let reason = format!("persistent-session cleanup could not be proved: {error}");
+                    return attempt.finish(Err(reason));
+                }
+            }
+            None if self
+                .natural_exit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some() => {}
+            None => {
+                return attempt.finish(Err(
+                    "persistent-session running owner was absent before checked reap proof"
+                        .to_owned(),
+                ));
+            }
         }
 
         let cleanup_observer = self
@@ -2631,6 +2745,19 @@ struct PoolState {
     exclusive: HashMap<String, ExclusiveSessionEntry>,
     exclusive_reservations: HashMap<String, ExclusiveReservationEntry>,
     exclusive_failure_cleanup: HashMap<String, &'static str>,
+    /// Cleanup proof the idle reaper recorded when it retired an exclusive
+    /// process that ended on its own. Kept apart from request-failure proofs:
+    /// the session's terminating owner consumes it through `retire_exclusive`,
+    /// a failed request's owner may consume it as its own proof, and until one
+    /// of them does it fences capture and replacement like any unsettled end.
+    exclusive_reaped: HashMap<String, &'static str>,
+    /// Bounded reason an exclusive process was retired by the supervisor
+    /// because it could no longer serve (it exited or its channel failed).
+    /// Cleared with the matching cleanup state.
+    exclusive_exit_reason: HashMap<String, String>,
+    /// Bounded caller-supplied notes about an exclusive session, shown beside
+    /// its exit reason. The pool never interprets them.
+    exclusive_notes: HashMap<String, String>,
     /// Starts admitted by `reserve_exclusive` that have not yet completed the
     /// caller's durable binding publication. Shutdown waits for these exact
     /// ownership units before snapshotting and reaping the pool.
@@ -2927,6 +3054,9 @@ impl PersistentSessionPool {
                 exclusive: HashMap::new(),
                 exclusive_reservations: HashMap::new(),
                 exclusive_failure_cleanup: HashMap::new(),
+                exclusive_reaped: HashMap::new(),
+                exclusive_exit_reason: HashMap::new(),
+                exclusive_notes: HashMap::new(),
                 exclusive_starts_in_flight: 0,
                 cleanup_unproved: None,
             }),
@@ -3037,6 +3167,7 @@ impl PersistentSessionPool {
         if state.exclusive.contains_key(session_id)
             || state.exclusive_reservations.contains_key(session_id)
             || state.exclusive_failure_cleanup.contains_key(session_id)
+            || state.exclusive_reaped.contains_key(session_id)
         {
             bail!("exclusive persistent session already exists");
         }
@@ -3404,7 +3535,47 @@ impl PersistentSessionPool {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(state.exclusive_failure_cleanup.remove(session_id))
+        state.exclusive_exit_reason.remove(session_id);
+        state.exclusive_notes.remove(session_id);
+        let failure = state.exclusive_failure_cleanup.remove(session_id);
+        let reaped = state.exclusive_reaped.remove(session_id);
+        Ok(failure.or(reaped))
+    }
+
+    /// Attach a short note to a live exclusive session so a later exit report
+    /// can show it. The pool stores the text without interpreting it, bounds
+    /// it, and keeps only a small number of sessions' notes.
+    pub fn note_exclusive_diagnostic(&self, session_id: &str, note: &str) {
+        const MAX_NOTED_SESSIONS: usize = 64;
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.exclusive.contains_key(session_id)
+            || (state.exclusive_notes.len() >= MAX_NOTED_SESSIONS
+                && !state.exclusive_notes.contains_key(session_id))
+        {
+            return;
+        }
+        state
+            .exclusive_notes
+            .insert(session_id.to_owned(), bounded_reason(note.to_owned()));
+    }
+
+    /// Why the supervisor retired this exclusive process, if it did, with any
+    /// note recorded for it. Reading does not consume the cleanup proof.
+    pub fn exclusive_exit_reason(&self, session_id: &str) -> Option<String> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let reason = state.exclusive_exit_reason.get(session_id)?;
+        Some(match state.exclusive_notes.get(session_id) {
+            Some(note) => format!("{note}; {reason}"),
+            None => reason.clone(),
+        })
     }
 
     /// Consume cleanup testimony after the durable possible-contact boundary.
@@ -3438,6 +3609,7 @@ impl PersistentSessionPool {
             if state.cleanup_unproved.is_some()
                 || state.exclusive_reservations.contains_key(session_id)
                 || state.exclusive_failure_cleanup.contains_key(session_id)
+                || state.exclusive_reaped.contains_key(session_id)
             {
                 bail!(
                     "workspace capture is fenced by pending or unsettled exclusive worker contact"
@@ -3488,7 +3660,22 @@ impl PersistentSessionPool {
                 .map(|entry| Arc::clone(&entry.process))
         };
         let Some(process) = process else {
-            return Ok(ExclusiveRetirementOutcome::Absent);
+            // The idle reaper may have retired this ended process before its
+            // terminating owner got here. That owner owns the session's end,
+            // so it takes the reaper's proof instead of leaving it to fence
+            // every later capture of the workspace.
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let outcome = match state.exclusive_reaped.remove(session_id) {
+                Some("reaped") => ExclusiveRetirementOutcome::Reaped,
+                Some(_) => ExclusiveRetirementOutcome::Unproved,
+                None => ExclusiveRetirementOutcome::Absent,
+            };
+            self.inner.changed.notify_all();
+            return Ok(outcome);
         };
         let result = process.retire();
         let mut state = self
@@ -3505,6 +3692,9 @@ impl PersistentSessionPool {
                 {
                     state.exclusive.remove(session_id);
                 }
+                // A reaper that retired the same process concurrently left a
+                // proof of what this owner has just proved itself.
+                state.exclusive_reaped.remove(session_id);
                 ExclusiveRetirementOutcome::Reaped
             }
             Err(error) => {
@@ -5514,6 +5704,7 @@ fn ready_process_registered(
         initial_observation_sink: Mutex::new(observation_sink),
         reader_failure: Mutex::new(None),
         running: Mutex::new(Some(running)),
+        natural_exit: Mutex::new(None),
         cleanup_unproved: Mutex::new(None),
         cleanup_observer: Mutex::new(std::mem::take(&mut custody.observer)),
         relay_owner: Mutex::new(custody.relay_owner.take()),
@@ -5646,6 +5837,19 @@ fn combine_retirement_observers(
             }
         })),
     }
+}
+
+const MAX_EXIT_REASON_BYTES: usize = 512;
+
+fn bounded_reason(mut reason: String) -> String {
+    if reason.len() > MAX_EXIT_REASON_BYTES {
+        let mut end = MAX_EXIT_REASON_BYTES;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    reason
 }
 
 fn attach_process_diagnostic(process: &SessionProcess, error: anyhow::Error) -> anyhow::Error {
@@ -6258,6 +6462,21 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                 let now = now_ms();
                 let mut retired = Vec::new();
                 let mut retired_exclusive = Vec::new();
+                // Probe exits before taking the pool lock: a process that
+                // ended on its own is reaped here, never left as a zombie
+                // behind a session nobody is calling.
+                let candidates = inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .exclusive
+                    .values()
+                    .filter(|entry| !entry.process.leased.load(Ordering::Acquire))
+                    .map(|entry| Arc::clone(&entry.process))
+                    .collect::<Vec<_>>();
+                for process in candidates {
+                    let _ = process.observe_natural_exit();
+                }
                 let state = inner
                     .state
                     .lock()
@@ -6290,6 +6509,7 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                 }
                 for (session_id, entry) in &state.exclusive {
                     let expired = entry.process.relay_failed()
+                        || entry.process.has_ended()
                         || entry
                             .process
                             .resource_occupancy_limit
@@ -6351,6 +6571,16 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                     }
                 }
                 for (session_id, process) in retired_exclusive {
+                    // Publish why before retirement settles the durable rows,
+                    // so whoever observes the settled row can read the reason.
+                    if let Some(reason) = process.exit_reason() {
+                        inner
+                            .state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .exclusive_exit_reason
+                            .insert(session_id.clone(), reason);
+                    }
                     match process.retire() {
                         Ok(()) => {
                             let mut state = inner
@@ -6363,9 +6593,7 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                                 .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process))
                             {
                                 state.exclusive.remove(&session_id);
-                                state
-                                    .exclusive_failure_cleanup
-                                    .insert(session_id, "reaped");
+                                state.exclusive_reaped.insert(session_id, "reaped");
                             }
                         }
                         Err(error) => {
@@ -6376,9 +6604,7 @@ fn spawn_idle_reaper(inner: Weak<PoolInner>) {
                             state
                                 .cleanup_unproved
                                 .get_or_insert_with(|| error.to_string());
-                            state
-                                .exclusive_failure_cleanup
-                                .insert(session_id, "unproved");
+                            state.exclusive_reaped.insert(session_id, "unproved");
                             tracing::error!(%error, "expired exclusive-session cleanup could not be proved; pool quarantined");
                         }
                     }
@@ -7521,6 +7747,8 @@ while True:
             if acknowledgement['kind'] != 'observation_ack':
                 raise SystemExit(2)
         send('final', frame['request_id'], {'echo':frame['body']})
+        if frame['body'].get('exit_after_final'):
+            raise SystemExit(7)
     elif frame['kind'] == 'control':
         if frame['body'].get('force_expired'):
             send('final', frame['request_id'], {
@@ -7597,6 +7825,7 @@ while True:
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
+            isolation_captured_callback_socket: false,
             isolation_bundle_roots: Vec::new(),
             isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
@@ -8707,6 +8936,123 @@ while True:
             pool.retire_exclusive(&session_id).unwrap(),
             ExclusiveRetirementOutcome::Reaped
         );
+    }
+
+    #[test]
+    fn exclusive_worker_that_exits_on_its_own_is_reaped_and_settled_promptly() {
+        let pool = PersistentSessionPool::new();
+        let id = "e".repeat(64);
+        let settled = Arc::new(AtomicBool::new(false));
+        let mut started = fake_framed_session().unwrap();
+        let observed = Arc::clone(&settled);
+        started.retirement_observer = Some(Arc::new(move || {
+            observed.store(true, Ordering::Release);
+            Ok(())
+        }));
+        let mut lifecycle = test_lifecycle();
+        lifecycle.ready_timeout_ms = 5_000;
+        lifecycle.request_timeout_ms = 5_000;
+        lifecycle.idle_timeout_ms = 60_000;
+        pool.reserve_exclusive(&id, &lifecycle, &test_wire())
+            .unwrap()
+            .bind(started)
+            .unwrap();
+        pool.execute_exclusive(
+            &id,
+            serde_json::json!({"exit_after_final": true}),
+            || false,
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        pool.note_exclusive_diagnostic(&id, "bridge refused notification `fixture/unknown`");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline
+            && pool.inner.state.lock().unwrap().exclusive.contains_key(&id)
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !pool.inner.state.lock().unwrap().exclusive.contains_key(&id),
+            "an exited exclusive worker must be retired without any caller"
+        );
+        assert!(settled.load(Ordering::Acquire), "retirement must settle");
+        let reason = pool.exclusive_exit_reason(&id).expect("exit reason");
+        assert!(reason.contains("exit code 7"), "{reason}");
+        assert!(
+            reason.starts_with("bridge refused notification `fixture/unknown`"),
+            "{reason}"
+        );
+        assert_eq!(
+            pool.take_exclusive_failure_cleanup_state(&id).unwrap(),
+            Some("reaped")
+        );
+        assert!(pool.exclusive_exit_reason(&id).is_none());
+    }
+
+    #[test]
+    fn terminating_owner_consumes_the_reapers_proof_so_capture_is_not_fenced() {
+        // The idle reaper retired an ended exclusive process before its
+        // terminating owner called `retire_exclusive` (a loaded host makes
+        // that order likely). The owner takes the reaper's proof; capture is
+        // then fenced only by what is genuinely still unsettled.
+        let pool = PersistentSessionPool::new();
+        let id = "e".repeat(64);
+        pool.inner
+            .state
+            .lock()
+            .unwrap()
+            .exclusive_reaped
+            .insert(id.clone(), "reaped");
+        assert!(pool.exclusive_capture_boot_identity(&id).is_err());
+        assert_eq!(
+            pool.retire_exclusive(&id).unwrap(),
+            ExclusiveRetirementOutcome::Reaped
+        );
+        assert!(pool.exclusive_capture_boot_identity(&id).unwrap().is_none());
+        assert_eq!(
+            pool.retire_exclusive(&id).unwrap(),
+            ExclusiveRetirementOutcome::Absent
+        );
+        // An unproved reap stays unproved for the owner that takes it.
+        pool.inner
+            .state
+            .lock()
+            .unwrap()
+            .exclusive_reaped
+            .insert(id.clone(), "unproved");
+        assert_eq!(
+            pool.retire_exclusive(&id).unwrap(),
+            ExclusiveRetirementOutcome::Unproved
+        );
+        // A failed request's own proof is never taken by retirement, and its
+        // owner can still fall back to a reaper proof.
+        pool.inner
+            .state
+            .lock()
+            .unwrap()
+            .exclusive_failure_cleanup
+            .insert(id.clone(), "reaped");
+        assert_eq!(
+            pool.retire_exclusive(&id).unwrap(),
+            ExclusiveRetirementOutcome::Absent
+        );
+        assert!(pool.exclusive_capture_boot_identity(&id).is_err());
+        assert_eq!(
+            pool.take_exclusive_failure_cleanup_state(&id).unwrap(),
+            Some("reaped")
+        );
+        pool.inner
+            .state
+            .lock()
+            .unwrap()
+            .exclusive_reaped
+            .insert(id.clone(), "reaped");
+        assert_eq!(
+            pool.take_exclusive_failure_cleanup_state(&id).unwrap(),
+            Some("reaped")
+        );
+        assert!(pool.exclusive_capture_boot_identity(&id).unwrap().is_none());
     }
 
     #[test]

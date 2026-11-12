@@ -826,24 +826,23 @@ fn remove_pinned_directory_contents_tracking_heads(
 fn try_acquire_projection_cleanup_lease(
     directory: &lillux::PinnedDirectory,
     projection_name: &str,
-) -> anyhow::Result<Option<(std::ffi::OsString, fs::File)>> {
+) -> anyhow::Result<Option<(std::ffi::OsString, lillux::locks::ForkClosedLockFile)>> {
     let lease_name = std::ffi::OsString::from(format!("{projection_name}.lease"));
+    let fork_sensitive_descriptors = lillux::try_retain_fork_sensitive_descriptors()?;
     let lease = directory.open_regular_create(&lease_name, true, false, 0o600)?;
+    let lease = lillux::locks::ForkClosedLockFile::register(lease, &fork_sensitive_descriptors);
+    drop(fork_sensitive_descriptors);
     directory.sync()?;
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
-            return Err(error).with_context(|| {
-                format!(
-                    "acquire exclusive projection cleanup lease {}",
-                    directory.path().join(&lease_name).display()
-                )
-            });
+        let acquired = lease.try_lock_exclusive().with_context(|| {
+            format!(
+                "acquire exclusive projection cleanup lease {}",
+                directory.path().join(&lease_name).display()
+            )
+        })?;
+        if !acquired {
+            return Ok(None);
         }
     }
     #[cfg(not(unix))]

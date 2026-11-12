@@ -22,6 +22,10 @@ pub const LAUNCHER_BOOTSTRAP_FD: u32 = 41;
 pub const LAUNCHER_RUNTIME_FD: u32 = 42;
 pub const LAUNCHER_PRIVATE_PARENT_FD: u32 = 43;
 pub const LAUNCHER_EXECUTABLE_FD: u32 = 44;
+/// The sealed execution and expiry deadlines the supervisor derived on its own
+/// clock, and the pinned clock they are valid on.
+pub const LAUNCHER_DEADLINE_BOUND_FD: u32 = 45;
+pub const LAUNCHER_DEADLINE_CLOCK_FD: u32 = 46;
 pub const LAUNCHER_RUNTIME_MOUNT_FD_BASE: u32 = 64;
 pub const MAX_LAUNCHER_RUNTIME_MOUNTS: usize = MAX_GUEST_INPUTS;
 pub const MAX_LAUNCHER_BOOTSTRAP_BYTES: usize = 512 * 1024;
@@ -492,7 +496,7 @@ pub fn prepare_launcher_subprocess_request(
     workspace_outputs: Option<&lillux::InheritedDescriptorAuthority>,
     runtime_mounts: &[lillux::InheritedDescriptorAuthority],
     spec: &ExternalCandidateLauncherSpec,
-    timeout_seconds: f64,
+    window: &ryeos_state::external_execution::guest_window::GuestChannelWindow,
 ) -> Result<PreparedExternalCandidateLauncherRequest> {
     spec.validate()?;
     // Imported guest artifacts are pinned regular files, not memfds. Capture
@@ -547,10 +551,19 @@ pub fn prepare_launcher_subprocess_request(
         }
         _ => anyhow::bail!("external launcher workspace-output authority presence changed"),
     }
+    let timeout_seconds = window.expiry_remaining().as_secs_f64();
     ensure!(
-        timeout_seconds.is_finite() && timeout_seconds > 0.0,
-        "external launcher timeout is invalid"
+        timeout_seconds.is_finite() && timeout_seconds > 0.0 && !window.execution_elapsed(),
+        "external launcher window has elapsed"
     );
+    let (execution_deadline, expiry_deadline) = window.monotonic_pair();
+    let (deadline_bound, deadline_clock) =
+        lillux::time::OriginalLocalDeadlineHandoff::from_original(
+            execution_deadline,
+            expiry_deadline,
+        )
+        .map_err(anyhow::Error::msg)?
+        .into_authorities();
     let bytes = spec.canonical_bytes()?;
     let bootstrap_digest = lillux::sha256_hex(&bytes);
     let bootstrap = lillux::sealed_memfd(c"ryeos-external-candidate-bootstrap", &bytes)
@@ -585,6 +598,12 @@ pub fn prepare_launcher_subprocess_request(
     private_parent
         .bind_to_subprocess_request(&mut request, LAUNCHER_PRIVATE_PARENT_FD)
         .map_err(anyhow::Error::msg)?;
+    deadline_bound
+        .bind_to_subprocess_request(&mut request, LAUNCHER_DEADLINE_BOUND_FD)
+        .map_err(anyhow::Error::msg)?;
+    deadline_clock
+        .bind_to_subprocess_request(&mut request, LAUNCHER_DEADLINE_CLOCK_FD)
+        .map_err(anyhow::Error::msg)?;
     if let Some(workspace_outputs) = workspace_outputs {
         workspace_outputs.retain_for_child(&mut request.inherited_fds);
     }
@@ -617,7 +636,22 @@ pub unsafe fn prepare_from_inherited_bootstrap() -> Result<(
     ryeos_state::PinnedStateAuthority,
     NativeExternalCandidate,
     NativeCandidateOutput,
+    ryeos_state::external_execution::guest_window::GuestChannelWindow,
 )> {
+    // The supervisor derived these deadlines on this host's clock; nothing in
+    // the launcher compares a binding's absolute times with a wall clock.
+    let deadlines = unsafe {
+        lillux::time::AdoptedOriginalLocalDeadlines::take_inherited(
+            LAUNCHER_DEADLINE_BOUND_FD,
+            LAUNCHER_DEADLINE_CLOCK_FD,
+        )
+    }
+    .map_err(anyhow::Error::msg)?;
+    let window =
+        ryeos_state::external_execution::guest_window::GuestChannelWindow::from_handed_down(
+            deadlines.service_deadline(),
+            deadlines.cleanup_deadline(),
+        )?;
     let bytes = lillux::read_sealed_inherited_descriptor(
         LAUNCHER_BOOTSTRAP_FD,
         MAX_LAUNCHER_BOOTSTRAP_BYTES,
@@ -656,11 +690,12 @@ pub unsafe fn prepare_from_inherited_bootstrap() -> Result<(
         &authority,
         &private_parent,
         &mount_authorities,
+        &window,
     )?;
     // The registered mount owners intentionally remain live until preparation
     // has cloned them into the held native sandbox process.
     drop(mount_authorities);
-    Ok((spec, authority, candidate, output))
+    Ok((spec, authority, candidate, output, window))
 }
 
 #[cfg(test)]
@@ -1294,7 +1329,7 @@ mod tests {
             Some(&workspace_output),
             &[mount],
             &launch_spec,
-            30.0,
+            &ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&launch_spec.binding).unwrap(),
         )
         .unwrap();
         assert_eq!(prepared.request.cmd, "/proc/self/fd/44");
@@ -1310,7 +1345,7 @@ mod tests {
                 .unwrap(),
             workspace_output.inherited_descriptor().unwrap()
         );
-        assert_eq!(prepared.request.inherited_fd_mappings.len(), 5);
+        assert_eq!(prepared.request.inherited_fd_mappings.len(), 7);
         assert_eq!(prepared.bootstrap_digest, launch_spec.digest().unwrap());
         let expected_launcher_digest = lillux::sha256_hex(b"#!/bin/sh\nexit 0\n");
         assert_eq!(

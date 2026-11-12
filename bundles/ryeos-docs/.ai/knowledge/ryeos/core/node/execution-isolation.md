@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-11T06:42:46Z:489bed9e409dc8afd1fcc743f3852bf41b10ee37f4c495b4e3519c2c894e7744:9+eYyU9YDgIdqcVae6LMDzLAox18O1FOec2eAdwU6L8AOyHt3KOqjECnrfDGazNfRk4dsXrmtPTC03UFHMLOCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T23:03:08Z:839704d8564382359a0257e35886cdfc7f4ceb5f579cb54b31ab28474639ea61:AwJvQIgi+hshAiH66eukV7LOtZpqfWy13SpvMu55jK5dvO07fOfxlmBYq3o3E3eUyIpc5bhU3IWYpwthgYvKAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -189,7 +189,18 @@ The policy has two modes:
 - `mode: disabled` does not wrap the subprocess in an isolation adapter. This is the
   default and does not require the selected bundle. Node-owned stdout/stderr retention
   caps, signature, trust, authorization, and capability checks still apply,
-  but there is no OS confinement or verification-to-exec path pinning.
+  but there is no OS confinement. Verification-to-exec is still pinned: an
+  admitted command runs only from a retained descriptor carrying its exact
+  digest, never a reopened path. Because the workload shares the daemon's
+  user, that carrier is a kernel-sealed anonymous copy, except for a host
+  command on a system runtime surface (`/usr`, `/bin`, `/lib`, `/lib64`) whose
+  inode the daemon's effective identity provably cannot change (root-owned,
+  no group/other write, kernel write check denied, not FUSE, daemon not root).
+  That command runs from its own re-digested inode, so its executable self
+  lookup names the real file; multi-call binaries such as Ubuntu's Rust
+  coreutils refuse to run under any other name. The launch provenance records
+  which carrier ran (`command_delivery`). A root daemon always seals a copy;
+  use `mode: enforce` there, whose read-only materialization keeps the name.
   Daemon-owned processes still use attachment-before-execution; Lillux supplies
   the direct target hold without an isolation backend. When a finalized program
   retains an admitted source closure or external realization, RyeOS gives that
@@ -416,11 +427,13 @@ The narrow readable placeholders mean:
 
 - `{node_public_identity}` exposes only the exact regular, non-symlink
   `<app-root>/.ai/node/identity/public-identity.json`, never the private key.
-- `{daemon_socket}` exposes only the daemon-pinned, non-symlink Unix socket
-  when a typed launch fact requests callback IPC. RyeOS does not infer this
+- `{daemon_socket}` exposes only the daemon-pinned, non-symlink callback-only
+  Unix socket (it serves `runtime.*` only, never the control socket) when a typed launch fact requests callback IPC. RyeOS does not infer this
   authority from an environment-variable name. The requested path must equal
   the socket pinned at daemon startup, and the exact placeholder mount is
-  required; a surrounding directory is not substituted for it.
+  required; a surrounding directory is not substituted for it. A readable policy entry that equals or contains the daemon control
+  socket (for example its parent directory) is refused at launch by name, so
+  no entry can hand a sandbox the control socket.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
 - `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
   directory. The placeholder name matches the existing launch-envelope root.

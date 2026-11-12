@@ -856,8 +856,8 @@ mod tests {
             protocol: PROVIDER_DECLARATION_PROTOCOL.to_string(),
             targets: vec!["x86_64-unknown-linux-gnu".to_string()],
             connector: "provider-connector".to_string(),
-            connector_process_group:
-                ryeos_external_execution_contract::ExternalProviderConnectorProcessGroup::Inherited,
+            connector_descendants:
+                ryeos_external_execution_contract::ExternalProviderConnectorDescendants::InProcessGroup,
             configuration_adapter: "provider-configuration".to_string(),
             configuration_destination: "provider.json".to_string(),
             qualification_request_binding_protocol: None,
@@ -882,6 +882,7 @@ mod tests {
             capabilities: [LifecycleCapability::ExactAllocationReconciliation]
                 .into_iter()
                 .collect(),
+            relay_scope_setting: None,
         }
     }
 

@@ -1,7 +1,7 @@
 # Restored guest owner-product verifier
 
 This is a separate, credential-free executable intended to be uploaded into a
-fresh Render Sandbox restored from a bound filesystem snapshot. It is **not**
+fresh provider sandbox restored from a bound filesystem snapshot. It is **not**
 part of the four-entry owner-product tree it measures. It accepts one canonical,
 bounded controller challenge and emits one canonical JSON measurement (followed
 by one newline): the exact tree manifest, owner executable digest, installed
@@ -27,4 +27,4 @@ This source alone does not qualify a snapshot. The controller still must:
    requires it. A point measurement is not perpetual immutability.
 
 No provider contact, verifier upload, installed qualification or activation is
-performed by this crate alone. The Render activation gate remains closed.
+performed by this crate alone. The provider activation gate remains closed.

@@ -140,6 +140,20 @@ impl CallbackRuntimeMethodSurface {
         .expect("fixed remote qualification callback surface is canonical")
     }
 
+    /// The closed surface the daemon issues for one qualification callback
+    /// authority. A protocol that declares itself captured-compatible names
+    /// this surface by digest; admission compares against this function, never
+    /// against anything the protocol or tool supplies.
+    pub fn for_qualification_authority(
+        authority: ryeos_engine::protocols::QualificationCallbackAuthority,
+    ) -> Self {
+        use ryeos_engine::protocols::QualificationCallbackAuthority;
+        match authority {
+            QualificationCallbackAuthority::ScopedProducer => Self::qualification_scoped_producer(),
+            QualificationCallbackAuthority::RemoteConsumer => Self::qualification_remote_consumer(),
+        }
+    }
+
     pub fn exact(mut methods: Vec<String>) -> Result<Self> {
         if methods.is_empty() {
             bail!("exact callback runtime-method surface is empty");
@@ -1530,6 +1544,74 @@ mod tests {
         ] {
             assert!(remote.authorize(method).is_err());
         }
+    }
+
+    #[test]
+    fn captured_compatible_qualification_surfaces_carry_no_mutable_path_dispatch_or_publication_authority()
+     {
+        // Every runtime method that can write project or durable state, author or
+        // publish content, dispatch or continue work, or touch secrets. The thread-auth
+        // credential only pairs with a callback bearer; it never authorizes a method
+        // the bearer's closed surface omits, so these stay refused on the bearer.
+        let state_changing = [
+            "runtime.append_event",
+            "runtime.append_events",
+            "runtime.attach_process",
+            "runtime.author_item",
+            "runtime.bundle_events_append",
+            "runtime.bundle_events_materialize_attachment",
+            "runtime.claim_commands",
+            "runtime.complete_command",
+            "runtime.dedicated_session_command",
+            "runtime.dispatch_action",
+            "runtime.finalize_thread",
+            "runtime.mark_running",
+            "runtime.project_snapshot",
+            "runtime.provider_attempt_prepare",
+            "runtime.publish_artifact",
+            "runtime.publish_project_observation",
+            "runtime.publish_state_anchor",
+            "runtime.request_continuation",
+            "runtime.spawn_follow_child",
+            "runtime.start_dedicated_session",
+            "runtime.submit_command",
+            "runtime.vault_delete",
+            "runtime.vault_get",
+            "runtime.vault_list",
+            "runtime.vault_put",
+        ];
+        let remote = CallbackRuntimeMethodSurface::qualification_remote_consumer();
+        for method in state_changing {
+            assert!(remote.authorize(method).is_err(), "{method}");
+        }
+        // The only methods a captured-compatible remote verifier holds are the
+        // verification methods, each joined to the admitted grant by its handler.
+        for method in [
+            "runtime.consumer_verification_inputs",
+            "runtime.consumer_verification_start",
+            "runtime.consumer_verification_observe",
+            "runtime.consumer_verification_settle",
+        ] {
+            remote.authorize(method).unwrap();
+        }
+        // The scoped surface drives a daemon-owned producer process; it is not
+        // a captured-compatible class and must not overlap the remote surface.
+        let scoped = CallbackRuntimeMethodSurface::qualification_scoped_producer();
+        for method in state_changing {
+            assert!(scoped.authorize(method).is_err(), "{method}");
+        }
+        // The class is bound by digest to the surface the daemon issues.
+        use ryeos_engine::protocols::QualificationCallbackAuthority::{
+            RemoteConsumer, ScopedProducer,
+        };
+        assert_eq!(
+            CallbackRuntimeMethodSurface::for_qualification_authority(RemoteConsumer),
+            remote
+        );
+        assert_eq!(
+            CallbackRuntimeMethodSurface::for_qualification_authority(ScopedProducer),
+            scoped
+        );
     }
 
     #[test]

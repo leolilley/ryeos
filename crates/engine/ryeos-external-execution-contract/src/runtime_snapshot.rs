@@ -889,6 +889,9 @@ pub enum RuntimeSnapshotQualificationAdapterResponse {
     },
     Uncertain {
         operation_id: String,
+        /// Diagnostic only; never alters the uncertain outcome.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<crate::UncertaintyReason>,
     },
 }
 
@@ -897,10 +900,18 @@ impl RuntimeSnapshotQualificationAdapterResponse {
         request.validate()?;
         match self {
             Self::OccurrenceBound { occurrence } => occurrence.validate_for(&request.intent)?,
-            Self::Uncertain { operation_id } => ensure!(
-                operation_id == &request.intent.operation_id,
-                "uncertain qualification result changed durable attempt"
-            ),
+            Self::Uncertain {
+                operation_id,
+                reason,
+            } => {
+                ensure!(
+                    operation_id == &request.intent.operation_id,
+                    "uncertain qualification result changed durable attempt"
+                );
+                if let Some(reason) = reason {
+                    reason.validate()?;
+                }
+            }
         }
         Ok(())
     }
@@ -1042,7 +1053,7 @@ mod tests {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "2".repeat(64)),
-            provider_id: "render-sandbox-early-access".into(),
+            provider_id: "test-backend".into(),
             source_occurrence_id: "sbox-fixture-1".into(),
             source_bootstrap_operation_id: None,
             source_created_at: None,

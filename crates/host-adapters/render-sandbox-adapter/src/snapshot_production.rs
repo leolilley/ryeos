@@ -1511,6 +1511,7 @@ mod tests {
             tls_roots_der_base64: vec![base64::engine::general_purpose::STANDARD.encode(b"root")],
         };
         let mut source = crate::RenderSandbox {
+            name: None,
             created_at: intent.source_created_at.clone().unwrap(),
             id: intent.source_occurrence_id.clone(),
             idle_timeout_seconds: 900,

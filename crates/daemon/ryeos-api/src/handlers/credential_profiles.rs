@@ -71,9 +71,9 @@ async fn create(
     }
     let state_dir = state.config.runtime_state_dir();
     ryeos_app::private_artifact_home::remove_empty_orphan(&state_dir, &home_id)
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     ryeos_app::private_artifact_home::create(&state_dir, &home_id, &Default::default())
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     if let Err(error) = state
         .state_store
         .create_credential_profile(NewCredentialProfile {
@@ -234,7 +234,7 @@ async fn confirm(
             req.login_epoch,
             &req.expected_account_digest,
         )
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     Ok(json!({
         "profile_id":req.profile_id,
         "state":"active",
@@ -272,7 +272,7 @@ async fn revoke(
                 root,
             )
             .await
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
         {
             _root_operations.push(operation);
         }
@@ -298,7 +298,7 @@ async fn revoke(
         state
             .state_store
             .revoke_credential_profile(&req.profile_id, &owner, req.credential_generation)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
     };
 
     // Revocation is the first authoritative commit. Command contact checks
@@ -521,7 +521,7 @@ async fn delete(
         state
             .state_store
             .begin_credential_profile_deletion(&req.profile_id, &owner, req.credential_generation)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
     };
     ryeos_app::private_artifact_home::remove(&state.config.runtime_state_dir(), &profile.home_id)
         .map_err(internal)?;
@@ -533,7 +533,7 @@ async fn delete(
 }
 
 fn internal(error: impl std::fmt::Display) -> HandlerError {
-    HandlerError::Internal(error.to_string())
+    HandlerError::Internal(format!("{error:#}"))
 }
 
 pub const CREATE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

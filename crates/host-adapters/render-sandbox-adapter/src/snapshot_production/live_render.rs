@@ -18,12 +18,11 @@ use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use base64::Engine as _;
 use lillux::network::{NetworkCancellation, NetworkContext};
-use lillux::time::{Duration, MonotonicDeadline};
+use lillux::time::{Duration, MonotonicDeadline, MonotonicTimer};
 use ryeos_external_execution_contract::runtime_snapshot::{
     RUNTIME_SNAPSHOT_INTENT_SCHEMA, RuntimeSnapshotIntent, RuntimeSnapshotSource,
 };
@@ -253,7 +252,7 @@ fn get_sandbox(
 }
 
 fn wait_running(live: &Live, settings: &Settings, id: &str, label: &str) -> Result<RenderSandbox> {
-    let started = Instant::now();
+    let started = MonotonicTimer::start();
     let url = route_url(live, RouteName::ById, Some(id), settings)?;
     loop {
         let sandbox = get_sandbox(live, settings, &url, id)?;
@@ -273,7 +272,7 @@ fn wait_running(live: &Live, settings: &Settings, id: &str, label: &str) -> Resu
             "{label} sandbox {id} not running within {} s",
             RUNNING_WAIT.as_secs()
         );
-        std::thread::sleep(RUNNING_POLL);
+        lillux::time::sleep(RUNNING_POLL);
     }
 }
 
@@ -414,7 +413,7 @@ fn run_command(contact: &RenderContact<'_>, command: &str) -> Result<String> {
         RUN_OUTPUT_BYTES,
         None,
     )?;
-    Ok(String::from_utf8(stdout)?)
+    Ok(String::from_utf8(stdout.stdout)?)
 }
 
 fn wait_snapshot_available(
@@ -424,7 +423,7 @@ fn wait_snapshot_available(
     creation: &BoundSnapshotCreation,
     url: &url::Url,
 ) -> Result<()> {
-    let started = Instant::now();
+    let started = MonotonicTimer::start();
     loop {
         let (status, body) = read_control_json(send_control(
             &live.network,
@@ -476,7 +475,7 @@ fn wait_snapshot_available(
             creation.snapshot_id,
             SNAPSHOT_WAIT.as_secs()
         );
-        std::thread::sleep(SNAPSHOT_POLL);
+        lillux::time::sleep(SNAPSHOT_POLL);
     }
 }
 
@@ -530,7 +529,7 @@ fn terminate_and_observe(
             "{label} sandbox {id} status {:?}, not yet terminal (poll {attempt})",
             sandbox.status
         ));
-        std::thread::sleep(TERMINATE_POLL);
+        lillux::time::sleep(TERMINATE_POLL);
     }
     bail!("{label} sandbox {id} not terminal after {TERMINATE_POLLS} polls")
 }
@@ -628,7 +627,7 @@ fn run_chain(live: &Live, guard: &Guard<'_>) -> Result<()> {
     intent.validate()?;
     let snapshot_settings = live.snapshot_settings();
     snapshot_settings.validate_for_intent(&intent)?;
-    let started = Instant::now();
+    let started = MonotonicTimer::start();
     let uploaded = send_snapshot_upload(
         &intent,
         &live.snapshot_spec,

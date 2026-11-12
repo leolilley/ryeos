@@ -75,9 +75,10 @@ fn synth_project_with_hello() -> PathBuf {
 
     // Tool kind schema's .py format declares `after_shebang: true` for
     // its signature envelope — meaning the signature line lives AFTER
-    // the shebang. We don't sign at all here (Unsigned trust class is
-    // accepted by the engine for items the chain doesn't gate on), so
-    // the shebang is the very first line.
+    // the shebang. This test calls the engine's build_plan/execute_plan
+    // directly, below the daemon's launch trust gate, so the tool is left
+    // unsigned; through the daemon an unsigned tool is refused before it
+    // runs.
     //
     // The ryeos-tool header below matches the kind schema's `metadata.rules`:
     //   executor_id → routes to the python script runtime, which itself
@@ -304,6 +305,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
@@ -444,6 +446,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
@@ -574,6 +577,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,
+        isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
         isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {

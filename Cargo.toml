@@ -67,7 +67,7 @@ members = [
     "crates/tools/browser-tools",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
-    "crates/tools/modal-guest-launcher",
+    "crates/host-adapters/modal-guest-launcher",
 ]
 exclude = ["vendor/libsqlite3-sys-0.28.0"]
 resolver = "2"

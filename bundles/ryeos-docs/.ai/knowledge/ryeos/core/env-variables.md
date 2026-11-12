@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-29T09:08:38Z:caf9eecbe5d3b5a51fec59e50700fdabbaa683f9a5547b23c0cee3941f81b34b:VWQoFYWO0g8aQWB+a5OOk6NCVbgyfFfm/K6aXm4501yqJdB53SNE8e0LKsJE7CfZyPzZruEKyOlS8NvR0sCDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T03:26:26Z:84c92b0c97124d061f37d012a072d868f0e1fb726a970994bf19e2f7bc610227:34CBg9ZwwarI2s0RmAKmVxoYQjqTQnc2KgxuqanTCi9L2uJOCKlv3jukhaIxWmSIBWpiyRj5ta+XL9vZ6ZijAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -59,6 +59,12 @@ continuation relocates or advances its operational snapshot. It is empty for
 projectless execution and grants no state access by itself; the callback token
 still supplies authority.
 
+`RYEOSD_RUNTIME_STATE_ROOT` is the daemon-owned directory a launch may write its
+own state into, for a protocol that declares it. A read-only pinned project
+keeps this directory apart from the project, so it is the only writable path a
+captured launch on that project receives. It lasts as long as the launch and
+stays on the node: external placement refuses this binding.
+
 Engine-plan and lifecycle bindings can include `RYEOS_THREAD_ID`,
 `RYEOS_CHAIN_ROOT_ID`, `RYEOS_ITEM_PATH`, `RYEOS_ITEM_KIND`, `RYEOS_ITEM_REF`,
 `RYEOS_PROJECT_ROOT`, `RYEOS_SITE_ID`, `RYEOS_ORIGIN_SITE_ID`,
@@ -83,5 +89,7 @@ variables are represented in the typed launch plan. Enforced mode replaces any i
 `TMPDIR` value with `/tmp`, the isolation-private tmpfs. When a verified protocol
 requests callback IPC, its `RYEOSD_SOCKET_PATH` value
 is checked against the daemon-pinned path before the exact socket is exposed.
+That path is the callback-only socket (`ryeosd-runtime.sock`), which routes
+`runtime.*` alone; the control socket is never given to a tool.
 Callback-free launches do not mount it. See [Execution
 Isolation](node/execution-isolation.md).

@@ -29,6 +29,7 @@ struct CodexEnvironmentsToml<'a> {
 struct CodexCommandEnvironment<'a> {
     id: &'a str,
     program: String,
+    initialize_timeout_sec: u64,
     env: BTreeMap<&'static str, &'a str>,
 }
 
@@ -130,6 +131,7 @@ fn render(request: &ProviderConfigurationRequest) -> Result<ProviderConfiguratio
         environments: vec![CodexCommandEnvironment {
             id: ENVIRONMENT_ID,
             program: connector_program.to_owned(),
+            initialize_timeout_sec: request.connector_handshake_timeout_seconds,
             env,
         }],
     })
@@ -163,6 +165,7 @@ mod tests {
             placement_thread_id: "T-fixture".into(),
             execution_binding_hash: "a".repeat(64),
             connector_capability: "private-capability".into(),
+            connector_handshake_timeout_seconds: 120,
         };
         let encoded = render(&request).unwrap();
         let wire = encoded.canonical_bytes().unwrap();
@@ -188,6 +191,10 @@ mod tests {
         assert_eq!(
             environment["program"].as_str(),
             Some("/ryeos/realizations/external-connector/connector")
+        );
+        assert_eq!(
+            environment["initialize_timeout_sec"].as_integer(),
+            Some(120)
         );
         assert!(environment.get("url").is_none());
         assert!(environment.get("cwd").is_none());

@@ -37,7 +37,7 @@ struct ExternalComposeArgs {
     #[arg(long)]
     id: String,
 
-    /// Lifecycle backend id; `render` selects render-sandbox-early-access.
+    /// Installed lifecycle adapter backend id.
     #[arg(long)]
     backend: String,
 
@@ -53,7 +53,7 @@ struct ExternalComposeArgs {
     #[arg(long)]
     roots: Option<PathBuf>,
 
-    /// file-relay: Render owner workspace id; must equal settings `owner_id`.
+    /// file-relay: provider owner workspace id; must equal settings `owner_id`.
     #[arg(long)]
     owner_workspace_id: Option<String>,
 
@@ -351,11 +351,11 @@ mod tests {
             "--id",
             "operator",
             "--backend",
-            "render",
+            "test-backend",
             "--transport",
             "file-relay",
             "--owner-workspace-id",
-            "render-owner",
+            "owner-1",
             "--private-mailbox-parent",
             "/run/ryeos/relay",
             "--account",
@@ -382,7 +382,7 @@ mod tests {
             "--id",
             "x",
             "--backend",
-            "render",
+            "test-backend",
             "--transport",
             "file-relay",
             "--account",
@@ -434,7 +434,7 @@ mod tests {
             "--id",
             "x",
             "--backend",
-            "render",
+            "test-backend",
             "--account",
             "a",
             "--settings",
@@ -516,7 +516,7 @@ mod tests {
         let report = ComposeReport {
             id: "operator".into(),
             path: PathBuf::from("/srv/node/.ai/node/external_execution/operator.yaml"),
-            backend: "render-sandbox-early-access".into(),
+            backend: "test-backend".into(),
             account: "acct".into(),
             capacity_group: "candidate-workers".into(),
             transport: "https".into(),

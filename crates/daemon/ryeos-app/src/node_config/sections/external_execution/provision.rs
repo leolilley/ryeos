@@ -392,7 +392,7 @@ mod tests {
         .unwrap();
         assert_eq!(report.section, "runtime_snapshot_production");
         assert_eq!(report.outcome, ProvisionOutcome::Inserted);
-        assert_eq!(report.backend, "render-sandbox-early-access");
+        assert_eq!(report.backend, "test-backend");
         // The read-back builds its access from the reported coordinates, so a
         // drifting owner formula would not find the stored secret.
         assert_eq!(read_back(&node, &report), "producer-secret");

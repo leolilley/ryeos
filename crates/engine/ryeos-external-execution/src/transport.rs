@@ -103,6 +103,9 @@ impl From<anyhow::Error> for ExternalTransportStepFailure {
 pub trait ExternalSupervisorRuntime {
     fn binding(&self) -> &ExecutionChannelBinding;
     fn ready_frame(&self) -> &str;
+    /// The channel window on the guest's own clock, which every frame the
+    /// driver verifies is judged against.
+    fn window(&self) -> &ryeos_state::external_execution::guest_window::GuestChannelWindow;
     fn has_durable_capture(&self) -> Result<bool>;
     fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch>;
     fn poll_execution_output(&mut self) -> Result<Option<String>>;
@@ -122,6 +125,10 @@ impl ExternalSupervisorRuntime for LiveInheritedExternalCandidateSupervisor {
 
     fn ready_frame(&self) -> &str {
         self.ready_frame()
+    }
+
+    fn window(&self) -> &ryeos_state::external_execution::guest_window::GuestChannelWindow {
+        LiveInheritedExternalCandidateSupervisor::window(self)
     }
 
     fn has_durable_capture(&self) -> Result<bool> {
@@ -204,10 +211,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         let started = (|| -> Result<(bool, u64, Vec<u8>)> {
             let capture_retained = runtime.has_durable_capture()?;
             let ready = runtime.ready_frame().as_bytes().to_vec();
-            let verified = SignedExecutionFrame::decode_and_verify(
+            let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
                 &ready,
                 runtime.binding(),
-                lillux::time::timestamp_millis(),
+                runtime.window(),
             )?;
             ensure!(
                 verified.frame().direction == ChannelDirection::SupervisorToOwner
@@ -312,10 +319,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             && self.command_terminated.is_none()
             && let Some(wire) = self.runtime.poll_execution_output()?
         {
-            let verified = SignedExecutionFrame::decode_and_verify(
+            let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
                 wire.as_bytes(),
                 self.runtime.binding(),
-                lillux::time::timestamp_millis(),
+                self.runtime.window(),
             )?;
             if !(verified.frame().direction == ChannelDirection::SupervisorToOwner
                 && match self.runtime.binding().execution_mode {
@@ -355,10 +362,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             .map(|(_, wire)| wire.clone())
             .or_else(|| self.poll_frame.clone())
             .context("external control loop has no exact frame available for polling")?;
-        let sent = SignedExecutionFrame::decode_and_verify(
+        let sent = SignedExecutionFrame::decode_and_verify_in_guest_window(
             &outgoing,
             self.runtime.binding(),
-            lillux::time::timestamp_millis(),
+            self.runtime.window(),
         )?;
         if sent.frame().direction != ChannelDirection::SupervisorToOwner {
             return Err(
@@ -478,10 +485,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         );
         if let Some(urgent) = response.urgent_revocation_frame.as_ref() {
             self.validate_owner_envelope(urgent)?;
-            let verified = SignedExecutionFrame::decode_and_verify(
+            let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
                 &urgent.canonical_wire,
                 self.runtime.binding(),
-                lillux::time::timestamp_millis(),
+                self.runtime.window(),
             )?;
             ensure!(
                 matches!(verified.frame().payload, ExecutionChannelPayload::Cancel),
@@ -509,10 +516,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             envelope.canonical_wire.len() <= ryeos_state::external_execution::MAX_FRAME_BYTES,
             "external owner frame exceeds its wire bound"
         );
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             &envelope.canonical_wire,
             self.runtime.binding(),
-            lillux::time::timestamp_millis(),
+            self.runtime.window(),
         )?;
         ensure!(
             verified.frame().direction == ChannelDirection::OwnerToSupervisor
@@ -524,10 +531,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     }
 
     fn owner_frame_is_acknowledgement(&self, envelope: &ExternalTransportFrame) -> Result<bool> {
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             &envelope.canonical_wire,
             self.runtime.binding(),
-            lillux::time::timestamp_millis(),
+            self.runtime.window(),
         )?;
         Ok(matches!(
             verified.frame().payload,
@@ -560,10 +567,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     }
 
     fn dispatch_ordinary(&mut self, wire: &[u8]) -> Result<()> {
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             self.runtime.binding(),
-            lillux::time::timestamp_millis(),
+            self.runtime.window(),
         )?;
         ensure!(
             !matches!(
@@ -614,10 +621,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
     fn enqueue_dispatch(&mut self, dispatched: ExternalOwnerFrameDispatch) -> Result<()> {
         let mut frames = vec![dispatched.acknowledgement_frame.into_bytes()];
         frames.sort_by_key(|wire| {
-            SignedExecutionFrame::decode_and_verify(
+            SignedExecutionFrame::decode_and_verify_in_guest_window(
                 wire,
                 self.runtime.binding(),
-                self.runtime.binding().issued_at_ms,
+                self.runtime.window(),
             )
             .map(|frame| frame.frame().sequence)
             .unwrap_or(u64::MAX)
@@ -648,10 +655,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
             else {
                 return Ok(());
             };
-            let verified = SignedExecutionFrame::decode_and_verify(
+            let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
                 &wire,
                 self.runtime.binding(),
-                lillux::time::timestamp_millis(),
+                self.runtime.window(),
             )?;
             if let Some(delivered_digest) =
                 self.delivered_supervisor.get(&verified.frame().sequence)
@@ -686,10 +693,10 @@ impl<R: ExternalSupervisorRuntime, T: ExternalExecutionChannelTransport>
         wire: Vec<u8>,
         retry_if_delivered: bool,
     ) -> Result<()> {
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             &wire,
             self.runtime.binding(),
-            lillux::time::timestamp_millis(),
+            self.runtime.window(),
         )?;
         ensure!(
             verified.frame().direction == ChannelDirection::SupervisorToOwner,
@@ -777,6 +784,7 @@ mod tests {
     use super::*;
 
     struct FixtureRuntime {
+        window: ryeos_state::external_execution::guest_window::GuestChannelWindow,
         binding: ExecutionChannelBinding,
         supervisor_key: lillux::crypto::SigningKey,
         ready: String,
@@ -815,6 +823,7 @@ mod tests {
                 },
             );
             Self {
+                window: ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                 binding,
                 supervisor_key,
                 ready: ready.canonical().to_owned(),
@@ -874,6 +883,10 @@ mod tests {
     }
 
     impl ExternalSupervisorRuntime for FixtureRuntime {
+        fn window(&self) -> &ryeos_state::external_execution::guest_window::GuestChannelWindow {
+            &self.window
+        }
+
         fn binding(&self) -> &ExecutionChannelBinding {
             &self.binding
         }
@@ -1273,10 +1286,10 @@ mod tests {
                 &authority,
                 &"9".repeat(64),
                 binding.clone(),
+                ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                 host.factory(),
                 host.destination(),
-                &ryeos_state::external_execution::native_journal::testing::census(&host),
-            )
+                &ryeos_state::external_execution::native_journal::testing::census(&host))
             .unwrap();
             let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
                 lillux::ExactProcessIdentity {
@@ -1285,6 +1298,7 @@ mod tests {
                     target_start_time_ticks: 202,
                     group_leader_pid: 101,
                     group_leader_start_time_ticks: 202,
+                    group_basis: lillux::GroupBasis::ProcessGroup,
                 },
                 &"8".repeat(64),
                 &"7".repeat(64),
@@ -1437,10 +1451,10 @@ mod tests {
                 &authority,
                 &"5".repeat(64),
                 binding.clone(),
+                ryeos_state::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                 host.factory(),
                 host.destination(),
-                &ryeos_state::external_execution::native_journal::testing::census(&host),
-            )
+                &ryeos_state::external_execution::native_journal::testing::census(&host))
             .unwrap();
             let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
                 lillux::ExactProcessIdentity {
@@ -1449,6 +1463,7 @@ mod tests {
                     target_start_time_ticks: 404,
                     group_leader_pid: 303,
                     group_leader_start_time_ticks: 404,
+                    group_basis: lillux::GroupBasis::ProcessGroup,
                 },
                 &"4".repeat(64),
                 &"3".repeat(64),
@@ -1521,6 +1536,10 @@ mod tests {
     }
 
     impl ExternalSupervisorRuntime for JournalFixtureRuntime {
+        fn window(&self) -> &ryeos_state::external_execution::guest_window::GuestChannelWindow {
+            self.journal.window()
+        }
+
         fn binding(&self) -> &ExecutionChannelBinding {
             &self.binding
         }
@@ -1534,10 +1553,10 @@ mod tests {
         }
 
         fn dispatch_owner_frame(&mut self, wire: &[u8]) -> Result<ExternalOwnerFrameDispatch> {
-            let peer = SignedExecutionFrame::decode_and_verify(
+            let peer = SignedExecutionFrame::decode_and_verify_in_guest_window(
                 wire,
                 &self.binding,
-                lillux::time::timestamp_millis(),
+                self.journal.window(),
             )?;
             ensure!(
                 peer.frame().direction == ChannelDirection::OwnerToSupervisor
@@ -1675,7 +1694,7 @@ mod tests {
             let sent = SignedExecutionFrame::decode_and_verify(
                 canonical_supervisor_frame,
                 &self.binding,
-                lillux::time::timestamp_millis(),
+                self.binding.issued_at_ms,
             )?;
             if self.suppress_ack_of_ack
                 && matches!(
@@ -1693,7 +1712,7 @@ mod tests {
                 SignedExecutionFrame::decode_and_verify(
                     cached,
                     &self.binding,
-                    lillux::time::timestamp_millis(),
+                    self.binding.issued_at_ms,
                 )?
             } else {
                 let acknowledgement = sign(
@@ -2654,6 +2673,199 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(sequences, vec![1, 2, 2, 3, 4]);
         assert_eq!(transport.calls[1], transport.calls[2]);
+    }
+
+    /// A binding the controller issued on a wall clock `skew_ms` away from the
+    /// guest's, with execution and channel windows of the given lengths.
+    fn skewed_binding(
+        skew_ms: i64,
+        execution_ms: i64,
+        expiry_ms: i64,
+    ) -> (
+        ExecutionChannelBinding,
+        lillux::crypto::SigningKey,
+        lillux::crypto::SigningKey,
+    ) {
+        let (mut binding, owner, supervisor) = fixture();
+        binding.issued_at_ms = lillux::time::timestamp_millis() + skew_ms;
+        binding.execution_deadline_ms = binding.issued_at_ms + execution_ms;
+        binding.expires_at_ms = binding.issued_at_ms + expiry_ms;
+        binding.validate().unwrap();
+        (binding, owner, supervisor)
+    }
+
+    fn owner_protocol_input(
+        binding: &ExecutionChannelBinding,
+        owner: &lillux::crypto::SigningKey,
+        sequence: u64,
+        previous: &str,
+    ) -> AuthenticatedExecutionFrame {
+        sign(
+            binding,
+            owner,
+            ChannelDirection::OwnerToSupervisor,
+            sequence,
+            Some(previous.to_owned()),
+            1,
+            ExecutionChannelPayload::ProtocolBytes {
+                bytes_base64: STANDARD.encode(b"input"),
+            },
+        )
+    }
+
+    #[test]
+    fn a_guest_with_a_skewed_wall_clock_runs_a_session_inside_its_local_window() {
+        for skew_ms in [-3_600_000_i64, 3_600_000] {
+            let (binding, owner, supervisor) = skewed_binding(skew_ms, 60_000, 120_000);
+            // Ready is authored and Release is recorded, claimed and applied
+            // by the real guest journal.
+            let runtime = JournalFixtureRuntime::running(
+                binding.clone(),
+                &owner,
+                supervisor,
+                b"output".to_vec(),
+            );
+            let release_digest = runtime.owner_predecessor_digest.clone();
+            let transport = AppliedAckTransport::new(
+                binding.clone(),
+                owner.clone(),
+                2,
+                Some(release_digest.clone()),
+                0,
+            );
+            // The driver verifies the Ready frame and every exchange against
+            // the local window, not the guest's wall clock.
+            let mut driver = ExternalCandidateTransportDriver::new(runtime, transport)
+                .unwrap_or_else(|error| panic!("skew {skew_ms}: {error:#}"));
+            for _ in 0..3 {
+                assert_eq!(
+                    driver
+                        .step()
+                        .unwrap_or_else(|error| panic!("skew {skew_ms}: {error:#}")),
+                    ExternalTransportProgress::Advanced
+                );
+            }
+            drop(driver);
+
+            // A second session on the same skewed clock takes an execution
+            // input and a cancellation straight through the journal.
+            let (binding, owner, supervisor) = skewed_binding(skew_ms, 60_000, 120_000);
+            let runtime =
+                JournalFixtureRuntime::running(binding.clone(), &owner, supervisor, vec![]);
+            let next_sequence = 2;
+            let previous = runtime.owner_predecessor_digest.clone();
+            // An execution input is recorded, claimed and applied.
+            let input = owner_protocol_input(&binding, &owner, next_sequence, &previous);
+            assert!(
+                runtime
+                    .journal
+                    .record_frame(input.canonical().as_bytes())
+                    .unwrap_or_else(|error| panic!("skew {skew_ms}: {error:#}"))
+            );
+            let GuestApplicationClaim::New(token) = runtime
+                .journal
+                .claim(
+                    ChannelDirection::OwnerToSupervisor,
+                    input.frame().sequence,
+                    input.digest(),
+                )
+                .unwrap_or_else(|error| panic!("skew {skew_ms}: {error:#}"))
+            else {
+                panic!("skew {skew_ms}: input must be newly claimed")
+            };
+            let performed = match runtime
+                .journal
+                .apply_protocol_chunk(token, |_, rest| Ok(rest.len()))
+                .unwrap_or_else(|error| panic!("skew {skew_ms}: {error:#}"))
+            {
+                ryeos_state::external_execution::guest_journal::GuestProtocolApplication::Performed(
+                    performed,
+                ) => performed,
+                _ => panic!("skew {skew_ms}: the whole input was written"),
+            };
+            runtime.journal.finish(performed).unwrap();
+            // Cancellation commits the sticky revocation.
+            let cancel = sign(
+                &binding,
+                &owner,
+                ChannelDirection::OwnerToSupervisor,
+                input.frame().sequence + 1,
+                Some(input.digest().to_owned()),
+                1,
+                ExecutionChannelPayload::Cancel,
+            );
+            runtime
+                .journal
+                .commit_terminal_revocation(cancel.canonical().as_bytes())
+                .unwrap_or_else(|error| panic!("skew {skew_ms}: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn a_guest_refuses_frames_once_its_local_window_elapses_whatever_its_wall_clock_says() {
+        for skew_ms in [-3_600_000_i64, 3_600_000] {
+            // The guest's own clock is advanced past each window by a simulated
+            // host suspension, so no test waits in real time.
+            let (binding, owner, supervisor) = skewed_binding(skew_ms, 60_000, 120_000);
+            let runtime =
+                JournalFixtureRuntime::running(binding.clone(), &owner, supervisor, vec![]);
+            assert!(!runtime.journal.window().execution_elapsed());
+            let release_digest = runtime.owner_predecessor_digest.clone();
+            let input = owner_protocol_input(&binding, &owner, 2, &release_digest);
+            assert!(
+                runtime
+                    .journal
+                    .record_frame(input.canonical().as_bytes())
+                    .unwrap()
+            );
+
+            // Past the execution window the retained input can no longer be
+            // claimed, though the channel itself is still open.
+            lillux::time::simulated_suspension::suspend_for(std::time::Duration::from_secs(61));
+            assert!(runtime.journal.window().execution_elapsed());
+            assert!(!runtime.journal.window().expiry_elapsed());
+            let refusal = runtime
+                .journal
+                .claim(
+                    ChannelDirection::OwnerToSupervisor,
+                    input.frame().sequence,
+                    input.digest(),
+                )
+                .err()
+                .unwrap_or_else(|| panic!("skew {skew_ms}: a late input was claimed"));
+            assert!(
+                format!("{refusal:#}").contains("execution deadline passed"),
+                "skew {skew_ms}: {refusal:#}"
+            );
+
+            // Past the channel window nothing more is accepted at all.
+            lillux::time::simulated_suspension::suspend_for(std::time::Duration::from_secs(60));
+            assert!(runtime.journal.window().expiry_elapsed());
+            let later = owner_protocol_input(&binding, &owner, 3, input.digest());
+            let refusal = runtime
+                .journal
+                .record_frame(later.canonical().as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("skew {skew_ms}: a frame was accepted after expiry"));
+            assert!(
+                format!("{refusal:#}").contains("admitted lifetime"),
+                "skew {skew_ms}: {refusal:#}"
+            );
+            let transport = AppliedAckTransport::new(
+                binding.clone(),
+                owner.clone(),
+                2,
+                Some(release_digest),
+                0,
+            );
+            let refusal = ExternalCandidateTransportDriver::new(runtime, transport)
+                .err()
+                .unwrap_or_else(|| panic!("skew {skew_ms}: the driver started after expiry"));
+            assert!(
+                format!("{refusal:#}").contains("admitted lifetime"),
+                "skew {skew_ms}: {refusal:#}"
+            );
+        }
     }
 
     #[test]

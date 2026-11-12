@@ -213,7 +213,9 @@ impl ExternalQualificationRelayCursor {
 /// No join handle is detached, including unwinding and early error returns.
 pub(crate) struct ExternalQualificationRelayPump {
     stop: Sender<()>,
-    thread: Option<JoinHandle<Result<()>>>,
+    /// Behind a mutex so a liveness check can join a pump that already
+    /// finished and report why, without a mutable borrow of the owner.
+    thread: std::sync::Mutex<Option<JoinHandle<Result<()>>>>,
 }
 
 impl ExternalQualificationRelayPump {
@@ -230,22 +232,43 @@ impl ExternalQualificationRelayPump {
             .context("start joinable Q relay pump")?;
         Ok(Self {
             stop,
-            thread: Some(thread),
+            thread: std::sync::Mutex::new(Some(thread)),
         })
     }
 
+    /// A pump that is no longer running is joined here, so the refusal says
+    /// whether it finished its signed frame allowance or failed, and how.
     pub(crate) fn ensure_running(&self) -> Result<()> {
-        ensure!(
-            self.thread
-                .as_ref()
-                .is_some_and(|thread| !thread.is_finished()),
-            "Q relay pump failed or exhausted its signed frames before Worker/native settlement"
-        );
-        Ok(())
+        let mut slot = self
+            .thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match slot.as_ref() {
+            Some(thread) if !thread.is_finished() => return Ok(()),
+            Some(_) => {}
+            None => {
+                anyhow::bail!("Q relay pump was already joined before Worker/native settlement")
+            }
+        }
+        let finished = slot.take().expect("finished pump checked above");
+        match finished.join() {
+            Ok(Ok(())) => anyhow::bail!(
+                "Q relay pump finished its signed frame allowance before Worker/native settlement"
+            ),
+            Ok(Err(error)) => {
+                Err(error.context("Q relay pump failed before Worker/native settlement"))
+            }
+            Err(_) => anyhow::bail!("Q relay pump panicked before Worker/native settlement"),
+        }
     }
 
     pub(crate) fn stop_and_join(&mut self) -> Result<()> {
-        let Some(thread) = self.thread.take() else {
+        let Some(thread) = self
+            .thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        else {
             return Ok(());
         };
         let _ = self.stop.send(());
@@ -258,7 +281,7 @@ impl ExternalQualificationRelayPump {
 impl Drop for ExternalQualificationRelayPump {
     fn drop(&mut self) {
         if let Err(error) = self.stop_and_join() {
-            tracing::error!(%error, "Q relay stopped with an error before cleanup handoff");
+            tracing::error!(error = %format!("{error:#}"), "Q relay stopped with an error before cleanup handoff");
         }
     }
 }
@@ -386,7 +409,7 @@ mod tests {
         let owners = Owners {
             _pump: ExternalQualificationRelayPump {
                 stop,
-                thread: Some(thread),
+                thread: std::sync::Mutex::new(Some(thread)),
             },
             _cleanup: Cleanup(joined),
         };

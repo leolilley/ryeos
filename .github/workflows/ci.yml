@@ -105,6 +105,11 @@ jobs:
       - name: Check daemon image init boundaries
         run: ./scripts/ci/test-daemon-image-init-policy.sh
 
+      - name: Check composition daemon features match their bundle sets
+        run: |
+          python3 -B scripts/release/test-check-composition-daemon-features.py
+          python3 -B scripts/release/check-composition-daemon-features.py
+
       - name: Check image build cache boundaries
         run: ./scripts/ci/test-image-build-cache.sh
 
@@ -417,6 +422,65 @@ jobs:
           --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
           --partition "hash:${{ matrix.shard }}/8"
 
+  multicall-coreutils:
+    name: Multi-call coreutils (Ubuntu 26.04)
+    # Ubuntu 26.04's Rust coreutils refuse unless the executable's own file
+    # name matches the requested utility. The rest of CI stays pinned to 24.04;
+    # this job runs the disabled-isolation command delivery and the e2e tools
+    # that call echo and sleep against the patched coreutils.
+    needs: [bundles, workspace-archive]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      RUSTC_WRAPPER: ""
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+
+      - name: Show the coreutils under test
+        run: |
+          readlink -f /usr/bin/echo
+          /usr/bin/echo --version | head -1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+
+      - name: Prepare the runner
+        run: ./scripts/ci/prepare-runner.sh
+
+      - name: Download the refreshed bundle state
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: bundle-state-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle-state
+
+      - name: Download the workspace test archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: workspace-test-archive-${{ github.sha }}
+          path: ${{ runner.temp }}/test-archive
+
+      - name: Restore the refreshed bundles
+        run: ./scripts/ci/unpack-bundle-state.sh "$RUNNER_TEMP/bundle-state/bundle-state.tar.zst"
+
+      - name: Run the multi-call coreutils tests
+        env:
+          RUST_MIN_STACK: 8388608
+        run: >-
+          ./scripts/gate.sh
+          --nextest-run-archive "$RUNNER_TEMP/test-archive/workspace.tar.zst"
+          -E 'test(/authority::isolation::tests::disabled_/) | test(/unwritable/) | binary(launch_trust_floor_e2e) | binary(vault_provider_narrow_e2e) | binary(launch_trust_scheduler_e2e) | binary(launch_trust_hook_e2e)'
+
   scheduler-compositions:
     name: Scheduler composition checks
     runs-on: ubuntu-latest
@@ -509,7 +573,7 @@ jobs:
     name: Workspace tests
     # Aggregates the build, shards and composition checks so the required
     # check keeps its name and fails if any part failed or was skipped.
-    needs: [bundles, workspace-archive, test-shard, scheduler-compositions]
+    needs: [bundles, workspace-archive, test-shard, multicall-coreutils, scheduler-compositions]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}

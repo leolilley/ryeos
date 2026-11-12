@@ -4,16 +4,27 @@
 //! The daemon has already committed one durable activation claim before this
 //! adapter is invoked. Every stage may have reached Render even if its reply
 //! is lost. This module never retries and reconciliation must never call it.
+//!
+//! The run stream is read until the guest owner's terminal report, its exit,
+//! loss, or the activation's absolute deadline, and the closed outcome with
+//! the owner's last reported phase rides back in the Pending response. Only
+//! closed words leave; stderr is never examined or forwarded.
 
 use std::io::Read as _;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use lillux::network::{NetworkCancellation, NetworkContext};
-use lillux::time::MonotonicDeadline;
+use lillux::time::{Duration, MonotonicDeadline};
 use ryeos_external_execution_contract::canonical_json;
-use ryeos_http_transport::{
-    Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource,
+use ryeos_external_execution_contract::guest_owner_report::{
+    GuestOwnerActivationReport, GuestOwnerStdout, GuestOwnerTerminal,
 };
+use ryeos_external_execution_contract::{UncertaintyClass, UncertaintyReason};
+use ryeos_http_transport::{
+    Deadlines, Header, HttpClient, HttpRequest, HttpResponse, Limits, RequestBodySource, SseLimits,
+    SseReader,
+};
+use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::provider_spec::{ProviderSpec, RouteName};
@@ -27,7 +38,103 @@ use crate::{
 };
 
 const MAX_UPLOAD_RESPONSE_BYTES: u64 = 16 * 1024;
-const MAX_RUN_RESPONSE_BYTES: u64 = 1024 * 1024;
+const MAX_RUN_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
+/// Time kept back from the activation deadline to write the response.
+const ACTIVATION_RESPONSE_RESERVE: Duration = Duration::from_secs(3);
+const OWNER_STREAM_LIMITS: SseLimits = SseLimits {
+    line_bytes: 16 * 1024,
+    event_bytes: 16 * 1024,
+    total_bytes: 1024 * 1024,
+    events: 16 * 1024,
+};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunOutputEvent {
+    stream: String,
+    data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunExitEvent {
+    #[serde(rename = "exit_code")]
+    _exit_code: i32,
+}
+
+/// Read the run stream until the owner's terminal report. Ending the read is
+/// never an owner verdict beyond the closed outcome it returns.
+fn observe_owner_report(
+    body: impl std::io::Read,
+    deadline: MonotonicDeadline,
+    cancellation: &NetworkCancellation,
+) -> GuestOwnerActivationReport {
+    let mut stdout = GuestOwnerStdout::new();
+    let ended = |stdout: &GuestOwnerStdout| {
+        let last_phase = stdout.last_phase();
+        if deadline.has_elapsed() {
+            GuestOwnerActivationReport::NoReportBeforeDeadline { last_phase }
+        } else {
+            GuestOwnerActivationReport::StreamLost { last_phase }
+        }
+    };
+    let Ok(mut events) =
+        SseReader::with_operation_policy(body, OWNER_STREAM_LIMITS, cancellation.clone(), deadline)
+    else {
+        return ended(&stdout);
+    };
+    let maximum = OWNER_STREAM_LIMITS.event_bytes;
+    while let Ok(Some(event)) = events.next_event() {
+        match event.event.as_deref() {
+            Some("output") => {
+                let Ok(output) = ryeos_external_execution_contract::from_json_slice_strict::<
+                    RunOutputEvent,
+                >(event.data.as_bytes(), maximum) else {
+                    break;
+                };
+                if output.stream != "stdout" {
+                    continue;
+                }
+                match stdout.push(&output.data) {
+                    Ok(None) => {}
+                    Ok(Some(GuestOwnerTerminal::Held)) => {
+                        return GuestOwnerActivationReport::Held {
+                            last_phase: stdout.last_phase(),
+                            supervisor_exit: None,
+                        };
+                    }
+                    Ok(Some(GuestOwnerTerminal::Refused(step))) => {
+                        return GuestOwnerActivationReport::Refused {
+                            step,
+                            last_phase: stdout.last_phase(),
+                            detail: stdout.refusal_detail().map(str::to_owned),
+                        };
+                    }
+                    Err(_) => {
+                        return GuestOwnerActivationReport::MalformedReport {
+                            last_phase: stdout.last_phase(),
+                        };
+                    }
+                }
+            }
+            Some("exit") => {
+                if ryeos_external_execution_contract::from_json_slice_strict::<RunExitEvent>(
+                    event.data.as_bytes(),
+                    maximum,
+                )
+                .is_err()
+                {
+                    break;
+                }
+                return GuestOwnerActivationReport::ExitedBeforeReport {
+                    last_phase: stdout.last_phase(),
+                };
+            }
+            _ => {}
+        }
+    }
+    ended(&stdout)
+}
 
 /// The test seam keeps order and at-most-once behavior independent of HTTP.
 /// It is not an alternate lifecycle or a provider abstraction above this
@@ -41,7 +148,57 @@ trait OneShotContact {
         bytes: u64,
         sha256: &str,
     ) -> Result<()>;
-    fn run(&mut self, command: &str) -> Result<()>;
+    fn run(&mut self, command: &str) -> Result<GuestOwnerActivationReport>;
+}
+
+/// The one-shot activation step a failure happened in. It rides on the error
+/// as a context so the reason the controller records can name the step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActivationStep {
+    UploadSignedImport,
+    UploadGuestPackage,
+    Run,
+}
+
+impl ActivationStep {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::UploadSignedImport => "upload_signed_import",
+            Self::UploadGuestPackage => "upload_guest_package",
+            Self::Run => "run",
+        }
+    }
+}
+
+impl std::fmt::Display for ActivationStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for ActivationStep {}
+
+/// The bounded, fixed-word reason a failed first contact carries to the
+/// controller: the step, then the classified failure when one was
+/// classified, else only whether the deadline had passed. Provider text
+/// reaches it only through the classification, which bounds and redacts.
+pub(crate) fn contact_failure_reason(
+    error: &anyhow::Error,
+    deadline: MonotonicDeadline,
+) -> UncertaintyReason {
+    let step = error
+        .downcast_ref::<ActivationStep>()
+        .map_or("before_contact", |step| step.as_str());
+    match error.downcast_ref::<crate::contact_failure::ContactFailure>() {
+        Some(classified) => UncertaintyReason::new(
+            classified.0.class,
+            &format!("{step}: {}", classified.0.detail),
+        ),
+        None if deadline.has_elapsed() => {
+            UncertaintyReason::new(UncertaintyClass::Timeout, &format!("{step}: deadline"))
+        }
+        None => UncertaintyReason::new(UncertaintyClass::Transport, &format!("{step}: failed")),
+    }
 }
 
 fn contact_once(
@@ -49,30 +206,35 @@ fn contact_once(
     delivery: &ActivationDeliveryPlan,
     signed_import: &[u8],
     package: &lillux::InheritedDescriptorAuthority,
-) -> Result<()> {
+) -> Result<GuestOwnerActivationReport> {
     ensure!(
         signed_import.len() as u64 == delivery.signed_import_bytes
             && lillux::sha256_hex(signed_import) == delivery.signed_import_sha256,
         "signed import changed before Render upload"
     );
-    contact.upload_bytes(
-        delivery.signed_import_remote_path,
-        signed_import,
-        &delivery.signed_import_sha256,
-    )?;
-    contact.upload_file(
-        delivery.guest_package_remote_path,
-        package,
-        delivery.guest_package_bytes,
-        &delivery.guest_package_sha256,
-    )?;
-    contact.run(&delivery.owner_command)
+    contact
+        .upload_bytes(
+            delivery.signed_import_remote_path,
+            signed_import,
+            &delivery.signed_import_sha256,
+        )
+        .context(ActivationStep::UploadSignedImport)?;
+    contact
+        .upload_file(
+            delivery.guest_package_remote_path,
+            package,
+            delivery.guest_package_bytes,
+            &delivery.guest_package_sha256,
+        )
+        .context(ActivationStep::UploadGuestPackage)?;
+    contact
+        .run(&delivery.owner_command)
+        .context(ActivationStep::Run)
 }
 
 /// This function must only be called from the first claimed activation, never
-/// reconciliation. Even a successful run response remains merely Pending:
-/// only the independently authenticated supervisor channel can establish
-/// Ready. The installed Render profile currently does not enable this call.
+/// reconciliation. Even a held report remains merely Pending: only the
+/// independently authenticated supervisor channel can establish Ready.
 pub(crate) fn first_activation_contact(
     network: &NetworkContext,
     provider_spec: &ProviderSpec,
@@ -83,7 +245,7 @@ pub(crate) fn first_activation_contact(
     package: &lillux::InheritedDescriptorAuthority,
     deadline: MonotonicDeadline,
     cancellation: &NetworkCancellation,
-) -> Result<()> {
+) -> Result<GuestOwnerActivationReport> {
     preflight_delivery_before_credential(delivery, signed_import, package)?;
     let mut contact = RenderContact::new(
         network,
@@ -229,10 +391,19 @@ impl RenderContact<'_> {
             self.settings,
             self.cancellation,
         )?;
-        ensure!(
-            response.status == 201 && has_json_content_type(&response.headers),
-            "Render token mint did not return the exact JSON success shape"
-        );
+        if response.status != 201 {
+            let detail = crate::contact_failure::response_detail(response.status, response.body);
+            return Err(crate::contact_failure::failure(
+                ryeos_external_execution_contract::UncertaintyClass::TokenMint,
+                &format!("token mint {detail}"),
+            ));
+        }
+        if !has_json_content_type(&response.headers) {
+            return Err(crate::contact_failure::failure(
+                ryeos_external_execution_contract::UncertaintyClass::ContentType,
+                "token mint status 201 without an exact JSON content type",
+            ));
+        }
         let mut bytes = Zeroizing::new(Vec::new());
         response
             .body
@@ -312,6 +483,13 @@ pub(super) fn proxy_request(
     if matches!(operation, ProxyOperation::UploadFile { .. }) {
         deadlines = deadlines.with_response_wait(crate::upload_response_wait(body.exact_len()));
     }
+    if matches!(operation, ProxyOperation::RunStream) {
+        // A run stream carries output only when the program writes. A verifier
+        // that is working, such as the consumer scenario's model turn, is
+        // silent for longer than any idle bound; the contact's absolute
+        // deadline is the one bound that applies while the stream is open.
+        deadlines.idle_timeout = deadline.remaining().max(IDLE_TIMEOUT);
+    }
     Ok(HttpRequest {
         method: token.method,
         url: token.route,
@@ -378,26 +556,42 @@ impl OneShotContact for RenderContact<'_> {
         Ok(())
     }
 
-    fn run(&mut self, command: &str) -> Result<()> {
+    fn run(&mut self, command: &str) -> Result<GuestOwnerActivationReport> {
         let operation = ProxyOperation::RunStream;
         let token = self.mint(operation, Some(command))?;
         let body = canonical_json(&serde_json::json!({ "command": command }))?;
-        let response = self.send_proxy(
+        let stream_deadline = MonotonicDeadline::after(
+            self.deadline
+                .remaining()
+                .saturating_sub(ACTIVATION_RESPONSE_RESERVE),
+        );
+        let mut request = proxy_request(
+            self.settings,
+            self.occurrence_id,
             token,
             operation,
             RequestBodySource::from_bytes(body),
             "application/json",
             "text/event-stream",
             MAX_RUN_RESPONSE_BYTES,
+            stream_deadline,
+            self.cancellation,
         )?;
+        // The owner is silent between progress reports; only the absolute
+        // deadline bounds the stream.
+        request.deadlines.idle_timeout = stream_deadline.remaining().max(IDLE_TIMEOUT);
+        let response = HttpClient::new(self.network.clone()).execute(request)?;
         ensure!(
             response.status == 200,
             "Render run proxy did not return the expected stream status"
         );
-        // Dropping the stream is deliberate only after an installed test proves
-        // the guest owner survives lost client streams. This code is unreachable
-        // from the current signed provider profile.
-        Ok(())
+        // The stream is dropped after the terminal report; the owner survives
+        // a lost client stream by design.
+        Ok(observe_owner_report(
+            response.body,
+            stream_deadline,
+            self.cancellation,
+        ))
     }
 }
 
@@ -558,9 +752,50 @@ mod tests {
         ) -> Result<()> {
             self.record("package")
         }
-        fn run(&mut self, _: &str) -> Result<()> {
-            self.record("run")
+        fn run(&mut self, _: &str) -> Result<GuestOwnerActivationReport> {
+            self.record("run")?;
+            Ok(GuestOwnerActivationReport::Held {
+                last_phase: None,
+                supervisor_exit: None,
+            })
         }
+    }
+
+    #[test]
+    fn a_failed_first_contact_names_its_step_in_fixed_words() {
+        let deadline = MonotonicDeadline::after(Duration::from_secs(60));
+        let classified = crate::contact_failure::failure(
+            UncertaintyClass::UploadStatus,
+            "status 503; message: Bearer abc",
+        )
+        .context(ActivationStep::UploadGuestPackage);
+        let reason = contact_failure_reason(&classified, deadline);
+        assert_eq!(reason.class, UncertaintyClass::UploadStatus);
+        assert!(
+            reason
+                .detail
+                .starts_with("upload_guest_package: status 503"),
+            "{}",
+            reason.detail
+        );
+
+        let plain = anyhow::anyhow!("socket closed by https://provider.example/secret-path")
+            .context(ActivationStep::Run);
+        let reason = contact_failure_reason(&plain, deadline);
+        assert_eq!(reason.class, UncertaintyClass::Transport);
+        assert_eq!(reason.detail, "run: failed");
+
+        let elapsed = MonotonicDeadline::after(Duration::ZERO);
+        let late = anyhow::anyhow!("read timed out").context(ActivationStep::UploadGuestPackage);
+        let reason = contact_failure_reason(&late, elapsed);
+        assert_eq!(reason.class, UncertaintyClass::Timeout);
+        assert_eq!(reason.detail, "upload_guest_package: deadline");
+
+        let unstepped = anyhow::anyhow!("signed import changed before Render upload");
+        assert_eq!(
+            contact_failure_reason(&unstepped, deadline).detail,
+            "before_contact: failed"
+        );
     }
 
     #[test]
@@ -606,6 +841,150 @@ mod tests {
         };
         assert!(contact_once(&mut contact, &plan, b"changed", &package).is_err());
         assert!(contact.calls.is_empty());
+    }
+
+    fn sse(events: &[(&str, serde_json::Value)]) -> Vec<u8> {
+        events
+            .iter()
+            .map(|(name, data)| format!("event: {name}\ndata: {data}\n\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    fn output(stream: &str, data: &str) -> (&'static str, serde_json::Value) {
+        (
+            "output",
+            serde_json::json!({ "stream": stream, "data": data }),
+        )
+    }
+
+    fn observed(body: &[u8]) -> GuestOwnerActivationReport {
+        let deadline = MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        observe_owner_report(body, deadline, &NetworkCancellation::default())
+    }
+
+    #[test]
+    fn activation_stream_reports_each_owner_outcome_with_its_last_phase() {
+        use ryeos_external_execution_contract::guest_owner_report::{
+            GuestOwnerReport, GuestOwnerStep as Step,
+        };
+        let phase = |step| GuestOwnerReport::Phase(step).line();
+        let held = GuestOwnerReport::Held.line();
+        let refused = GuestOwnerReport::Refused(Step::Install).line();
+        let exit = ("exit", serde_json::json!({ "exit_code": 1 }));
+        let staged = [
+            output("stdout", &phase(Step::ImportVerify)),
+            output("stderr", "progress noise\n"),
+            output("stdout", &phase(Step::Stage)),
+        ];
+        let with = |tail: &[(&'static str, serde_json::Value)]| {
+            let mut events = staged.to_vec();
+            events.extend_from_slice(tail);
+            sse(&events)
+        };
+        assert_eq!(
+            observed(&with(&[output("stdout", &held)])),
+            GuestOwnerActivationReport::Held {
+                last_phase: Some(Step::Stage),
+                supervisor_exit: None
+            }
+        );
+        // The terminal line ends the read; later events are never examined.
+        assert_eq!(
+            observed(&with(&[
+                output("stdout", &held),
+                output("stdout", "garbage\n"),
+                exit.clone()
+            ])),
+            GuestOwnerActivationReport::Held {
+                last_phase: Some(Step::Stage),
+                supervisor_exit: None
+            }
+        );
+        assert_eq!(
+            observed(&with(&[
+                output("stdout", &phase(Step::Install)[..10]),
+                output("stdout", &phase(Step::Install)[10..]),
+                output("stdout", &refused),
+            ])),
+            GuestOwnerActivationReport::Refused {
+                step: Step::Install,
+                last_phase: Some(Step::Install),
+                detail: None,
+            }
+        );
+        assert_eq!(
+            observed(&with(&[
+                output("stderr", "Error: private text\n"),
+                exit.clone()
+            ])),
+            GuestOwnerActivationReport::ExitedBeforeReport {
+                last_phase: Some(Step::Stage)
+            }
+        );
+        // Stderr is never read as a report, even when it looks like one.
+        assert_eq!(
+            observed(&sse(&[output("stderr", &refused)])),
+            GuestOwnerActivationReport::StreamLost { last_phase: None }
+        );
+        assert_eq!(
+            observed(&with(&[])),
+            GuestOwnerActivationReport::StreamLost {
+                last_phase: Some(Step::Stage)
+            }
+        );
+        for garbage in ["thread 'main' panicked\n", &"x".repeat(4096)] {
+            assert_eq!(
+                observed(&with(&[output("stdout", garbage), exit.clone()])),
+                GuestOwnerActivationReport::MalformedReport {
+                    last_phase: Some(Step::Stage)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn activation_stream_ending_without_a_terminal_report_is_lost_or_late() {
+        assert_eq!(
+            observed(b""),
+            GuestOwnerActivationReport::StreamLost { last_phase: None }
+        );
+        for body in [
+            sse(&[("keepalive", serde_json::json!({}))]),
+            sse(&[(
+                "output",
+                serde_json::json!({ "stream": "stdout", "data": "x", "extra": 1 }),
+            )]),
+            sse(&[("exit", serde_json::json!({}))]),
+            sse(&[output("stderr", &"a".repeat(32 * 1024))]),
+            sse(&(0..160)
+                .map(|_| output("stderr", &"e".repeat(8 * 1024)))
+                .collect::<Vec<_>>()),
+        ] {
+            assert_eq!(
+                observed(&body),
+                GuestOwnerActivationReport::StreamLost { last_phase: None }
+            );
+        }
+        let refused = sse(&[output(
+            "stdout",
+            &ryeos_external_execution_contract::guest_owner_report::GuestOwnerReport::Refused(
+                ryeos_external_execution_contract::guest_owner_report::GuestOwnerStep::Stage,
+            )
+            .line(),
+        )]);
+        let cancellation = NetworkCancellation::default();
+        cancellation.cancel();
+        let live = MonotonicDeadline::after(lillux::time::Duration::from_secs(30));
+        assert_eq!(
+            observe_owner_report(&refused[..], live, &cancellation),
+            GuestOwnerActivationReport::StreamLost { last_phase: None }
+        );
+        let expired = MonotonicDeadline::after(lillux::time::Duration::ZERO);
+        assert_eq!(
+            observe_owner_report(&refused[..], expired, &NetworkCancellation::default()),
+            GuestOwnerActivationReport::NoReportBeforeDeadline { last_phase: None }
+        );
     }
 
     #[test]

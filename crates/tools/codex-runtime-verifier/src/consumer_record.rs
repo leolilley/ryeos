@@ -331,7 +331,7 @@ mod control_tests {
         assert!(
             serde_json::from_value::<ConsumerVerifierConfiguration>(missing_controller).is_err()
         );
-        for duration in [0, 300_001, u64::MAX] {
+        for duration in [0, 3_600_001, u64::MAX] {
             let mut changed = value.clone();
             changed["controller"]["maximum_duration_ms"] = duration.into();
             assert!(
@@ -440,7 +440,7 @@ impl ConsumerVerifierConfiguration {
         }
         .validate()?;
         ensure!(
-            (1..=300_000).contains(&self.controller.maximum_duration_ms),
+            (1..=3_600_000).contains(&self.controller.maximum_duration_ms),
             "consumer controller duration exceeds its finite allowance"
         );
         self.external_candidate_qualification_context.validate()?;
@@ -1119,6 +1119,9 @@ impl ImportedConsumerInputs {
         // Keep prepared (including its private descriptor custody) alive until
         // the shared loop has settled the whole namespace and drained output.
         crate::native_guest::run_prepared_protocol(
+            // The native lane proves no path binding after entry; its
+            // control root is used through its retained descriptor only.
+            || Ok(()),
             || crate::native_guest::capture_requested(control),
             prepared.request().clone(),
             input,
@@ -1485,8 +1488,11 @@ impl ConsumerInputRecord {
         let verifier = root
             .open_inherited_regular(std::ffi::OsStr::new(CONSUMER_VERIFIER_REMOTE_NAME), false)?
             .context("imported consumer verifier is missing")?;
+        // The observation reports the portable form (0o644 or 0o755), so the
+        // delivery's declared mode is compared in that form too.
         ensure!(
-            verifier.regular_file_observation()?.portable_mode()? == CONSUMER_VERIFIER_MODE,
+            verifier.regular_file_observation()?.portable_mode()?
+                == lillux::normalized_portable_mode(CONSUMER_VERIFIER_MODE),
             "imported consumer verifier mode differs from exact delivery"
         );
         self.verify_verifier_payload(&verifier)?;
@@ -1535,7 +1541,8 @@ impl ConsumerInputRecord {
                 .open_inherited_regular(std::ffi::OsStr::new(&record_name), false)?
                 .context("imported consumer product manifest is missing")?;
             ensure!(
-                manifest.regular_file_observation()?.portable_mode()? == 0o400,
+                manifest.regular_file_observation()?.portable_mode()?
+                    == lillux::normalized_portable_mode(0o400),
                 "imported consumer manifest differs from immutable delivery mode"
             );
             let remaining = budget.maximum_regular_bytes - regular_bytes;

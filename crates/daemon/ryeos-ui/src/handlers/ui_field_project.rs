@@ -155,7 +155,7 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     )?;
     if !request.expansions.is_empty() {
         document = apply_bounded_expansions(document, &request.expansions, &ui_state, SERVICE_REF)
-            .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     }
     serde_json::to_value(document).map_err(Into::into)
 }
@@ -416,7 +416,7 @@ fn add_admission_facts(
         Err(error) => {
             builder.warn(
                 "admission_history_unavailable",
-                format!("admission history was not projected: {error}"),
+                format!("admission history was not projected: {error:#}"),
             );
             return Ok(());
         }

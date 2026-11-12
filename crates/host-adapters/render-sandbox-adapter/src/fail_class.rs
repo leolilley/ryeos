@@ -25,6 +25,13 @@ pub(crate) enum FailClass {
     UploadStatus,
     CreateStatus,
     Deadline,
+    RelayRequest,
+    RelayContact,
+    RelayTransport,
+    RelayStatus,
+    RelayResponse,
+    RelayInput,
+    RelayBody,
     Other,
 }
 
@@ -48,6 +55,13 @@ impl FailClass {
             Self::UploadStatus => 16,
             Self::CreateStatus => 17,
             Self::Deadline => 18,
+            Self::RelayRequest => 19,
+            Self::RelayContact => 20,
+            Self::RelayTransport => 21,
+            Self::RelayStatus => 22,
+            Self::RelayResponse => 23,
+            Self::RelayInput => 24,
+            Self::RelayBody => 25,
         }
     }
 
@@ -70,6 +84,13 @@ impl FailClass {
             Self::UploadStatus => "upload_status",
             Self::CreateStatus => "create_status",
             Self::Deadline => "deadline",
+            Self::RelayRequest => "relay_request",
+            Self::RelayContact => "relay_contact",
+            Self::RelayTransport => "relay_transport",
+            Self::RelayStatus => "relay_status",
+            Self::RelayResponse => "relay_response",
+            Self::RelayInput => "relay_input",
+            Self::RelayBody => "relay_body",
         }
     }
 
@@ -138,10 +159,17 @@ mod tests {
             FailClass::UploadStatus,
             FailClass::CreateStatus,
             FailClass::Deadline,
+            FailClass::RelayRequest,
+            FailClass::RelayContact,
+            FailClass::RelayTransport,
+            FailClass::RelayStatus,
+            FailClass::RelayResponse,
+            FailClass::RelayInput,
+            FailClass::RelayBody,
             FailClass::Other,
         ];
         let mut codes: Vec<i32> = all.iter().map(|class| class.exit_code()).collect();
-        assert!(codes.iter().all(|code| (2..=20).contains(code)));
+        assert!(codes.iter().all(|code| (2..=63).contains(code)));
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), all.len());

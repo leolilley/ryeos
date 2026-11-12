@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-19T00:12:54Z:498f4c9aa9be3815a7a89174341a770326793f0f29fd196ebd57973586357f15:zWtmtFP89aUFrrUkcF1bY/qmzm3dBCc0D+XBxk/dG13N1qUKFrbPT4yvgKoPUBWXIgDa/u7p794f18rpmIPRAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T03:26:26Z:9cbafc8f3673b56ac8c168134b29a4b61475df20ccfd8ad847699bfac4576652:zcn/trMqGSX8hm8T/n/9UoW8Ybyxc8Duu9R5SdI5vOcZSedSPBBFhsLc8O/NiSUm0FaxmVhP3ncayLGEbXRuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -36,8 +36,21 @@ fallback.
 Signed execution-kind projections retain filesystem and network ceilings in
 the admitted plan. `captured_execution` and `isolated` are irreversible
 restrictions: a parent, restart, or current node default cannot widen them.
-Captured execution excludes ambient system, bundle, trust, callback and parent
-environment authority. Host-environment templates are denied during plan
+Captured execution excludes ambient system, bundle, trust and parent
+environment authority, and refuses daemon callback and thread-auth credentials
+except on one protocol class. A protocol may declare
+`captured_compatible_callback` with the digest of a closed callback
+method surface. The registry accepts the declaration only on the remote-consumer
+qualification callback protocol (never the scoped-producer one) with managed
+HTTP callbacks, a bounded single-call evidence projector, no session and no remote or detached dispatch. Admission then
+requires the declared digest to equal the digest of the surface the daemon
+itself issues for that authority. The sandbox then receives exactly the pinned
+daemon socket entry, read-only, and never its parent directory or any other
+ambient mount; any other callback
+protocol, including an ordinary tool callback, stays refused. The thread-auth
+credential only pairs with the callback bearer and never authorizes a method
+outside that bearer's closed surface, so the class grants no project-write,
+dispatch, authoring, publishing or secret authority. Host-environment templates are denied during plan
 compilation, not merely filtered from the final process environment. These
 restrictions require enforced isolation; disabled mode refuses them.
 
@@ -139,11 +152,12 @@ protocol and lifecycle bindings, not a list granted to every subprocess:
 
 | Variable | Purpose |
 |---|---|
-| `RYEOSD_SOCKET_PATH` | Daemon UDS path for callbacks |
+| `RYEOSD_SOCKET_PATH` | Daemon callback-only UDS path |
 | `RYEOSD_CALLBACK_TOKEN` | Auth token for daemon callbacks |
 | `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
 | `RYEOSD_THREAD_ID` | Thread identifier |
 | `RYEOSD_PROJECT_STATE_SCOPE` | Opaque logical-project state namespace; stable across pinned COW relocation and generation advance, empty for projectless execution, and never an authority token |
+| `RYEOSD_RUNTIME_STATE_ROOT` | Daemon-owned directory the launch may write its own state into, when its protocol declares it; mounted writable at this exact path |
 | `RYE_THREAD_ID` | Thread ID for tool primitives |
 | `RYEOS_ITEM_PATH` | Resolved item source path |
 | `RYEOS_ITEM_KIND` | Resolved item kind |

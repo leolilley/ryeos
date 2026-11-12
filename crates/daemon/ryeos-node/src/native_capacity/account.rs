@@ -142,6 +142,8 @@ impl NativeCapacityAccountBinding {
             maximum_occupancy_ms: u64,
             outside_cleanup_steps: u64,
             rollover_drain_margin_ms: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            rollover_work_margin_steps: Option<u64>,
             units: Units,
         }
         #[derive(Serialize)]
@@ -201,6 +203,7 @@ impl NativeCapacityAccountBinding {
                     outside_cleanup_steps: self.policy.incarnation.outside_cleanup_steps,
                     maximum_occupancy_ms: self.policy.incarnation.maximum_occupancy_ms,
                     rollover_drain_margin_ms: self.policy.incarnation.rollover_drain_margin_ms,
+                    rollover_work_margin_steps: self.policy.incarnation.rollover_work_margin_steps,
                     units: self.policy.incarnation.units.into(),
                 },
                 issuance_nonce: &self.policy.issuance_nonce,
@@ -1938,8 +1941,9 @@ impl RetainedCapacityAccount {
         &self,
         inputs: &LiveNativeCapacityInputs,
         claim: Option<super::RolloverClaim>,
+        spent: Option<&lillux_sqlite::OriginalNativeBudgetSnapshot>,
     ) -> Result<Option<(CapacityRecord, [u8; 32])>> {
-        let Some(super::RolloverClaim { latch_bits }) = claim else {
+        let Some(super::RolloverClaim { latch_bits, margin }) = claim else {
             return Ok(None);
         };
         if latch_bits & super::service_refusal::FACT != 0 {
@@ -1961,12 +1965,20 @@ impl RetainedCapacityAccount {
                 Duration::from_millis(inputs.policy.incarnation.cleanup_occupancy_ms),
             )
             .map_err(anyhow::Error::msg)?;
-        let drained = match window {
-            lillux::time::OccupancyWindowState::Cleanup { .. }
-            | lillux::time::OccupancyWindowState::Expired => true,
-            lillux::time::OccupancyWindowState::Service { remaining } => {
-                remaining
-                    <= Duration::from_millis(inputs.policy.incarnation.rollover_drain_margin_ms)
+        let drained = match margin {
+            // The time margin is proven by the retained clock.
+            super::PlannedMargin::Time => match window {
+                lillux::time::OccupancyWindowState::Cleanup { .. }
+                | lillux::time::OccupancyWindowState::Expired => true,
+                lillux::time::OccupancyWindowState::Service { remaining } => {
+                    remaining
+                        <= Duration::from_millis(inputs.policy.incarnation.rollover_drain_margin_ms)
+                }
+            },
+            // The work margin is proven by the final counters of the
+            // incarnation's own budget, never by the claim.
+            super::PlannedMargin::Work => {
+                super::reservation::work_margin_proven(&inputs.policy.incarnation, spent)
             }
         };
         if !drained {
@@ -2000,6 +2012,7 @@ impl RetainedCapacityAccount {
         inputs: &LiveNativeCapacityInputs,
         release: &lillux_sqlite::original_host_owner::backing::HostStorageReleased,
         claim: Option<super::RolloverClaim>,
+        spent: Option<&lillux_sqlite::OriginalNativeBudgetSnapshot>,
         pay: &dyn Fn(u64) -> Result<()>,
     ) -> Result<()> {
         release
@@ -2009,7 +2022,7 @@ impl RetainedCapacityAccount {
         if matches!(self.phase, AccountPhase::Settled) {
             return Ok(());
         }
-        let renewal = self.rollover_renewal_target(inputs, claim)?;
+        let renewal = self.rollover_renewal_target(inputs, claim, spent)?;
         self.prepare_settlement(inputs, renewal)?;
         let AccountPhase::SettlementPending(target) = self.phase else {
             unreachable!("prepared settlement")
@@ -2469,7 +2482,7 @@ mod issuance_digest_tests {
                 host_control_storage_bytes: if maximum { i64::MAX as u64 } else { 4_096 },
                 allocator_steps: if maximum { i64::MAX as u64 } else { 1_000 },
                 connection_tickets: if maximum { 64 } else { 1 },
-                cleanup_steps: if maximum { i64::MAX as u64 - 1 } else { 8 },
+                cleanup_steps: if maximum { i64::MAX as u64 / 2 } else { 8 },
             };
             let directory: PinnedDirectoryIdentity = serde_json::from_value(serde_json::json!({
                 "filesystem": {"device": u64::MAX}, "inode": 1,
@@ -2489,11 +2502,11 @@ mod issuance_digest_tests {
                 anchor_protocol: anchor::PROTOCOL.to_owned(),
                 reanchor: None,
                 policy: NodeNativeCapacityPolicy {
-                    schema: 6,
+                    schema: 7,
                     issuance_nonce: "a".repeat(32),
                     allowance: units,
                     incarnation: ryeos_node_runtime::node_policy::sections::native_capacity::NativeIncarnationEnvelope {
-                        units, maximum_occupancy_ms: 3, cleanup_occupancy_ms: 1, rollover_drain_margin_ms: 1,
+                        units, maximum_occupancy_ms: 3, cleanup_occupancy_ms: 1, rollover_drain_margin_ms: 1, rollover_work_margin_steps: Some(1),
                         host_release_steps: 2, outside_cleanup_steps: 1,
                     },
                     recovery: ryeos_node_runtime::node_policy::sections::native_capacity::NativeRecoveryEnvelope {
@@ -2516,6 +2529,24 @@ mod issuance_digest_tests {
                 expected,
                 "outside cleanup allocation must bind to the original issuance"
             );
+            binding.policy.incarnation.outside_cleanup_steps -= 1;
+            assert_eq!(binding.issuance_digest().unwrap(), expected);
+            binding.policy.incarnation.rollover_work_margin_steps = Some(2);
+            assert_ne!(
+                binding.issuance_digest().unwrap(),
+                expected,
+                "the work rollover margin must bind to the original issuance"
+            );
+            // A schema 6 issuance names no margin: its digest is the digest
+            // of its canonical form without the key, as it was issued.
+            binding.policy.schema = 6;
+            binding.policy.incarnation.rollover_work_margin_steps = None;
+            binding.policy.validate().unwrap();
+            let canonical =
+                lillux::canonical_json(&serde_json::to_value(&binding).unwrap()).unwrap();
+            assert!(!canonical.contains("rollover_work_margin_steps"));
+            let issued: [u8; 32] = sha2::Sha256::digest(canonical.as_bytes()).into();
+            assert_eq!(binding.issuance_digest().unwrap(), issued);
         }
     }
 }

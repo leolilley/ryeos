@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-09-23T13:41:33Z:6626e26b7e01ea37604b140cc4f1f63815c2de5823ddb0fec37092a5c9ded42b:W1MhkAf6sDyiTHfyYaKJ6lBsiGqebpt7TjCfPF+oZHOJK7e5WsaJZRxcKxj0eoM/mxddZ8zawyBxnXDOU/jwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T02:56:41Z:2491e1fc4a6c4e36313126566e64e100cd7a85ef3ba5c39487d371252c00136a:jtBEJp9pfKC4LhEhsR0Tj7BFKKHKOKSewM/suxzhuNo0WVgLINVaVMypUBKQKUOZ2NbvN0TrscM8G85wmuYbBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Qualify one exact admitted signed bundle-tree realization."""
 import json, os, pathlib, stat, sys
 p=json.load(sys.stdin)

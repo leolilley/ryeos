@@ -284,7 +284,7 @@ pub async fn run(
                         }
                         // A trust rejection is an authored authority failure, not
                         // a cache miss. It must remain fail-closed.
-                        enforce_current_trust(&per_root, target_kind)?;
+                        enforce_current_trust(engine, state, &per_root, target_kind)?;
                         apply_projection(
                             resolution,
                             output_derived,
@@ -360,7 +360,7 @@ pub async fn run(
                                 }
                                 continue 'authority;
                             }
-                            enforce_current_trust(&per_root, target_kind)?;
+                            enforce_current_trust(engine, state, &per_root, target_kind)?;
                             apply_projection(
                                 resolution,
                                 output_derived,
@@ -668,7 +668,7 @@ pub async fn run(
             method: target_method.clone(),
             thread_id: child_thread_id.clone(),
             callback: ryeos_runtime::envelope::EnvelopeCallback {
-                socket_path: state.config.uds_path.clone(),
+                socket_path: state.config.runtime_uds_path(),
                 token: cap.token.clone(),
             },
             project_root: project_path.to_path_buf(),
@@ -730,6 +730,11 @@ pub async fn run(
             item_ref: runtime_item_ref.clone(),
             thread_id: child_thread_id.clone(),
             project_path: project_path.to_path_buf(),
+            runtime_state_root: cap
+                .provenance
+                .state_root_override()
+                .unwrap_or(project_path)
+                .to_path_buf(),
             acting_principal: principal_fingerprint.to_string(),
             cas_root: state
                 .state_store
@@ -740,7 +745,7 @@ pub async fn run(
                 Some(
                     state
                         .config
-                        .uds_path
+                        .runtime_uds_path()
                         .to_str()
                         .ok_or_else(|| {
                             LaunchAugmentationError::RuntimeRegistry(
@@ -813,6 +818,7 @@ pub async fn run(
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
+        let runtime_socket = state.config.runtime_uds_path();
         let applied = state
             .isolation
             .apply_awaiting_attachment_with_provenance(
@@ -833,8 +839,9 @@ pub async fn run(
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
                     checkpoint_authority: None,
+                    captured_callback_socket: false,
                     daemon_socket_path: callback_ipc_requested
-                        .then_some(state.config.uds_path.as_path()),
+                        .then_some(runtime_socket.as_path()),
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],
@@ -1441,11 +1448,13 @@ fn resolve_compose_authority(
         };
         let resolution_output = closure.output();
         crate::execution::launch::enforce_effective_trust(
-            resolution_output.effective_trust_class,
+            &engine.kinds,
+            &state.node_policy,
+            resolution_output,
             requested_ref,
             target_kind,
         )
-        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(error.to_string()))?;
+        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(Box::new(error)))?;
         per_root.insert((*requested_ref).to_string(), resolution_output.clone());
         referenced_closures.push((cache_key, closure));
     }
@@ -2089,16 +2098,20 @@ fn digest_json(value: &Value) -> Result<String, LaunchAugmentationError> {
 }
 
 fn enforce_current_trust(
+    engine: &ryeos_engine::engine::Engine,
+    state: &ryeos_app::state::AppState,
     per_root: &BTreeMap<String, ResolutionOutput>,
     target_kind: &str,
 ) -> Result<(), LaunchAugmentationError> {
     for (root_ref, output) in per_root {
         crate::execution::launch::enforce_effective_trust(
-            output.effective_trust_class,
+            &engine.kinds,
+            &state.node_policy,
+            output,
             root_ref,
             target_kind,
         )
-        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(error.to_string()))?;
+        .map_err(|error| LaunchAugmentationError::EffectiveTrustRejected(Box::new(error)))?;
     }
     Ok(())
 }
@@ -2515,6 +2528,7 @@ pub(crate) mod tests {
             external_candidate_imports: Arc::new(Default::default()),
             node_policy: Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                    ryeos_node_runtime::node_policy::default_launch_trust_record(),
                     Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),

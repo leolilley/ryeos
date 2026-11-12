@@ -54,6 +54,16 @@ pub struct ProtocolDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qualification_callback: Option<QualificationCallbackAuthority>,
 
+    /// Declares that this qualification callback protocol is the one class of
+    /// daemon callback a `captured_execution` tool may receive. The class is
+    /// valid only for a qualification callback whose method surface is closed
+    /// and named here by digest; the daemon admits it only when that digest
+    /// equals the digest of the surface it actually issues for the declared
+    /// `qualification_callback` authority. Absent means captured execution
+    /// refuses every callback and thread-auth credential on this protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_compatible_callback: Option<CapturedCompatibleCallback>,
+
     /// Optional bidirectional request/response channel carried independently
     /// of stdio. Absence means this is an ordinary one-shot protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +83,16 @@ pub struct ProtocolDescriptor {
 pub enum QualificationCallbackAuthority {
     ScopedProducer,
     RemoteConsumer,
+}
+
+/// Binding of a captured-compatible callback protocol to its exact closed
+/// runtime-method surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapturedCompatibleCallback {
+    /// Lowercase SHA-256 identity of the closed callback method surface the
+    /// daemon issues for this protocol's `qualification_callback` authority.
+    pub surface_digest: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +135,12 @@ pub enum PersistentSessionCleanupAuthority {
     /// disposable, single-tenant placements; it is not containment and does
     /// not imply descendant-death proof against a hostile worker.
     TrustedProcessGroup,
+    /// The node retains authority over every descendant of one dedicated
+    /// worker, including ones that leave its process group, through a
+    /// containment it has qualified and reports (a cgroup scope or the
+    /// worker's retained PID-namespace init). A declared need, answered by
+    /// reported capability; it grants no quiescence.
+    DescendantContainment,
     /// A protected external supervisor owns one exact deployment occurrence.
     /// This does not claim authority over the provider's physical host.
     ExternalPlacementIncarnation,
@@ -314,6 +340,9 @@ pub fn validate_persistent_session_protocol(
                 PersistentSessionCleanupAuthority::TrustedProcessGroup
             ) | (
                 PersistentSessionProcessMode::ExclusiveSession,
+                PersistentSessionCleanupAuthority::DescendantContainment
+            ) | (
+                PersistentSessionProcessMode::ExclusiveSession,
                 PersistentSessionCleanupAuthority::ExternalPlacementIncarnation
             )
         )
@@ -498,12 +527,14 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::Http,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -531,12 +562,14 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: Some(PersistentSessionProtocol {
                 process_mode: mode,
                 cleanup_authority,
@@ -581,6 +614,7 @@ mod tests {
         for cleanup in [
             PersistentSessionCleanupAuthority::LocalProcessScope,
             PersistentSessionCleanupAuthority::TrustedProcessGroup,
+            PersistentSessionCleanupAuthority::DescendantContainment,
             PersistentSessionCleanupAuthority::ExternalPlacementIncarnation,
         ] {
             assert!(
@@ -591,6 +625,14 @@ mod tests {
                 .is_ok()
             );
         }
+        // Descendant containment belongs to one dedicated worker, never a pool.
+        assert!(
+            validate_persistent_session_protocol(&persistent_protocol(
+                PersistentSessionProcessMode::PooledRequests,
+                PersistentSessionCleanupAuthority::DescendantContainment,
+            ))
+            .is_err()
+        );
         assert!(
             validate_persistent_session_protocol(&persistent_protocol(
                 PersistentSessionProcessMode::ExclusiveSession,

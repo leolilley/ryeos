@@ -348,6 +348,7 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
             connect_timeout_ms: 5_000,
             request_timeout_ms: 10_000,
             maximum_response_bytes: 1024 * 1024,
+            max_clock_skew_ms: None,
         }
         .into(),
         tls_root_certificates_der_base64: roots,
@@ -479,6 +480,7 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
         guest_runtime_manifest_hash: inputs.probe_manifest_hash.into(),
         attachment_deadline_ms,
         admission_deadline_ms: attachment_deadline_ms - 1_000,
+        max_clock_skew_ms: None,
         nonce_sha256: lillux::sha256_hex(&lillux::crypto::generate_random_bytes::<32>()),
         ticket,
         guest_inputs: projection.clone(),

@@ -15,4 +15,4 @@ crates/tools/guest-wire-verifier/Cargo.toml
 crates/tools/codex-external-configuration/Cargo.toml
 crates/tools/codex-guest-runtime-producer/Cargo.toml
 crates/tools/codex-runtime-verifier/Cargo.toml
-crates/tools/modal-guest-launcher/Cargo.toml
+crates/host-adapters/modal-guest-launcher/Cargo.toml

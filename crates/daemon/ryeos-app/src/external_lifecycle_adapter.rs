@@ -12,8 +12,8 @@ use ryeos_external_execution::lifecycle_adapter::{
 };
 use ryeos_external_execution_contract::relay_file::{
     LIFECYCLE_RELAY_UPLOAD_FD_ENV, MAX_RELAY_RESPONSE_BYTES, RELAY_FILE_PROTOCOL,
-    RelayFileAdapterRequest, RelayFileAdapterResponse, RelayFileDirection, RelayFileEffect,
-    RelayFileKind,
+    RelayDeliveryAccount, RelayFileAdapterRequest, RelayFileAdapterResponse, RelayFileDirection,
+    RelayFileEffect,
 };
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES, MAX_RESTORED_VERIFIER_ADAPTER_RESPONSE_BYTES,
@@ -68,7 +68,7 @@ use crate::node_config::sections::external_execution::ExternalPlacementBackendCo
 use crate::runtime_db::external_execution::{
     ClaimedRelayFileContact, ExternalAllocationOccurrence, ExternalAllocationReservation,
     ExternalGuestPackageDeliveryCommitment, ExternalSupervisorActivationIntent,
-    ExternalTerminationIntent, RelayDirection, RelayKind, RelayTransferPhase,
+    ExternalTerminationIntent, RelayDirection, RelayTransferPhase, RelayTransferRecord,
 };
 use crate::vault::placement::PlacementCredential;
 
@@ -489,9 +489,11 @@ impl ExecutableExternalPlacementBackend {
         admitted_adapter_request: Option<&[u8]>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<LifecycleAdapterResponse>> {
-        let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
-            lillux::time::Duration::from_secs(u64::from(contract.contact_timeout_seconds)),
-        ));
+        let deadline = adapter_operation_deadline(
+            matches!(request, LifecycleAdapterRequest::ActivateSupervisor { .. }),
+            deadline,
+            contract.contact_timeout_seconds,
+        );
         ensure!(
             !deadline.has_elapsed(),
             "external lifecycle contact deadline expired"
@@ -703,15 +705,20 @@ impl ExecutableExternalPlacementBackend {
                 .context("external lifecycle remaining timeout exceeds its bound")?
                 .to_string(),
         ));
+        // The adapter stops its own work at the deadline it was told and
+        // answers with what it saw; give that answer a moment to arrive
+        // before the process is ended, or every overrun reads the same.
+        let answer_deadline =
+            lillux::time::MonotonicDeadline::after(deadline.remaining() + ADAPTER_ANSWER_GRACE);
         let response = run_lifecycle_adapter(
             &self.adapter,
             LifecycleAdapterInvocation::Operate,
             &request_handle,
             inherited,
             envs,
-            deadline,
+            answer_deadline,
         )?;
-        let deadline_exceeded = response.deadline_exceeded;
+        let deadline_exceeded = response.deadline_exceeded || deadline.has_elapsed();
         let response = decode_operation_response(&response.bytes, request)?;
         Ok(ExternalLifecycleObservation {
             value: response,
@@ -724,63 +731,12 @@ impl ExecutableExternalPlacementBackend {
         credential: &PlacementCredential,
         bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
         claim: ClaimedRelayFileContact,
+        delivery_account: Option<RelayDeliveryAccount>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
         let record = claim.record();
         let intent = &record.intent;
-        bootstrap.validate()?;
-        let relay = bootstrap.controller.relay()?;
-        ensure!(
-            bootstrap.digest()? == intent.bootstrap_digest
-                && bootstrap.placement_thread_id == intent.placement_thread_id
-                && bootstrap.occurrence_id == intent.occurrence_id
-                && bootstrap.allocation_request_digest == intent.allocation_request_digest
-                && bootstrap.relay_mailbox_root()? == intent.mailbox_root
-                && relay.maximum_file_bytes == intent.maximum_file_bytes,
-            "claimed relay differs from original signed placement"
-        );
-        ensure!(
-            match claim.effect() {
-                RelayFileEffect::UploadOnce =>
-                    intent.direction == RelayDirection::ControllerToGuest
-                        && record.phase == RelayTransferPhase::UploadPossible
-                        && record.read_attempts == 0,
-                RelayFileEffect::Download =>
-                    (intent.direction == RelayDirection::GuestToController
-                        && record.phase == RelayTransferPhase::Reading
-                        && record.read_attempts > 0)
-                        || (intent.direction == RelayDirection::ControllerToGuest
-                            && record.phase == RelayTransferPhase::UploadPossible
-                            && record.read_attempts > 0),
-            },
-            "relay adapter received no durable contact claim"
-        );
-        let request = RelayFileAdapterRequest {
-            schema: 1,
-            protocol: RELAY_FILE_PROTOCOL.into(),
-            binding_hash: bootstrap.execution_binding_hash.clone(),
-            settings_digest: contract.settings_digest.clone(),
-            placement_thread_id: intent.placement_thread_id.clone(),
-            occurrence_id: intent.occurrence_id.clone(),
-            allocation_request_digest: intent.allocation_request_digest.clone(),
-            bootstrap_digest: intent.bootstrap_digest.clone(),
-            mailbox_root: intent.mailbox_root.clone(),
-            kind: match intent.kind {
-                RelayKind::Attach => RelayFileKind::Attach,
-                RelayKind::Exchange => RelayFileKind::Exchange,
-            },
-            sequence: intent.sequence,
-            direction: match intent.direction {
-                RelayDirection::GuestToController => RelayFileDirection::GuestToController,
-                RelayDirection::ControllerToGuest => RelayFileDirection::ControllerToGuest,
-            },
-            remote_path: intent.remote_path.clone(),
-            maximum_file_bytes: intent.maximum_file_bytes,
-            deadline_ms: intent.deadline_ms,
-            effect: claim.effect(),
-            expected_sha256: intent.expected_sha256.clone(),
-            expected_bytes: intent.expected_bytes,
-        };
+        let request = relay_file_adapter_request(contract, bootstrap, &claim, delivery_account)?;
         let request_bytes = request.canonical_bytes()?;
         let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
             lillux::time::Duration::from_secs(u64::from(contract.contact_timeout_seconds)),
@@ -1028,6 +984,84 @@ impl ExecutableExternalPlacementBackend {
     }
 }
 
+/// Whether `record` is the durable state its contact effect requires. The
+/// unjournaled owner-report download carries a claim of one read attempt.
+fn relay_contact_claim_is_durable(record: &RelayTransferRecord, effect: RelayFileEffect) -> bool {
+    let intent = &record.intent;
+    match effect {
+        RelayFileEffect::UploadOnce => {
+            intent.direction == RelayDirection::ControllerToGuest
+                && record.phase == RelayTransferPhase::UploadPossible
+                && record.read_attempts == 0
+        }
+        RelayFileEffect::Download => {
+            (intent.direction == RelayDirection::GuestToController
+                && record.phase == RelayTransferPhase::Reading
+                && record.read_attempts > 0)
+                || (intent.direction == RelayDirection::ControllerToGuest
+                    && record.phase == RelayTransferPhase::UploadPossible
+                    && record.read_attempts > 0)
+        }
+    }
+}
+
+/// The exact relay-file request for one durable contact claim on the original
+/// sealed bootstrap. Every relay-file transport receives this request.
+pub(crate) fn relay_file_adapter_request(
+    contract: &ExternalPlacementBackendContract,
+    bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
+    claim: &ClaimedRelayFileContact,
+    delivery_account: Option<RelayDeliveryAccount>,
+) -> Result<RelayFileAdapterRequest> {
+    let record = claim.record();
+    let intent = &record.intent;
+    bootstrap.validate()?;
+    let relay = bootstrap.controller.relay()?;
+    ensure!(
+        bootstrap.digest()? == intent.bootstrap_digest
+            && bootstrap.placement_thread_id == intent.placement_thread_id
+            && bootstrap.occurrence_id == intent.occurrence_id
+            && bootstrap.allocation_request_digest == intent.allocation_request_digest
+            && bootstrap.relay_mailbox_root()? == intent.mailbox_root
+            && relay.maximum_file_bytes == intent.maximum_file_bytes,
+        "claimed relay differs from original signed placement"
+    );
+    ensure!(
+        relay_contact_claim_is_durable(record, claim.effect()),
+        "relay adapter received no durable contact claim"
+    );
+    let claim_effect = claim.effect();
+    Ok(RelayFileAdapterRequest {
+        schema: 2,
+        protocol: RELAY_FILE_PROTOCOL.into(),
+        binding_hash: bootstrap.execution_binding_hash.clone(),
+        settings_digest: contract.settings_digest.clone(),
+        placement_thread_id: intent.placement_thread_id.clone(),
+        occurrence_id: intent.occurrence_id.clone(),
+        allocation_request_digest: intent.allocation_request_digest.clone(),
+        bootstrap_digest: intent.bootstrap_digest.clone(),
+        mailbox_root: intent.mailbox_root.clone(),
+        kind: intent.kind.file_kind(),
+        sequence: intent.sequence,
+        direction: match intent.direction {
+            RelayDirection::GuestToController => RelayFileDirection::GuestToController,
+            RelayDirection::ControllerToGuest => RelayFileDirection::ControllerToGuest,
+        },
+        remote_path: intent.remote_path.clone(),
+        maximum_file_bytes: intent.maximum_file_bytes,
+        deadline_ms: intent.deadline_ms,
+        effect: claim.effect(),
+        expected_sha256: intent.expected_sha256.clone(),
+        expected_bytes: intent.expected_bytes,
+        delivery_account: match claim_effect {
+            RelayFileEffect::UploadOnce => {
+                Some(delivery_account.context("relay upload has no delivery account")?)
+            }
+            RelayFileEffect::Download => None,
+        },
+    })
+}
+
 impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
     fn relay_file_contact(
         &self,
@@ -1035,9 +1069,23 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         credential: &PlacementCredential,
         bootstrap: &ryeos_state::external_execution::transport::ExternalSupervisorBootstrap,
         claim: ClaimedRelayFileContact,
+        delivery_account: Option<RelayDeliveryAccount>,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<RelayFileAdapterResponse>> {
-        self.invoke_relay_file(contract, credential, bootstrap, claim, deadline)
+        let intent = &claim.record().intent;
+        let step = format!(
+            "relay the {:?} {:?} file (sequence {})",
+            intent.kind, intent.direction, intent.sequence
+        );
+        self.invoke_relay_file(
+            contract,
+            credential,
+            bootstrap,
+            claim,
+            delivery_account,
+            deadline,
+        )
+        .with_context(|| step)
     }
 
     fn lifecycle_escrow_capture(&self) -> Result<Option<LifecycleEscrowCapture<'_>>> {
@@ -1123,6 +1171,7 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<Vec<u8>> {
         self.invoke_await_lease_ready(request, ready_frame, report_frame, deadline)
+            .context("await the guest's lease readiness")
     }
 
     fn artifact_hash(&self) -> &str {
@@ -1143,6 +1192,10 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
 
     fn settings_schema_digest(&self) -> &str {
         &self.declaration.settings_schema_digest
+    }
+
+    fn relay_scope_setting(&self) -> Option<&str> {
+        self.declaration.relay_scope_setting.as_deref()
     }
 
     fn preflight_runtime_snapshot(
@@ -1661,11 +1714,20 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
             remaining_ms > 0,
             "restored verifier expired before adapter contact"
         );
+        // An owner measurement uploads one small verifier inside a contact; a
+        // consumer attempt delivers its whole archive and keeps the profile's
+        // delivery budget, as a Q guest package keeps its startup budget.
+        let budget_seconds = match &request.intent.purpose {
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::OwnerMeasurement { .. } => {
+                qualification.contact_timeout_seconds()
+            }
+            ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime { .. } => {
+                qualification.delivery_timeout_seconds()
+            }
+        };
         let deadline = deadline
             .min(lillux::time::MonotonicDeadline::after(
-                lillux::time::Duration::from_secs(u64::from(
-                    qualification.contact_timeout_seconds(),
-                )),
+                lillux::time::Duration::from_secs(u64::from(budget_seconds)),
             ))
             .min(lillux::time::MonotonicDeadline::after(
                 lillux::time::Duration::from_millis(u64::try_from(remaining_ms)?),
@@ -2036,7 +2098,8 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
         let bootstrap_file =
             lillux::sealed_memfd(c"ryeos-external-guest-bootstrap", &bootstrap_bytes)
-                .map_err(anyhow::Error::msg)?;
+                .map_err(anyhow::Error::msg)
+                .context("seal the guest bootstrap")?;
         let expected = GuestStagingExpected {
             inputs: guest_inputs.projection(),
             activation_request_digest,
@@ -2381,11 +2444,28 @@ impl ExecutableExternalPlacementBackend {
             },
             LifecycleAdapterResponse::AllocationNoOccurrence {
                 provider_observation_digest,
+                reason,
                 ..
-            } => ExternalAllocationResolution::NoOccurrence {
-                provider_observation_digest,
-            },
-            LifecycleAdapterResponse::AllocationPending { .. } => {
+            } => {
+                tracing::warn!(
+                    placement = %reservation.placement_thread_id,
+                    reason = %reason,
+                    "external allocation produced no occurrence"
+                );
+                ExternalAllocationResolution::NoOccurrence {
+                    provider_observation_digest,
+                }
+            }
+            LifecycleAdapterResponse::AllocationPending { reason, .. } => {
+                // Reconciliation polls during startup; only the one create
+                // says what happened to the request.
+                if !reconcile {
+                    tracing::warn!(
+                        placement = %reservation.placement_thread_id,
+                        reason = %reason,
+                        "external allocation outcome is unknown"
+                    );
+                }
                 ExternalAllocationResolution::Pending
             }
             _ => anyhow::bail!("lifecycle adapter returned a non-allocation response"),
@@ -2552,9 +2632,14 @@ impl ExecutableExternalPlacementBackend {
             } => ExternalSupervisorActivationResolution::NotStarted {
                 provider_observation_digest,
             },
-            LifecycleAdapterResponse::SupervisorPending { .. } => {
-                ExternalSupervisorActivationResolution::Pending
-            }
+            LifecycleAdapterResponse::SupervisorPending {
+                guest_owner,
+                contact_failure,
+                ..
+            } => ExternalSupervisorActivationResolution::Pending {
+                guest_owner,
+                contact_failure,
+            },
             _ => anyhow::bail!("lifecycle adapter returned a non-activation response"),
         };
         Ok(ExternalLifecycleObservation {
@@ -2767,9 +2852,73 @@ fn artifact_bytes(artifact: &ryeos_engine::binary_resolver::CapturedExecutable) 
     Ok(bytes)
 }
 
+/// Bound one adapter operation. A provider round trip is capped by the
+/// contact timeout. The first supervisor activation also delivers the guest
+/// package, whose transfer can outlast any contact; it keeps the deadline the
+/// caller derived from the reservation's startup budget.
+/// How long past an operation's deadline the adapter may take to answer with
+/// the typed account of where it stopped. Its own work ends at the deadline.
+const ADAPTER_ANSWER_GRACE: lillux::time::Duration = lillux::time::Duration::from_secs(5);
+
+fn adapter_operation_deadline(
+    delivers_guest_package: bool,
+    deadline: lillux::time::MonotonicDeadline,
+    contact_timeout_seconds: u32,
+) -> lillux::time::MonotonicDeadline {
+    if delivers_guest_package {
+        return deadline;
+    }
+    deadline.min(lillux::time::MonotonicDeadline::after(
+        lillux::time::Duration::from_secs(u64::from(contact_timeout_seconds)),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_unjournaled_owner_report_download_is_a_durable_claim_for_the_adapter() {
+        use crate::runtime_db::external_execution::{RelayKind, RelayTransferIntent};
+        let root = format!("/ryeos/occurrences/sbx-a/{}", "a".repeat(64));
+        let claim = ClaimedRelayFileContact::unjournaled_download(RelayTransferIntent {
+            schema: 1,
+            placement_thread_id: "placement".into(),
+            occurrence_id: "sbx-a".into(),
+            allocation_request_digest: "b".repeat(64),
+            bootstrap_digest: "c".repeat(64),
+            remote_path: format!("{root}/owner-report.json"),
+            mailbox_root: root,
+            kind: RelayKind::OwnerReport,
+            sequence: 0,
+            direction: RelayDirection::GuestToController,
+            maximum_file_bytes: 1024,
+            expected_sha256: None,
+            expected_bytes: None,
+            deadline_ms: 1,
+            retention_budget_bytes: 4096,
+        })
+        .unwrap();
+        assert!(relay_contact_claim_is_durable(
+            claim.record(),
+            claim.effect()
+        ));
+    }
+
+    #[test]
+    fn package_delivery_keeps_the_startup_budget_while_contacts_stay_bounded() {
+        let startup =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(600));
+        let contact = adapter_operation_deadline(false, startup, 30);
+        assert!(contact.remaining() <= lillux::time::Duration::from_secs(30));
+        let delivery = adapter_operation_deadline(true, startup, 30);
+        assert!(delivery.remaining() > lillux::time::Duration::from_secs(500));
+        let short = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
+        assert!(
+            adapter_operation_deadline(true, short, 30).remaining()
+                <= lillux::time::Duration::from_secs(5)
+        );
+    }
 
     fn opened(path: &std::path::Path) -> lillux::InheritedDescriptorAuthority {
         let resolved = lillux::canonicalize_existing_path(path).unwrap();
@@ -3066,7 +3215,7 @@ mod tests {
                 contact_deadline_ms: 100_000,
             },
         };
-        let valid = serde_json::json!({"outcome":"allocation_pending", "operation_id":"a".repeat(64), "request_digest":"a".repeat(64)});
+        let valid = serde_json::json!({"outcome":"allocation_pending", "operation_id":"a".repeat(64), "request_digest":"a".repeat(64), "reason":"create_no_response"});
         decode_operation_response(&serde_json::to_vec(&valid).unwrap(), &request).unwrap();
         for fault in ["variant", "field", "identity"] {
             let mut value = valid.clone();

@@ -135,7 +135,7 @@ fn accept_blocking(
             .write_barrier
             .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
             .map_err(|error| {
-                anyhow::anyhow!("cannot acquire product accept write permit: {error}")
+                anyhow::anyhow!("cannot acquire product accept write permit: {error:#}")
             })?;
         let mut stage = pinned
             .require_recovery()?

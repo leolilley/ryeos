@@ -534,7 +534,7 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
                             Ok(Some(record)) => record,
                             Ok(None) => current,
                             Err(error) => {
-                                tracing::error!(fire_id = %fire_id_log, %error,
+                                tracing::error!(fire_id = %fire_id_log, error = %format!("{error:#}"),
                                     "dispatch failure: failed to reload fire record");
                                 return;
                             }

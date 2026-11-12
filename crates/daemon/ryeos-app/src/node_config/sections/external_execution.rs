@@ -22,6 +22,12 @@ pub mod compose_qualification;
 pub mod provision;
 
 pub const SECTION_NAME: &str = "external_execution";
+/// Upper bound on the native work one placement may declare: a thousand
+/// times the largest envelope an incarnation is issued today.
+pub(crate) const MAX_NATIVE_WORK_STEPS: u64 = 1_000_000_000_000;
+/// The native work a placement declares when its binding states none: a
+/// tenth of the incarnation envelope the shipped profiles issue.
+pub(crate) const DEFAULT_NATIVE_WORK_STEPS: u64 = 2_000_000;
 pub struct ExternalExecutionSection;
 
 /// Workload-specific authority in one node-signed placement binding. Direct
@@ -371,6 +377,15 @@ struct BindingDocument {
     contact_timeout_seconds: u32,
     observation_timeout_seconds: u32,
     cleanup_timeout_seconds: u32,
+    /// Prepaid native work (SQL VM steps) one placement may spend on the
+    /// node across its whole life. A fresh placement is admitted only when
+    /// the daemon incarnation has at least this much left. A document that
+    /// states none declares [`DEFAULT_NATIVE_WORK_STEPS`], the figure a
+    /// compose without an explicit limit writes; it is kept absent rather
+    /// than filled in, because a retained binding generation must
+    /// re-canonicalize to the exact bytes the node retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_work_steps: Option<u64>,
     max_workspace_bytes: u64,
     max_export_bytes: u64,
     max_transfer_bytes: u64,
@@ -456,9 +471,14 @@ impl BindingDocument {
         );
         ensure!(
             (1..=60).contains(&self.contact_timeout_seconds)
-                && (1..=300).contains(&self.observation_timeout_seconds)
+                && (1..=900).contains(&self.observation_timeout_seconds)
                 && (1..=600).contains(&self.cleanup_timeout_seconds),
             "placement binding lifecycle deadlines exceed bounds"
+        );
+        ensure!(
+            self.native_work_steps
+                .is_none_or(|steps| (1..=MAX_NATIVE_WORK_STEPS).contains(&steps)),
+            "placement binding declares native work outside bounds"
         );
         ensure!(
             self.storage_policy == "ephemeral_private_candidate_v1"
@@ -505,17 +525,18 @@ impl BindingDocument {
                     )? == http.tls_root_bundle_digest,
                 "external controller TLS roots changed their signed identity"
             ),
-            ExternalControllerTransportSelection::ControllerFileRelay(relay) => ensure!(
+            // Whether the installed adapter implements the relay operation is
+            // checked at placement qualification, where its declaration is in
+            // hand; the adapter also checks its own settings against the
+            // relay's workspace scope when it moves a file.
+            ExternalControllerTransportSelection::ControllerFileRelay(_) => ensure!(
                 matches!(
                     &self.workload,
                     ExternalWorkloadBinding::QualificationStructuredSession(_)
                         | ExternalWorkloadBinding::StructuredSession(_)
                 ) && self.network_policy == "controller_file_relay_guest_deny_all_v1"
-                    && self.backend == "render-sandbox-early-access"
-                    && self.controller_tls_root_certificates_der_base64.is_empty()
-                    && self.settings.get("owner_id").and_then(Value::as_str)
-                        == Some(relay.owner_workspace_id.as_str()),
-                "external controller file relay requires signed Render Q owner and no TLS roots"
+                    && self.controller_tls_root_certificates_der_base64.is_empty(),
+                "external controller file relay requires a session workload, the relay network policy and no TLS roots"
             ),
         }
         Ok(())
@@ -552,6 +573,7 @@ impl BindingDocument {
             contact_timeout_seconds: self.contact_timeout_seconds,
             observation_timeout_seconds: self.observation_timeout_seconds,
             cleanup_timeout_seconds: self.cleanup_timeout_seconds,
+            native_work_steps: self.native_work_steps.unwrap_or(DEFAULT_NATIVE_WORK_STEPS),
             max_workspace_bytes: self.max_workspace_bytes,
             max_export_bytes: self.max_export_bytes,
             max_transfer_bytes: self.max_transfer_bytes,
@@ -559,6 +581,27 @@ impl BindingDocument {
             max_guest_package_framed_bytes: self.max_guest_package_framed_bytes,
         }
     }
+}
+
+/// A file-relay selection moves files for exactly one workspace scope, and the
+/// adapter's settings name that scope under a key its signed declaration
+/// states. Refuse a selection whose scope differs from the settings, or whose
+/// adapter states no key, so a mismatch is caught before any provider contact.
+/// Other transports carry no scope.
+pub(crate) fn require_relay_scope(
+    transport: &ExternalControllerTransportSelection,
+    scope_setting: Option<&str>,
+    settings: &Value,
+) -> Result<()> {
+    let ExternalControllerTransportSelection::ControllerFileRelay(relay) = transport else {
+        return Ok(());
+    };
+    let key = scope_setting.context("the adapter declares no relay scope setting")?;
+    ensure!(
+        settings.get(key).and_then(Value::as_str) == Some(relay.owner_workspace_id.as_str()),
+        "the adapter's relay scope setting differs from the file relay workspace"
+    );
+    Ok(())
 }
 
 /// Exact non-secret adapter contract projected from the signed binding. A
@@ -592,6 +635,7 @@ pub(crate) struct ExternalPlacementBackendContract {
     pub(crate) contact_timeout_seconds: u32,
     pub(crate) observation_timeout_seconds: u32,
     pub(crate) cleanup_timeout_seconds: u32,
+    pub(crate) native_work_steps: u64,
     pub(crate) max_workspace_bytes: u64,
     pub(crate) max_export_bytes: u64,
     pub(crate) max_transfer_bytes: u64,
@@ -880,6 +924,7 @@ impl RetainedExternalExecutionBinding {
                     connect_timeout_ms: 5_000,
                     request_timeout_ms: 10_000,
                     maximum_response_bytes: 1024 * 1024,
+                    max_clock_skew_ms: None,
                     network_inputs: provider_network_inputs,
                 },
             ),
@@ -889,6 +934,7 @@ impl RetainedExternalExecutionBinding {
             contact_timeout_seconds: 30,
             observation_timeout_seconds: 60,
             cleanup_timeout_seconds: 120,
+            native_work_steps: Some(2_000_000),
             max_workspace_bytes: 1024,
             max_export_bytes: 512,
             max_transfer_bytes: 2048,
@@ -915,49 +961,9 @@ impl RetainedExternalExecutionBinding {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn composed_test_fixture(
-        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
-        controller_tls_root_certificates_der_base64: Vec<String>,
-        backend: String,
-        backend_artifact_hash: String,
-        backend_artifact_bytes: u64,
-        settings_schema_digest: String,
-        supervisor_artifact_hash: String,
-        supervisor_artifact_bytes: u64,
-        launcher_artifact_hash: String,
-        launcher_artifact_bytes: u64,
-        configuration_adapter_artifact_hash: String,
-        configuration_adapter_artifact_bytes: u64,
-        connector_artifact_hash: String,
-        connector_artifact_bytes: u64,
-        qualification: &PlacementQualificationSelection,
-    ) -> Result<Self> {
-        Self::composed_test_fixture_with_settings(
-            program,
-            controller_transport,
-            controller_tls_root_certificates_der_base64,
-            backend,
-            backend_artifact_hash,
-            backend_artifact_bytes,
-            settings_schema_digest,
-            supervisor_artifact_hash,
-            supervisor_artifact_bytes,
-            launcher_artifact_hash,
-            launcher_artifact_bytes,
-            configuration_adapter_artifact_hash,
-            configuration_adapter_artifact_bytes,
-            connector_artifact_hash,
-            connector_artifact_bytes,
-            serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
-            qualification,
-        )
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,
@@ -974,11 +980,11 @@ impl RetainedExternalExecutionBinding {
         settings: Value,
         qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
-        let provider_network_inputs = controller_transport.network_inputs.clone();
+        let transport: ComposedTestTransport = controller_transport.into();
         let document = compose::compose_binding_document(compose::ComposeInputs {
             program,
-            controller_transport: controller_transport.into(),
-            provider_network_inputs,
+            controller_transport: transport.selection,
+            provider_network_inputs: transport.network_inputs,
             tls_roots_der_base64: controller_tls_root_certificates_der_base64,
             backend,
             account: "account".into(),
@@ -1020,6 +1026,7 @@ impl RetainedExternalExecutionBinding {
                 configuration_adapter_artifact_bytes,
                 connector_artifact_hash,
                 connector_artifact_bytes,
+                relay_scope_setting: transport.relay_scope_setting,
             },
             limits: compose::ComposeLimits {
                 max_active: 1,
@@ -1032,6 +1039,7 @@ impl RetainedExternalExecutionBinding {
                 contact_timeout_seconds: 60,
                 observation_timeout_seconds: 60,
                 cleanup_timeout_seconds: 120,
+                native_work_steps: 2_000_000,
                 max_workspace_bytes: 16 * 1024 * 1024,
                 max_export_bytes: 8 * 1024 * 1024,
                 max_transfer_bytes: 16 * 1024 * 1024,
@@ -1084,6 +1092,29 @@ impl std::fmt::Debug for InstalledExternalExecutionBinding {
             .field("id", &self.id)
             .field("digest", &self.digest)
             .finish_non_exhaustive()
+    }
+}
+
+/// The controller transport a composed test binding selects, with the
+/// provider network inputs its lifecycle contacts read.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct ComposedTestTransport {
+    pub selection: ExternalControllerTransportSelection,
+    pub network_inputs: ExternalNetworkInputPolicy,
+    /// The adapter-settings key a file-relay selection's workspace scope is
+    /// carried under, as the adapter's signed declaration states it.
+    pub relay_scope_setting: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl From<ExternalControllerTransportContract> for ComposedTestTransport {
+    fn from(contract: ExternalControllerTransportContract) -> Self {
+        Self {
+            network_inputs: contract.network_inputs.clone(),
+            selection: contract.into(),
+            relay_scope_setting: None,
+        }
     }
 }
 
@@ -1165,7 +1196,7 @@ impl InstalledExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
-        controller_transport: ExternalControllerTransportContract,
+        controller_transport: impl Into<ComposedTestTransport>,
         controller_tls_root_certificates_der_base64: Vec<String>,
         backend: String,
         backend_artifact_hash: String,
@@ -1460,8 +1491,8 @@ mod workload_binding_tests {
     fn ordinary_relay_document() -> BindingDocument {
         let mut document = document();
         document.schema = 19;
-        document.backend = "render-sandbox-early-access".into();
-        document.settings = serde_json::json!({"owner_id":"render-owner"});
+        document.backend = "example-backend".into();
+        document.settings = serde_json::json!({"owner_id":"owner-a"});
         document.settings_digest = adapter_settings_digest(&document.settings).unwrap();
         document.network_policy = "controller_file_relay_guest_deny_all_v1".into();
         document.controller_tls_root_certificates_der_base64.clear();
@@ -1471,15 +1502,51 @@ mod workload_binding_tests {
                 route_contract:
                     ryeos_state::external_execution::transport::EXTERNAL_CHANNEL_RELAY_CONTRACT
                         .into(),
-                owner_workspace_id: "render-owner".into(),
+                owner_workspace_id: "owner-a".into(),
                 private_mailbox_parent: "/run/ryeos/private-relay".into(),
                 maximum_file_bytes: 1024 * 1024,
                 maximum_frames: 1024,
                 poll_interval_ms: 1000,
                 poll_deadline_ms: 30_000,
+                max_clock_skew_ms: None,
             },
         );
         document
+    }
+
+    #[test]
+    fn a_retained_binding_without_native_work_round_trips_exactly_and_declares_the_default() {
+        let retained = RetainedExternalExecutionBinding::test_fixture();
+        // The row a node retained before the field existed: the same
+        // document signed without it, so its canonical bytes carry no key.
+        let mut before = retained.clone();
+        before.document.native_work_steps = None;
+        let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
+        let body = serde_yaml::to_string(&before.document).unwrap();
+        before.signed_source =
+            lillux::signature::sign_content_at(&body, &key, "#", None, "2026-09-20T00:00:00Z");
+        before.digest = binding_digest(&before.id, &before.signer, &before.signed_source).unwrap();
+        before.capacity_owner = capacity_owner(&before.signer, &before.document).unwrap();
+        let json = before.canonical_json().unwrap();
+        assert!(!json.contains("native_work_steps"));
+        let decoded: RetainedExternalExecutionBinding = serde_json::from_str(&json).unwrap();
+        assert!(decoded == before);
+        assert_eq!(decoded.canonical_json().unwrap(), json);
+        assert_eq!(
+            decoded.backend_contract().native_work_steps,
+            DEFAULT_NATIVE_WORK_STEPS
+        );
+        // A composed binding states it, and the statement survives.
+        assert_eq!(
+            retained.backend_contract().native_work_steps,
+            retained.document.native_work_steps.unwrap()
+        );
+        assert!(
+            retained
+                .canonical_json()
+                .unwrap()
+                .contains("native_work_steps")
+        );
     }
 
     #[test]
@@ -1547,8 +1614,8 @@ mod workload_binding_tests {
             attestation_hash: "4".repeat(64),
             owner_principal: format!("fp:{}", "5".repeat(64)),
             qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                policy_ref: Some("config:render/snapshot-qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
             },
             remote_testimony: None,
         });
@@ -1698,8 +1765,8 @@ mod workload_binding_tests {
             attestation_hash: "6".repeat(64),
             owner_principal: format!("fp:{}", "7".repeat(64)),
             qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                policy_ref: Some("config:render/snapshot-qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
             },
             remote_testimony: None,
         });
@@ -1742,12 +1809,12 @@ mod workload_binding_tests {
             attestation_hash: "6".repeat(64),
             owner_principal: format!("fp:{}", "7".repeat(64)),
             qualification: ryeos_state::external_content::products::composition::ProductRelationshipQualification {
-                policy_ref: Some("config:render/snapshot-qualification".into()),
-                required_claims: vec!["render_snapshot_v1".into()],
+                policy_ref: Some("config:test/snapshot-qualification".into()),
+                required_claims: vec!["snapshot_v1".into()],
             },
             remote_testimony: Some(ExternalRemoteQualificationTestimonyBinding {
                 acceptance_hash: "8".repeat(64),
-                acceptance_policy_ref: "config:render/snapshot-acceptance".into(),
+                acceptance_policy_ref: "config:test/snapshot-acceptance".into(),
             }),
         });
         qualified.validate().unwrap();
@@ -1783,11 +1850,8 @@ mod workload_binding_tests {
 
         for (field, bad) in [
             ("acceptance_hash", "not-a-hash"),
-            ("acceptance_policy_ref", "tool:render/snapshot-acceptance"),
-            (
-                "acceptance_policy_ref",
-                "config:render/snapshot-acceptance@1",
-            ),
+            ("acceptance_policy_ref", "tool:test/snapshot-acceptance"),
+            ("acceptance_policy_ref", "config:test/snapshot-acceptance@1"),
         ] {
             let mut wrong = qualified.clone();
             let remote = wrong

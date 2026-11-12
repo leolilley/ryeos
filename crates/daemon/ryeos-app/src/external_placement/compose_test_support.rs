@@ -14,6 +14,7 @@ pub(crate) struct CoordinateOnlyBackend {
     settings_schema_digest: String,
     supervisor_hash: String,
     launcher_hash: String,
+    relay_scope_setting: Option<String>,
 }
 
 impl CoordinateOnlyBackend {
@@ -30,6 +31,7 @@ impl CoordinateOnlyBackend {
             settings_schema_digest: settings_schema_digest.to_owned(),
             supervisor_hash: supervisor_hash.to_owned(),
             launcher_hash: launcher_hash.to_owned(),
+            relay_scope_setting: Some("owner_id".to_owned()),
         })
     }
 }
@@ -61,6 +63,10 @@ impl ExternalPlacementBackend for CoordinateOnlyBackend {
 
     fn settings_schema_digest(&self) -> &str {
         &self.settings_schema_digest
+    }
+
+    fn relay_scope_setting(&self) -> Option<&str> {
+        self.relay_scope_setting.as_deref()
     }
 
     fn qualify_offline(

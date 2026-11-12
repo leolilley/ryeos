@@ -2,7 +2,7 @@
 //!
 //! The operator either names an installed external-execution binding, from
 //! whose verified document the provider backend, account, adapter artifact
-//! identity, Render owner, API trust roots and network inputs are taken so the
+//! identity, provider owner, API trust roots and network inputs are taken so the
 //! producer can never drift from the placement binding it feeds, or states
 //! backend, account, owner and trust roots outright on a node that places no
 //! sessions. The standalone adapter artifact comes from the installed bundles
@@ -25,10 +25,9 @@ use super::{
 };
 use crate::node_config::NodeConfigSection as _;
 use crate::node_config::sections::external_execution::compose::{
-    ProducerSourceFacts, canonical_backend_id, item_context, load_node_identity,
-    operator_network_inputs, parse_tls_root_pem, publish_signed_document, read_installed_binding,
-    read_installed_document, resolve_installed_artifacts, sign_node_document, validate_document_id,
-    verify_node_signed,
+    ProducerSourceFacts, item_context, load_node_identity, operator_network_inputs,
+    parse_tls_root_pem, publish_signed_document, read_installed_binding, read_installed_document,
+    resolve_installed_artifacts, sign_node_document, validate_document_id, verify_node_signed,
 };
 
 /// Largest snapshot production spec the adapter accepts.
@@ -60,7 +59,7 @@ impl Default for ProductionLimits {
 /// so has no external-execution binding to take them from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StandaloneProducerFacts {
-    /// Lifecycle backend id; `render` selects render-sandbox-early-access.
+    /// Installed lifecycle adapter backend id.
     pub backend: String,
     /// Provider account label that scopes the credential.
     pub account: String,
@@ -177,7 +176,7 @@ fn standalone_source_facts(
         "account must be 1..=128 characters of A-Z a-z 0-9 _ - ."
     );
     let roots = parse_tls_root_pem(&stated.roots_pem)?;
-    let backend = canonical_backend_id(&stated.backend).to_owned();
+    let backend = stated.backend.clone();
     let adapter_artifact_hash = adapter_artifact_hash(&backend)?;
     Ok(ProducerSourceFacts {
         backend,
@@ -425,8 +424,8 @@ pub(crate) mod tests {
 
     pub(crate) fn facts() -> ProducerSourceFacts {
         ProducerSourceFacts {
-            backend: "render-sandbox-early-access".into(),
-            account: "render-test".into(),
+            backend: "test-backend".into(),
+            account: "provider-test".into(),
             adapter_artifact_hash: "b".repeat(64),
             settings: serde_json::json!({
                 "schema": 2,
@@ -444,7 +443,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) const SPEC: &[u8] = br#"{"schema":1,"provider_profile":"render_sandbox_v1"}"#;
+    pub(crate) const SPEC: &[u8] = br#"{"schema":1,"provider_profile":"test_profile_v1"}"#;
 
     pub(crate) fn request<'a>(node: &'a StoppedNode, id: &str) -> ProductionComposeRequest<'a> {
         ProductionComposeRequest {
@@ -473,7 +472,7 @@ pub(crate) mod tests {
     fn installs_a_loader_admissible_document_derived_from_the_facts() {
         let node = stopped_node();
         let report = install_production(&node, "snapshot-producer");
-        assert_eq!(report.backend, "render-sandbox-early-access");
+        assert_eq!(report.backend, "test-backend");
         assert_eq!(report.provider_group_id, "sbg-exact");
         assert_eq!(report.snapshot_spec_sha256, lillux::sha256_hex(SPEC));
         assert!(
@@ -558,8 +557,8 @@ pub(crate) mod tests {
 
     fn stated() -> StandaloneProducerFacts {
         StandaloneProducerFacts {
-            backend: "render".into(),
-            account: "render-test".into(),
+            backend: "test-backend".into(),
+            account: "provider-test".into(),
             owner_id: "usr-test".into(),
             roots_pem: crate::node_config::sections::external_execution::compose::tests::root_pem(),
         }
@@ -567,7 +566,7 @@ pub(crate) mod tests {
 
     fn standalone_facts() -> ProducerSourceFacts {
         standalone_source_facts(&stated(), |backend| {
-            assert_eq!(backend, "render-sandbox-early-access");
+            assert_eq!(backend, "test-backend");
             Ok("b".repeat(64))
         })
         .unwrap()
@@ -617,7 +616,7 @@ pub(crate) mod tests {
         );
         assert_eq!(binding_report.source, "external_binding:operator");
         assert_eq!(standalone_report.source, "standalone");
-        assert_eq!(standalone_document.backend, "render-sandbox-early-access");
+        assert_eq!(standalone_document.backend, "test-backend");
         assert_eq!(standalone_document.adapter_artifact_hash, "b".repeat(64));
         assert_eq!(
             standalone_document.network_inputs,

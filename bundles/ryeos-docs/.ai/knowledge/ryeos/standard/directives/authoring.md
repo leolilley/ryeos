@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T02:15:39Z:c878fcdb8dd85b10b7ce4d50f2fb01210a416b75d1cdadcbc02931a241900abd:oIDMe2g7c1yq2p46VYddNx6/EJlkKSaFTLMLYyedhzox7b2uvQRKic1dCK7VmfrQnOWrwu3d4os82kCkZv5ZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-10-31T02:06:51Z:83fad713521ac63d56180ab1ae22e6e12790ccc8a1eff7cc813a5239168b7711:jdqPlSs/JMOU2Ea2sovWQmcvlrpBb2ers7gAWPdPOzP0wz7e4ytFia2je0ZAVIMw22GISSRaSEP3NG1rTUe3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -67,6 +67,12 @@ Instructions for the runtime.
   Each in-flight dispatch holds one dedicated daemon connection for the
   child's whole duration, so raise the bound with the node's connection
   budget and concurrent-directive count in mind.
+
+Only runtime limits are enforced; prose instructions such as "call the tool
+once" are not. Set `limits.tool_calls` (and `limits.turns`) to bound a run, and
+set `return_nudge` (`true`, or a custom message) so a small open model is told
+to return its result after a tool call instead of re-querying until the turn
+limit.
 
 Keep directives focused: one job, clear inputs, explicit declared capabilities, and no hidden reliance on project-root provider configs unless trust policy allows it.
 

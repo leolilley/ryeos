@@ -1564,6 +1564,7 @@ mod tests {
                 connect_timeout_ms: 1_000,
                 request_timeout_ms: 2_000,
                 maximum_response_bytes: 64 * 1024,
+                max_clock_skew_ms: None,
             }.into(),
             tls_root_certificates_der_base64: roots,
             placement_thread_id: "T-supervisor-journal".into(),
@@ -1970,10 +1971,10 @@ mod tests {
             guest_directory,
             &authority,
             &launcher_digest,
-            expected_binding,
+            expected_binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&expected_binding).unwrap(),
             host.factory(),
-            host.destination(),
-        )
+            host.destination())
         .unwrap();
         let launch = attached
             .begin_launch(
@@ -2042,9 +2043,9 @@ mod tests {
             &authority,
             &launcher_digest,
             expected_binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&expected_binding).unwrap(),
             host.factory(),
-            host.destination(),
-        )
+            host.destination())
         .unwrap();
         let anchored_guest = reservation.store_identity().clone();
         let launch = attached

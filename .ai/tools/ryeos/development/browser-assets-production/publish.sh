@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-12T12:57:28Z:3984884b6e28a44a12b0e276d1d444ce1fa4cd77342a7e0fd3aacdf4313f7c92:+hrPc0A9nUEpHNsHSVY6k+00k6OumBfXq2qWhIKr6NG29G0LTTTO5GKPkgN57sjoUNdFt+MdvJYe/07fqZ0fDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T13:52:53Z:23fe26e974ef79cb8d198c68e3563444f32689bd26452fa451439e8114bd690f:EdTbH/tq4rCzIN8htf+DExOHLON4ClDu2bkfh+p4zyoY8Vzc8794z79pru1tTi4dBilqTa1jZNeZvrItD8LTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"

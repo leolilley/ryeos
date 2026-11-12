@@ -325,10 +325,64 @@ pub fn ingest_qualification_worker_observation_batch(
             wire_max_bytes,
         )?;
     persist_state_observations(state, placement, request_digest, &body, 128 * 16)?;
+    note_bridge_refusal(state, placement, &body);
     Ok(serde_json::json!({
         "through_sequence": ack.through_sequence,
         "batch_digest": ack.batch_digest,
     }))
+}
+
+fn plain_identifier(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-./:".contains(&byte))
+}
+
+/// The bridge reports a refused workload message as a `bridge.refused` event
+/// carrying only a class and a method name. The Worker is untrusted, so each
+/// field is re-checked as a plain bounded identifier and anything else is
+/// dropped; the returned notes never contain message content.
+fn bridge_refusal_notes(body: &Value) -> Vec<String> {
+    let Some(events) = body.get("events").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    events
+        .iter()
+        .filter(|event| event.get("event_type").and_then(Value::as_str) == Some("bridge.refused"))
+        .map(|event| {
+            let payload = event.get("payload");
+            let class = payload
+                .and_then(|payload| payload.get("class"))
+                .and_then(Value::as_str)
+                .filter(|class| plain_identifier(class, 64));
+            let method = payload
+                .and_then(|payload| payload.get("method"))
+                .and_then(Value::as_str)
+                .filter(|method| plain_identifier(method, 128));
+            match (class, method) {
+                (Some("unknown_notification"), Some(method)) => {
+                    format!("bridge refused notification `{method}`")
+                }
+                (Some(class), Some(method)) => {
+                    format!("bridge refused workload message `{method}` ({class})")
+                }
+                (Some(class), None) => format!("bridge refused a workload message ({class})"),
+                (None, _) => "bridge refused a workload message".to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// Keep the bridge's refusal as a short note on the Worker's session so the
+/// failure that follows names its cause.
+fn note_bridge_refusal(state: &AppState, placement: &str, body: &Value) {
+    for note in bridge_refusal_notes(body) {
+        state
+            .persistent_sessions
+            .note_exclusive_diagnostic(placement, &note);
+    }
 }
 
 fn persist_request_delta(
@@ -493,6 +547,8 @@ pub fn execute_signed_qualification_worker_request(
             if let Err(error) = setup {
                 return Err(fence_unknown_command(state, placement, error));
             }
+            // Setup returns without waiting for the connector it started.
+            wait_for_connector(state, placement, deadline)?;
             // Successful setup does not authorize a turn after revocation or
             // expiry. This independent gate verifies setup settlement too.
             let admission = root.authenticate_invocation(state)?;
@@ -589,6 +645,28 @@ fn validate_setup_final(body: &Value, wire_max_bytes: u32) -> Result<()> {
     Ok(())
 }
 
+/// How long a started connector gets to authenticate before the turn is refused.
+const CONNECTOR_CONNECT_WAIT: lillux::time::Duration = lillux::time::Duration::from_secs(30);
+
+fn wait_for_connector(
+    state: &AppState,
+    placement: &str,
+    deadline: lillux::time::MonotonicDeadline,
+) -> Result<()> {
+    let wait = lillux::time::MonotonicDeadline::after(CONNECTOR_CONNECT_WAIT).min(deadline);
+    while !state.state_store.external_connector_connected(placement)? {
+        ensure!(
+            !wait.has_elapsed(),
+            "Q Worker connector did not connect after setup"
+        );
+        lillux::time::sleep(
+            wait.remaining()
+                .min(lillux::time::Duration::from_millis(50)),
+        );
+    }
+    Ok(())
+}
+
 fn fence_unknown_command(state: &AppState, placement: &str, error: anyhow::Error) -> anyhow::Error {
     match state
         .state_store
@@ -677,5 +755,42 @@ mod tests {
         ));
         record.phase = QualificationWorkerCommandPhase::OutcomeUnknown;
         assert!(command_outcome(&record).is_err());
+    }
+}
+
+#[cfg(test)]
+mod bridge_refusal_note_tests {
+    use super::bridge_refusal_notes;
+    use serde_json::json;
+
+    #[test]
+    fn unknown_notification_names_the_method_and_nothing_else() {
+        let notes = bridge_refusal_notes(&json!({"events":[
+            {"event_type":"worker.event","payload":{}},
+            {"event_type":"bridge.refused","payload":{
+                "class":"unknown_notification","method":"turn/moderationMetadata",
+                "body":"credential-bearing-payload"}}
+        ]}));
+        assert_eq!(
+            notes,
+            vec!["bridge refused notification `turn/moderationMetadata`".to_owned()]
+        );
+    }
+
+    #[test]
+    fn untrusted_fields_that_are_not_plain_identifiers_are_dropped() {
+        let notes = bridge_refusal_notes(&json!({"events":[
+            {"event_type":"bridge.refused","payload":{
+                "class":"unknown_notification","method":"spaced out\nsecret"}},
+            {"event_type":"bridge.refused","payload":{
+                "class":"x".repeat(65),"method":"m".repeat(129)}}
+        ]}));
+        assert_eq!(
+            notes,
+            vec![
+                "bridge refused a workload message (unknown_notification)".to_owned(),
+                "bridge refused a workload message".to_owned()
+            ]
+        );
     }
 }

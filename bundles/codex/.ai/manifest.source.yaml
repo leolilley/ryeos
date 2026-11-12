@@ -19,7 +19,7 @@ external_providers:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
     connector: ryeos-external-candidate-connector
-    connector_process_group: new
+    connector_descendants: contained
     configuration_adapter: ryeos-codex-external-configuration
     configuration_destination: environments.toml
     qualification_request_binding_protocol: ryeos.external-execution.qualification-request-binding.v1

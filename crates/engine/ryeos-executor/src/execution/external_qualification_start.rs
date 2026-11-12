@@ -118,10 +118,26 @@ fn run_consumer_runtime_verification_transport_for_invocation(
         (Err(error), Ok(())) => Err(error),
         (Ok(()), Err(cleanup_error)) => Err(cleanup_error
             .context("Q transport settled but original guest scratch remains cleanup-unproved")),
-        (Err(error), Err(cleanup_error)) => Err(error.context(format!(
-            "Q original guest scratch remains cleanup-unproved: {cleanup_error:#}"
-        ))),
+        (Err(error), Err(cleanup_error)) => Err(with_secondary_failure(
+            error,
+            "Q original guest scratch remains cleanup-unproved",
+            &cleanup_error,
+        )),
     }
+}
+
+/// Keep a primary failure as the head of the reported error and carry a
+/// failure of the cleanup that followed it as secondary text. A plain
+/// `context` call would put the cleanup failure first and make it read as the
+/// cause. The primary stays in the chain, so typed markers on it remain
+/// reachable.
+pub(super) fn with_secondary_failure(
+    primary: anyhow::Error,
+    secondary_label: &str,
+    secondary: &anyhow::Error,
+) -> anyhow::Error {
+    let head = format!("{primary}; {secondary_label}: {secondary:#}");
+    primary.context(head)
 }
 
 /// The exact released channel and its remote cleanup obligation. Dropping this
@@ -320,11 +336,47 @@ fn await_external_qualification_ready(
             // The lifeline retains cancellation even when no local provider
             // was launched. Cleanup proof is a separate durable observation.
             drop(cleanup);
+            let error = ryeos_app::external_placement::with_external_guest_owner_testimony(
+                state,
+                start.placement(),
+                error,
+            );
             Err(error
                 .context(
                     "external qualification startup failed; cleanup attempted by retained owner",
                 )
                 .context(ryeos_app::persistent_session::PersistentSessionCleanupUnproved))
         }
+    }
+}
+
+#[cfg(test)]
+mod secondary_failure_tests {
+    use super::with_secondary_failure;
+
+    #[derive(Debug)]
+    struct Marker;
+    impl std::fmt::Display for Marker {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("marker")
+        }
+    }
+    impl std::error::Error for Marker {}
+
+    #[test]
+    fn start_failure_with_cleanup_failure_reports_primary_first_and_both() {
+        let primary = anyhow::Error::new(Marker).context("Worker exited before the turn completed");
+        let cleanup = anyhow::anyhow!("scratch cleanup changed its settled allocation");
+        let combined =
+            with_secondary_failure(primary, "scratch remains cleanup-unproved", &cleanup);
+        let shown = format!("{combined}");
+        assert!(
+            shown.starts_with("Worker exited before the turn completed; "),
+            "{shown}"
+        );
+        assert!(shown.contains("scratch cleanup changed its settled allocation"));
+        assert!(combined.downcast_ref::<Marker>().is_some());
+        let chain = format!("{combined:#}");
+        assert!(chain.find("Worker exited").unwrap() < chain.find("scratch cleanup").unwrap());
     }
 }

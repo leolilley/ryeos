@@ -18,6 +18,7 @@ use lillux_sqlite::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::export::{ValidatedCandidateRetention, validated_retained_candidate_root_sets};
+use super::guest_window::GuestChannelWindow;
 use super::journal::{self, ApplicationClaim, JournalOwner};
 use super::native_journal::{self, NativeJournalConnection};
 use super::{
@@ -52,12 +53,12 @@ fn require_q_program(
 
 const DATABASE_NAME: &str = "external-candidate.sqlite3";
 const APPLICATION_ID: i32 = 0x5259_4547; // RYEG
-const SCHEMA_EPOCH: i64 = 13;
+const SCHEMA_EPOCH: i64 = 14;
 
 const OWNER_SQL: &str = r#"
 CREATE TABLE external_guest_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=13),
+    schema_epoch INTEGER NOT NULL CHECK(schema_epoch=14),
     bootstrap_digest TEXT NOT NULL,
     binding_digest TEXT NOT NULL UNIQUE,
     journal_nonce TEXT NOT NULL UNIQUE,
@@ -273,6 +274,9 @@ struct GuestStore {
     bootstrap_digest: String,
     state_runtime_identity_json: String,
     binding: ExecutionChannelBinding,
+    /// The channel's lifetime on this guest's own clock; new frames are
+    /// admitted against it, never against the binding's absolute times.
+    window: GuestChannelWindow,
     store_identity: GuestJournalStoreIdentity,
 }
 
@@ -307,6 +311,7 @@ pub struct ReservedGuestJournal {
     bootstrap_digest: String,
     state_runtime_identity_json: String,
     binding: ExecutionChannelBinding,
+    window: GuestChannelWindow,
     store_identity: GuestJournalStoreIdentity,
     factory: Arc<OriginalNativeFactory>,
     destination: Arc<dyn OriginalNativeDestinationAuthority>,
@@ -551,6 +556,10 @@ impl ReservedGuestJournal {
         &self.binding
     }
 
+    pub fn window(&self) -> &GuestChannelWindow {
+        &self.window
+    }
+
     /// Initialize the already-anchored exact inode. This can be consumed only
     /// by the process that reserved it; recovery never reopens this authority.
     /// The reserved main is still zero-length, so the native `Existing` open
@@ -565,6 +574,7 @@ impl ReservedGuestJournal {
             bootstrap_digest,
             state_runtime_identity_json,
             binding,
+            window,
             store_identity,
             factory,
             destination,
@@ -664,6 +674,7 @@ impl ReservedGuestJournal {
             bootstrap_digest,
             state_runtime_identity_json,
             binding,
+            window,
             store_identity,
         };
         if let Err(error) = store.validate() {
@@ -676,6 +687,10 @@ impl ReservedGuestJournal {
 impl PreparedGuestJournal {
     pub fn binding(&self) -> &ExecutionChannelBinding {
         &self.0.binding
+    }
+
+    pub fn window(&self) -> &GuestChannelWindow {
+        &self.0.window
     }
 
     pub fn store_identity(&self) -> &GuestJournalStoreIdentity {
@@ -693,6 +708,7 @@ impl PreparedGuestJournal {
         authority: &PinnedStateAuthority,
         bootstrap_digest: &str,
         binding: ExecutionChannelBinding,
+        window: GuestChannelWindow,
         factory: &Arc<OriginalNativeFactory>,
         destination: Arc<dyn OriginalNativeDestinationAuthority>,
         retain: RetainTerminal<'_>,
@@ -702,6 +718,7 @@ impl PreparedGuestJournal {
             authority,
             bootstrap_digest,
             binding,
+            window,
             factory,
             destination,
         )?
@@ -726,6 +743,7 @@ impl PreparedGuestJournal {
         authority: &PinnedStateAuthority,
         bootstrap_digest: &str,
         binding: ExecutionChannelBinding,
+        window: GuestChannelWindow,
         factory: &Arc<OriginalNativeFactory>,
         destination: Arc<dyn OriginalNativeDestinationAuthority>,
     ) -> Result<ReservedGuestJournal> {
@@ -768,6 +786,7 @@ impl PreparedGuestJournal {
             bootstrap_digest: bootstrap_digest.to_owned(),
             state_runtime_identity_json,
             binding,
+            window,
             store_identity,
             factory: Arc::clone(factory),
             destination,
@@ -869,6 +888,7 @@ impl RecoveredGuestJournal {
         store_identity: &GuestJournalStoreIdentity,
         bootstrap_digest: &str,
         binding: &ExecutionChannelBinding,
+        window: GuestChannelWindow,
         factory: &Arc<OriginalNativeFactory>,
         destination: Arc<dyn OriginalNativeDestinationAuthority>,
         retain: RetainTerminal<'_>,
@@ -879,6 +899,7 @@ impl RecoveredGuestJournal {
             store_identity,
             bootstrap_digest,
             binding,
+            window,
             factory,
             destination,
             retain,
@@ -900,6 +921,10 @@ impl RecoveredGuestJournal {
 
     pub fn binding(&self) -> &ExecutionChannelBinding {
         &self.0.binding
+    }
+
+    pub fn window(&self) -> &GuestChannelWindow {
+        &self.0.window
     }
 
     /// Persist cancellation independently before attempting contiguous append.
@@ -969,6 +994,10 @@ impl LiveGuestJournal {
 
     pub fn binding(&self) -> &ExecutionChannelBinding {
         &self.0.binding
+    }
+
+    pub fn window(&self) -> &GuestChannelWindow {
+        &self.0.window
     }
 
     pub fn has_applied_release(&self) -> Result<bool> {
@@ -1626,10 +1655,10 @@ impl LiveGuestJournal {
 
     pub fn record_frame(&self, wire: &[u8]) -> Result<bool> {
         self.0.require_database_identity()?;
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             &self.0.binding,
-            lillux::time::timestamp_millis(),
+            &self.0.window,
         )?;
         if matches!(verified.frame().payload, ExecutionChannelPayload::Cancel) {
             let committed = self.0.commit_terminal_revocation(wire)?;
@@ -1659,10 +1688,10 @@ impl LiveGuestJournal {
     /// acknowledgements; locally authored frames remain pending remote proof.
     pub fn record_owner_acknowledgement(&self, wire: &[u8]) -> Result<bool> {
         self.0.require_database_identity()?;
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             &self.0.binding,
-            lillux::time::timestamp_millis(),
+            &self.0.window,
         )?;
         ensure!(
             verified.frame().direction == ChannelDirection::OwnerToSupervisor
@@ -1915,10 +1944,10 @@ impl LiveGuestJournal {
     /// asking the transport owner to reconstruct its signed coordinates.
     /// Cancellation uses the separate sticky-revocation API.
     pub fn record_and_claim(&self, wire: &[u8]) -> Result<GuestApplicationClaim> {
-        let verified = SignedExecutionFrame::decode_and_verify(
+        let verified = SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             &self.0.binding,
-            lillux::time::timestamp_millis(),
+            &self.0.window,
         )?;
         ensure!(
             !matches!(verified.frame().payload, ExecutionChannelPayload::Cancel),
@@ -1981,10 +2010,10 @@ impl LiveGuestJournal {
                         "INSERT INTO external_guest_terminal_application VALUES(?1,?2,'claimed')",
                         params![self.0.binding.digest()?, committed.frame.digest()],
                     )?;
-                    let frame = SignedExecutionFrame::decode_and_verify(
+                    let frame = SignedExecutionFrame::decode_and_verify_in_guest_window(
                         &committed.wire,
                         &self.0.binding,
-                        lillux::time::timestamp_millis(),
+                        &self.0.window,
                     )?;
                     GuestTerminalApplicationClaim::New(GuestTerminalApplicationToken(frame))
                 }
@@ -2472,6 +2501,7 @@ impl GuestStore {
         store_identity: &GuestJournalStoreIdentity,
         bootstrap_digest: &str,
         binding: &ExecutionChannelBinding,
+        window: GuestChannelWindow,
         factory: &Arc<OriginalNativeFactory>,
         destination: Arc<dyn OriginalNativeDestinationAuthority>,
         retain: RetainTerminal<'_>,
@@ -2567,6 +2597,7 @@ impl GuestStore {
             bootstrap_digest: bootstrap_digest.to_owned(),
             state_runtime_identity_json,
             binding: binding.clone(),
+            window,
             store_identity: store_identity.clone(),
         };
         if let Err(error) = store.validate() {
@@ -2594,6 +2625,7 @@ impl GuestStore {
             bootstrap_digest,
             state_runtime_identity_json,
             binding,
+            window,
             store_identity,
         } = self;
         // The reservation pin and the lifetime lock are released only after
@@ -2610,6 +2642,7 @@ impl GuestStore {
                     bootstrap_digest,
                     state_runtime_identity_json,
                     binding,
+                    window,
                     store_identity,
                 },
                 error,
@@ -2630,6 +2663,7 @@ impl GuestStore {
             bootstrap_digest,
             state_runtime_identity_json,
             binding,
+            window: _,
             store_identity,
         } = self;
         let error = conn.refuse(error);
@@ -2649,6 +2683,7 @@ impl GuestStore {
     fn owner(&self) -> GuestOwner<'_> {
         GuestOwner {
             bootstrap_digest: &self.bootstrap_digest,
+            window: &self.window,
         }
     }
 
@@ -3126,10 +3161,10 @@ impl GuestStore {
 
     fn commit_terminal_revocation(&self, wire: &[u8]) -> Result<CommittedGuestRevocation> {
         self.require_database_identity()?;
-        let frame = SignedExecutionFrame::decode_and_verify(
+        let frame = SignedExecutionFrame::decode_and_verify_in_guest_window(
             wire,
             &self.binding,
-            lillux::time::timestamp_millis(),
+            &self.window,
         )?;
         ensure!(
             frame.frame().direction == ChannelDirection::OwnerToSupervisor
@@ -3188,9 +3223,14 @@ impl GuestStore {
 
 struct GuestOwner<'a> {
     bootstrap_digest: &'a str,
+    window: &'a GuestChannelWindow,
 }
 
 impl JournalOwner for GuestOwner<'_> {
+    fn frame_lifetime(&self) -> journal::FrameLifetimeCheck<'_> {
+        journal::FrameLifetimeCheck::GuestWindow(self.window)
+    }
+
     fn require_owner(&self, conn: &Connection, binding: &ExecutionChannelBinding) -> Result<()> {
         let retained: Option<(String, String)> = conn
             .query_row(
@@ -3549,10 +3589,10 @@ mod tests {
             authority,
             &bootstrap,
             binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             host.factory(),
             host.destination(),
-            &census(host),
-        )
+            &census(host))
         .unwrap();
         let store_identity = prepared.store_identity().clone();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
@@ -3562,6 +3602,7 @@ mod tests {
                 target_start_time_ticks: 200,
                 group_leader_pid: 100,
                 group_leader_start_time_ticks: 200,
+                group_basis: lillux::GroupBasis::ProcessGroup,
             },
             &"7".repeat(64),
             &"6".repeat(64),
@@ -3673,10 +3714,10 @@ mod tests {
             store_identity,
             bootstrap_digest,
             binding,
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(binding).unwrap(),
             host.factory(),
             host.destination(),
-            &census(host),
-        )
+            &census(host))
     }
 
     /// Reopen, validate and close the retained journal; a refusal settles
@@ -4259,9 +4300,9 @@ mod tests {
             &authority,
             &bootstrap,
             binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             host.factory(),
-            host.destination(),
-        )
+            host.destination())
         .unwrap();
         let outer_anchor = reserved.store_identity().clone();
         outer_anchor.digest().unwrap();
@@ -4287,9 +4328,9 @@ mod tests {
             &authority,
             &bootstrap,
             binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             host.factory(),
-            host.destination(),
-        )
+            host.destination())
         .unwrap();
         let outer_anchor = reserved.store_identity().clone();
         drop(reserved);
@@ -4301,10 +4342,10 @@ mod tests {
                 &authority,
                 &bootstrap,
                 binding.clone(),
+                crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                 host.factory(),
                 host.destination(),
-                &census(&host),
-            ),
+                &census(&host)),
         );
         refusal(
             &host,
@@ -4346,9 +4387,9 @@ mod tests {
                 &authority,
                 &bootstrap,
                 binding.clone(),
+                crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                 host.factory(),
-                host.destination(),
-            )
+                host.destination())
             .unwrap();
 
             match mutation {
@@ -4380,10 +4421,10 @@ mod tests {
                         competing,
                         &authority,
                         &bootstrap,
-                        binding,
+                        binding.clone(),
+                        crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
                         host.factory(),
-                        host.destination(),
-                    ) {
+                        host.destination()) {
                         Ok(_) => panic!("competing guest owner acquired reservation"),
                         Err(error) => format!("{error:#}"),
                     };
@@ -4740,10 +4781,10 @@ mod tests {
             &authority,
             &bootstrap,
             binding.clone(),
+            crate::external_execution::guest_window::GuestChannelWindow::starting_now_for_single_clock_harness(&binding).unwrap(),
             host.factory(),
             host.destination(),
-            &census(&host),
-        )
+            &census(&host))
         .unwrap();
         let store_identity = prepared.store_identity().clone();
         let occurrence = LauncherOccurrenceEvidence::from_held_launcher(
@@ -4753,6 +4794,7 @@ mod tests {
                 target_start_time_ticks: 300,
                 group_leader_pid: 200,
                 group_leader_start_time_ticks: 300,
+                group_basis: lillux::GroupBasis::ProcessGroup,
             },
             &"7".repeat(64),
             &"6".repeat(64),

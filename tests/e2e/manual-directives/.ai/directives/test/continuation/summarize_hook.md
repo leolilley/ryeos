@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-02T05:15:26Z:b8d7bce577589825a6073556bee1f8a908e7929027ad6e803a3d503b11e1b334:EdvO9s5pB7o6DmSGZvOdG4DZIRHG+B5RHA3kRuuwvO99lx2imafIDE1iChg8Og1UOh8vhJsw3uBsIcS2z8+nAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T09:41:52Z:cb91e3e77e4b137db6be2c664afe6cefad8ff6457ee0e0753352896180bfcd35:bqhixCepUwasvqidY/YsZ/cHAABBl+iomaPl6GVhCxJT85MCT7YRGDbt6/7uXTnYg29kZtKBVxCkETOZN8biAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "E2E continuation hook target that summarizes the live continuation boundary."
 version: "1.0.0"

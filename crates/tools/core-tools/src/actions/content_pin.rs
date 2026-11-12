@@ -266,7 +266,7 @@ fn run_content_pin_prepared(
             &header.content_hash,
             &header.signature_b64,
             &header.signer_fingerprint,
-            lillux::signature::content_to_sign(&body, envelope.after_shebang),
+            &body,
             &signing_key.verifying_key(),
             &signer_fingerprint,
         )

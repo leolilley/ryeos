@@ -1173,7 +1173,7 @@ fn prepare_owned_workspace_after_thread_birth(
                                 launch_owner,
                                 &identity,
                             )
-                            .map_err(|error| error.to_string())
+                            .map_err(|error| format!("{error:#}"))
                     }
                     #[cfg(not(target_os = "linux"))]
                     {
@@ -1809,7 +1809,7 @@ fn post_execution_foldback(
     let permit = state
         .write_barrier
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error:#}"))?;
 
     // Fold back changes
     let (operational_shadow_paths, output_context) =
@@ -2133,7 +2133,7 @@ fn finalize_completion(
     match finalized {
         Ok(thread) => Ok(thread),
         Err(err) => {
-            tracing::error!(error = %err, "invalid completion during finalization");
+            tracing::error!(error = %format!("{err:#}"), "invalid completion during finalization");
             Err(ExecutionCleanupFailure {
                 operation: "finalize completion",
                 operation_error: err,
@@ -3135,13 +3135,15 @@ fn promoted_scoped_producer_commands(
 
 fn admitted_root_requires_process_scope(
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
-) -> Result<bool> {
+) -> Result<ryeos_app::thread_lifecycle::ProcessContainmentRequirement> {
     metadata
         .sealed_root_request
         .as_ref()
-        .map(|sealed| sealed.requires_process_scope_for_qualification())
+        .map(|sealed| sealed.process_containment_for_qualification())
         .transpose()
-        .map(|required| required.unwrap_or(false))
+        .map(|required| {
+            required.unwrap_or(ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None)
+        })
 }
 
 // Execution plumbing: each argument is a distinct leg of the thread's
@@ -3323,12 +3325,12 @@ fn build_protocol_launch_env(
         });
 
     let isolation_daemon_socket_path =
-        callback_ipc_requested.then(|| state.config.uds_path.clone());
+        callback_ipc_requested.then(|| state.config.runtime_uds_path());
     let callback_socket_path = if callback_socket_requested {
         Some(
             state
                 .config
-                .uds_path
+                .runtime_uds_path()
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("callback socket path is not valid UTF-8"))?
                 .to_owned(),
@@ -3345,6 +3347,7 @@ fn build_protocol_launch_env(
         item_ref,
         thread_id: thread_id.to_string(),
         project_path: project_path.to_path_buf(),
+        runtime_state_root: callback_project_path.to_path_buf(),
         acting_principal: acting_principal.to_string(),
         cas_root,
         callback_token: callback_token.clone(),
@@ -3974,6 +3977,7 @@ pub(crate) fn prepare_process_inputs(
     retained_resolution: &ryeos_engine::resolution::ResolutionOutput,
     base_path: &Path,
     source_placement: super::source_closure::SourceMountPlacement,
+    private_runtime_view_realizations: bool,
 ) -> Result<PreparedProcessInputs> {
     // `retained_resolution` is the execution being spawned. For a borrowed
     // child this already materializes/mounts the child's finalized source and
@@ -4142,13 +4146,26 @@ pub(crate) fn prepare_process_inputs(
                 anyhow::bail!("private input delivery has no armed materialization budget")
             }
         };
-        (
+        let external = if private_runtime_view_realizations {
+            // The view lives under the private scratch root, whose lifeline
+            // outlives the process; only its path is handed to the child.
+            let view = super::persistent_session::create_node_owned_runtime_view(&path)?;
+            super::external_content::bind_external_realizations_in_private_runtime_view_with_budget(
+                state,
+                retained_resolution,
+                view.path(),
+                budget,
+            )?
+        } else {
             super::external_content::bind_external_realizations_in_private_workspace_with_budget(
                 state,
                 retained_resolution,
                 &path,
                 budget,
-            )?,
+            )?
+        };
+        (
+            external,
             super::source_closure::bind_source_in_private_workspace_with_budget(
                 state,
                 retained_resolution,
@@ -5261,6 +5278,10 @@ pub async fn run_and_wait(
             &prepared_plan,
             state.isolation.is_enforced(),
         ),
+        super::persistent_session::tool_supports_private_descriptor_realizations(
+            &protocol.descriptor,
+            state.isolation.as_ref(),
+        ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
@@ -5364,7 +5385,7 @@ pub async fn run_and_wait(
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
-        bindings: protocol_env_bindings,
+        bindings: mut protocol_env_bindings,
         callback_token,
         thread_auth_token,
         isolation_daemon_socket_path,
@@ -5389,6 +5410,13 @@ pub async fn run_and_wait(
         wait_remote_consumer_grant,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    if let Some(bound) = wait_bound_external.as_ref() {
+        protocol_env_bindings.extend(
+            bound
+                .delivery_env_bindings()
+                .map_err(|error| guard.fail_before_spawn(error))?,
+        );
+    }
     if let Some(token) = callback_token {
         guard.track_callback_token(token);
     }
@@ -5560,7 +5588,7 @@ pub async fn run_and_wait(
             original_snapshot_hash: wait_snapshot.as_deref(),
             state_root: wait_state_root.as_deref(),
             selected_resources: wait_selected_resources,
-            require_process_scope: wait_requires_process_scope,
+            process_containment: wait_requires_process_scope,
         })
     });
 
@@ -6288,6 +6316,10 @@ pub async fn run_detached(
             &prepared_plan,
             state.isolation.is_enforced(),
         ),
+        super::persistent_session::tool_supports_private_descriptor_realizations(
+            &protocol.descriptor,
+            state.isolation.as_ref(),
+        ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     effective_path = process_path;
@@ -6362,7 +6394,7 @@ pub async fn run_detached(
     }
     let launch_timeout_secs = prepared_plan.timeout_secs;
     let ProtocolLaunchEnv {
-        bindings: protocol_env_bindings,
+        bindings: mut protocol_env_bindings,
         callback_token,
         thread_auth_token,
         isolation_daemon_socket_path,
@@ -6387,6 +6419,13 @@ pub async fn run_detached(
         None,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    if let Some(bound) = bg_bound_external.as_ref() {
+        protocol_env_bindings.extend(
+            bound
+                .delivery_env_bindings()
+                .map_err(|error| guard.fail_before_spawn(error))?,
+        );
+    }
     if let Some(token) = callback_token {
         guard.track_callback_token(token);
     }
@@ -6944,7 +6983,7 @@ async fn dispatch_detached_bg_task(
             original_snapshot_hash: snap_for_spawn.as_deref(),
             state_root: state_root_for_spawn.as_deref(),
             selected_resources: bg_selected_resources,
-            require_process_scope: bg_requires_process_scope,
+            process_containment: bg_requires_process_scope,
         })
     })
     .await;
@@ -8936,6 +8975,18 @@ async fn run_existing_recovered_thread(
     .map_err(|error| {
         guard.fail_before_spawn(error.context("admitted_execution_closure_invalid"))
     })?;
+    let recovered_private_view_realizations = recovered_direct_protocol(
+        &engine,
+        &admitted_capsule,
+        &params.resolved.resolved_item.kind,
+    )
+    .map(|protocol| {
+        super::persistent_session::tool_supports_private_descriptor_realizations(
+            &protocol.descriptor,
+            state.isolation.as_ref(),
+        )
+    })
+    .map_err(|error| guard.fail_before_spawn(error.context("admitted_protocol_closure_invalid")))?;
     let PreparedProcessInputs {
         path: process_path,
         default_input_cwd,
@@ -8955,6 +9006,7 @@ async fn run_existing_recovered_thread(
             &prepared_plan,
             state.isolation.is_enforced(),
         ),
+        recovered_private_view_realizations,
     )
     .map_err(|error| {
         guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
@@ -9047,6 +9099,7 @@ async fn run_existing_recovered_thread(
         .map_err(|error| guard.fail_before_spawn(error))?;
     super::admitted_trust::validate_direct_current_trust(
         &engine,
+        &state.node_policy,
         &current_trust_store,
         primary_resolution,
         prepared_plan.execution_plan(),
@@ -9131,7 +9184,7 @@ async fn run_existing_recovered_thread(
         .get_launch_metadata(&thread_id)?
         .context("recovered direct root has no retained launch metadata")?;
     let ProtocolLaunchEnv {
-        bindings: protocol_env_bindings,
+        bindings: mut protocol_env_bindings,
         callback_token,
         thread_auth_token,
         isolation_daemon_socket_path,
@@ -9169,6 +9222,13 @@ async fn run_existing_recovered_thread(
         )?,
     )
     .map_err(|error| guard.fail_before_spawn(error.context("protocol_contract_failed")))?;
+    if let Some(bound) = bg_external_realizations.as_ref() {
+        protocol_env_bindings.extend(
+            bound
+                .delivery_env_bindings()
+                .map_err(|error| guard.fail_before_spawn(error))?,
+        );
+    }
     if let Some(token) = callback_token {
         guard.track_callback_token(token);
     }

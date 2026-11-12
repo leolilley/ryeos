@@ -47,7 +47,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -175,253 +175,253 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "cli_auth_credentials_store": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "model_provider": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "check_for_update_on_startup": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approval_policy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approvals_reviewer": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "default_permissions": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "web_search": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "allow_login_shell": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.inherit": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.ignore_default_excludes": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.PATH": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LANG": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_ALL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_CTYPE": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TERM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TZ": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TMPDIR": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_NOSYSTEM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_GLOBAL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_PAGER": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.CODEX_HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.DBUS_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.SSH_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.*PROXY": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "agents.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.image_generation": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.goals": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.apps": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.plugins": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.skill_mcp_dependency_install": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.remote_plugin": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.hooks": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent_v2.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.memories": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.network_proxy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode_host": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.skills.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.mcp.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           }
         },
         "layers": [
@@ -429,7 +429,7 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa",
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -447,7 +447,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -499,7 +499,7 @@
               "file": "/controller/private-home/config.toml",
               "profile": null
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa",
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -509,7 +509,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -618,7 +618,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -750,253 +750,253 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "cli_auth_credentials_store": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "model_provider": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "check_for_update_on_startup": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approval_policy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approvals_reviewer": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "default_permissions": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "web_search": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "allow_login_shell": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.inherit": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.ignore_default_excludes": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.PATH": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LANG": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_ALL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_CTYPE": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TERM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TZ": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TMPDIR": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_NOSYSTEM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_GLOBAL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_PAGER": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.CODEX_HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.DBUS_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.SSH_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.*PROXY": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "agents.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.image_generation": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.goals": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.apps": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.plugins": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.skill_mcp_dependency_install": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.remote_plugin": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.hooks": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent_v2.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.memories": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.network_proxy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode_host": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.skills.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.mcp.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "projects./workspace.trust_level": {
             "name": {
@@ -1004,7 +1004,7 @@
               "file": "/controller/private-home/config.toml",
               "profile": null
             },
-            "version": "sha256:fea759ebffaad145577a11e0cf31d833d7be48de7f995dc0fc55991ed8aeb16e"
+            "version": "sha256:105a819162b357bd188124bf0249556f237697d77114aba86da84393bd0ca3aa"
           }
         },
         "layers": [
@@ -1012,7 +1012,7 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa",
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -1030,7 +1030,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -1082,7 +1082,7 @@
               "file": "/controller/private-home/config.toml",
               "profile": null
             },
-            "version": "sha256:fea759ebffaad145577a11e0cf31d833d7be48de7f995dc0fc55991ed8aeb16e",
+            "version": "sha256:105a819162b357bd188124bf0249556f237697d77114aba86da84393bd0ca3aa",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -1092,7 +1092,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -1206,7 +1206,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -1334,253 +1334,253 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "cli_auth_credentials_store": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "model_provider": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "check_for_update_on_startup": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approval_policy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approvals_reviewer": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "default_permissions": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "web_search": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "allow_login_shell": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.inherit": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.ignore_default_excludes": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.PATH": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LANG": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_ALL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_CTYPE": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TERM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TZ": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TMPDIR": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_NOSYSTEM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_GLOBAL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_PAGER": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.CODEX_HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.DBUS_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.SSH_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.*PROXY": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "agents.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.image_generation": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.goals": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.apps": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.plugins": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.skill_mcp_dependency_install": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.remote_plugin": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.hooks": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent_v2.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.memories": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.network_proxy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode_host": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.skills.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.mcp.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           }
         },
         "layers": [
@@ -1597,7 +1597,7 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa",
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -1615,7 +1615,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -1667,7 +1667,7 @@
               "file": "/controller/private-home/config.toml",
               "profile": null
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa",
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -1677,7 +1677,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -1786,7 +1786,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -1914,253 +1914,253 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "cli_auth_credentials_store": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "model_provider": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "check_for_update_on_startup": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approval_policy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "approvals_reviewer": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "default_permissions": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "web_search": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "allow_login_shell": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.inherit": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.ignore_default_excludes": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.PATH": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LANG": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_ALL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.LC_CTYPE": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TERM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TZ": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.TMPDIR": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_NOSYSTEM": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_CONFIG_GLOBAL": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.GIT_PAGER": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.CODEX_HOME": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.DBUS_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.SSH_*": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "shell_environment_policy.filters.*PROXY": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "agents.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.image_generation": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.goals": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.apps": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.plugins": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.skill_mcp_dependency_install": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.remote_plugin": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.hooks": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.multi_agent_v2.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.memories": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.network_proxy": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode_host": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "features.code_mode.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.skills.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           },
           "orchestrator.mcp.enabled": {
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa"
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b"
           }
         },
         "layers": [
@@ -2168,7 +2168,7 @@
             "name": {
               "type": "sessionFlags"
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa",
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -2186,7 +2186,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -2238,7 +2238,7 @@
               "file": "/controller/private-home/config.toml",
               "profile": null
             },
-            "version": "sha256:0a0c3291f31f7d3dc83f7ba276d26204409d791ce3cef7004ce8c1dafa5fe7aa",
+            "version": "sha256:035f9b098154415e2594b35b2f3930c26727bf33ba1aa848d1d7fc143b08ad1b",
             "config": {
               "forced_login_method": "chatgpt",
               "cli_auth_credentials_store": "file",
@@ -2248,7 +2248,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -2414,7 +2414,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -2572,7 +2572,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -2634,7 +2634,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -2743,7 +2743,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -2897,7 +2897,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -2963,7 +2963,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -3072,7 +3072,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -3226,7 +3226,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -3288,7 +3288,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -3410,7 +3410,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -3564,7 +3564,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -3626,7 +3626,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -3735,7 +3735,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -3889,7 +3889,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -3951,7 +3951,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -4060,7 +4060,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -4214,7 +4214,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -4276,7 +4276,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -4385,7 +4385,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -4539,7 +4539,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -4601,7 +4601,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -4710,7 +4710,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -4865,7 +4865,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -4927,7 +4927,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -5036,7 +5036,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -5189,7 +5189,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -5251,7 +5251,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -5360,7 +5360,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -5514,7 +5514,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -5576,7 +5576,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -5685,7 +5685,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -5841,7 +5841,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -5903,7 +5903,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -6012,7 +6012,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -6166,7 +6166,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -6228,7 +6228,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -6342,7 +6342,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -6496,7 +6496,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -6563,7 +6563,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -6672,7 +6672,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -6826,7 +6826,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -6888,7 +6888,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -7003,7 +7003,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -7180,7 +7180,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -7334,7 +7334,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -7396,7 +7396,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -7506,7 +7506,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -7660,7 +7660,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -7721,7 +7721,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -7830,7 +7830,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -7984,7 +7984,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -8046,7 +8046,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -8162,7 +8162,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -8316,7 +8316,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -8378,7 +8378,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -9495,7 +9495,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -9649,7 +9649,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -9711,7 +9711,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -9820,7 +9820,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -9973,7 +9973,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -10035,7 +10035,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -10144,7 +10144,7 @@
           "allow_login_shell": false,
           "sandbox_mode": null,
           "sandbox_workspace_write": null,
-          "default_permissions": "danger-full-access",
+          "default_permissions": ":danger-full-access",
           "permissions": null,
           "notify": [],
           "instructions": null,
@@ -10299,7 +10299,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {
@@ -10361,7 +10361,7 @@
               "check_for_update_on_startup": false,
               "approval_policy": "never",
               "approvals_reviewer": "user",
-              "default_permissions": "danger-full-access",
+              "default_permissions": ":danger-full-access",
               "web_search": "disabled",
               "allow_login_shell": false,
               "shell_environment_policy": {

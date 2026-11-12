@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-10-23T02:19:56Z:d6fd83115c50cf1588e5bd2ab163e4988dafef765bed72d074f2fc226482b78e:1rXP/T7w3X17oPPdQjVtPRMQB3+PDSYeqZM+h7WcyUglpdUTG4/2sa/k2pb4556X2z0r8ysMpbG0JrjTE8bwBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T09:41:52Z:9d93bde112a6dc3eae56e5a9036b7d02522c4e3dc7ba5c5109d69e685185cf36:Jwj3njNUBSkK5SbcDCZfTWeZFh6casmBvWUpWhQvIcZl3sBU81VMmZXT5qBIfcrBsrzL4dD/DD1jOERBAjotDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -400,10 +400,15 @@ daemon_scope_output="$(
 daemon_scope_status=$?
 set -e
 [[ "$daemon_scope_status" -eq 2 ]]
-grep -Fq -- 'build --release --locked -p ryeosd -p ryeos-cli -p ryeos-core-tools' \
+# Packages without features build together; each featured package builds alone
+# with unqualified features (a multi-package build with package-qualified
+# features compiled ryeosd with none of them).
+grep -Fxq -- 'build --release --locked -p ryeos-core-tools' <<<"$daemon_scope_output"
+grep -Fxq -- 'build --release --locked -p ryeosd --features model-provider-setup,scheduling' \
   <<<"$daemon_scope_output"
-grep -Fq -- '--features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling' \
+grep -Fxq -- 'build --release --locked -p ryeos-cli --features model-provider-setup,scheduling' \
   <<<"$daemon_scope_output"
+assert_rejected grep -Fq -- 'ryeosd/' <<<"$daemon_scope_output"
 assert_rejected grep -Fq -- '-p ryeos-session-exec' <<<"$daemon_scope_output"
 assert_rejected grep -Fq -- '-p ryeos-structured-session' <<<"$daemon_scope_output"
 grep -Fq -- \

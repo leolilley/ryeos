@@ -53,7 +53,7 @@ pub(crate) fn verify_retained_signed_envelope(
                 &header.content_hash,
                 &header.signature_b64,
                 &header.signer_fingerprint,
-                lillux::signature::content_to_sign(&raw, envelope.after_shebang),
+                &raw,
                 &key,
                 &signer.signer_fingerprint,
             ),

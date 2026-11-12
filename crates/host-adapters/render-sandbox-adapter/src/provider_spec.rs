@@ -268,6 +268,9 @@ enum BindProofProfile {
 enum NoOccurrenceProofProfile {
     #[serde(rename = "render_no_request_sent_v1")]
     RenderNoRequestSentV1,
+    /// As above, and the provider's own refusal of this create request.
+    #[serde(rename = "render_no_request_sent_or_direct_refusal_v1")]
+    RenderNoRequestSentOrDirectRefusalV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -521,7 +524,7 @@ impl ProviderSpec {
                 && allocate.body.as_ref() == Some(&expected_create_body_mapping())
                 && allocate.bind_proof_profile == Some(BindProofProfile::RenderSandboxCreate201V1)
                 && allocate.no_occurrence_proof_profile
-                    == Some(NoOccurrenceProofProfile::RenderNoRequestSentV1)
+                    == Some(NoOccurrenceProofProfile::RenderNoRequestSentOrDirectRefusalV1)
                 && allocate.mutation_route.is_none()
                 && allocate.observation_route.is_none()
                 && allocate.terminal_proof_profile.is_none(),
@@ -662,7 +665,7 @@ impl ProviderSpec {
         let mut capabilities = BTreeSet::new();
         if self.operations.allocate.kind == OperationKind::CreateOnce
             && self.operations.allocate.no_occurrence_proof_profile
-                == Some(NoOccurrenceProofProfile::RenderNoRequestSentV1)
+                == Some(NoOccurrenceProofProfile::RenderNoRequestSentOrDirectRefusalV1)
         {
             capabilities.insert(LifecycleCapability::AuthoritativeNoOccurrence);
         }
@@ -681,6 +684,9 @@ impl ProviderSpec {
         // SupervisorPending until the channel owner verifies Ready and Release.
         if self.one_shot_activation_enabled() && self.relay_file_enabled() {
             capabilities.insert(LifecycleCapability::SupervisorActivation);
+        }
+        if self.relay_file_enabled() {
+            capabilities.insert(LifecycleCapability::ControllerFileRelay);
         }
         capabilities
     }
@@ -818,6 +824,11 @@ impl ProviderSpec {
 
     pub(crate) fn allocation_bind_proof_enabled(&self) -> bool {
         self.operations.allocate.bind_proof_profile.is_some()
+    }
+
+    pub(crate) fn allocation_direct_refusal_proof_enabled(&self) -> bool {
+        self.operations.allocate.no_occurrence_proof_profile
+            == Some(NoOccurrenceProofProfile::RenderNoRequestSentOrDirectRefusalV1)
     }
 
     pub(crate) fn allocation_no_occurrence_proof_enabled(&self) -> bool {
@@ -1321,6 +1332,7 @@ mod tests {
                 LifecycleCapability::SupervisorActivation,
                 LifecycleCapability::AuthoritativeNoOccurrence,
                 LifecycleCapability::ExactTerminalObservation,
+                LifecycleCapability::ControllerFileRelay,
             ])
         );
 
@@ -1456,6 +1468,7 @@ mod tests {
                 LifecycleCapability::SupervisorActivation,
                 LifecycleCapability::AuthoritativeNoOccurrence,
                 LifecycleCapability::ExactTerminalObservation,
+                LifecycleCapability::ControllerFileRelay,
             ]),
             "activation plus relay admits startup, not runtime or reconciliation testimony"
         );

@@ -234,23 +234,26 @@ fn run(
             reservation.startup_started_at_ms,
             reservation.startup_deadline_ms,
         )?;
-        let channel = loop {
-            check_control(state, thread_id)?;
-            ensure!(
-                !startup_deadline.has_elapsed(),
-                "external direct signed startup deadline expired"
-            );
-            match startup.advance().map_err(anyhow::Error::from)? {
-                ExternalCandidateStartProgress::Ready(channel) => break channel,
-                ExternalCandidateStartProgress::CleanupRequired => {
-                    bail!("external direct startup requires cleanup")
+        let channel = (|| -> Result<_> {
+            loop {
+                check_control(state, thread_id)?;
+                ensure!(
+                    !startup_deadline.has_elapsed(),
+                    "external direct signed startup deadline expired"
+                );
+                match startup.advance().map_err(anyhow::Error::from)? {
+                    ExternalCandidateStartProgress::Ready(channel) => break Ok(channel),
+                    ExternalCandidateStartProgress::CleanupRequired => {
+                        bail!("external direct startup requires cleanup")
+                    }
+                    ExternalCandidateStartProgress::CleanupProved => {
+                        bail!("external direct startup ended without a target")
+                    }
+                    _ => pause(startup_deadline),
                 }
-                ExternalCandidateStartProgress::CleanupProved => {
-                    bail!("external direct startup ended without a target")
-                }
-                _ => pause(startup_deadline),
             }
-        };
+        })()
+        .map_err(|error| placement::with_external_guest_owner_testimony(state, thread_id, error))?;
         drop(startup);
         check_control(state, thread_id)?;
         state.threads.mark_running(thread_id)?;

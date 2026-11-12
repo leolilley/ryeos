@@ -1,0 +1,32 @@
+# ryeos:signed:2026-11-04T04:58:11Z:2c56e19e41966c09f26f460fc0551662f1f5d684f40ca6fb7bd8fcd07edfaa91:8rQxXIIUIAitNLeboyTS73dPxNCuv9zto8neUlclyKTG61Uax6Df4+GA36NmIpDNoHk3PjKfxktnwb7B6epCDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: codex
+version: "1.0.0"
+description: >-
+  The accepted Codex consumer qualification variants, each declaring the guarantees it requires of the
+  node in the capability names the node reports. A node selects the one variant whose requirements its
+  reported guarantees meet; none or more than one is refused, naming the candidates and each unmet
+  guarantee. A variant is a signed policy, whose Worker and verifier are pinned by their own digests, and
+  the relationship that names that policy. The contained variant runs the Worker over a contained session
+  with captured filesystem authority and a captured verifier, so it needs enforced isolation, captured
+  filesystem authority and the captured-compatible callback class, and qualified descendant containment
+  (a cgroup scope or a PID-namespace init) to terminate, recover and settle every descendant. The trusted
+  variant runs the Worker on a trusted process group with node_policy authority, because the Worker's
+  connector needs a new process group; it needs node policy to accept trusted process-group sessions, a
+  weaker guarantee a node reports only where isolation is not enforced. Each policy repeats its variant's
+  requirements, and a node refuses to prove or launch a policy whose requirements it does not hold.
+qualification_variants:
+  schema: ryeos.qualification_variants.v1
+  variants:
+    - policy_ref: config:codex/consumer-qualification-policy
+      relationship_name: runtime_to_external_authoring_worker
+      requires_guarantees:
+        - isolation:enforced
+        - filesystem:captured_execution
+        - callback:captured_compatible
+        - any_of: [termination:scope, termination:pid_namespace]
+        - any_of: [recovery:scope, recovery:pid_namespace]
+    - policy_ref: config:codex/consumer-qualification-policy-trusted-lane
+      relationship_name: runtime_to_external_authoring_worker_trusted_lane
+      requires_guarantees:
+        - name: sessions:trusted_process_group
+          accept: [trusted]

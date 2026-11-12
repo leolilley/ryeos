@@ -506,6 +506,16 @@ mod tests {
         MonotonicDeadline::after(Duration::from_secs(2))
     }
 
+    /// Run the named test alone in a fresh copy of the test binary. Each of
+    /// these tests asserts the instant a descriptor's last holder lets go.
+    /// The kernel finishes a dying process's nested file releases a tick
+    /// later, off the exiting task, so a sibling test that forks and kills a
+    /// held child makes that instant unobservable in a shared process.
+    /// Returns whether the caller is that fresh copy and must run the body.
+    fn isolated(name: &str) -> bool {
+        super::super::fork_creation_custody_tests::run_isolated_in(module_path!(), name)
+    }
+
     #[test]
     #[ignore = "requires native loopback socket binding"]
     fn inherited_duplex_transfers_exact_listener_without_rebinding() {
@@ -548,6 +558,16 @@ mod tests {
         let read = unsafe { File::from_raw_fd(descriptors[0]) };
         let write = unsafe { File::from_raw_fd(descriptors[1]) };
         (read, inherited_descriptor_path(write).unwrap())
+    }
+
+    /// The device and inode behind a descriptor number, or `None` when the
+    /// number is not open. Socket inodes are never reused while the process
+    /// lives, so a different or absent identity proves the original object
+    /// was closed even if another thread has since taken the number.
+    fn descriptor_identity(fd: std::os::fd::RawFd) -> Option<(u64, u64)> {
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        (unsafe { libc::fstat(fd, &mut stat) } == 0)
+            .then_some((stat.st_dev as u64, stat.st_ino as u64))
     }
 
     fn assert_no_writer_leaked(mut reader: File) {
@@ -624,6 +644,9 @@ mod tests {
 
     #[test]
     fn wrong_and_extra_descriptor_counts_close_every_received_right() {
+        if !isolated("wrong_and_extra_descriptor_counts_close_every_received_right") {
+            return;
+        }
         reject_packet_without_leaking(b"ok", 0, 1);
         reject_packet_without_leaking(b"ok", 1, 0);
         reject_packet_without_leaking(b"ok", 2, 1);
@@ -631,6 +654,9 @@ mod tests {
 
     #[test]
     fn payload_and_ancillary_truncation_close_received_and_undelivered_rights() {
+        if !isolated("payload_and_ancillary_truncation_close_received_and_undelivered_rights") {
+            return;
+        }
         reject_packet_without_leaking(b"oversized", 1, 1);
         // Test-only raw sending bypasses the public mechanical ceiling.
         reject_packet_without_leaking(b"ok", MAX_TRANSFER_DESCRIPTORS + 1, 1);
@@ -638,6 +664,9 @@ mod tests {
 
     #[test]
     fn unexpected_ancillary_does_not_hide_later_rights_from_cleanup() {
+        if !isolated("unexpected_ancillary_does_not_hide_later_rights_from_cleanup") {
+            return;
+        }
         let (receiver, child) = inherited_descriptor_transfer_pair().unwrap();
         let enabled = 1i32;
         assert_eq!(
@@ -673,6 +702,9 @@ mod tests {
 
     #[test]
     fn sender_rejects_overflow_before_transfer_and_receiver_observes_eof() {
+        if !isolated("sender_rejects_overflow_before_transfer_and_receiver_observes_eof") {
+            return;
+        }
         let (receiver, child) = inherited_descriptor_transfer_pair().unwrap();
         let (probe, writer) = pipe_probe();
         assert!(
@@ -696,6 +728,9 @@ mod tests {
 
     #[test]
     fn empty_packet_with_rights_is_rejected_without_a_leak() {
+        if !isolated("empty_packet_with_rights_is_rejected_without_a_leak") {
+            return;
+        }
         reject_packet_without_leaking(b"", 1, 1);
     }
 
@@ -738,6 +773,9 @@ mod tests {
 
     #[test]
     fn adopting_wrong_descriptor_type_closes_the_transferred_owner() {
+        if !isolated("adopting_wrong_descriptor_type_closes_the_transferred_owner") {
+            return;
+        }
         let (probe, writer) = pipe_probe();
         let lease = try_retain_fork_sensitive_descriptors().unwrap();
         let file = writer.file().try_clone().unwrap();
@@ -842,6 +880,9 @@ mod tests {
 
     #[test]
     fn unrelated_held_child_must_not_retain_received_inheritance_copy() {
+        if !isolated("unrelated_held_child_must_not_retain_received_inheritance_copy") {
+            return;
+        }
         let (mut reader, received) = received_pipe_authority();
         let inherited = received.for_child().unwrap();
         let mut retained = Vec::new();
@@ -865,6 +906,9 @@ mod tests {
 
     #[test]
     fn unrelated_held_child_must_not_keep_sender_peer_alive() {
+        if !isolated("unrelated_held_child_must_not_keep_sender_peer_alive") {
+            return;
+        }
         let (receiver, child) = inherited_descriptor_transfer_pair().unwrap();
         let unrelated = crate::spawn_awaiting_attachment(held_request())
             .expect("hold unrelated child before exec");
@@ -889,6 +933,9 @@ mod tests {
 
     #[test]
     fn intended_held_child_retains_only_requested_registered_authority() {
+        if !isolated("intended_held_child_retains_only_requested_registered_authority") {
+            return;
+        }
         let (mut reader, received) = received_pipe_authority();
         let mut request = held_request();
         request.inherited_fds.push(received.for_child().unwrap());
@@ -903,6 +950,11 @@ mod tests {
 
     #[test]
     fn pre_fork_failure_releases_registered_request_and_mapping_without_join_deadlock() {
+        if !isolated(
+            "pre_fork_failure_releases_registered_request_and_mapping_without_join_deadlock",
+        ) {
+            return;
+        }
         let (reader, received) = received_pipe_authority();
         let mut request = held_request();
         request.cmd = "invalid\0executable".to_owned();
@@ -919,6 +971,9 @@ mod tests {
 
     #[test]
     fn intended_mapping_closes_source_and_temporary_copies_before_hold() {
+        if !isolated("intended_mapping_closes_source_and_temporary_copies_before_hold") {
+            return;
+        }
         let (reader, received) = received_pipe_authority();
         let pipe_identity =
             std::fs::read_link(format!("/proc/self/fd/{}", reader.as_raw_fd())).unwrap();
@@ -948,6 +1003,9 @@ mod tests {
 
     #[test]
     fn mapping_retains_unrelated_parent_target_without_overwriting_it() {
+        if !isolated("mapping_retains_unrelated_parent_target_without_overwriting_it") {
+            return;
+        }
         let (reader, received) = received_pipe_authority();
         let (other_reader, other) = received_pipe_authority();
         let occupied = other.for_child().unwrap();
@@ -1044,6 +1102,9 @@ mod tests {
 
     #[test]
     fn unrelated_held_child_does_not_retain_duplex_parent_or_clones() {
+        if !isolated("unrelated_held_child_does_not_retain_duplex_parent_or_clones") {
+            return;
+        }
         let (parent, child) = crate::inherited_duplex_channel_pair().unwrap();
         let parent_clone = parent.try_clone().unwrap();
         super::super::configure_nonblocking_fd(child.channel.file()).unwrap();
@@ -1060,6 +1121,9 @@ mod tests {
 
     #[test]
     fn unrelated_held_child_does_not_retain_parent_status_reader() {
+        if !isolated("unrelated_held_child_does_not_retain_parent_status_reader") {
+            return;
+        }
         let status = crate::supervised_launcher_status_pipe().unwrap();
         let unrelated = crate::spawn_awaiting_attachment(held_request()).unwrap();
         drop(status.reader);
@@ -1070,8 +1134,16 @@ mod tests {
 
     #[test]
     fn receive_deadline_returns_during_quiescence_and_deferred_close_settles_queued_rights() {
+        if !isolated(
+            "receive_deadline_returns_during_quiescence_and_deferred_close_settles_queued_rights",
+        ) {
+            return;
+        }
         let (receiver, child) = inherited_descriptor_transfer_pair().unwrap();
         let endpoint_fd = receiver.socket.file().as_raw_fd();
+        // A descriptor number can be reused by a parallel test once closed, so
+        // closure is proved by the kernel object's identity, never the number.
+        let endpoint_identity = descriptor_identity(endpoint_fd).unwrap();
         let (mut probe, writer) = pipe_probe();
         sender(child)
             .send(
@@ -1111,8 +1183,7 @@ mod tests {
         assert!(live_during_quiescence);
         assert_eq!(queued_writer.unwrap_err().kind(), io::ErrorKind::WouldBlock);
         assert_no_writer_leaked(probe);
-        assert_eq!(unsafe { libc::fcntl(endpoint_fd, libc::F_GETFD) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        assert_ne!(descriptor_identity(endpoint_fd), Some(endpoint_identity));
         drop(settlement);
         // Release removed the exact registration, so reuse and re-registration
         // at this coordinate cannot collide with a stale deferred owner.
@@ -1131,6 +1202,9 @@ mod tests {
 
     #[test]
     fn last_owner_close_is_physical_and_clone_contention_returns_authority() {
+        if !isolated("last_owner_close_is_physical_and_clone_contention_returns_authority") {
+            return;
+        }
         let (mut probe, owner) = pipe_probe();
         let clone = owner.clone();
         let (owner, error) = owner.try_close_last_owner(deadline()).unwrap_err();
@@ -1146,6 +1220,9 @@ mod tests {
 
     #[test]
     fn last_owner_close_timeout_retains_original_owner_until_explicit_close() {
+        if !isolated("last_owner_close_timeout_retains_original_owner_until_explicit_close") {
+            return;
+        }
         let (mut probe, owner) = pipe_probe();
         let coordinate = owner.inherited_descriptor().unwrap();
         let quiescence = super::super::quiesce_fork_sensitive_descriptors(
@@ -1175,6 +1252,9 @@ mod tests {
 
     #[test]
     fn unrelated_held_child_must_not_retain_prepared_mapping_copies() {
+        if !isolated("unrelated_held_child_must_not_retain_prepared_mapping_copies") {
+            return;
+        }
         let (mut reader, received) = received_pipe_authority();
         let inherited = received.for_child().unwrap();
         let mut request = held_request();

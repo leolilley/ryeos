@@ -73,6 +73,10 @@ pub struct BuildRequest<'a> {
     /// Project root for env/secret expansion contexts.
     pub project_path: &'a Path,
 
+    /// Directory this launch may write its own state into; see
+    /// `EnvInjectionSource::RuntimeStateRoot`.
+    pub runtime_state_root: &'a Path,
+
     /// Opaque namespace for durable state owned by the admitted logical
     /// project. Absent for projectless execution.
     pub project_state_scope: Option<&'a str>,
@@ -197,6 +201,13 @@ pub fn build_subprocess_spec(
             EnvInjectionSource::ProjectStateScope => {
                 request.project_state_scope.unwrap_or_default().to_string()
             }
+            EnvInjectionSource::RuntimeStateRoot => request
+                .runtime_state_root
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "runtime state root",
+                })?
+                .to_owned(),
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request
                 .cas_root
@@ -338,12 +349,14 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::Http,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -372,12 +385,14 @@ mod tests {
                 allows_pushed_head: false,
                 allows_target_site: false,
                 allows_detached: false,
+                pushed_head_requires_declaration: false,
             },
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
             callback_channel: CallbackChannel::None,
             qualification_callback: None,
+            captured_compatible_callback: None,
             session: None,
             execution_evidence: None,
         }
@@ -413,6 +428,7 @@ mod tests {
             args,
             cwd: Path::new("/project"),
             project_path: Path::new("/project"),
+            runtime_state_root: Path::new("/project"),
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ),

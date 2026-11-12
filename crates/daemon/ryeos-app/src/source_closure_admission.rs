@@ -514,7 +514,7 @@ pub fn admit_source_closure_in_publication(
     let _permit = state
         .write_barrier
         .acquire_with_timeout(crate::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error:#}"))?;
     let cas = authority.cas_store()?;
     let staged = publication
         .as_mut()
@@ -1111,7 +1111,11 @@ fn verify_owner_signed_files(
         .signer_fingerprint
         .as_deref()
         .ok_or_else(|| {
-            anyhow::anyhow!("source-owning project item has no verified signer fingerprint")
+            owner_trust_refused(
+                true,
+                "source-owning project item is unsigned; its files need its owner's signature"
+                    .to_owned(),
+            )
         })?;
     let mut testimony = Vec::with_capacity(candidate.manifest.entries.len());
     let mut root_matched = false;
@@ -1133,12 +1137,17 @@ fn verify_owner_signed_files(
         })?;
         let header =
             ryeos_engine::item_resolution::parse_signature_header(content, &format.signature)
-                .ok_or_else(|| anyhow::anyhow!("source file `{}` is unsigned", entry.path))?;
+                .ok_or_else(|| {
+                    owner_trust_refused(true, format!("source file `{}` is unsigned", entry.path))
+                })?;
         if header.signer_fingerprint != owner {
-            anyhow::bail!(
-                "source file `{}` is signed by a foreign principal",
-                entry.path
-            );
+            return Err(owner_trust_refused(
+                false,
+                format!(
+                    "source file `{}` is signed by a foreign principal",
+                    entry.path
+                ),
+            ));
         }
         let (trust, signer) = ryeos_engine::trust::verify_item_signature(
             content,
@@ -1149,10 +1158,13 @@ fn verify_owner_signed_files(
         if trust != ryeos_engine::contracts::TrustClass::Trusted
             || signer.as_ref().map(|signer| signer.0.as_str()) != Some(owner)
         {
-            anyhow::bail!(
-                "source file `{}` has no current owner testimony",
-                entry.path
-            );
+            return Err(owner_trust_refused(
+                false,
+                format!(
+                    "source file `{}` has no current owner testimony: its signer is not pinned",
+                    entry.path
+                ),
+            ));
         }
         if entry.path == root_entry {
             root_matched = true;
@@ -1194,13 +1206,37 @@ fn require_manifest_entry(candidate: &CapturedSourceCandidate, entry: &str) -> a
     Ok(())
 }
 
+/// A source-owning item or one of its files lacks the owner signature its
+/// launch requires. This is a launch-policy refusal, not an internal failure:
+/// the dispatch layer reports it as such.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOwnerTrustRefused {
+    /// True when the item or file carries no signature at all.
+    pub unsigned: bool,
+    pub detail: String,
+}
+
+impl std::fmt::Display for SourceOwnerTrustRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for SourceOwnerTrustRefused {}
+
+fn owner_trust_refused(unsigned: bool, detail: String) -> anyhow::Error {
+    anyhow::Error::new(SourceOwnerTrustRefused { unsigned, detail })
+}
+
 pub(crate) fn source_owner_identity(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
 ) -> anyhow::Result<ryeos_state::objects::SourceOwnerIdentity> {
-    let signer =
-        resolution.root.signer_fingerprint.clone().ok_or_else(|| {
-            anyhow::anyhow!("source-owning item has no verified signer fingerprint")
-        })?;
+    let signer = resolution.root.signer_fingerprint.clone().ok_or_else(|| {
+        owner_trust_refused(
+            true,
+            "source-owning item is unsigned; its files need its owner's signature".to_owned(),
+        )
+    })?;
     let (item_kind, logical_item_key) = resolution
         .root
         .resolved_ref

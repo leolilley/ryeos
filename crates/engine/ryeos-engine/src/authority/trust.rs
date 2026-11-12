@@ -858,13 +858,13 @@ pub fn pin_key(
     let key_file = target_dir.join(&key_name);
     let directory = lillux::PinnedDirectory::open_or_create(target_dir).map_err(|error| {
         EngineError::Internal(format!(
-            "cannot establish trust dir {}: {error}",
+            "cannot establish trust dir {}: {error:#}",
             target_dir.display()
         ))
     })?;
     let _lock = directory.lock_exclusive().map_err(|error| {
         EngineError::Internal(format!(
-            "cannot lock trust dir {}: {error}",
+            "cannot lock trust dir {}: {error:#}",
             target_dir.display()
         ))
     })?;
@@ -875,14 +875,14 @@ pub fn pin_key(
         .open_pinned_regular(std::ffi::OsStr::new(&key_name), false)
         .map_err(|error| {
             EngineError::Internal(format!(
-                "cannot inspect trust key {}: {error}",
+                "cannot inspect trust key {}: {error:#}",
                 key_file.display()
             ))
         })?
     {
         let observation = existing.observation().map_err(|error| {
             EngineError::Internal(format!(
-                "cannot observe trust key {}: {error}",
+                "cannot observe trust key {}: {error:#}",
                 key_file.display()
             ))
         })?;
@@ -890,7 +890,7 @@ pub fn pin_key(
             .read_stable_bounded(&observation, MAX_TRUST_DOCUMENT_BYTES)
             .map_err(|error| {
                 EngineError::Internal(format!(
-                    "existing trust doc {} cannot be read for idempotency check: {error} — remove it manually if intentional",
+                    "existing trust doc {} cannot be read for idempotency check: {error:#} — remove it manually if intentional",
                     key_file.display()
                 ))
             })?;
@@ -923,7 +923,7 @@ pub fn pin_key(
         )
         .map_err(|e| {
             EngineError::Internal(format!(
-                "cannot publish trust key {}: {e}",
+                "cannot publish trust key {}: {e:#}",
                 key_file.display(),
             ))
         })?;
@@ -1334,10 +1334,9 @@ mod tests {
         shebang: &str,
     ) -> String {
         let envelope = shebang_envelope();
-        // Content after signature line = body
-        // But with shebang, the signature line is line 2.
-        // Content hash is over everything after the signature line.
-        let content_hash = sha256_hex(body.as_bytes());
+        // The signature line is line 2, below the shebang; the content hash
+        // covers every byte except that line, shebang included.
+        let content_hash = sha256_hex(format!("{shebang}\n{body}").as_bytes());
         let signature: Signature = signing_key.sign(content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
         let timestamp = "2026-04-10T00:00:00Z";
@@ -1842,7 +1841,10 @@ pem = "ed25519:{key_b64}"
         let envelope = shebang_envelope();
 
         let hash = content_hash_after_signature(&content, &envelope).unwrap();
-        assert_eq!(hash, sha256_hex(body.as_bytes()));
+        assert_eq!(
+            hash,
+            sha256_hex(format!("#!/usr/bin/env python3\n{body}").as_bytes())
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-22T00:31:25Z:74df10c383075a6abf639ddd2845d4b9825f27a7fa7192b3659aa97f5656dda9:lSm1Gak+hBQqaewKywCApWRG81Jmols5x3804I7F09UBo7nUBMEE3V/keykZdA6dBx73Y2NbQ0cO3UnWnlt7BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-11T09:41:52Z:50c1942bb3b8b1d9e5b1ae141267df1a87fc1445cdb26d0adda888655bfb48bb:RWeACyNuCG13uwebzzOwF+Fqb/XQGZfHaGorVB+vIFsF0rWeJL5JacYy/Vy26SFiELvSWZKWPAK5x2FgS+PgDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: host-capability-boundary

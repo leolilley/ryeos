@@ -797,16 +797,38 @@ impl SealedRootExecutionRequest {
         self.qualification.as_ref()
     }
 
-    /// A claim-bearing verifier must get an actual process scope when its
-    /// admitted signed policy demands whole-descendant natural emptiness.
-    /// This is read from the sealed root, never a later policy lookup or an
-    /// executor-selected optional resource.
-    pub fn requires_process_scope_for_qualification(&self) -> Result<bool> {
+    /// A claim-bearing verifier must run under an actual retained containment
+    /// when its admitted signed policy demands whole-descendant emptiness:
+    /// `scope_empty` demands a cgroup scope, `containment_empty` demands any
+    /// qualified mechanism (cgroup scope or PID-namespace init). The weaker
+    /// `trusted_process_group_absent` demands none. This is read from the
+    /// sealed root, never a later policy lookup or an executor-selected
+    /// optional resource.
+    pub fn process_containment_for_qualification(
+        &self,
+    ) -> Result<super::ProcessContainmentRequirement> {
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
         self.validate_qualification_purpose()?;
-        Ok(self.qualification.as_ref().is_some_and(|purpose| {
-            purpose.policy_source.policy.minimum_verifier_process_settlement
-                == ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::ScopeEmpty
-        }))
+        Ok(self.qualification.as_ref().map_or(
+            super::ProcessContainmentRequirement::None,
+            |purpose| match purpose
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement
+            {
+                Settlement::ScopeEmpty => super::ProcessContainmentRequirement::CgroupScope,
+                Settlement::ContainmentEmpty => {
+                    super::ProcessContainmentRequirement::AnyQualifiedContainment
+                }
+                Settlement::TrustedProcessGroupAbsent => super::ProcessContainmentRequirement::None,
+            },
+        ))
+    }
+
+    /// Whether the sealed root demands any retained containment.
+    pub fn requires_process_scope_for_qualification(&self) -> Result<bool> {
+        Ok(self.process_containment_for_qualification()?
+            != super::ProcessContainmentRequirement::None)
     }
 
     fn validate_qualification_purpose(&self) -> Result<()> {
@@ -2494,6 +2516,46 @@ mod authority_tests {
         })).unwrap());
         sealed.validate_qualification_purpose().unwrap();
         sealed
+    }
+
+    #[test]
+    fn sealed_verifier_containment_follows_the_signed_minimum_settlement() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        let mut sealed = qualified_product_sealed_fixture();
+        // (signed minimum, containment the launch must run under)
+        for (minimum, expected) in [
+            (Settlement::ScopeEmpty, Requirement::CgroupScope),
+            (
+                Settlement::ContainmentEmpty,
+                Requirement::AnyQualifiedContainment,
+            ),
+            (Settlement::TrustedProcessGroupAbsent, Requirement::None),
+        ] {
+            sealed
+                .qualification
+                .as_mut()
+                .unwrap()
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement = minimum;
+            assert_eq!(
+                sealed.process_containment_for_qualification().unwrap(),
+                expected,
+                "{minimum:?}"
+            );
+            assert_eq!(
+                sealed.requires_process_scope_for_qualification().unwrap(),
+                expected != Requirement::None
+            );
+        }
+        // An ordinary root demands none.
+        assert_eq!(
+            SealedRootExecutionRequest::storage_test_fixture()
+                .process_containment_for_qualification()
+                .unwrap(),
+            Requirement::None
+        );
     }
 
     #[test]

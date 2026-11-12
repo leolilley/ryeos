@@ -24,8 +24,10 @@ def digest(letter):
 EMITTED = {
     "policy_ref": "config:ryeos/environments/qualification/native-authoring",
     "relationship_name": "runtime_to_external_authoring_worker",
+    "requires_guarantees": ["isolation:enforced"],
     "subject_manifest_hash": digest("a"),
     "bundle_generation_identity": "generation-synthetic-1",
+    "consumer_verifier_selections": {},
     "verifier_parameters": {
         "external_candidate_qualification_context": {
             "schema": "ryeos.external_candidate_qualification_context.v3",
@@ -52,6 +54,7 @@ TEMPLATE = {
     "product_qualification_policy": {
         "schema": "ryeos.product_qualification_policy.v5",
         "verifier_ref": "tool:codex/qualification/consumer-runtime-verifier",
+        "requires_guarantees": ["isolation:enforced"],
         "subject_declaration_id": "guest-runtime",
         "allowed_claims": ["bounded_candidate_capture"],
         "minimum_verifier_process_settlement": "scope_empty",
@@ -102,6 +105,20 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(
             section["consumer_execution_context"], EMITTED["consumer_execution_context"]
         )
+
+    def test_policy_requiring_other_guarantees_than_the_selected_variant_is_refused(self):
+        template = copy.deepcopy(TEMPLATE)
+        template["product_qualification_policy"]["requires_guarantees"] = [
+            {"name": "sessions:trusted_process_group", "accept": ["trusted"]}
+        ]
+        with self.assertRaises(merge.MergeRefused):
+            merge.merge(template, merge.parse_emitted(copy.deepcopy(EMITTED)), False,
+                        merge.verifier_config_schema())
+        for bad in ([], "isolation:enforced"):
+            emitted = copy.deepcopy(EMITTED)
+            emitted["requires_guarantees"] = bad
+            with self.assertRaises(merge.MergeRefused):
+                merge.parse_emitted(emitted)
 
     def test_template_without_codex_side_data_is_refused(self):
         for field in merge.CODEX_SIDE_FIELDS:

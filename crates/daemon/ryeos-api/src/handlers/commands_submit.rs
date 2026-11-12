@@ -44,7 +44,7 @@ pub async fn handle(
     let thread = state
         .state_store
         .get_thread(&req.thread_id)
-        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
     ctx.require_owner(thread.requested_by.as_deref())?;
 
@@ -66,7 +66,7 @@ pub async fn handle(
             requested_by,
             params: req.params,
         })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     // Daemon-side immediate enforcement: a cancel/kill signals the target AND
     // cascades to its live descendants right now, regardless of whether the

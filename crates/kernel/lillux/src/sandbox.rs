@@ -309,7 +309,7 @@ pub struct TmpfsLimits {
 }
 
 impl TmpfsLimits {
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         if self.size_bytes == 0 || self.size_bytes > MAX_ROOT_OVERLAY_TMPFS_BYTES {
             return Err("root overlay tmpfs size must be non-zero and bounded".into());
         }
@@ -1376,15 +1376,42 @@ pub fn prepare_linux_sandbox(
 /// process; callers must not run this in a shared daemon. This protects source
 /// integrity, not confidentiality from a same-UID peer after target exec.
 /// Whole-scope settlement and product-policy checks remain separate gates.
+///
+/// The target inherits this process's standard input and output. With
+/// `target_stderr` it receives that file as its standard error instead, which
+/// lets the owner read what the target says about its own failure; the owner's
+/// copy of the descriptor closes when this call returns.
 pub fn prepare_linux_sandbox_from_sealed_source(
     source: LinuxSealedPrivateSourceFilesystem,
     source_child: &std::ffi::OsStr,
     source_destination: &Path,
     request: LinuxSandboxRequest,
+    target_stderr: Option<std::fs::File>,
 ) -> HeldPrivateSourceSandboxProcess {
     imp::validate_private_source_request(&source, source_child, source_destination, &request)
         .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
-    let held = prepare_linux_sandbox_inner(request, None, Some(&source))
+    let stdio = target_stderr.map(|stderr| {
+        let ambient = |descriptor: i32| -> Result<std::fs::File, String> {
+            // SAFETY: F_DUPFD_CLOEXEC on a descriptor number only duplicates
+            // an open descriptor or fails.
+            let duplicate = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+            if duplicate >= 0 {
+                use std::os::fd::FromRawFd as _;
+                // SAFETY: fcntl returned a new descriptor owned by nothing else.
+                return Ok(unsafe { std::fs::File::from_raw_fd(duplicate) });
+            }
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")
+                .map_err(|error| format!("open null stand-in for stdio {descriptor}: {error}"))
+        };
+        Ok::<_, String>([ambient(0)?, ambient(1)?, stderr])
+    });
+    let stdio = stdio
+        .transpose()
+        .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
+    let held = prepare_linux_sandbox_inner(request, stdio.as_ref(), Some(&source))
         .unwrap_or_else(|error| imp::fatal_private_source_transition(&error));
     HeldPrivateSourceSandboxProcess {
         held,
@@ -2398,7 +2425,7 @@ mod imp {
         // bind mounts belonging to the former mount namespace.
         let inherited_directory =
             crate::secure_fs::pin_canonical_mount_source(std::path::Path::new(ROOT))
-                .map_err(|error| format!("pin inherited namespace probe: {error}"))?;
+                .map_err(|error| format!("pin inherited namespace probe: {error:#}"))?;
         let inherited_bytes = crate::sealed_memfd(c"lillux-mount-probe", b"exact sealed bytes")?;
         let mut available = LinuxSandboxInspection::declared_native_contract();
         for nested in [false, true] {
@@ -3092,12 +3119,20 @@ mod imp {
         std::env::set_current_dir("/")
             .map_err(|error| format!("leave ambient cwd before private source entry: {error}"))?;
         let former = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
-            .map_err(|error| format!("pin former temporary root: {error}"))?
+            .map_err(|error| format!("pin former temporary root: {error:#}"))?
             .ok_or("temporary root is absent before private source entry")?;
         let former_identity = former
             .identity()
-            .map_err(|error| format!("identify former temporary root: {error}"))?;
+            .map_err(|error| format!("identify former temporary root: {error:#}"))?;
         let transition = || -> Result<crate::secure_fs::PinnedDirectory, String> {
+            // A preceding UID drop leaves this process non-dumpable, which
+            // makes its own /proc identity files unwritable to it. Restore
+            // dumpability for the mapping writes only; it is cleared again
+            // below, before any source byte is imported.
+            syscall_zero(
+                unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) },
+                "make private source owner dumpable for its identity mapping",
+            )?;
             enter_mapped_user_namespace()?;
             syscall_zero(
                 unsafe { libc::unshare(libc::CLONE_NEWNS) },
@@ -3118,20 +3153,20 @@ mod imp {
             )
             .map_err(|error| format!("mount fresh private source filesystem: {error}"))?;
             let root = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
-                .map_err(|error| format!("pin private source filesystem: {error}"))?
+                .map_err(|error| format!("pin private source filesystem: {error:#}"))?
                 .ok_or("private source filesystem disappeared after mount")?;
             root.require_owner_private_directory()
-                .map_err(|error| format!("private source root is not owner-private: {error}"))?;
+                .map_err(|error| format!("private source root is not owner-private: {error:#}"))?;
             if root
                 .identity()
-                .map_err(|error| format!("identify private source root: {error}"))?
+                .map_err(|error| format!("identify private source root: {error:#}"))?
                 == former_identity
             {
                 return Err("private source mount did not replace former temporary root".into());
             }
             let descriptor = root
                 .try_clone_descriptor()
-                .map_err(|error| format!("retain private source root descriptor: {error}"))?;
+                .map_err(|error| format!("retain private source root descriptor: {error:#}"))?;
             let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
             syscall_zero(
                 unsafe { libc::fstatfs(descriptor.as_raw_fd(), stat.as_mut_ptr()) },
@@ -3181,7 +3216,7 @@ mod imp {
                 } => {
                     let descriptor = source.try_clone_descriptor().map_err(|error| {
                         format!(
-                            "retain root overlay source for {}: {error}",
+                            "retain root overlay source for {}: {error:#}",
                             target.display()
                         )
                     })?;
@@ -3226,13 +3261,18 @@ mod imp {
         for (overlay, clone) in overlays.iter().zip(clones.iter()) {
             let target = overlay.target();
             let pinned = crate::secure_fs::PinnedDirectory::open(target)
-                .map_err(|error| format!("pin root overlay target {}: {error}", target.display()))?
+                .map_err(|error| {
+                    format!("pin root overlay target {}: {error:#}", target.display())
+                })?
                 .ok_or_else(|| format!("root overlay target {} is absent", target.display()))?;
             let before = pinned.identity().map_err(|error| {
-                format!("identify root overlay target {}: {error}", target.display())
+                format!(
+                    "identify root overlay target {}: {error:#}",
+                    target.display()
+                )
             })?;
             let target_fd = pinned.try_clone_descriptor().map_err(|error| {
-                format!("retain root overlay target {}: {error}", target.display())
+                format!("retain root overlay target {}: {error:#}", target.display())
             })?;
             match (overlay, clone) {
                 (
@@ -3269,7 +3309,7 @@ mod imp {
             }
             let after = crate::secure_fs::PinnedDirectory::open(target)
                 .map_err(|error| {
-                    format!("reopen root overlay target {}: {error}", target.display())
+                    format!("reopen root overlay target {}: {error:#}", target.display())
                 })?
                 .ok_or_else(|| {
                     format!(
@@ -3280,7 +3320,7 @@ mod imp {
                 .identity()
                 .map_err(|error| {
                     format!(
-                        "identify mounted root overlay {}: {error}",
+                        "identify mounted root overlay {}: {error:#}",
                         target.display()
                     )
                 })?;
@@ -3298,7 +3338,7 @@ mod imp {
             {
                 let expected = source.identity().map_err(|error| {
                     format!(
-                        "identify root overlay source for {}: {error}",
+                        "identify root overlay source for {}: {error:#}",
                         target.display()
                     )
                 })?;
@@ -3318,18 +3358,18 @@ mod imp {
     ) -> Result<(), String> {
         let seal = || -> Result<(), String> {
             let current = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
-                .map_err(|error| format!("reopen private source root before seal: {error}"))?
+                .map_err(|error| format!("reopen private source root before seal: {error:#}"))?
                 .ok_or("private source root disappeared before seal")?;
             if current
                 .identity()
-                .map_err(|error| format!("identify private source root before seal: {error}"))?
-                != root.identity().map_err(|error| error.to_string())?
+                .map_err(|error| format!("identify private source root before seal: {error:#}"))?
+                != root.identity().map_err(|error| format!("{error:#}"))?
             {
                 return Err("private source root changed before seal".into());
             }
             let descriptor = root
                 .try_clone_descriptor()
-                .map_err(|error| format!("retain private source seal descriptor: {error}"))?;
+                .map_err(|error| format!("retain private source seal descriptor: {error:#}"))?;
             set_mount_attributes_fd(descriptor.as_raw_fd(), true, true, true)
                 .map_err(|error| format!("seal private source mount read-only: {error}"))?;
             let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -3365,7 +3405,7 @@ mod imp {
         let root = source
             .root
             .try_clone_descriptor()
-            .map_err(|error| format!("inspect sealed source descriptor: {error}"))?;
+            .map_err(|error| format!("inspect sealed source descriptor: {error:#}"))?;
         let root_stat = mount_source_stat(root.as_raw_fd())?;
         let expected_mount = mount_source_id(root.as_raw_fd())?;
         let mut expected = Vec::with_capacity(selections.len());
@@ -3373,11 +3413,11 @@ mod imp {
             let child = source
                 .root
                 .open_child_directory(selection.child)
-                .map_err(|error| format!("resolve exact sealed source child: {error}"))?
+                .map_err(|error| format!("resolve exact sealed source child: {error:#}"))?
                 .ok_or("exact sealed source child is absent")?;
             let descriptor = child
                 .try_clone_descriptor()
-                .map_err(|error| format!("inspect exact sealed source child: {error}"))?;
+                .map_err(|error| format!("inspect exact sealed source child: {error:#}"))?;
             let stat = mount_source_stat(descriptor.as_raw_fd())?;
             if stat.st_dev != root_stat.st_dev
                 || mount_source_id(descriptor.as_raw_fd())? != expected_mount
@@ -3433,16 +3473,16 @@ mod imp {
         let root = source
             .root
             .try_clone_descriptor()
-            .map_err(|error| format!("inspect sealed source descriptor: {error}"))?;
+            .map_err(|error| format!("inspect sealed source descriptor: {error:#}"))?;
         let source_device = mount_source_stat(root.as_raw_fd())?.st_dev;
         let child = source
             .root
             .open_child_directory(source_child)
-            .map_err(|error| format!("resolve exact sealed source child: {error}"))?
+            .map_err(|error| format!("resolve exact sealed source child: {error:#}"))?
             .ok_or("exact sealed source child is absent")?;
         let child_fd = child
             .try_clone_descriptor()
-            .map_err(|error| format!("inspect exact sealed source child: {error}"))?;
+            .map_err(|error| format!("inspect exact sealed source child: {error:#}"))?;
         let expected_child = mount_source_stat(child_fd.as_raw_fd())?;
         let expected_mount = mount_source_id(root.as_raw_fd())?;
         if mount_source_id(child_fd.as_raw_fd())? != expected_mount {
@@ -3504,12 +3544,15 @@ mod imp {
                 return Err("private source owner must be single-threaded".into());
             }
             let current = crate::secure_fs::PinnedDirectory::open(Path::new(ROOT))
-                .map_err(|error| format!("reopen sealed source root: {error}"))?
+                .map_err(|error| format!("reopen sealed source root: {error:#}"))?
                 .ok_or("sealed source root is absent")?;
             if current
                 .identity()
-                .map_err(|error| format!("identify sealed source root: {error}"))?
-                != source.root.identity().map_err(|error| error.to_string())?
+                .map_err(|error| format!("identify sealed source root: {error:#}"))?
+                != source
+                    .root
+                    .identity()
+                    .map_err(|error| format!("{error:#}"))?
             {
                 return Err("sealed source root changed before held preparation".into());
             }
@@ -3608,7 +3651,7 @@ mod imp {
     ) -> Result<crate::InheritedDescriptorAuthority, String> {
         let expected = mount_source_stat(fd)?;
         let source = crate::secure_fs::pin_canonical_mount_source(path)
-            .map_err(|error| format!("pin mount source in cloned namespace: {error}"))?;
+            .map_err(|error| format!("pin mount source in cloned namespace: {error:#}"))?;
         let observed = mount_source_stat(source.file().as_raw_fd())?;
         // open_tree cannot clone a vfsmount owned by the former namespace.
         // A kernel-reported path is only a locator: a replacement, symlink,
@@ -3724,7 +3767,7 @@ mod imp {
         let mounted = open_mount_target_no_symlinks(overlay_destination)?;
         let mut current =
             crate::PinnedDirectory::from_open_directory(rooted(overlay_destination)?, mounted)
-                .map_err(|error| format!("pin mounted overlay root: {error}"))?;
+                .map_err(|error| format!("pin mounted overlay root: {error:#}"))?;
         for component in descendant.relative_path.components() {
             let std::path::Component::Normal(name) = component else {
                 return Err(
@@ -3734,13 +3777,13 @@ mod imp {
             };
             current = current
                 .open_child_directory(name)
-                .map_err(|error| format!("open mounted overlay descendant: {error}"))?
+                .map_err(|error| format!("open mounted overlay descendant: {error:#}"))?
                 .ok_or_else(|| "mounted overlay descendant is missing".to_string())?;
         }
         let expected = mount_source_stat(raw_fd(descendant.source_fd)?)?;
         let observed_descriptor = current
             .try_clone_descriptor()
-            .map_err(|error| format!("inspect mounted overlay descendant: {error}"))?;
+            .map_err(|error| format!("inspect mounted overlay descendant: {error:#}"))?;
         let observed = mount_source_stat(observed_descriptor.as_raw_fd())?;
         if expected.st_dev != observed.st_dev
             || expected.st_ino != observed.st_ino
@@ -3753,7 +3796,7 @@ mod imp {
         }
         current
             .into_inherited_descriptor_path()
-            .map_err(|error| format!("retain mounted overlay descendant: {error}"))
+            .map_err(|error| format!("retain mounted overlay descendant: {error:#}"))
     }
 
     struct SealedSourceStaging {
@@ -3765,11 +3808,11 @@ mod imp {
     impl SealedSourceStaging {
         fn create() -> Result<Self, String> {
             let root = crate::PinnedDirectory::open(std::path::Path::new(ROOT))
-                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("{error:#}"))?
                 .ok_or_else(|| "private materialization root is missing".to_string())?;
             let mountpoint = root
                 .create_child(OsStr::new(SEALED_STAGING_NAME), 0o700)
-                .map_err(|error| format!("create private sealed staging: {error}"))?;
+                .map_err(|error| format!("create private sealed staging: {error:#}"))?;
             let path = root.path().join(SEALED_STAGING_NAME);
             mount_raw(
                 Some("tmpfs"),
@@ -3781,7 +3824,7 @@ mod imp {
             .map_err(|error| format!("mount private sealed staging: {error}"))?;
             let content = root
                 .open_child_directory(OsStr::new(SEALED_STAGING_NAME))
-                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("{error:#}"))?
                 .ok_or_else(|| "private sealed staging mount disappeared".to_string())?;
             Ok(Self {
                 root,
@@ -3795,12 +3838,12 @@ mod imp {
             let current = self
                 .root
                 .open_child_directory(name)
-                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("{error:#}"))?
                 .ok_or_else(|| "sealed staging disappeared before detach".to_string())?;
             if !self
                 .content
                 .is_same_directory(&current)
-                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("{error:#}"))?
             {
                 return Err("sealed staging mount identity changed".to_string());
             }
@@ -3841,7 +3884,7 @@ mod imp {
         let name = OsString::from(format!(".lillux-sealed-source-{fd}"));
         let root_fd = root
             .try_clone_descriptor()
-            .map_err(|error| format!("retain private materialization root: {error}"))?;
+            .map_err(|error| format!("retain private materialization root: {error:#}"))?;
         let encoded = c_string(&name, "private sealed source")?;
         let output_fd = unsafe {
             libc::openat(
@@ -3907,7 +3950,7 @@ mod imp {
     fn descriptor_kind(fd: u32) -> Result<DescriptorKind, String> {
         let file = unsafe { File::from_raw_fd(duplicate_fd(raw_fd(fd)?)?) };
         crate::secure_fs::open_mount_entry_kind(&file)
-            .map_err(|error| format!("inspect admitted mount descriptor: {error}"))
+            .map_err(|error| format!("inspect admitted mount descriptor: {error:#}"))
     }
 
     fn create_target(path: &Path, kind: DescriptorKind) -> Result<(), String> {

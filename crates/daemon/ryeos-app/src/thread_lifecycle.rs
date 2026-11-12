@@ -54,12 +54,13 @@ mod validation;
 pub(crate) use direct_execution::external_direct_program_test_fixture;
 pub use direct_execution::{
     ADMITTED_DIRECT_PROJECT_ROOT, ItemReleaseError, PreparedExternalDirectProjectFile,
-    PreparedItemPlan, RunningItem, SpawnItemFailure, SpawnItemFailureDisposition, SpawnItemParams,
-    SpawnedItemAwaitingAttachment, SpawnedPersistentSessionAwaitingAttachment,
-    capsule_requires_external_direct, effective_child_external_content_declarations,
-    external_direct_environment, prepare_bundle_item_plan_for_qualification,
-    prepare_captured_item_plan, prepare_external_direct_project_file,
-    prepare_external_qualification_local_worker_plan, prepare_item_plan, spawn_item,
+    PreparedItemPlan, ProcessContainmentRequirement, RunningItem, SpawnItemFailure,
+    SpawnItemFailureDisposition, SpawnItemParams, SpawnedItemAwaitingAttachment,
+    SpawnedPersistentSessionAwaitingAttachment, capsule_requires_external_direct,
+    effective_child_external_content_declarations, external_direct_environment,
+    prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan,
+    prepare_external_direct_project_file, prepare_external_qualification_local_worker_plan,
+    prepare_item_plan, qualification_worker_protocol_lane_admits, spawn_item,
     with_prepared_external_qualification_local_worker_plan,
 };
 pub(crate) use direct_execution::{
@@ -792,7 +793,7 @@ pub fn continuation_request_fingerprint(
         "lifecycle_authority": lifecycle_authority,
         "sealed_root_request": sealed_root_request,
     });
-    let bytes = serde_json::to_vec(&canonical).expect("fingerprint input is serializable");
+    let bytes = lillux::canonical_json(&canonical).expect("fingerprint input is canonical JSON");
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     format!("sha256:{:x}", hasher.finalize())
@@ -7971,7 +7972,9 @@ pub fn preflight_root_execution(
     // authority, such as a CAS mutation guard, can never start that process,
     // so refuse at this entry rather than deep inside a composer. Callers must
     // resolve first and take their guard afterwards.
-    if lillux::current_thread_retains_fork_sensitive_descriptors() {
+    if lillux::current_thread_retains_fork_sensitive_descriptors()
+        || ryeos_state::recovery::cas_mutation_guard_held_on_current_thread()
+    {
         bail!(
             "root execution preflight refused: the calling thread retains fork-sensitive descriptor authority (such as a CAS mutation guard) and resolution must start handler processes"
         );

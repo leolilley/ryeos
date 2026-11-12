@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-01T13:09:46Z:c11964e0779484297c86e127009893434b06b63f8e415685d94ac08d669a8e10:9LX6h37F+We4qC4oCQGrYeQV2lvTxovKSX47Z6fLZS/GXhrFD9ArNWu0pPM2UXfo/NQUw3rQqbWqJjBeMNwOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-05T03:59:09Z:48c01e70894f7fe4aa88142d511adf59cdb4f95a374159d4527f4f06ade121cc:pzsIw6m0WCAkZXogauhm09A5+ita9xxvp/P06ujkGgX9mMFxN4pIr5Bl8YiRZIBM+lqLnWLE2/mWh1Rik4yWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -41,7 +41,8 @@ inert record inputs. Reservation and contact independently recheck the original
 unstopped launch owner and same-occurrence live prerequisite in their durable
 transactions. No input response grants executable custody or provider contact.
 
-The invoking verifier creates its private input record once. Recovery reopens
+The invoking verifier creates its private input record once, in the launch's
+runtime state root because its project is read-only. Recovery reopens
 those exact bytes and only observes the retained attempt. A lost START response
 does not authorize START replay. Provider settlement rejoins the existing exact
 occurrence termination journal; it proves provider death, separately from native
@@ -199,7 +200,7 @@ or require current execution contact. An absent normal-intent or readiness probe
 remains negative without demanding a capture that never happened. Revocation
 and cancellation cleanup remain independent of normal fixture evidence. SQL
 readback alone is not authenticated CAS custody. These source joins and authored
-tests do not establish installed execution, product semantics or a Render proof.
+tests do not establish installed execution, product semantics or a provider proof.
 
 The transcript is published after original Worker retirement and exact native
 settlement application, before relay shutdown, private-root removal and provider
@@ -301,7 +302,7 @@ it to the original retained source.
 
 These source contracts and synthetic interpreter fixtures do not establish an
 actual model-generated three-call turn, hostile writer exclusion, callback
-expiry, native containment, accepted five-claim qualification or Render readiness.
+expiry, native containment, accepted five-claim qualification or provider readiness.
 The independent credential-free diagnostic keeps its separate occurrence and
 claim requirements. All five ordinary admission claims remain disabled.
 

@@ -636,29 +636,52 @@ fn direct_process_settlement(
     if settlement.thread_id != snapshot.thread_id || settlement.digest()? != digest {
         bail!("direct qualification verifier settlement differs from signed terminal");
     }
-    let authority = match settlement.kind {
-        crate::runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty => {
-            VerifierProcessSettlementAuthority::ScopeEmpty
-        }
+    let authority = verifier_settlement_authority(
+        settlement.kind,
+        settlement.process_identity.process_scope.as_ref(),
+        state
+            .isolation
+            .inspection()
+            .process_scope_readiness
+            .trusted_exclusive_session
+            .ready,
+    )?;
+    crate::process::assert_reaped_process_group_absent(&settlement.process_identity)
+        .context("direct qualification verifier process authority is not settled")?;
+    Ok(Some((digest, authority)))
+}
+
+/// What a settled direct verifier's retained process authority proves.
+///
+/// The settlement kind records that a whole retained containment was proved
+/// empty; the retained recovery names the mechanism. A verifier whose sealed
+/// policy demands `containment_empty` runs under whichever qualified mechanism
+/// the node reports (`process_containment_for_qualification` in the sealed
+/// request, applied by `spawn_item`), so a PID-namespace recovery is graded by
+/// its actual mechanism and never as a cgroup scope.
+fn verifier_settlement_authority(
+    kind: crate::runtime_db::ThreadProcessSettlementKind,
+    scope: Option<&lillux::ProcessScopeRecovery>,
+    trusted_process_group_admitted: bool,
+) -> anyhow::Result<VerifierProcessSettlementAuthority> {
+    match kind {
+        crate::runtime_db::ThreadProcessSettlementKind::ReapedScopeEmpty => Ok(
+            if scope.is_some_and(lillux::ProcessScopeRecovery::is_pid_namespace_init) {
+                VerifierProcessSettlementAuthority::ContainmentEmpty
+            } else {
+                VerifierProcessSettlementAuthority::ScopeEmpty
+            },
+        ),
         crate::runtime_db::ThreadProcessSettlementKind::ReapedGroupAbsent => {
-            if !state
-                .isolation
-                .inspection()
-                .process_scope_readiness
-                .trusted_exclusive_session
-                .ready
-            {
+            if !trusted_process_group_admitted {
                 bail!("node policy does not admit trusted process-group verifier cleanup");
             }
-            VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent
+            Ok(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent)
         }
         crate::runtime_db::ThreadProcessSettlementKind::RecoveryDeath => {
             bail!("recovery death cannot qualify a direct verifier")
         }
-    };
-    crate::process::assert_reaped_process_group_absent(&settlement.process_identity)
-        .context("direct qualification verifier process authority is not settled")?;
-    Ok(Some((digest, authority)))
+    }
 }
 
 fn signed_terminal_process_settlement_digest(events: &[ThreadEvent]) -> anyhow::Result<String> {
@@ -1847,4 +1870,69 @@ pub(in crate::operator_external_content) fn verify_current(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod settlement_grading_tests {
+    use super::*;
+    use crate::runtime_db::ThreadProcessSettlementKind as Kind;
+    use VerifierProcessSettlementAuthority as Authority;
+
+    fn recovery(value: serde_json::Value) -> lillux::ProcessScopeRecovery {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn each_retained_mechanism_is_graded_by_what_it_is() {
+        let boot = "00000000-0000-4000-8000-000000000000";
+        let cgroup = recovery(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {
+                "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"}},
+            "backend": {"implementation": "linux_cgroup_v2", "boot_id": boot,
+                "parent": {"filesystem": {"device": 1}, "inode": 2},
+                "directory": {"filesystem": {"device": 1}, "inode": 3}, "name": "scope"}
+        }));
+        let namespace = recovery(serde_json::json!({
+            "version": 5, "control_timeout": {"secs": 1, "nanos": 0},
+            "configuration": {"version": 3, "backend": {"implementation": "pid_namespace_init"}},
+            "backend": {"implementation": "pid_namespace_init", "boot_id": boot,
+                "init_pid": 40, "init_start_time_ticks": 200,
+                "namespace": {"device": 1, "inode": 2}}
+        }));
+        let grade = |kind, scope: Option<&lillux::ProcessScopeRecovery>, trusted| {
+            verifier_settlement_authority(kind, scope, trusted).ok()
+        };
+        assert_eq!(
+            grade(Kind::ReapedScopeEmpty, Some(&cgroup), false),
+            Some(Authority::ScopeEmpty)
+        );
+        assert_eq!(
+            grade(Kind::ReapedScopeEmpty, Some(&namespace), false),
+            Some(Authority::ContainmentEmpty)
+        );
+        assert_eq!(
+            grade(Kind::ReapedGroupAbsent, None, true),
+            Some(Authority::TrustedProcessGroupAbsent)
+        );
+        // The trusted lane needs the node to admit it; recovery death never grades.
+        assert_eq!(grade(Kind::ReapedGroupAbsent, None, false), None);
+        assert_eq!(grade(Kind::RecoveryDeath, Some(&namespace), true), None);
+        // Against a signed policy: containment_empty accepts a namespace or a
+        // cgroup scope settlement, scope_empty only a cgroup scope's.
+        let accepted = |observed: Authority, minimum: Authority| observed.satisfies(minimum);
+        assert!(accepted(
+            Authority::ContainmentEmpty,
+            Authority::ContainmentEmpty
+        ));
+        assert!(accepted(Authority::ScopeEmpty, Authority::ContainmentEmpty));
+        assert!(!accepted(
+            Authority::ContainmentEmpty,
+            Authority::ScopeEmpty
+        ));
+        assert!(!accepted(
+            Authority::TrustedProcessGroupAbsent,
+            Authority::ContainmentEmpty
+        ));
+    }
 }

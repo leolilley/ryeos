@@ -255,6 +255,7 @@ impl IndependentVerifierScenario {
             "description":"Independently check exact scripted Codex app-server scenario; not production profile qualification",
             "executor_id":"@subprocess", "execution_protocol":"protocol:ryeos/core/qualification_scoped_callback",
             "effects":"live", "filesystem_authority":"node_policy", "network_authority":"node_policy",
+            "project_lane":"pinned_snapshot",
             "external_content":declarations,
             "config":{"command":format!("bin:{VERIFIER_BIN}"), "args":[], "input_data":"${params_json}", "timeout_secs":300},
             "config_schema":{"type":"object", "properties":{

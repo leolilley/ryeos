@@ -439,6 +439,15 @@ fn digest_open_regular_file_chunked_exact(
     Ok((format!("{:x}", whole.finalize()), chunks))
 }
 
+/// The portable project-snapshot form of one declared regular-file mode: a
+/// mode with any execute bit is 0o755, every other mode is 0o644. A caller
+/// that compares an observed file against a mode it declared in a delivery
+/// normalizes the declaration with this before comparing it to
+/// [`normalized_portable_regular_mode`].
+pub fn normalized_portable_mode(mode: u32) -> u32 {
+    if mode & 0o111 == 0 { 0o644 } else { 0o755 }
+}
+
 /// Normalize one descriptor-observed regular file to RyeOS's portable
 /// project-snapshot mode contract. OS-specific permission inspection remains
 /// inside Lillux; callers consume only the stable 0o644/0o755 result.
@@ -454,11 +463,7 @@ pub fn normalized_portable_regular_mode(metadata: &std::fs::Metadata) -> Result<
         if !metadata.file_type().is_file() {
             anyhow::bail!("portable mode source is not a regular file");
         }
-        Ok(if metadata.permissions().mode() & 0o111 == 0 {
-            0o644
-        } else {
-            0o755
-        })
+        Ok(normalized_portable_mode(metadata.permissions().mode()))
     }
 }
 
@@ -996,6 +1001,83 @@ pub fn require_effective_user_owned_regular(file: &File) -> Result<OpenFileIdent
     }
 }
 
+/// `statfs` magic of FUSE filesystems: their bytes are served by a user-space
+/// process, so permission bits say nothing about whether they can change.
+#[cfg(target_os = "linux")]
+const FUSE_SUPER_MAGIC: u32 = 0x6573_5546;
+
+/// Prove that the current process cannot change the bytes of the exact open
+/// regular file. The file is owned by root and carries no group/other write
+/// bits, so the effective user can neither write it nor chmod itself into
+/// writing it (POSIX ACL entries are bounded by the group bits). The kernel's
+/// own effective-identity access check must also deny writing, which covers
+/// capabilities such as `CAP_DAC_OVERRIDE`. A root effective user never
+/// proves this, and a FUSE-backed file never does either.
+///
+/// Callers use this to run a verified host inode in place of a sealed copy:
+/// the proof is about this process's authority, so a workload launched with
+/// the same credentials inherits the same inability to modify the file.
+pub fn require_unwritable_by_effective_user(file: &File) -> Result<OpenFileIdentity> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        anyhow::bail!("unwritable regular-file proof is unavailable on this platform")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            anyhow::bail!("a root effective user can write every file; no unwritable proof");
+        }
+        let identity = observe_open_file_identity(file)?;
+        if identity.file_type != libc::S_IFREG
+            || identity.owner != 0
+            || identity.is_group_or_other_writable()
+        {
+            anyhow::bail!(
+                "descriptor is not a root-owned regular file without group/other write bits (uid={}, mode={:#o})",
+                identity.owner,
+                identity.mode & 0o7777,
+            );
+        }
+        let mut stats = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+        // SAFETY: the descriptor is open for the call and the kernel fully
+        // writes the exclusively borrowed output on success.
+        if unsafe { libc::fstatfs(file.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("read filesystem type of open descriptor");
+        }
+        // SAFETY: fstatfs succeeded. Magic numbers are 32-bit; the field's
+        // width and signedness differ by target.
+        let filesystem_type = i128::from(unsafe { stats.assume_init() }.f_type) & 0xffff_ffff;
+        if filesystem_type == i128::from(FUSE_SUPER_MAGIC) {
+            anyhow::bail!("descriptor is on a FUSE filesystem served by a user-space process");
+        }
+        let path = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .expect("descriptor path has no interior NUL");
+        // SAFETY: the path is a valid C string; AT_EACCESS judges the
+        // effective identity, which the kernel checks when it writes.
+        if unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::W_OK, libc::AT_EACCESS) }
+            == 0
+        {
+            anyhow::bail!("the kernel grants this process write access to the descriptor");
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EACCES | libc::EPERM | libc::EROFS)
+        ) {
+            return Err(error).context("judge write access to open descriptor");
+        }
+        if observe_open_file_identity(file)? != identity {
+            anyhow::bail!("descriptor changed while its write authority was judged");
+        }
+        Ok(identity)
+    }
+}
+
 /// Compare the inode identities of two already-open descriptors.
 pub fn same_open_file_identity(left: &File, right: &File) -> Result<bool> {
     let left = observe_open_file_identity(left)?;
@@ -1143,6 +1225,7 @@ fn digest_open_regular_file_exact(file: &File, expected_bytes: u64) -> Result<St
         }
         digest.update(&buffer[..read]);
         remaining -= read as u64;
+        crate::progress::beat();
     }
     let mut sentinel = [0_u8; 1];
     if read_regular_file_at(file, &mut sentinel, expected_bytes)? != 0 {
@@ -2325,6 +2408,17 @@ fn remove_flat_directory_generation(
 }
 
 impl PinnedRegularFile {
+    /// Hand this exact inode's descriptor to a fork-closed lock, registered
+    /// while the caller still holds the lease it took before opening. A lock
+    /// held on it then never needs the fork window closed.
+    #[cfg(unix)]
+    pub fn into_fork_closed_lock(
+        self,
+        lease: &crate::exec::ForkSensitiveDescriptorLease,
+    ) -> crate::locks::ForkClosedLockFile {
+        crate::locks::ForkClosedLockFile::register(self.file, lease)
+    }
+
     /// Open one exact bounded byte stream whose digest must match an
     /// independently admitted upload identity. The stream must be consumed
     /// and finished before its bytes can be treated as staged input.
@@ -3815,10 +3909,46 @@ impl PinnedDirectory {
         Ok(())
     }
 
+    /// Re-anchor this path binding after the current process deliberately
+    /// entered a new mount namespace. Every mount there has a new identity, so
+    /// the original descriptor can no longer prove the path. Reopen the same
+    /// path inside the current namespace, require the identical directory
+    /// inode, and keep that descriptor: later checks then compare mounts
+    /// within this namespace. A binding that is not re-anchored keeps
+    /// refusing, and a path that now reaches another inode refuses here.
+    pub fn rebind_in_current_mount_namespace(&mut self) -> Result<()> {
+        if !self.path_binding_required {
+            return Ok(());
+        }
+        let current = Self::open(&self.path)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "pinned directory path disappeared at mount namespace entry: {}",
+                self.path.display()
+            )
+        })?;
+        ensure!(
+            self.is_same_directory(&current)?,
+            "pinned directory path reaches another inode after mount namespace entry: {}",
+            self.path.display()
+        );
+        self.directory = current.directory;
+        Ok(())
+    }
+
     /// Fixed-size path-binding check for an original admission checkpoint.
     /// This performs the same no-follow component traversal and exact inode /
     /// mount comparison as the ordinary check, without cloning path buffers or
     /// constructing dynamic refusals. It does not grant ownership or funding.
+    /// Give up this binding's path proof because the current process
+    /// deliberately entered a private root in which the path no longer
+    /// resolves (a sandbox prepared for a guest, as opposed to a private
+    /// source filesystem that keeps the host view). The open descriptor
+    /// remains the sole authority for every later traversal and mutation;
+    /// path proofs become no-ops instead of refusing a path that cannot exist.
+    pub fn release_path_binding(&mut self) {
+        self.path_binding_required = false;
+    }
+
     pub fn ensure_path_binding_fixed(&self) -> std::result::Result<(), &'static str> {
         if !self.path_binding_required {
             return Ok(());
@@ -8777,15 +8907,17 @@ where
             }
             continue;
         }
+        // Pruning reads only the path, so an ignored entry is never opened:
+        // an ignored symlink or special file is skipped, not refused.
+        if prune(&relative, false)? {
+            continue;
+        }
         let file = open_regular_at(&frame.directory, &name_c, &display)?.ok_or_else(|| {
             anyhow::anyhow!(
                 "secure project walk encountered a symlink, special file, or disappearing entry: {}",
                 display.display()
             )
         })?;
-        if prune(&relative, false)? {
-            continue;
-        }
         visit(&relative, file)?;
     }
     Ok(())
@@ -8927,6 +9059,7 @@ fn copy_open_regular_into_new(
     }
     let mut target = unsafe { File::from_raw_fd(descriptor) };
     let result = (|| -> Result<()> {
+        crate::progress::beat();
         source.seek(std::io::SeekFrom::Start(0))?;
         let mut bounded = (&mut source).take(observation.size().saturating_add(1));
         let copied = std::io::copy(&mut bounded, &mut target)?;
@@ -9116,7 +9249,48 @@ fn restore_quarantined_regular(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_modes_normalize_like_observed_ones() {
+        assert_eq!(super::normalized_portable_mode(0o500), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o400), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o644), 0o644);
+        assert_eq!(super::normalized_portable_mode(0o755), 0o755);
+        assert_eq!(super::normalized_portable_mode(0o010), 0o755);
+    }
+
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_root_owned_system_binary_is_unwritable_by_an_ordinary_effective_user() {
+        if unsafe { libc::geteuid() } == 0 {
+            let file = File::open("/bin/sh").unwrap();
+            assert!(require_unwritable_by_effective_user(&file).is_err());
+            return;
+        }
+        let canonical = std::fs::canonicalize("/bin/sh").unwrap();
+        let file = File::open(&canonical).unwrap();
+        let identity = require_unwritable_by_effective_user(&file)
+            .expect("a root-owned system shell cannot be written by an ordinary user");
+        assert_eq!(identity.owner, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_owned_by_the_effective_user_is_never_proved_unwritable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("owned");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let file = File::open(&path).unwrap();
+        let error = require_unwritable_by_effective_user(&file).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("root-owned")
+                || format!("{error:#}").contains("root effective user"),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn stable_prefix_is_bounded_cursor_independent_and_rejects_changed_file() {
@@ -11772,6 +11946,37 @@ mod fixed_directory_binding_controls {
         assert!(original.ensure_path_binding().is_err());
         assert!(original.ensure_path_binding_fixed().is_err());
     }
+    #[test]
+    fn namespace_rebind_keeps_the_same_inode_and_refuses_another() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+        original.ensure_path_binding().unwrap();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        assert!(original.rebind_in_current_mount_namespace().is_err());
+        assert_eq!(original.identity().unwrap(), identity);
+        assert!(original.ensure_path_binding().is_err());
+    }
+    #[test]
+    fn released_binding_keeps_descriptor_authority_without_path_proofs() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        let mut original = super::PinnedDirectory::open(&selected).unwrap().unwrap();
+        let identity = original.identity().unwrap();
+        original.release_path_binding();
+        std::fs::rename(&selected, temp.path().join("retained")).unwrap();
+        std::fs::create_dir(&selected).unwrap();
+        original.ensure_path_binding().unwrap();
+        original.rebind_in_current_mount_namespace().unwrap();
+        assert_eq!(original.identity().unwrap(), identity);
+    }
+
     #[test]
     fn original_binding_rejects_symlink_replacement() {
         let temp = tempfile::tempdir().unwrap();

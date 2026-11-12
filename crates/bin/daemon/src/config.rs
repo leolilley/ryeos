@@ -159,7 +159,11 @@ pub enum DaemonCommand {
         #[arg(long)]
         profile: bool,
 
-        /// Print build provenance as JSON.
+        /// Print the compiled optional Cargo features, one per line.
+        #[arg(long)]
+        features: bool,
+
+        /// Print build provenance, including compiled features, as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -340,7 +344,7 @@ mod tests {
             "--active-bundle",
             "core",
             "--active-bundle",
-            "render-sandbox",
+            "test-bundle",
         ])
         .unwrap();
         assert!(matches!(
@@ -349,7 +353,7 @@ mod tests {
                 schema_cut: false,
                 active_bundles,
                 ..
-            }) if active_bundles == ["core", "render-sandbox"]
+            }) if active_bundles == ["core", "test-bundle"]
         ));
     }
 }

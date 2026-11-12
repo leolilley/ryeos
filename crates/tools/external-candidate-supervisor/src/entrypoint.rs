@@ -12,7 +12,8 @@ use ryeos_external_execution::guest_installation::{
 };
 use ryeos_external_execution_contract::guest_supervisor_descriptors::{
     SUPERVISOR_BOOTSTRAP_FD, SUPERVISOR_CANDIDATE_RUNTIME_FD, SUPERVISOR_LAUNCH_INTENT_FD,
-    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD, SUPERVISOR_RELAY_MAILBOX_FD,
+    SUPERVISOR_LAUNCHER_FD, SUPERVISOR_PRIVATE_PARENT_FD,
+    SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION, SUPERVISOR_RELAY_MAILBOX_FD,
     SUPERVISOR_STAGE_MOUNT_DESTINATION, SUPERVISOR_STATE_ROOT_FD, SUPERVISOR_WORKSPACE_OUTPUT_FD,
     fixed_guest_supervisor_descriptor_plan,
 };
@@ -73,6 +74,24 @@ pub fn adopt_mounted_supervisor_content(
         }
     }
     Ok((launcher, opened.bind_execution_inputs(retained, scratch)?))
+}
+
+/// Reopen the private parent at its mounted path in this supervisor's view,
+/// proven the same inode as the inherited descriptor. Everything created under
+/// it then has a locator that resolves inside this view, which the launcher
+/// needs to re-prove each mount source in its own namespace.
+pub fn adopt_mounted_private_parent(
+    mounted: &std::path::Path,
+    inherited: lillux::PinnedDirectory,
+) -> Result<lillux::PinnedDirectory> {
+    let reopened = lillux::PinnedDirectory::open(mounted)?
+        .context("mounted candidate private parent is absent")?;
+    ensure!(
+        reopened.identity()? == inherited.identity()?,
+        "mounted candidate private parent differs from the inherited one"
+    );
+    reopened.require_owner_private_directory()?;
+    Ok(reopened)
 }
 
 /// Join the sealed post-import record, bootstrap, pinned private roots and
@@ -174,12 +193,15 @@ pub fn run_from_mounted_inherited() -> Result<ExternalCandidateSupervisorOutcome
             SUPERVISOR_CANDIDATE_RUNTIME_FD,
         )
     }?;
-    let candidate_private_parent = unsafe {
-        lillux::PinnedDirectory::take_inherited_directory(
-            PathBuf::from("<external-candidate-private-parent>"),
-            SUPERVISOR_PRIVATE_PARENT_FD,
-        )
-    }?;
+    let candidate_private_parent = adopt_mounted_private_parent(
+        std::path::Path::new(SUPERVISOR_PRIVATE_PARENT_MOUNT_DESTINATION),
+        unsafe {
+            lillux::PinnedDirectory::take_inherited_directory(
+                PathBuf::from("<external-candidate-private-parent>"),
+                SUPERVISOR_PRIVATE_PARENT_FD,
+            )
+        }?,
+    )?;
     let relay_mailbox = if bootstrap.controller.relay().is_ok() {
         // SAFETY: the sealed relay launch intent binds this dedicated fixed
         // coordinate to the original mailbox inode before any runtime use.
@@ -314,6 +336,28 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn mounted_private_parent_must_be_the_inherited_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let private = temporary.path().join("private");
+        let other = temporary.path().join("other");
+        for path in [&private, &other] {
+            std::fs::create_dir(path).unwrap();
+            lillux::PinnedDirectory::open(path)
+                .unwrap()
+                .unwrap()
+                .tighten_owner_private_directory()
+                .unwrap();
+        }
+        let inherited = || lillux::PinnedDirectory::open(&private).unwrap().unwrap();
+        let adopted = adopt_mounted_private_parent(&private, inherited()).unwrap();
+        assert_eq!(adopted.identity().unwrap(), inherited().identity().unwrap());
+        assert!(adopt_mounted_private_parent(&other, inherited()).is_err());
+        assert!(
+            adopt_mounted_private_parent(&temporary.path().join("absent"), inherited()).is_err()
+        );
+    }
 
     #[test]
     fn mounted_content_adoption_binds_launcher_config_and_indexed_scratch() {
