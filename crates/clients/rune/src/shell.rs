@@ -76,10 +76,14 @@ pub fn shell(vm: &RyeOsViewModel, local: &Local) -> El {
         .w_full()
         .h_full()
         .fill(p.bg)
+        .on_layout(|app: &mut App, rect: [f32; 4]| app.set_viewport(rect[2], rect[3]))
         .child(system_bar(vm, local))
         .child(view_set_strip(&chrome.top_bar, local))
         .child(body(vm, local))
         .child(status_bar(&chrome.status_bar));
+    if local.narrow() && local.navigation_open && !vm.navigation.items.is_empty() {
+        page = page.child(navigation_drawer(vm, local));
+    }
     if !vm.notices.is_empty() {
         page = page.child(notices(&vm.notices));
     }
@@ -141,7 +145,11 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
         context = context.child(
             summary
                 .child(title)
-                .child(text("⌄").font(theme::data(10.0)).color(p.muted))
+                .child(crate::icons::glyph(
+                    &crate::icons::CHEVRON_DOWN,
+                    12.0,
+                    p.muted,
+                ))
                 .on_press(move |app: &mut App| app.set_surfaces_open(!open)),
         );
     }
@@ -158,6 +166,23 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
                 .font(theme::data(10.0).tracking(0.4))
                 .color(p.muted),
         );
+    let state = if local.narrow() && !vm.navigation.items.is_empty() {
+        let open = local.navigation_open;
+        state.child(
+            text("Views")
+                .key(NAVIGATION_TOGGLE)
+                .font(theme::ui(11.0))
+                .color(if open { p.accent_bright } else { p.text })
+                .px(6.0)
+                .role("button")
+                .label("Views")
+                .expanded(open)
+                .hover(p.plane_selected)
+                .on_press(move |app: &mut App| app.set_navigation_open(!open)),
+        )
+    } else {
+        state
+    };
     row()
         .w_full()
         .h(SYSTEM_HEIGHT)
@@ -248,10 +273,11 @@ fn surface_picker(session: &RyeOsSessionVm, local: &Local) -> El {
                         });
                     }),
             );
-            let mut rename = text("✎")
-                .font(theme::data(10.0))
-                .color(p.text)
+            let mut rename = col()
+                .child(crate::icons::glyph(&crate::icons::PENCIL, 12.0, p.text))
                 .px(8.0)
+                .h_full()
+                .center()
                 .role("button")
                 .label(format!("Rename {}", surface.title))
                 .disabled(surface.rename_intent.is_none());
@@ -367,14 +393,14 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                     .role("group")
                     .label(format!("{} view-set actions", tab.title))
                     .child(strip_action(
-                        "✎",
+                        &crate::icons::PENCIL,
                         format!("Rename {}", tab.title),
                         move |app| {
                             app.begin_rename(RenameTarget::ViewSet(view_set_id), &title);
                         },
                     ))
                     .child(strip_action(
-                        "⧉",
+                        &crate::icons::DUPLICATE,
                         format!("Duplicate {}", tab.title),
                         move |app| {
                             app.ui(RyeOsUiEvent::Activate {
@@ -383,7 +409,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                         },
                     ))
                     .child(strip_action(
-                        "×",
+                        &crate::icons::CLOSE,
                         format!("Close {}", tab.title),
                         move |app| {
                             app.ui(RyeOsUiEvent::Activate {
@@ -404,7 +430,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
                 .role("button")
                 .label("New view set")
                 .hover(p.plane_selected)
-                .child(text("＋").font(theme::ui(20.0)).color(p.muted))
+                .child(crate::icons::glyph(&crate::icons::PLUS, 16.0, p.muted))
                 .on_press(|app: &mut App| {
                     app.ui(RyeOsUiEvent::Activate {
                         intent: RyeOsUiIntent::NewViewSet,
@@ -436,7 +462,7 @@ fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
 }
 
 /// One of the active view set's 25-point action buttons.
-fn strip_action(glyph: &str, label: String, act: impl Fn(&mut App) + 'static) -> El {
+fn strip_action(icon: &'static rune::Icon, label: String, act: impl Fn(&mut App) + 'static) -> El {
     let p = Palette::get();
     col()
         .size(25.0, 25.0)
@@ -444,11 +470,7 @@ fn strip_action(glyph: &str, label: String, act: impl Fn(&mut App) + 'static) ->
         .role("button")
         .label(label)
         .hover(p.plane_selected)
-        .child(
-            text(glyph.to_owned())
-                .font(theme::data(12.0))
-                .color(p.faint),
-        )
+        .child(crate::icons::glyph(icon, 12.0, p.faint))
         .on_press(act)
 }
 
@@ -515,11 +537,35 @@ fn body(vm: &RyeOsViewModel, local: &Local) -> El {
         .pb(14.0)
         .px(18.0)
         .gap(12.0);
-    if !vm.navigation.items.is_empty() {
-        body = body.child(navigation(vm));
+    if !vm.navigation.items.is_empty() && !local.narrow() {
+        body = body.child(navigation(vm).w(NAV_WIDTH));
     }
     body.child(view_set(vm, local))
 }
+
+/// The narrow layout's navigation: a drawer over a scrim under the system
+/// bar; choosing a view or pressing outside closes it.
+fn navigation_drawer(vm: &RyeOsViewModel, local: &Local) -> El {
+    let p = Palette::get();
+    let width = (local.width() - 44.0).clamp(0.0, 320.0);
+    el().pin(
+        Some(0.0),
+        Some(SYSTEM_HEIGHT),
+        Some(0.0),
+        Some(STATUS_HEIGHT),
+    )
+    .fill(p.bg.alpha(0.68))
+    .modal(true, |app: &mut App| app.set_navigation_open(false))
+    .focus_return(NAVIGATION_TOGGLE)
+    .child(
+        navigation(vm)
+            .pin(Some(0.0), Some(0.0), None, Some(0.0))
+            .w(width),
+    )
+}
+
+/// The narrow system bar's drawer control; focus returns to it on close.
+const NAVIGATION_TOGGLE: &str = "navigation-toggle";
 
 fn navigation(vm: &RyeOsViewModel) -> El {
     let p = Palette::get();
@@ -548,6 +594,7 @@ fn navigation(vm: &RyeOsViewModel) -> El {
                 )
                 .child(text(item.label.clone()).font(theme::ui(13.0)).color(ink))
                 .on_press(move |app: &mut App| {
+                    app.set_navigation_open(false);
                     app.ui(RyeOsUiEvent::Activate {
                         intent: intent.clone(),
                     });
@@ -555,7 +602,6 @@ fn navigation(vm: &RyeOsViewModel) -> El {
         );
     }
     col()
-        .w(NAV_WIDTH)
         .h_full()
         .min_h(0.0)
         .fill(p.plane)
@@ -645,6 +691,12 @@ fn dock(tile: &RyeOsDockTileVm, side: bool, local: &Local) -> El {
         frame.on_press(move |app: &mut App| app.ui(RyeOsUiEvent::FocusDock { edge }))
     };
     let size = f32::from(tile.size);
+    // A compact window caps side docks so the view set keeps its room.
+    let size = if side && local.width() <= crate::COMPACT {
+        size.min(local.width() * 0.28)
+    } else {
+        size
+    };
     if side {
         col().w(size).h_full().min_h(0.0).child(frame)
     } else {
@@ -784,6 +836,14 @@ fn divider(
         })
 }
 
+/// Whether the focused tile is under `node`.
+fn holds_focus(node: &RyeOsLayoutNodeVm) -> bool {
+    match node {
+        RyeOsLayoutNodeVm::Split { first, second, .. } => holds_focus(first) || holds_focus(second),
+        RyeOsLayoutNodeVm::Tile { focused, .. } => *focused,
+    }
+}
+
 fn layout(
     node: &RyeOsLayoutNodeVm,
     local: &Local,
@@ -791,6 +851,19 @@ fn layout(
     path: &mut Vec<SplitBranch>,
 ) -> El {
     match node {
+        RyeOsLayoutNodeVm::Split { first, second, .. } if local.narrow() => {
+            // One tile at a time: the focused leaf's branch, the authored tree
+            // untouched.
+            let into_first = holds_focus(first) || !holds_focus(second);
+            path.push(if into_first {
+                SplitBranch::First
+            } else {
+                SplitBranch::Second
+            });
+            let shown = layout(if into_first { first } else { second }, local, splits, path);
+            path.pop();
+            shown
+        }
         RyeOsLayoutNodeVm::Split {
             axis,
             ratio,
@@ -1025,12 +1098,11 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
         .px(12.0)
         .center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-        .child(
-            text("■")
-                .font(theme::data(8.0))
-                .color(p.accent_bright)
-                .pr(10.0),
-        )
+        .child(col().pr(10.0).child(crate::icons::glyph(
+            &crate::icons::SQUARE,
+            9.0,
+            p.accent_bright,
+        )))
         .child(
             text(dialog.title.to_uppercase())
                 .font(theme::data(10.0).tracking(0.8))
@@ -1069,9 +1141,9 @@ fn dialog_layer(dialog: &RyeOsDialogVm, local: &Local) -> El {
     col()
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .items_center()
-        .pt(96.0)
-        .px(18.0)
-        .pb(18.0)
+        .pt(if local.narrow() { 36.0 } else { 96.0 })
+        .px(if local.narrow() { 8.0 } else { 18.0 })
+        .pb(if local.narrow() { 8.0 } else { 18.0 })
         .fill(p.bg.alpha(0.72))
         .modal(true, move |app: &mut App| {
             app.ui(RyeOsUiEvent::CloseDialog {
@@ -1176,7 +1248,7 @@ pub fn composer(input: &RyeOsInputVm, local: &Local) -> El {
                 .gap(8.0)
                 .center_y()
                 .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-                .child(text("●").font(theme::data(9.0)).color(p.green))
+                .child(crate::icons::glyph(&crate::icons::DOT, 9.0, p.green))
                 .child(
                     text(input.route_label.clone())
                         .font(theme::data(9.0))

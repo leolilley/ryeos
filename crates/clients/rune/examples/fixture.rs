@@ -33,7 +33,11 @@ const SURFACE: &str = "22222222-2222-4222-8222-222222222222";
 const FILES: &str = include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/project/files.yaml");
 const THREADS: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml");
-const LAUNCHER: &str = include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/ui/launcher.yaml");
+const LAUNCHER: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/ui/launcher.yaml");
+const EXECUTION: &str =
+    include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/development/execution.yaml");
+const BUILD_DEPLOY: &str = include_str!("../../base/tests/fixtures/field/build-deploy-live.json");
 const TIMELINE: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml");
 
@@ -72,6 +76,7 @@ fn response(view_ref: &str) -> Option<Value> {
             { "thread_id": "T-5d21", "kind": "directive_run", "item_ref": "directive:ryeos/review/diff",
               "project": { "name": "ryeos-next" }, "status": "failed", "created_at": "2026-11-12T07:03:00Z" }
         ], "coverage": { "complete": false, "returned": 3 } }),
+        "view:ryeos/development/execution" => serde_json::from_str(BUILD_DEPLOY).ok()?,
         "view:ryeos/chain/timeline" => json!({ "events": [
             { "event_type": "cognition_in", "chain_seq": 1, "payload": { "turn": 1 } },
             { "event_type": "cognition_out", "chain_seq": 2, "payload": { "content": "Reading the layout module first." } },
@@ -111,15 +116,37 @@ fn answer(core: &mut RyeOsCore, effects: Vec<RyeOsEffect>) -> usize {
     answered
 }
 
+/// The execution field with its thread given directly: the fixture has no
+/// selection facet to resolve it from.
+fn execution() -> Result<Value, String> {
+    let mut definition = view(EXECUTION)?;
+    definition["sources"]["execution"]["params"]["thread_id"] = json!("T-build-root");
+    Ok(definition)
+}
+
+fn scene() -> String {
+    std::env::var("RYEOS_FIXTURE_SCENE").unwrap_or_default()
+}
+
 fn core() -> Result<RyeOsCore, String> {
+    let field = scene() == "field";
+    let tiles = if field {
+        json!([
+            "view:ryeos/development/execution",
+            "view:ryeos/threads/history"
+        ])
+    } else {
+        json!(["view:ryeos/threads/history", "view:ryeos/chain/timeline"])
+    };
     let presentation = UiCompositionPresentation::from_effective_surface(json!({
         "name": "workbench", "title": "Workbench", "version": "1.0.0",
         "tiling": { "mode": "master_stack",
             "master": { "side": "left", "arrange": "vertical", "ratio": 0.6, "count": 1 },
             "stack": { "arrange": "vertical" }, "insert": "end" },
-        "tiles": ["view:ryeos/threads/history", "view:ryeos/chain/timeline"],
+        "tiles": tiles,
         "views": {
             "view:ryeos/threads/history": view(THREADS)?,
+            "view:ryeos/development/execution": execution()?,
             "view:ryeos/chain/timeline": view(TIMELINE)?
         }
     }))
@@ -254,11 +281,12 @@ fn core() -> Result<RyeOsCore, String> {
     });
     answered += answer(&mut core, effects);
     // RYEOS_FIXTURE_SCENE picks what is open when the frame is drawn.
-    let scene = std::env::var("RYEOS_FIXTURE_SCENE").unwrap_or_default();
-    match scene.as_str() {
-        "" => {}
+    match scene().as_str() {
+        "" | "field" => {}
         "launcher" => {
-            let effects = core.dispatch(RyeOsEvent::Ui { event: RyeOsUiEvent::OpenLauncher });
+            let effects = core.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::OpenLauncher,
+            });
             answered += answer(&mut core, effects);
         }
         other => return Err(format!("unknown fixture scene {other}")),

@@ -543,17 +543,54 @@ fn ui(event: RyeOsUiEvent) -> impl Fn(&mut App) + 'static {
     move |app: &mut App| app.ui(event.clone())
 }
 
+/// A field control: small, muted and ruled, as the browser shell draws them.
 fn button(label: impl Into<String>, enabled: bool, event: Option<RyeOsUiEvent>) -> El {
+    control(None, label.into(), enabled, event, false)
+}
+
+/// A control led by an icon; `label` (possibly empty) follows it.
+fn icon_button(
+    icon: &'static rune::Icon,
+    label: impl Into<String>,
+    enabled: bool,
+    event: Option<RyeOsUiEvent>,
+) -> El {
+    control(Some(icon), label.into(), enabled, event, false)
+}
+
+/// A control that shows an on state (a visible layer, the rail's cut).
+fn toggle(
+    icon: Option<&'static rune::Icon>,
+    label: impl Into<String>,
+    pressed: bool,
+    event: RyeOsUiEvent,
+) -> El {
+    control(icon, label.into(), true, Some(event), pressed).focus_selected(pressed)
+}
+
+fn control(
+    lead: Option<&'static rune::Icon>,
+    label: String,
+    enabled: bool,
+    event: Option<RyeOsUiEvent>,
+    pressed: bool,
+) -> El {
     let p = Palette::get();
+    let ink = if pressed { p.yellow } else { p.muted };
     let mut b = row()
-        .h(26.0)
-        .px(9.0)
+        .px(6.0)
+        .py(4.0)
+        .gap(4.0)
         .center()
-        .border(1.0, p.line)
-        .fill(p.plane)
+        .border(1.0, if pressed { p.yellow } else { p.line })
         .role("button")
-        .focusable(enabled)
-        .child(text(label.into()).font(theme::ui(11.0)).color(p.text));
+        .focusable(enabled);
+    if let Some(icon) = lead {
+        b = b.child(crate::icons::glyph(icon, 10.0, ink));
+    }
+    if !label.is_empty() {
+        b = b.child(text(label).font(theme::data(9.0)).color(ink));
+    }
     match (enabled, event) {
         (true, Some(event)) => b = b.hover(p.plane_raised).on_press(ui(event)),
         _ => b = b.disabled(true).opacity(0.5),
@@ -573,7 +610,6 @@ pub(crate) fn query_key(instance: &RyeOsViewInstanceKey) -> String {
 }
 
 pub fn view(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey, local: &Local) -> El {
-    let p = Palette::get();
     let selected = field
         .selected
         .as_deref()
@@ -584,24 +620,40 @@ pub fn view(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey, local: &Local
             .iter()
             .find(|item| item.source == selected.source && item.root_id == selected.id)
     });
-    let mut root = col()
+    // The stage fills the view; the toolbar, detail, evidence and rail float
+    // over it, as in the browser shell.
+    let mut root = el()
         .key(format!("field:{instance:?}"))
         .w_full()
         .h_full()
-        .min_h(0.0)
+        .min_h(240.0)
         .label(field.title.clone())
-        .child(toolbar(field, instance, selected, expansion, local));
-    if !field.replay.rail.is_empty() {
-        root = root.child(rail(field, instance));
+        .clip_rounded(0.0)
+        .child(stage(field, instance))
+        .child(toolbar(field, instance, selected, expansion, local).pin(
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            None,
+        ));
+    let rail_shown = !field.replay.rail.is_empty();
+    if rail_shown {
+        root = root.child(rail(field, instance).pin(Some(10.0), None, Some(10.0), Some(10.0)));
     }
-    root = root.child(stage(field, instance));
     if has_evidence(field, expansion) {
-        root = root.child(evidence(field, instance, expansion, local));
+        let bottom = if rail_shown { 44.0 } else { 10.0 };
+        root = root.child(evidence(field, instance, expansion, local).pin(
+            Some(10.0),
+            None,
+            None,
+            Some(bottom),
+        ));
     }
     if selected.is_some() || !field.compare.is_empty() || !field.warnings.is_empty() {
-        root = root.child(detail(field, instance, selected));
+        root =
+            root.child(detail(field, instance, selected).pin(None, Some(58.0), Some(12.0), None));
     }
-    root.fill(p.plane)
+    root
 }
 
 fn toolbar(
@@ -620,11 +672,15 @@ fn toolbar(
     };
     let mut controls = row()
         .gap(5.0)
-        .child(button(
-            "◀",
-            replay.previous.is_some(),
-            Some(step(FieldStepDirection::Previous)),
-        ))
+        .child(
+            icon_button(
+                &crate::icons::PREVIOUS,
+                "",
+                replay.previous.is_some(),
+                Some(step(FieldStepDirection::Previous)),
+            )
+            .label("Previous event"),
+        )
         .child(button(
             if replay.playing { "Pause" } else { "Play" },
             replay.playing || replay.next.is_some(),
@@ -633,11 +689,15 @@ fn toolbar(
                 playing: !replay.playing,
             }),
         ))
-        .child(button(
-            "▶",
-            replay.next.is_some(),
-            Some(step(FieldStepDirection::Next)),
-        ))
+        .child(
+            icon_button(
+                &crate::icons::NEXT,
+                "",
+                replay.next.is_some(),
+                Some(step(FieldStepDirection::Next)),
+            )
+            .label("Next event"),
+        )
         .child(button(
             "Live",
             replay.mode != "live",
@@ -645,12 +705,13 @@ fn toolbar(
         ));
     for group in &field.groups {
         controls = controls.child(
-            button(
-                format!(
-                    "{} {}",
-                    if group.collapsed { "▸" } else { "▾" },
-                    group.label
-                ),
+            icon_button(
+                if group.collapsed {
+                    &crate::icons::COLLAPSED
+                } else {
+                    &crate::icons::EXPANDED
+                },
+                group.label.clone(),
                 true,
                 Some(RyeOsUiEvent::SetFieldGroupCollapsed {
                     instance_key: key.clone(),
@@ -662,18 +723,20 @@ fn toolbar(
         );
     }
     for layer in &field.layers {
-        controls = controls.child(
-            button(
-                format!("{} {}", if layer.visible { "●" } else { "○" }, layer.label),
-                true,
-                Some(RyeOsUiEvent::SetFieldLayerVisible {
-                    instance_key: key.clone(),
-                    layer_id: layer.id.clone(),
-                    visible: !layer.visible,
-                }),
-            )
-            .focus_selected(layer.visible),
-        );
+        controls = controls.child(toggle(
+            Some(if layer.visible {
+                &crate::icons::DOT
+            } else {
+                &crate::icons::RING
+            }),
+            layer.label.clone(),
+            layer.visible,
+            RyeOsUiEvent::SetFieldLayerVisible {
+                instance_key: key.clone(),
+                layer_id: layer.id.clone(),
+                visible: !layer.visible,
+            },
+        ));
     }
     if let Some(selected) = selected {
         if selected.activate_intent.is_some() {
@@ -749,17 +812,17 @@ fn toolbar(
     let move_instance = instance.clone();
     let search = text_input(
         &local.field_query(&edit_key, &field.search.query),
-        theme::ui(12.0),
+        theme::data(10.0),
     )
     .single_line()
     .placeholder("Search field", p.faint)
     .label("Search field entities")
     .color(p.text)
-    .w(220.0)
+    .w(200.0)
     .px(8.0)
-    .py(4.0)
-    .border(1.0, p.line)
-    .fill(p.bg)
+    .py(6.0)
+    .border(1.0, p.line_strong)
+    .fill(p.plane)
     .on_edit(move |app: &mut App| app.field_query_mut(&edit_key))
     .on_input_change(move |app: &mut App, _| {
         let query = app.field_query_text(&change_key);
@@ -780,20 +843,21 @@ fn toolbar(
         });
         true
     });
-    col()
-        .w_full()
-        .gap(6.0)
+    row()
+        .h(46.0)
+        .gap(10.0)
         .px(10.0)
-        .py(7.0)
+        .center_y()
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
+        .fill(p.plane.alpha(0.94))
         .child(
-            row()
-                .w_full()
+            col()
+                .max_w(220.0)
                 .min_w(0.0)
-                .gap(10.0)
+                .gap(1.0)
                 .child(
                     text(field.title.clone())
-                        .font(rune::tok::TextStyle::new(12.0, 600.0).family(theme::UI))
+                        .font(rune::tok::TextStyle::new(12.0, 500.0).family(theme::UI))
                         .color(p.text)
                         .truncate(),
                 )
@@ -801,19 +865,18 @@ fn toolbar(
                     text(sources)
                         .font(theme::data(9.0))
                         .color(p.muted)
-                        .truncate()
-                        .grow(1.0)
-                        .min_w(0.0),
-                )
-                .child(search),
+                        .truncate(),
+                ),
         )
         .child(
             row()
                 .key(format!("field-controls:{instance:?}"))
-                .w_full()
+                .grow(1.0)
+                .min_w(0.0)
                 .scroll_x()
-                .child(controls),
+                .child(controls.gap(3.0)),
         )
+        .child(search)
 }
 
 fn phase_name(phase: RyeOsSourcePhase) -> &'static str {
@@ -827,8 +890,7 @@ fn phase_name(phase: RyeOsSourcePhase) -> &'static str {
 }
 
 fn rail(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey) -> El {
-    let p = Palette::get();
-    let mut entries = row().gap(4.0);
+    let mut entries = row().gap(3.0);
     for entry in &field.replay.rail {
         let cursor = FieldCursorState::BraidCut {
             anchor: FieldEventRefState {
@@ -837,26 +899,18 @@ fn rail(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey) -> El {
                 event_hash: entry.event.event_hash.clone(),
             },
         };
-        let mut chip = button(
+        entries = entries.child(toggle(
+            None,
             entry.label.clone(),
-            true,
-            Some(RyeOsUiEvent::SetFieldCursor {
+            entry.selected,
+            RyeOsUiEvent::SetFieldCursor {
                 instance_key: instance.clone(),
                 cursor,
-            }),
-        )
-        .focus_selected(entry.selected);
-        if entry.selected {
-            chip = chip.fill(p.plane_selected).border(1.0, p.accent);
-        }
-        entries = entries.child(chip);
+            },
+        ));
     }
     row()
         .key(format!("field-rail:{instance:?}"))
-        .w_full()
-        .px(10.0)
-        .py(5.0)
-        .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
         .role("navigation")
         .label("Durable execution events")
         .scroll_x()
@@ -938,15 +992,22 @@ fn stage(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey) -> El {
                 .expanded(!group.collapsed)
                 .label(format!("Group {}", group.label))
                 .hover(p.plane_raised)
+                .gap(6.0)
+                .center_y()
+                .child(crate::icons::glyph(
+                    if group.collapsed {
+                        &crate::icons::COLLAPSED
+                    } else {
+                        &crate::icons::EXPANDED
+                    },
+                    11.0,
+                    p.muted,
+                ))
                 .child(
-                    text(format!(
-                        "{} {}",
-                        if group.collapsed { "▸" } else { "▾" },
-                        group.label
-                    ))
-                    .font(theme::data(11.0))
-                    .color(p.muted)
-                    .truncate(),
+                    text(group.label.to_owned())
+                        .font(theme::data(11.0))
+                        .color(p.muted)
+                        .truncate(),
                 )
                 .on_press(ui(RyeOsUiEvent::SetFieldGroupCollapsed {
                     instance_key: key,
@@ -965,9 +1026,8 @@ fn stage(field: &RyeOsFieldVm, instance: &RyeOsViewInstanceKey) -> El {
     let mut stage = col()
         .key(format!("field-stage:{instance:?}"))
         .w_full()
-        .grow(1.0)
-        .min_h(160.0)
-        .fill(p.bg)
+        .h_full()
+        .pt(46.0)
         .role("tree")
         .label(format!("{} entities", field.title))
         .focusable(true)
@@ -1279,23 +1339,28 @@ fn evidence(
         .focusable(true)
         .expanded(open)
         .hover(p.plane_raised)
-        .child(
-            text(if open { "▾ EVIDENCE" } else { "▸ EVIDENCE" })
-                .font(theme::data(9.0))
-                .color(p.muted),
-        )
+        .child(crate::icons::glyph(
+            if open {
+                &crate::icons::EXPANDED
+            } else {
+                &crate::icons::COLLAPSED
+            },
+            10.0,
+            p.muted,
+        ))
+        .child(text("EVIDENCE").font(theme::data(9.0)).color(p.muted))
         .child(
             text(flags.join(" · "))
                 .font(theme::data(9.0))
                 .color(p.faint)
                 .truncate()
-                .grow(1.0)
                 .min_w(0.0),
         )
         .on_press(move |app: &mut App| app.toggle_evidence(toggle_key.clone()));
     let mut block = col()
-        .w_full()
-        .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+        .max_w(580.0)
+        .border(1.0, p.line)
+        .fill(p.plane)
         .child(summary);
     if !open {
         return block;
@@ -1464,14 +1529,12 @@ fn detail(
     let p = Palette::get();
     let mut aside = col()
         .key(format!("field-detail:{instance:?}"))
-        .w_full()
-        .max_h(280.0)
-        .shrink()
-        .min_h(0.0)
+        .w(250.0)
+        .max_h(420.0)
         .gap(6.0)
-        .px(10.0)
-        .py(8.0)
-        .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+        .padding(10.0)
+        .border(1.0, p.line_strong)
+        .fill(p.plane.alpha(0.96))
         .scroll(rune::ScrollSpec {
             stick_bottom: false,
         });
@@ -1505,19 +1568,25 @@ fn detail(
                     .w_full(),
             )
             .child(text(meta).font(theme::data(9.0)).color(p.muted))
-            .child(crate::views::details(&selected.detail));
+            .child(crate::views::details_as(
+                &selected.detail,
+                crate::views::Pairs::Panel,
+            ));
         if let Some(artifact) = &selected.artifact_ref {
-            aside = aside.child(crate::views::detail_pairs(&[
-                ("Thread", artifact.thread_id.clone()),
-                ("Artifact", artifact.artifact_id.to_string()),
-                (
-                    "Content hash",
-                    artifact
-                        .content_hash
-                        .clone()
-                        .unwrap_or_else(|| "Not recorded".into()),
-                ),
-            ]));
+            aside = aside.child(crate::views::detail_pairs(
+                &[
+                    ("Thread", artifact.thread_id.clone()),
+                    ("Artifact", artifact.artifact_id.to_string()),
+                    (
+                        "Content hash",
+                        artifact
+                            .content_hash
+                            .clone()
+                            .unwrap_or_else(|| "Not recorded".into()),
+                    ),
+                ],
+                crate::views::Pairs::Panel,
+            ));
         }
         let mut connectors = row().gap(5.0);
         let mut any = false;

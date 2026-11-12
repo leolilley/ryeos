@@ -202,10 +202,13 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         let open = local.menu.as_deref() == Some(key.as_str());
         let toggle = key.clone();
         tools = tools.child(
-            text("⋮")
+            col()
                 .key(format!("{key}:open"))
-                .font(theme::ui(15.0))
-                .color(if open { p.accent_bright } else { p.muted })
+                .child(crate::icons::glyph(
+                    &crate::icons::MORE,
+                    14.0,
+                    if open { p.accent_bright } else { p.muted },
+                ))
                 .padding(5.0)
                 .role("button")
                 .label(format!("Actions for {}", spec.label))
@@ -586,7 +589,11 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
     } else {
         p.text
     };
-    let fold = if section.collapsed { "▸" } else { "▾" };
+    let fold = if section.collapsed {
+        &crate::icons::COLLAPSED
+    } else {
+        &crate::icons::EXPANDED
+    };
     let toggle_key = instance.clone();
     let section_id = section.id.clone();
     let header = row()
@@ -600,8 +607,9 @@ fn section_block(instance: &RyeOsViewInstanceKey, section: &RyeOsSectionVm) -> E
         .hover(p.plane_raised)
         .role("button")
         .expanded(!section.collapsed)
+        .child(crate::icons::glyph(fold, 12.0, ink))
         .child(
-            text(format!("{fold} {}", section.title))
+            text(section.title.clone())
                 .font(theme::ui(13.0))
                 .color(ink)
                 .truncate()
@@ -740,11 +748,7 @@ fn record(instance: &RyeOsViewInstanceKey, item: &RyeOsRowVm, style: RowStyle) -
                     item.primary
                 ))
                 .expanded(expanded)
-                .child(
-                    text(if expanded { "▾" } else { "▸" })
-                        .font(theme::ui(13.0))
-                        .color(if expanded { p.yellow } else { p.muted }),
-                )
+                .child(disclosure_icon(expanded, 13.0))
                 .on_press(move |app: &mut App| {
                     app.ui(RyeOsUiEvent::ToggleViewItemExpansion {
                         instance_key: expand_key.clone(),
@@ -1019,9 +1023,17 @@ fn tree_prefix(
         let item_id = item_id.to_owned();
         let collapsed = hierarchy.collapsed;
         prefix = prefix.child(
-            text(if collapsed { "▸" } else { "▾" })
-                .font(theme::data(13.0))
-                .color(p.muted)
+            col()
+                .center()
+                .child(crate::icons::glyph(
+                    if collapsed {
+                        &crate::icons::COLLAPSED
+                    } else {
+                        &crate::icons::EXPANDED
+                    },
+                    12.0,
+                    p.muted,
+                ))
                 .min_w(20.0)
                 .padding(4.0)
                 .hover(p.plane_selected)
@@ -1051,6 +1063,16 @@ fn tree_prefix(
 }
 
 /// The expand/collapse control at the right edge of a record.
+/// The open/closed triangle of an expandable record.
+fn disclosure_icon(expanded: bool, size: f32) -> El {
+    let p = Palette::get();
+    if expanded {
+        crate::icons::glyph(&crate::icons::EXPANDED, size, p.yellow)
+    } else {
+        crate::icons::glyph(&crate::icons::COLLAPSED, size, p.muted)
+    }
+}
+
 /// The rows and timeline disclosure column.
 const DISCLOSURE_WIDTH: f32 = 34.0;
 
@@ -1079,11 +1101,7 @@ fn disclosure(
             if expanded { "Collapse" } else { "Expand" }
         ))
         .expanded(expanded)
-        .child(
-            text(if expanded { "▾" } else { "▸" })
-                .font(theme::ui(13.0))
-                .color(if expanded { p.yellow } else { p.muted }),
-        )
+        .child(disclosure_icon(expanded, 13.0))
         .on_press(move |app: &mut App| {
             app.ui(RyeOsUiEvent::ToggleViewItemExpansion {
                 instance_key: expand_key.clone(),
@@ -1229,8 +1247,20 @@ fn entry_line(primary: &str, meta: Option<&str>, ink: rune::Color, weight: f32) 
     line
 }
 
+/// How a block of field/value pairs sits: indented under an expanded record,
+/// or flush inside a narrow floating panel (the field's detail).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Pairs {
+    Record,
+    Panel,
+}
+
 /// Field/value pairs under an expanded record.
 pub(crate) fn details(details: &[RyeOsRowDetailVm]) -> El {
+    details_as(details, Pairs::Record)
+}
+
+pub(crate) fn details_as(details: &[RyeOsRowDetailVm], style: Pairs) -> El {
     let p = Palette::get();
     let pairs: Vec<(&str, String, rune::Color)> = details
         .iter()
@@ -1244,41 +1274,48 @@ pub(crate) fn details(details: &[RyeOsRowDetailVm]) -> El {
             (field, detail.value.clone(), ink)
         })
         .collect();
-    pair_block(&pairs)
+    pair_block(&pairs, style)
 }
 
-/// Untoned field/value pairs in the record-detail style.
-pub(crate) fn detail_pairs(pairs: &[(&str, String)]) -> El {
+/// Untoned field/value pairs.
+pub(crate) fn detail_pairs(pairs: &[(&str, String)], style: Pairs) -> El {
     let p = Palette::get();
     let pairs: Vec<(&str, String, rune::Color)> = pairs
         .iter()
         .map(|(field, value)| (*field, value.clone(), p.muted))
         .collect();
-    pair_block(&pairs)
+    pair_block(&pairs, style)
 }
 
-fn pair_block(pairs: &[(&str, String, rune::Color)]) -> El {
+fn pair_block(pairs: &[(&str, String, rune::Color)], style: Pairs) -> El {
     let p = Palette::get();
-    let mut block = col()
-        .w_full()
-        .pt(7.0)
-        .pb(9.0)
-        .pl(34.0)
-        .pr(12.0)
-        .fill(p.plane_raised.alpha(0.45));
+    let (label_width, gap) = match style {
+        Pairs::Record => (110.0, 12.0),
+        Pairs::Panel => (76.0, 8.0),
+    };
+    let mut block = col().w_full();
+    block = match style {
+        Pairs::Record => block
+            .pt(7.0)
+            .pb(9.0)
+            .pl(34.0)
+            .pr(12.0)
+            .fill(p.plane_raised.alpha(0.45)),
+        Pairs::Panel => block.py(5.0),
+    };
     for (field, value, ink) in pairs {
         block = block.child(
             row()
                 .w_full()
                 .min_w(0.0)
-                .gap(12.0)
+                .gap(gap)
                 .py(2.0)
                 .child(
                     text((*field).to_owned())
                         .font(theme::data(9.0))
                         .color(p.faint)
                         .wrap_anywhere()
-                        .w(110.0),
+                        .w(label_width),
                 )
                 .child(
                     text(value.clone())

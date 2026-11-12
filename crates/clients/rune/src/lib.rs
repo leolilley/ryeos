@@ -8,6 +8,7 @@
 
 mod boot;
 mod field;
+mod icons;
 mod shell;
 mod theme;
 mod views;
@@ -53,9 +54,26 @@ pub struct Local {
     field_queries: HashMap<String, TextEdit>,
     /// The `field-evidence:` keys of fields whose Evidence panel is open.
     pub(crate) evidence_open: std::collections::BTreeSet<String>,
+    /// The shell's size in points, as last laid out.
+    pub(crate) viewport: Option<(f32, f32)>,
+    /// Whether the narrow layout's navigation drawer is open.
+    pub(crate) navigation_open: bool,
 }
 
+/// At or under this width the shell shows one tile and a navigation drawer.
+pub(crate) const NARROW: f32 = 760.0;
+/// At or under this width side docks give up width to the view set.
+pub(crate) const COMPACT: f32 = 980.0;
+
 impl Local {
+    pub(crate) fn width(&self) -> f32 {
+        self.viewport.map_or(f32::MAX, |(width, _)| width)
+    }
+
+    pub(crate) fn narrow(&self) -> bool {
+        self.width() <= NARROW
+    }
+
     /// A field's search buffer, or the core's query before one exists.
     pub(crate) fn field_query(&self, key: &str, query: &str) -> TextEdit {
         self.field_queries
@@ -380,6 +398,31 @@ impl App {
         if !self.local.evidence_open.remove(&key) {
             self.local.evidence_open.insert(key);
         }
+    }
+
+    /// Record the shell's laid-out size and tell the core, as the browser
+    /// shell does on a window resize.
+    pub(crate) fn set_viewport(&mut self, width: f32, height: f32) {
+        if self.local.viewport == Some((width, height)) {
+            return;
+        }
+        self.local.viewport = Some((width, height));
+        if width > NARROW {
+            self.local.navigation_open = false;
+        }
+        let Some(core) = self.core() else {
+            return;
+        };
+        let viewport = ryeos_client_base::ui::model::BrowserViewport {
+            width: width.round() as u32,
+            height: height.round() as u32,
+            device_pixel_ratio: core.runtime.viewport.device_pixel_ratio,
+        };
+        self.dispatch(RyeOsEvent::Resize { viewport });
+    }
+
+    pub(crate) fn set_navigation_open(&mut self, open: bool) {
+        self.local.navigation_open = open;
     }
 
     pub(crate) fn set_split_extent(&mut self, key: String, extent: f32) {
