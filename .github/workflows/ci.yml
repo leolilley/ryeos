@@ -67,7 +67,7 @@ env:
 jobs:
   static-policy:
     name: Static repository policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -166,7 +166,7 @@ jobs:
 
   rust-policy:
     name: Rust formatting, lint, and dependency policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Check out repository
@@ -209,7 +209,7 @@ jobs:
 
   secrets:
     name: Secret scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Check out repository history
@@ -261,7 +261,7 @@ jobs:
 
   bundles:
     name: Bundle refresh for tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
@@ -308,7 +308,7 @@ jobs:
 
   workspace-archive:
     name: Workspace test archive
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
@@ -370,7 +370,7 @@ jobs:
   test-shard:
     name: Workspace tests shard ${{ matrix.shard }}/8
     needs: [bundles, workspace-archive]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -490,7 +490,7 @@ jobs:
 
   scheduler-compositions:
     name: Scheduler composition checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # Three no-default-features checks at -j 1 take 20-30 minutes on a runner; the
     # job ceiling, not a step, bounds a stuck compilation.
     timeout-minutes: 60
@@ -581,7 +581,7 @@ jobs:
     # Aggregates the build, shards and composition checks so the required
     # check keeps its name and fails if any part failed or was skipped.
     needs: [bundles, workspace-archive, test-shard, multicall-coreutils, scheduler-compositions]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
     steps:
@@ -594,7 +594,7 @@ jobs:
 
   crash-archive:
     name: Crash qualification build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
@@ -650,7 +650,7 @@ jobs:
   crash-phase:
     name: Crash recovery ${{ matrix.label }}
     needs: [bundles, crash-archive]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # The serial two-node handoff matrix takes roughly 15 minutes of test time
     # on a runner by itself; every phase gets a runner of its own and keeps its
     # single test thread.
@@ -736,7 +736,7 @@ jobs:
   crash-qualification:
     name: Crash recovery qualification
     needs: [bundles, crash-archive, crash-phase]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
     steps:
@@ -749,7 +749,7 @@ jobs:
 
   bundle-refresh:
     name: Bundle refresh
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_bundles }}
     steps:
@@ -785,7 +785,7 @@ jobs:
 
   installed-resume-smoke:
     name: Installed restart/resume smoke
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
     steps:
@@ -823,7 +823,7 @@ jobs:
 
   rust-2024-audit:
     name: Rust 2024 compatibility audit
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_2024_audit }}
     steps:
