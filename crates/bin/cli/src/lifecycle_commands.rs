@@ -3890,6 +3890,16 @@ fn default_app_root() -> PathBuf {
         .expect("could not determine XDG data directory")
 }
 
+fn policy_carry_choices(
+    keep: &[String],
+    reset: &[String],
+) -> ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
+    ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
+        keep: keep.iter().cloned().collect(),
+        reset: reset.iter().cloned().collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4280,15 +4290,5 @@ mod tests {
         assert_eq!(parse_installed_revision(b"unknown\n"), None);
         assert_eq!(parse_installed_revision(b"two revisions\n"), None);
         assert_eq!(parse_installed_revision(&[b'a'; 129]), None);
-    }
-}
-
-fn policy_carry_choices(
-    keep: &[String],
-    reset: &[String],
-) -> ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
-    ryeos_node_runtime::node_policy::generation::PolicyCarryChoices {
-        keep: keep.iter().cloned().collect(),
-        reset: reset.iter().cloned().collect(),
     }
 }

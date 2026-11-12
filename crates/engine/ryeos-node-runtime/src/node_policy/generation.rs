@@ -1385,7 +1385,7 @@ mod tests {
     }
 
     fn operator_ingest_ignore() -> Value {
-        serde_json::json!({"schema": 2, "patterns": ["target/", "operator-only/"]})
+        serde_json::json!({"schema": 2, "patterns": ["operator-only/", "target/"]})
     }
 
     fn sections(names: &[&str]) -> BTreeSet<String> {
