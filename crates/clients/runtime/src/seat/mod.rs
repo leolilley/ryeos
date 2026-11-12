@@ -416,6 +416,10 @@ pub struct SeatShared<P: Platform> {
     pub delivery: RefCell<SeatDelivery>,
     /// A claimed replacement stream waiting for the reducer to adopt it.
     pub handoff: RefCell<Option<LiveSeatHandoff<Frames<P>>>>,
+    /// The producer taken out of `producer` while it is being relinquished.
+    /// It is still fenceable, and it stays here while the relinquishment's
+    /// outcome is unresolved.
+    pub relinquishing: RefCell<Option<UiPresentationProducer>>,
 }
 
 impl<P: Platform> SeatShared<P> {
@@ -425,6 +429,7 @@ impl<P: Platform> SeatShared<P> {
             producer: RefCell::new(None),
             delivery: RefCell::new(SeatDelivery::default()),
             handoff: RefCell::new(None),
+            relinquishing: RefCell::new(None),
         })
     }
 
@@ -442,6 +447,14 @@ impl<P: Platform> SeatShared<P> {
     /// the current one: a late failure of a predecessor must not poison a
     /// successor.
     pub fn fence(&self, expected: &UiPresentationProducer) -> bool {
+        // A producer being relinquished is out of `producer` but is still the
+        // writer until the node confirms; fencing it must survive a failed
+        // relinquishment.
+        if self.relinquishing.borrow().as_ref() == Some(expected) {
+            *self.relinquishing.borrow_mut() = None;
+            self.delivery.borrow_mut().blocked = true;
+            return true;
+        }
         if !self.is_current(expected) {
             return false;
         }

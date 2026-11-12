@@ -479,6 +479,7 @@ pub async fn claim_and_replay<P: Platform>(
             binding.max_seat_append_bytes,
         );
     }
+    *shared.relinquishing.borrow_mut() = None;
     *shared.producer.borrow_mut() = Some(producer.clone());
     Ok(Claimed {
         coordinate,

@@ -218,6 +218,11 @@ pub async fn relinquish_current<P: Platform>(
     shared: &Rc<SeatShared<P>>,
 ) -> Result<(), RuntimeError> {
     let Some(producer) = shared.current_producer() else {
+        if shared.relinquishing.borrow().is_some() {
+            return Err(RuntimeError::Fatal(
+                "an earlier relinquishment is unresolved; the seat was not given back".to_owned(),
+            ));
+        }
         return Ok(());
     };
     let (coordinate, root) = {
@@ -237,14 +242,17 @@ pub async fn relinquish_current<P: Platform>(
         (coordinate, root)
     };
     *shared.producer.borrow_mut() = None;
+    *shared.relinquishing.borrow_mut() = Some(producer.clone());
     let platform = &*shared.platform;
     let observation = match observe_producer(platform, &coordinate, &root).await {
         Ok(observation) => observation,
         Err(error) => {
             // No control request exists yet: a failed read must not strand an
-            // otherwise acknowledged writer.
-            shared.delivery.borrow_mut().blocked = false;
-            *shared.producer.borrow_mut() = Some(producer);
+            // otherwise acknowledged writer, unless it was fenced meanwhile.
+            if shared.relinquishing.borrow_mut().take().is_some() {
+                shared.delivery.borrow_mut().blocked = false;
+                *shared.producer.borrow_mut() = Some(producer);
+            }
             return Err(error);
         }
     };
@@ -254,9 +262,15 @@ pub async fn relinquish_current<P: Platform>(
             if *producer_incarnation == producer.producer_incarnation
     );
     if !ours {
+        // Another producer holds the seat: there is nothing of ours to give back.
+        *shared.relinquishing.borrow_mut() = None;
         return Err(RuntimeError::Fatal(
             "relinquishment no longer names the observed active producer".to_owned(),
         ));
     }
-    relinquish_observed(platform, &producer, &coordinate, observation).await
+    let result = relinquish_observed(platform, &producer, &coordinate, observation).await;
+    if result.is_ok() {
+        *shared.relinquishing.borrow_mut() = None;
+    }
+    result
 }

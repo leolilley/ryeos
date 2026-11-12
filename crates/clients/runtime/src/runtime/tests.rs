@@ -17,7 +17,7 @@ use crate::sim::{FakePlatform, Reply, open_history};
 
 fn producer(incarnation: char) -> UiPresentationProducer {
     UiPresentationProducer {
-        presentation_id: "presentation-1".to_owned(),
+        presentation_id: "11111111-1111-4111-8111-111111111111".to_owned(),
         thread_id: "seat-thread".to_owned(),
         producer_incarnation: incarnation.to_string().repeat(64),
     }
@@ -49,7 +49,7 @@ fn runtime(platform: &Rc<FakePlatform>) -> ClientRuntime<FakePlatform> {
 fn core() -> RyeOsCore {
     RyeOsCore::new(
         BrowserSession::default(),
-        "presentation-1",
+        "11111111-1111-4111-8111-111111111111",
         BrowserViewport::default(),
         0,
     )
@@ -283,4 +283,309 @@ fn an_unadopted_handoff_is_fenced_when_the_session_did_not_change() {
     assert!(runtime.shared.take_handoff().is_none());
     assert!(runtime.shared.current_producer().is_none());
     assert!(runtime.shared.delivery.borrow().blocked);
+}
+
+/// Delivery-state flows of a runtime that holds a live seat: what a lost,
+/// refused or overlapping seat task leaves behind, and what close does and
+/// does not publish.
+mod seat_delivery {
+    use super::*;
+    use crate::api::{SEAT_APPEND_PATH, SEAT_CLOSE_PATH, SEAT_OPEN_PATH, SEAT_TOUCH_PATH};
+    use crate::platform::{Clock, Spawner, Store};
+    use ryeos_client_base::ui::SeatEventKind;
+
+    const KEY: &str = "retained-key";
+
+    fn ready(
+        platform: &Rc<FakePlatform>,
+        who: &UiPresentationProducer,
+    ) -> ClientRuntime<FakePlatform> {
+        let mut runtime = runtime(platform);
+        runtime.seat = Some(active_seat(who));
+        runtime.retag_streams();
+        *runtime.shared.producer.borrow_mut() = Some(who.clone());
+        runtime.shared.delivery.borrow_mut().reset_for(
+            SeatCoordinate {
+                presentation_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+                thread_id: "seat-thread".to_owned(),
+                chain_root_id: "chain-1".to_owned(),
+            },
+            "session",
+            UiBindingAttachmentCoordinate {
+                binding_attachment_id: "root".to_owned(),
+                binding_generation: 1,
+                binding_digest: "digest".to_owned(),
+            },
+            KEY.to_owned(),
+            0,
+            1_000_000,
+        );
+        runtime
+    }
+
+    fn facet(seq: u64) -> SeatEvent {
+        SeatEvent {
+            seq,
+            producer_engine_seq: None,
+            kind: SeatEventKind::Facet {
+                key: "draft".to_owned(),
+                value: json!(1),
+            },
+        }
+    }
+
+    fn touched() -> Reply {
+        Reply::Ok(
+            json!({
+                "presentation_id": "11111111-1111-4111-8111-111111111111",
+                "thread_id": "seat-thread",
+                "touched": true,
+            })
+            .to_string(),
+        )
+    }
+
+    /// Start an append the way the runtime's writer does: one task that
+    /// sends the captured prefix and reports through the seat stream.
+    fn start_append(
+        platform: &Rc<FakePlatform>,
+        runtime: &mut ClientRuntime<FakePlatform>,
+        who: &UiPresentationProducer,
+        events: Vec<SeatEvent>,
+    ) {
+        let shared = runtime.shared.clone();
+        let inbox = runtime.inbox.clone();
+        let tag = runtime.seat_tag.clone();
+        let who = who.clone();
+        runtime.append_inflight = true;
+        let task = platform.spawner.spawn(async move {
+            let result = send_append(&shared, &who, &events, RetryPolicy::WEB).await;
+            inbox.push(
+                tag,
+                InboxPayload::Task(TaskResult::new(SeatTask::<FakePlatform>::Append {
+                    producer: who,
+                    events,
+                    upto: 1,
+                    result,
+                })),
+            );
+        });
+        runtime.io_tasks.push(task);
+    }
+
+    /// Renewal ticks that overlap send one request: the in-flight touch holds
+    /// the slot until its answer is folded, and the next renewal waits a full
+    /// interval after that.
+    #[test]
+    fn overlapping_presence_ticks_send_one_touch() {
+        let platform = FakePlatform::new();
+        platform.transport.script(SEAT_TOUCH_PATH, vec![touched()]);
+        platform.clock.set_now(TOUCH_INTERVAL_MS + 1);
+        let who = producer('a');
+        let mut runtime = ready(&platform, &who);
+
+        runtime.maybe_touch();
+        runtime.maybe_touch();
+        runtime.maybe_touch();
+        assert!(runtime.touch_inflight);
+        platform.sim().run_for(10);
+        let sent = platform.transport.calls_to(SEAT_TOUCH_PATH);
+        assert_eq!(sent.len(), 1);
+        let body: serde_json::Value = serde_json::from_str(&sent[0]).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "presentation_id": "11111111-1111-4111-8111-111111111111",
+                "thread_id": "seat-thread",
+                "producer_incarnation": who.producer_incarnation,
+            })
+        );
+
+        let mut core = core();
+        let drained = runtime.drain(&mut core);
+        assert!(drained.stop.is_none(), "{:?}", drained.stop);
+        assert!(!runtime.touch_inflight);
+        assert!(drained.seat.ready);
+        runtime.maybe_touch();
+        assert!(!runtime.touch_inflight, "the next renewal is a full interval away");
+
+        platform.clock.set_now(2 * TOUCH_INTERVAL_MS + 2);
+        runtime.maybe_touch();
+        assert!(runtime.touch_inflight);
+        platform.sim().run_for(10);
+        assert_eq!(platform.transport.calls_to(SEAT_TOUCH_PATH).len(), 2);
+    }
+
+    /// A definite refusal of presence fences the producer that was refused
+    /// and reports `writer_refused` once. A late refusal that belongs to a
+    /// predecessor neither reports nor fences its successor.
+    #[test]
+    fn a_refused_touch_fences_only_its_own_producer_and_reports_once() {
+        let platform = FakePlatform::new();
+        platform
+            .transport
+            .script(SEAT_TOUCH_PATH, vec![Reply::Status(403)]);
+        platform.clock.set_now(TOUCH_INTERVAL_MS + 1);
+        let who = producer('a');
+        let mut runtime = ready(&platform, &who);
+        runtime.maybe_touch();
+        platform.sim().run_for(10);
+
+        let mut core = core();
+        let drained = runtime.drain(&mut core);
+        let stop = drained.stop.clone().expect("the refusal is reported");
+        let StopReason::Unavailable(unavailable) = &stop else {
+            panic!("{stop:?}");
+        };
+        assert_eq!(unavailable.kind(), "writer_refused");
+        assert!(runtime.shared.current_producer().is_none());
+        assert!(runtime.shared.delivery.borrow().blocked);
+        assert!(!drained.seat.ready);
+        assert!(drained.seat.blocked);
+        assert!(runtime.drain(&mut core).stop.is_none(), "reported once");
+        assert_eq!(platform.transport.calls_to(SEAT_TOUCH_PATH).len(), 1);
+
+        // A refusal that arrives for a predecessor after a replacement.
+        let (old, successor) = (producer('a'), producer('b'));
+        let mut runtime = ready(&platform, &old);
+        *runtime.shared.producer.borrow_mut() = Some(successor.clone());
+        runtime.touch_inflight = true;
+        let mut out = Drained::default();
+        runtime.fold_task(
+            &mut core,
+            &TaskResult::new(SeatTask::<FakePlatform>::Touch {
+                producer: old,
+                outcome: TouchOutcome::Refused,
+            }),
+            &mut out,
+        );
+        assert!(out.stop.is_none(), "{:?}", out.stop);
+        assert!(!runtime.touch_inflight);
+        assert_eq!(runtime.shared.current_producer(), Some(successor));
+        assert!(!runtime.shared.delivery.borrow().blocked);
+    }
+
+    /// A mechanical close gives nothing back: it sends no control request,
+    /// keeps the writer as it was, and a refusal that arrives afterwards
+    /// publishes nothing. After a relinquish a late refusal is ignored too.
+    #[test]
+    fn a_late_refusal_after_close_publishes_nothing_and_close_sends_no_control_request() {
+        let platform = FakePlatform::new();
+        platform
+            .transport
+            .script(SEAT_TOUCH_PATH, vec![Reply::Status(403)]);
+        platform.clock.set_now(TOUCH_INTERVAL_MS + 1);
+        let who = producer('a');
+        let mut runtime = ready(&platform, &who);
+        runtime.maybe_touch();
+        runtime.detach();
+        platform.sim().run_for(10);
+        assert_eq!(platform.transport.calls_to(SEAT_TOUCH_PATH).len(), 1);
+
+        let mut core = core();
+        let drained = runtime.drain(&mut core);
+        assert!(drained.stop.is_none(), "{:?}", drained.stop);
+        assert!(!drained.changed);
+        assert!(platform.transport.calls_to(SEAT_OPEN_PATH).is_empty());
+        assert!(platform.transport.calls_to(SEAT_CLOSE_PATH).is_empty());
+        assert_eq!(runtime.shared.current_producer(), Some(who.clone()));
+        assert!(!runtime.shared.delivery.borrow().blocked);
+
+        // The writer was already given back when the refusal is folded.
+        *runtime.shared.producer.borrow_mut() = None;
+        let mut out = Drained::default();
+        runtime.fold_task(
+            &mut core,
+            &TaskResult::new(SeatTask::<FakePlatform>::Touch {
+                producer: who,
+                outcome: TouchOutcome::Refused,
+            }),
+            &mut out,
+        );
+        assert!(out.stop.is_none(), "{:?}", out.stop);
+    }
+
+    /// An append whose outcome is unknown is reported as `append_unknown`
+    /// exactly once. The writer is fenced, the retained request is exactly
+    /// what was sent, and nothing more is sent: no renewal, no claim.
+    #[test]
+    fn an_unknown_append_is_reported_once_and_blocks_further_mutation() {
+        let platform = FakePlatform::new();
+        platform
+            .transport
+            .script(SEAT_APPEND_PATH, vec![Reply::Network]);
+        let who = producer('a');
+        let mut runtime = ready(&platform, &who);
+        start_append(&platform, &mut runtime, &who, vec![facet(0)]);
+        platform.sim().run_for(10_000);
+        assert_eq!(platform.transport.calls_to(SEAT_APPEND_PATH).len(), 5);
+
+        let mut core = core();
+        let drained = runtime.drain(&mut core);
+        assert!(!runtime.append_inflight);
+        let stop = drained.stop.clone().expect("the unknown outcome is reported");
+        let StopReason::Unavailable(unavailable) = &stop else {
+            panic!("{stop:?}");
+        };
+        assert_eq!(unavailable.kind(), "append_unknown");
+        assert!(runtime.shared.current_producer().is_none());
+        assert!(runtime.shared.delivery.borrow().blocked);
+        assert!(drained.seat.blocked && !drained.seat.ready);
+
+        let stored = platform.store.get(KEY).expect("the request stays retained");
+        let record = retention::RetainedPendingAppend::parse(&stored).unwrap();
+        assert_eq!(
+            record.encoded_request,
+            platform.transport.calls_to(SEAT_APPEND_PATH)[0]
+        );
+        assert_eq!(
+            runtime.shared.delivery.borrow().pending.as_ref().map(|p| p.record.clone()),
+            Some(record)
+        );
+
+        assert!(runtime.drain(&mut core).stop.is_none(), "reported once");
+        platform
+            .clock
+            .set_now(platform.clock.now_ms() + 10 * TOUCH_INTERVAL_MS);
+        runtime.after_mutation(&core);
+        platform.sim().run_for(10);
+        assert!(platform.transport.calls_to(SEAT_TOUCH_PATH).is_empty());
+        assert!(platform.transport.calls_to(SEAT_OPEN_PATH).is_empty());
+        assert_eq!(platform.transport.calls_to(SEAT_APPEND_PATH).len(), 5);
+        assert_eq!(platform.store.get(KEY), Some(stored));
+    }
+
+    /// Closing while an append is admitted: the relinquish is refused before
+    /// any request and does not start closing; a detach lets the append task
+    /// finish on its own, and the retained request survives for recovery.
+    #[test]
+    fn close_during_an_admitted_append_keeps_the_retained_request() {
+        let platform = FakePlatform::new();
+        platform
+            .transport
+            .script(SEAT_APPEND_PATH, vec![Reply::Network]);
+        let who = producer('a');
+        let mut runtime = ready(&platform, &who);
+        start_append(&platform, &mut runtime, &who, vec![facet(0)]);
+        platform.sim().run_for(50);
+        assert!(!platform.transport.calls_to(SEAT_APPEND_PATH).is_empty());
+        let stored = platform.store.get(KEY).expect("retained before the first send");
+        let mut core = core();
+        assert!(!runtime.may_close(&core), "an admitted append holds the close");
+
+        let outcome = platform.sim().run(runtime.relinquish());
+        assert!(matches!(outcome, Err(RuntimeError::Fatal(_))), "{outcome:?}");
+        assert!(!runtime.closing);
+        assert!(platform.transport.calls_to(SEAT_OPEN_PATH).is_empty());
+        assert!(platform.transport.calls_to(SEAT_CLOSE_PATH).is_empty());
+        assert_eq!(runtime.shared.current_producer(), Some(who));
+
+        runtime.detach();
+        platform.sim().run_for(10_000);
+        assert_eq!(platform.store.get(KEY), Some(stored));
+        assert!(runtime.shared.delivery.borrow().pending.is_some());
+        let drained = runtime.drain(&mut core);
+        assert!(drained.stop.is_none(), "{:?}", drained.stop);
+        assert!(platform.transport.calls_to(SEAT_CLOSE_PATH).is_empty());
+    }
 }
