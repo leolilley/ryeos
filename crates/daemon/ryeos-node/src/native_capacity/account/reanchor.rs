@@ -804,6 +804,66 @@ pub fn amend_capacity_policy(
             "capacity policy amendment refused before any write: the acting account cannot be recorded as its evidence actor ({error}); run it as the node account"
         )
     })?;
+    let AmendmentInputs {
+        prior,
+        places,
+        operator_fingerprint,
+        node_fingerprint,
+    } = amendment_inputs(app_root, operator_key)?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    amend_policy_at(
+        places,
+        &prior,
+        policy,
+        &AmendmentIdentity {
+            operator_key,
+            operator_fingerprint,
+            node_fingerprint,
+        },
+        actor,
+        reason,
+        command,
+    )
+}
+
+/// What amending a stopped node's capacity issuance to one policy would do,
+/// decided by reading only. A refusal is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityPolicyAmendmentCheck {
+    /// The policy is already the one in force; there is nothing to amend.
+    AlreadyApplied,
+    /// The account admits the amendment: no incarnation debit is
+    /// outstanding and its current image fits the new policy.
+    Needed,
+}
+
+/// Decide, without writing, whether [`amend_capacity_policy`] to `policy`
+/// would be already applied, needed, or refused. It runs the amendment's own
+/// read-only checks, so a caller can refuse before changing anything else
+/// and amend later under the same lock.
+pub fn check_capacity_policy_amendment(
+    app_root: &Path,
+    state_lock: &StateLock,
+    operator_key: &SigningKey,
+    policy: &NodeNativeCapacityPolicy,
+) -> Result<CapacityPolicyAmendmentCheck> {
+    state_lock.ensure_protects_app_root(app_root)?;
+    let AmendmentInputs { prior, places, .. } = amendment_inputs(app_root, operator_key)?;
+    let check = check_policy_amendment_at(&places, &prior, policy)?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    Ok(check)
+}
+
+/// The issuance in force and the places an amendment acts on, read and
+/// authenticated without writing.
+struct AmendmentInputs {
+    prior: NativeCapacityAccountBinding,
+    places: AmendmentPlaces,
+    operator_fingerprint: String,
+    node_fingerprint: String,
+}
+
+fn amendment_inputs(app_root: &Path, operator_key: &SigningKey) -> Result<AmendmentInputs> {
     let operator = operator_key.verifying_key();
     let operator_fingerprint = ryeos_engine::trust::compute_fingerprint(&operator);
     let node_identity_path = app_root
@@ -830,20 +890,77 @@ pub fn amend_capacity_policy(
         state: PinnedDirectory::open(&app_root.join(".ai/state"))?
             .context("capacity runtime absent")?,
     };
-    state_lock.ensure_protects_app_root(app_root)?;
-    amend_policy_at(
+    Ok(AmendmentInputs {
+        prior,
         places,
-        &prior,
+        operator_fingerprint,
+        node_fingerprint,
+    })
+}
+
+/// [`check_capacity_policy_amendment`] below the app-root plumbing.
+pub(super) fn check_policy_amendment_at(
+    places: &AmendmentPlaces,
+    prior: &NativeCapacityAccountBinding,
+    policy: &NodeNativeCapacityPolicy,
+) -> Result<CapacityPolicyAmendmentCheck> {
+    policy.validate()?;
+    if prior.policy == *policy {
+        return Ok(CapacityPolicyAmendmentCheck::AlreadyApplied);
+    }
+    require_policy_amendment_log(&places.state)?;
+    admit_policy_amendment(places, prior, policy)?;
+    Ok(CapacityPolicyAmendmentCheck::Needed)
+}
+
+/// The log an amendment must end by extending, checked before its first
+/// write so a refused log never leaves an amendment without evidence.
+fn require_policy_amendment_log(state: &PinnedDirectory) -> Result<()> {
+    if let Some(log) =
+        state.open_pinned_regular(OsStr::new(POLICY_AMENDMENT_EVIDENCE_LOG), false)?
+    {
+        require_owned_log(&log, POLICY_AMENDMENT_EVIDENCE_LOG, "policy amendment")?;
+    }
+    Ok(())
+}
+
+/// Refuse, before any write, an amendment the account cannot take: one with
+/// an incarnation debit outstanding, or whose current image does not fit the
+/// new policy. Returns where the account stands for the signed document.
+fn admit_policy_amendment(
+    places: &AmendmentPlaces,
+    prior: &NativeCapacityAccountBinding,
+    policy: &NodeNativeCapacityPolicy,
+) -> Result<AccountPosition> {
+    let issuance = prior.issuance_digest()?;
+    ensure!(
+        places.directory.identity()? == prior.account_directory_identity,
+        "capacity directory differs from the binding in force"
+    );
+    let mut owner = StoppedCapacityAccount::open(
+        places.directory.try_clone()?,
+        prior.account_identity,
+        places.onboarding.try_clone()?,
+        places.state.try_clone()?,
+        issuance,
+        &prior.policy,
+    )?;
+    let position = owner.require_no_outstanding_debit(&prior.policy)?;
+    // Every later start validates the account's current image under the
+    // generation's policy, so the image must already fit the new one.
+    let mut fit = StoppedCapacityAccount::open(
+        places.directory.try_clone()?,
+        prior.account_identity,
+        places.onboarding.try_clone()?,
+        places.state.try_clone()?,
+        issuance,
         policy,
-        &AmendmentIdentity {
-            operator_key,
-            operator_fingerprint,
-            node_fingerprint,
-        },
-        actor,
-        reason,
-        command,
-    )
+    )?;
+    fit.require_no_outstanding_debit(policy).context(
+        "the capacity account's current image does not fit the new policy; open a fresh epoch \
+         with `ryeos node capacity reissue` first, then apply the policy",
+    )?;
+    Ok(position)
 }
 
 /// [`amend_capacity_policy`] below the app-root plumbing: `prior` is the
@@ -867,12 +984,7 @@ pub(super) fn amend_policy_at(
         sha256_hex(lillux::canonical_json(&serde_json::to_value(policy)?)?.as_bytes());
     // The log this run must end by extending is checked before the first
     // write, so a refused log never leaves an amendment without evidence.
-    if let Some(log) = places
-        .state
-        .open_pinned_regular(OsStr::new(POLICY_AMENDMENT_EVIDENCE_LOG), false)?
-    {
-        require_owned_log(&log, POLICY_AMENDMENT_EVIDENCE_LOG, "policy amendment")?;
-    }
+    require_policy_amendment_log(&places.state)?;
     let operator = identity.operator_key.verifying_key();
     if prior.policy == *policy {
         // Already in force. A rerun after the document but before the
@@ -913,34 +1025,8 @@ pub(super) fn amend_policy_at(
             already_applied: true,
         });
     }
+    let position = admit_policy_amendment(&places, prior, policy)?;
     let issuance = prior.issuance_digest()?;
-    ensure!(
-        places.directory.identity()? == prior.account_directory_identity,
-        "capacity directory differs from the binding in force"
-    );
-    let mut owner = StoppedCapacityAccount::open(
-        places.directory.try_clone()?,
-        prior.account_identity,
-        places.onboarding.try_clone()?,
-        places.state.try_clone()?,
-        issuance,
-        &prior.policy,
-    )?;
-    let position = owner.require_no_outstanding_debit(&prior.policy)?;
-    // Every later start validates the account's current image under the
-    // generation's policy, so the image must already fit the new one.
-    let mut fit = StoppedCapacityAccount::open(
-        places.directory.try_clone()?,
-        prior.account_identity,
-        places.onboarding.try_clone()?,
-        places.state.try_clone()?,
-        issuance,
-        policy,
-    )?;
-    fit.require_no_outstanding_debit(policy).context(
-        "the capacity account's current image does not fit the new policy; open a fresh epoch \
-         with `ryeos node capacity reissue` first, then apply the policy",
-    )?;
     let prior_binding_digest = prior.binding_digest()?;
     let body = ReanchorBody {
         schema: REANCHOR_SCHEMA.to_owned(),
@@ -1776,5 +1862,43 @@ mod controls {
         assert!(published_digests(&f.onboarding).unwrap().is_empty());
         assert!(f.evidence().is_empty());
         assert_eq!(f.in_force(), f.binding);
+    }
+
+    #[test]
+    fn the_amendment_check_writes_nothing() {
+        let f = AccountFixture::new();
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &f.binding.policy).unwrap(),
+            CapacityPolicyAmendmentCheck::AlreadyApplied
+        );
+        let mut amended = f.binding.policy.clone();
+        amended.incarnation.rollover_work_margin_steps = amended
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &amended).unwrap(),
+            CapacityPolicyAmendmentCheck::Needed
+        );
+        let mut too_small = f.binding.policy.clone();
+        too_small.allowance.storage_bytes = 70_000;
+        too_small.incarnation.units.storage_bytes = 70_000;
+        too_small.validate().unwrap();
+        let error = check_policy_amendment_at(&f.places, &f.binding, &too_small).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not fit the new policy"),
+            "{error:#}"
+        );
+        // No check published a document or wrote evidence.
+        assert!(published_digests(&f.onboarding).unwrap().is_empty());
+        assert!(f.evidence().is_empty());
+        assert_eq!(f.in_force(), f.binding);
+        // The amendment the check admitted applies, after which the same
+        // check finds it in force.
+        assert!(!f.amend(&f.binding, &amended).unwrap().already_applied);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.in_force(), &amended).unwrap(),
+            CapacityPolicyAmendmentCheck::AlreadyApplied
+        );
     }
 }

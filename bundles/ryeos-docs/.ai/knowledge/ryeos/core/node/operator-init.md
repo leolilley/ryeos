@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:9cca1b98cd1e3bfcc47c0813b5286f6e6b70b4ab654f1f17339ef1ba2069dcda:GSqe6mlvCbOdyCKMjDtn8a67RMUUl9ML4TPp6qfP/+3peZ0YlXtZPxIHxhVSpLXvgquIQjedGOhaXD6mZtKfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:24:46Z:5ae510c85a5ae6aebb423996aaeb0a381c40cd0345e2c14d6156489565b10ddf:5WLBpRgRg4HTJeHiIuuWRIUlc0MsFHcid3LDTtgernZK/CKuYmKFSOhap5xEJZjn+edNFQFo8geAN5Udq/v4Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -171,6 +171,12 @@ schema; one that no longer validates refuses the cut by name until it is fixed
 or named with `--reset-section`. On a node whose generation predates the
 operator record, the cutover lists every section that differs from the
 profile and needs each named with `--keep-section` or `--reset-section`.
+
+A cutover whose `native_capacity` differs from the capacity issuance in force
+amends the issuance in the same step. It refuses, before changing anything,
+while an incarnation debit is outstanding or the account's image does not fit
+the new policy; `ryeos node capacity reissue --reason "..."` settles the
+account, then the cutover is rerun.
 
 The `ingest_ignore` schema-1 to schema-2 change is one such clean cut. Schema 1
 only carried `additional_patterns`; schema 2 carries the complete canonical
