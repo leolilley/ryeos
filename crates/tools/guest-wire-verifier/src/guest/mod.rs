@@ -1,20 +1,22 @@
 //! Guest role: runs inside a restored sandbox as the administrator. It
-//! re-measures the subject, binds it read-only in a private mount namespace,
+//! re-measures the subject, reproduces it manifest-identically from its own
+//! owner bytes, binds that copy read-only in a private mount namespace,
 //! serves a loopback controller whose ephemeral key signs the occurrence
 //! assignment, runs the subject's owner exactly as shipped, and reports what
-//! happened. The product carries no controller key, so the subject itself is
-//! what runs.
+//! happened. The product carries no controller key, so what runs is
+//! byte-for-byte the subject's owner product.
 
 pub mod controller;
 pub mod fixture;
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime;
-use ryeos_external_execution::guest_runtime_product::OWNER_NAME;
+use ryeos_external_execution::guest_runtime_product::{OWNER_NAME, produce_guest_owner_runtime};
 use ryeos_external_execution_contract::restored_runtime_measurement::{
     CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, MAX_CONSUMER_INPUT_RECORD_BYTES,
     MAX_RESTORED_OWNER_CHALLENGE_BYTES, RemoteVerificationPurpose,
@@ -183,9 +185,37 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     let root_key = lillux::crypto::generate_signing_key();
     let controller_key = lillux::crypto::generate_signing_key();
 
-    // 3. The subject runs as shipped; only the assignment's controller key
-    // is ephemeral.
+    // 3. Reproduce the subject owner product from its own owner bytes and
+    // profile. The product carries no controller key, so the reproduction
+    // must be manifest-identical to the subject; the private mount namespace
+    // needs a distinct tree to overlay at the runtime root (a directory bound
+    // onto itself does not replace it).
     let profile = subject_runtime.profile().clone();
+    let bin = runtime_root
+        .open_child_directory(OsStr::new("bin"))?
+        .context("subject has no bin directory")?;
+    let owner_file = bin
+        .open_pinned_regular(OsStr::new(OWNER_NAME), false)?
+        .context("subject has no owner executable")?;
+    let owner_bytes = owner_file.observation()?.size();
+    let owner_authority = owner_file.inherited_descriptor_authority()?;
+    let parent = work.create_child(OsStr::new("runtime-parent"), 0o700)?;
+    let product = produce_guest_owner_runtime(
+        &parent,
+        OsStr::new("probe-runtime"),
+        &owner_authority,
+        owner_bytes,
+        &subject.owner_executable_sha256,
+        &profile,
+    )?;
+    let probe_identity =
+        ObservedGuestRuntime::observe(product.root())?.measure_exact_owner_product()?;
+    ensure!(
+        probe_identity.owner_executable_sha256 == subject.owner_executable_sha256
+            && probe_identity.manifest_hash == subject.manifest_hash
+            && product.manifest_hash() == subject.manifest_hash,
+        "probe product differs from the subject owner product"
+    );
 
     // 4. Loopback controller identity and the controller-side fixtures.
     let pki = EphemeralPki::generate()?;
@@ -217,7 +247,7 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     };
     lillux::sandbox::enter_root_overlay_namespace(&[
         lillux::sandbox::RootOverlay::Bind {
-            source: &runtime_root,
+            source: product.root(),
             target: Path::new(RUNTIME_ROOT),
             read_only: true,
         },
