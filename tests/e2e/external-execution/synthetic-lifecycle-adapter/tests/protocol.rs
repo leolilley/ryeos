@@ -68,6 +68,12 @@ use candidate_authoring::{
 };
 use candidate_operation_sources::signed_candidate_operation_sources;
 
+/// Ceilings, not expectations: an adapter operation or controller request that
+/// would pass in milliseconds on an idle host can take seconds on a loaded CI
+/// runner, and these fixtures assert completion, never expiry.
+const ADAPTER_OPERATION_CEILING: lillux::time::Duration = lillux::time::Duration::from_secs(60);
+const CONTROLLER_REQUEST_CEILING_MS: u32 = 15_000;
+
 /// Observe the signed Worker source before selecting its subject product. This
 /// authoring preview cannot borrow an identity from D1 qualification or a
 /// later capsule, so the final signed policy has no recursive dependency.
@@ -2779,7 +2785,7 @@ fn invoke_operation(
         request,
         bootstrap,
         inherited,
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
     )
     .unwrap()
 }
@@ -2917,7 +2923,7 @@ fn exact_protocol_boundary_allocates_and_reconciles_one_occurrence() {
         &inspection_request,
         vec![supervisor.clone(), launcher.clone(), provider_spec.clone()],
         Vec::new(),
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
     )
     .unwrap();
     assert!(!response.deadline_exceeded);
@@ -3285,7 +3291,7 @@ fn composed_controller_attachment_on(
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
         connect_timeout_ms: 1_000,
-        request_timeout_ms: 2_000,
+        request_timeout_ms: CONTROLLER_REQUEST_CEILING_MS,
         maximum_response_bytes: 64 * 1024,
         max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
@@ -4355,7 +4361,7 @@ async fn run_production_tls_candidate(
         route_contract: EXTERNAL_CHANNEL_ROUTE_CONTRACT.into(),
         tls_root_bundle_digest: external_tls_root_bundle_digest(&roots).unwrap(),
         connect_timeout_ms: 1_000,
-        request_timeout_ms: 2_000,
+        request_timeout_ms: CONTROLLER_REQUEST_CEILING_MS,
         maximum_response_bytes: 64 * 1024,
         max_clock_skew_ms: None,
         network_inputs: ExternalNetworkInputPolicy {
@@ -5972,7 +5978,7 @@ fn lost_allocation_response_reconciles_the_original_occurrence() {
         &allocate,
         None,
         Vec::new(),
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
     )
     .unwrap_err();
     assert!(
@@ -6503,7 +6509,7 @@ fn exercise_activation_fault(fault: &str) {
             &displaced,
             Some(&bootstrap),
             vec![package_authority.clone()],
-            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5)),
+            lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
         )
         .unwrap_err();
         assert!(
