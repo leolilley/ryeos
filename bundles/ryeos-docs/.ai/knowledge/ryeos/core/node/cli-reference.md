@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:23ae2ff7abf536732dc45037e52da88ec623890675eba42845994a722fc20cd6:7r8vN1BaY89pnootpyEeqgRZjg2nnMUnhIWLcYU+4RqkxJfH9sJtMAyEe/k+0FUrCac+qnvZjsR5pVbooShdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:13:03Z:34476d6a7af993854c338ddfa76b33e61be6d4b46c905253ccc5bbbb6b049444:C6e/HeJJvy3/i2CCOlaPyYIwlRB4pt4p9vMxOWRWRhEa6Si7QFljV/xgmLyZaRoaF8gj8BAuNz05FU2Kdyo2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -171,6 +171,35 @@ loader: disabled is a healthy inactive opt-out, while enforced mode resolves
 and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md).
+
+The `external_bindings` row compares every pin of every installed
+`external_execution`, `runtime_snapshot_production` and
+`runtime_snapshot_qualification` binding with the installed signed bundles and
+the node vault, read only: no adapter runs and the vault is opened without
+rewrap recovery. It fails for each pin the next fresh operation through that
+binding would refuse, and warns when it cannot decide one. Each finding names
+the binding (section, id, digest), the field, the pinned value, what is
+installed in that role, and the fix:
+
+| Code | Meaning |
+|---|---|
+| `binding_adapter_not_installed` | a pinned lifecycle adapter, supervisor, launcher, provider configuration adapter or connector is not installed |
+| `binding_restoration_verifier_not_installed` | the qualification's restoration verifier is not the one the producer's adapter ships |
+| `binding_provider_spec_differs` | the qualification's provider spec is not the one the producer's adapter declares |
+| `binding_snapshot_spec_differs` | the producer's snapshot production spec is not the one its adapter declares |
+| `binding_producer_digest_stale` | the qualification names a production binding that is absent or was recomposed |
+| `binding_consumer_verifier_not_installed` | a selected consumer verifier is not shipped by any installed bundle |
+| `binding_credential_absent` | the vault holds no credential for the binding's generation |
+| `binding_credential_unverified` (warn) | the vault could not be read without writing it, for example a pending rewrap |
+
+Pins the offline row cannot decide are listed under `not_checked`: a consumer
+selection's `scenario_source_digest` needs the running node's derive (a launch
+with a stale one is refused), and snapshots recorded in the runtime database
+are not read. A binding file in a schema the node no longer admits fails the
+`node_config` row with code `binding_schema_unsupported`, naming the file, the
+schema and protocol seen and those admitted. At run time, an operation through
+a production binding whose pinned adapter generation is not installed is
+refused with HTTP 409 `binding_artifact_not_installed`, naming the same pin.
 
 ### `ryeos node reset execution-history`
 

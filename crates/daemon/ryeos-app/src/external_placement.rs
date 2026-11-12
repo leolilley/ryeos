@@ -1342,6 +1342,11 @@ pub(crate) struct InstalledLifecycleGeneration {
     pub(crate) relay_scope_setting: Option<String>,
 }
 
+/// A signed binding pins a lifecycle generation the node does not have
+/// installed. Refused with HTTP 409 and the binding, field, pinned and
+/// installed identities.
+pub const BINDING_ARTIFACT_NOT_INSTALLED: &str = "binding_artifact_not_installed";
+
 #[derive(Debug, Default)]
 pub struct ExternalPlacementBackendRegistry {
     backends: BTreeMap<(String, String), Arc<dyn ExternalPlacementBackend>>,
@@ -1370,6 +1375,66 @@ impl ExternalPlacementBackendRegistry {
         })
     }
 
+    /// Typed refusal for a binding that pins a lifecycle generation the node
+    /// does not have installed: a conflict between signed node config and
+    /// the installed bundles, which `ryeos node doctor` names offline too.
+    fn binding_artifact_not_installed(
+        &self,
+        message: &str,
+        binding: serde_json::Value,
+        field: &str,
+        backend: &str,
+        pinned: &str,
+    ) -> anyhow::Error {
+        let installed: Vec<&str> = self
+            .backends
+            .keys()
+            .filter(|(id, _)| id == backend)
+            .map(|(_, hash)| hash.as_str())
+            .collect();
+        crate::handler_error::HandlerError::Structured {
+            code: BINDING_ARTIFACT_NOT_INSTALLED.to_owned(),
+            status: 409,
+            body: serde_json::json!({
+                "error": BINDING_ARTIFACT_NOT_INSTALLED,
+                "message": message,
+                "binding": binding,
+                "field": field,
+                "backend": backend,
+                "pinned": pinned,
+                "installed": installed,
+                "fix": "run `ryeos node doctor`, then recompose the binding against the installed bundles",
+            }),
+        }
+        .into()
+    }
+
+    /// The exact installed lifecycle generation a production binding pins.
+    fn producer_generation(
+        &self,
+        binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        message: &str,
+    ) -> Result<&Arc<dyn ExternalPlacementBackend>> {
+        self.backends
+            .get(&(
+                binding.backend().to_owned(),
+                binding.adapter_artifact_hash().to_owned(),
+            ))
+            .ok_or_else(|| {
+                self.binding_artifact_not_installed(
+                    message,
+                    serde_json::json!({
+                        "section": crate::node_config::sections::runtime_snapshot_production::SECTION_NAME,
+                        "id": binding.id(),
+                        "digest": binding.digest(),
+                    }),
+                    "adapter_artifact_hash",
+                    binding.backend(),
+                    binding.adapter_artifact_hash(),
+                )
+            })
+    }
+
     pub(crate) fn seal_restoration_verifier_upload(
         &self,
         producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -1377,13 +1442,10 @@ impl ExternalPlacementBackendRegistry {
     ) -> Result<
         ryeos_external_execution::restoration_verifier_delivery::SealedQualificationVerifierUpload,
     > {
-        let backend = self
-            .backends
-            .get(&(
-                producer.backend().to_owned(),
-                producer.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed restoration verifier adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            producer,
+            "exact signed restoration verifier adapter generation is not installed",
+        )?;
         backend.seal_restoration_verifier_upload(producer, qualification)
     }
 
@@ -1396,13 +1458,10 @@ impl ExternalPlacementBackendRegistry {
         upload: &lillux::InheritedDescriptorAuthority,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAdapterResponse>>{
-        let backend = self
-            .backends
-            .get(&(
-                producer.backend().to_owned(),
-                producer.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed restoration verifier adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            producer,
+            "exact signed restoration verifier adapter generation is not installed",
+        )?;
         backend.verify_restored_snapshot_once(
             producer,
             qualification,
@@ -1419,13 +1478,10 @@ impl ExternalPlacementBackendRegistry {
         qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
         credential: &PlacementCredential,
     ) -> Result<()> {
-        let backend = self
-            .backends
-            .get(&(
-                producer.backend().to_owned(),
-                producer.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed qualification adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            producer,
+            "exact signed qualification adapter generation is not installed",
+        )?;
         backend.preflight_snapshot_qualification_create(producer, qualification, credential)
     }
 
@@ -1437,13 +1493,10 @@ impl ExternalPlacementBackendRegistry {
         request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterRequest,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationAdapterResponse>>{
-        let backend = self
-            .backends
-            .get(&(
-                producer.backend().to_owned(),
-                producer.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed qualification adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            producer,
+            "exact signed qualification adapter generation is not installed",
+        )?;
         backend.create_snapshot_qualification_occurrence(
             producer,
             qualification,
@@ -1462,15 +1515,10 @@ impl ExternalPlacementBackendRegistry {
         first_contact: bool,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
-        let backend = self
-            .backends
-            .get(&(
-                producer.backend().to_owned(),
-                producer.adapter_artifact_hash().to_owned(),
-            ))
-            .context(
-                "exact signed qualification termination adapter generation is not installed",
-            )?;
+        let backend = self.producer_generation(
+            producer,
+            "exact signed qualification termination adapter generation is not installed",
+        )?;
         backend.terminate_snapshot_qualification_occurrence(
             producer,
             qualification,
@@ -1486,13 +1534,10 @@ impl ExternalPlacementBackendRegistry {
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
         credential: &PlacementCredential,
     ) -> Result<()> {
-        let backend = self
-            .backends
-            .get(&(
-                binding.backend().to_owned(),
-                binding.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed snapshot producer adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            binding,
+            "exact signed snapshot producer adapter generation is not installed",
+        )?;
         backend.preflight_runtime_snapshot(binding, credential)
     }
 
@@ -1500,13 +1545,10 @@ impl ExternalPlacementBackendRegistry {
         &self,
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
     ) -> Result<(String, String)> {
-        let backend = self
-            .backends
-            .get(&(
-                binding.backend().to_owned(),
-                binding.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed bootstrap adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            binding,
+            "exact signed bootstrap adapter generation is not installed",
+        )?;
         Ok((
             backend
                 .bootstrap_profile_digest()
@@ -1523,13 +1565,10 @@ impl ExternalPlacementBackendRegistry {
         &self,
         binding: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
     ) -> Result<crate::external_artifacts::LifecycleEscrowCapture<'_>> {
-        let backend = self
-            .backends
-            .get(&(
-                binding.backend().to_owned(),
-                binding.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed lifecycle generation is not installed")?;
+        let backend = self.producer_generation(
+            binding,
+            "exact signed lifecycle generation is not installed",
+        )?;
         backend
             .lifecycle_escrow_capture()?
             .context("installed backend has no captured signed lifecycle source")
@@ -1542,13 +1581,10 @@ impl ExternalPlacementBackendRegistry {
         request: &ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapAdapterRequest,
         deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot_bootstrap::RuntimeSnapshotBootstrapAdapterResponse>>{
-        let backend = self
-            .backends
-            .get(&(
-                binding.backend().to_owned(),
-                binding.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed bootstrap adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            binding,
+            "exact signed bootstrap adapter generation is not installed",
+        )?;
         backend.create_snapshot_bootstrap_source(binding, credential, request, deadline)
     }
 
@@ -1567,13 +1603,10 @@ impl ExternalPlacementBackendRegistry {
             ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotAdapterResponse,
         >,
     > {
-        let backend = self
-            .backends
-            .get(&(
-                binding.backend().to_owned(),
-                binding.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed snapshot producer adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            binding,
+            "exact signed snapshot producer adapter generation is not installed",
+        )?;
         backend.produce_runtime_snapshot(binding, credential, request, upload, deadline)
     }
 
@@ -1588,13 +1621,10 @@ impl ExternalPlacementBackendRegistry {
             ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotReadinessObservation,
         >,
     >{
-        let backend = self
-            .backends
-            .get(&(
-                binding.backend().to_owned(),
-                binding.adapter_artifact_hash().to_owned(),
-            ))
-            .context("exact signed snapshot producer adapter generation is not installed")?;
+        let backend = self.producer_generation(
+            binding,
+            "exact signed snapshot producer adapter generation is not installed",
+        )?;
         backend.observe_runtime_snapshot_readiness(binding, credential, request, deadline)
     }
 
@@ -1611,7 +1641,18 @@ impl ExternalPlacementBackendRegistry {
                 contract.backend.clone(),
                 contract.backend_artifact_hash.clone(),
             ))
-            .context("exact signed external placement backend generation is not installed")?;
+            .ok_or_else(|| {
+                self.binding_artifact_not_installed(
+                    "exact signed external placement backend generation is not installed",
+                    serde_json::json!({
+                        "section": crate::node_config::sections::external_execution::SECTION_NAME,
+                        "digest": binding_hash,
+                    }),
+                    "backend_artifact_hash",
+                    &contract.backend,
+                    &contract.backend_artifact_hash,
+                )
+            })?;
         backend.verify_runtime_probe(contract, proof, source, binding_hash)
     }
 
@@ -9257,6 +9298,33 @@ mod channel_stream_admission_tests;
 
 #[cfg(test)]
 mod lease_ready_loopback_tests;
+
+#[cfg(test)]
+mod binding_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn missing_snapshot_adapter_generation_is_a_typed_conflict() {
+        let registry = ExternalPlacementBackendRegistry::default();
+        let binding = crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding::test_fixture();
+        let error = registry.bootstrap_source_profile(&binding).unwrap_err();
+        let Some(crate::handler_error::HandlerError::Structured { code, status, body }) =
+            crate::handler_error::extract_handler_error(&error)
+        else {
+            panic!("expected a typed refusal, got {error:#}");
+        };
+        assert_eq!(code, BINDING_ARTIFACT_NOT_INSTALLED);
+        assert_eq!(status, 409);
+        assert_eq!(body["error"], BINDING_ARTIFACT_NOT_INSTALLED);
+        assert_eq!(body["binding"]["section"], "runtime_snapshot_production");
+        assert_eq!(body["binding"]["id"], binding.id());
+        assert_eq!(body["binding"]["digest"], binding.digest());
+        assert_eq!(body["field"], "adapter_artifact_hash");
+        assert_eq!(body["backend"], binding.backend());
+        assert_eq!(body["pinned"], binding.adapter_artifact_hash());
+        assert_eq!(body["installed"], serde_json::json!([]));
+    }
+}
 
 mod controller_clock;
 mod lease_lifecycle;

@@ -1266,6 +1266,9 @@ impl InstalledExternalExecutionBinding {
     pub(crate) fn backend_contract(&self) -> ExternalPlacementBackendContract {
         self.document.backend_contract()
     }
+    pub(crate) fn credential_generation(&self) -> &str {
+        &self.document.credential_generation
+    }
     pub(crate) fn retained_generation(&self) -> Result<RetainedExternalExecutionBinding> {
         let retained = RetainedExternalExecutionBinding {
             schema: 2,
@@ -1470,6 +1473,14 @@ impl NodeConfigSection for ExternalExecutionSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> Result<Box<dyn CompiledNodeConfigItem>> {
+        // Schemas 17, 18 and 19 are the transport/workload shapes
+        // `BindingDocument::validate` admits.
+        crate::node_config::coherence::require_admitted_binding_schema(
+            SECTION_NAME,
+            body,
+            &[17, 18, 19],
+            ryeos_state::external_execution::admission::PROTOCOL,
+        )?;
         let document: BindingDocument =
             serde_json::from_value(body.clone()).context("invalid external placement binding")?;
         document.validate()?;
