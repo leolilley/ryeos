@@ -380,7 +380,7 @@ pub enum DispatchError {
     /// classification to the leader's immutable result.
     #[error("{0}")]
     Shared(Arc<DispatchError>),
-    #[error("internal: {0}")]
+    #[error("internal: {0:#}")]
     Internal(#[from] anyhow::Error),
 }
 
