@@ -240,6 +240,71 @@ pub async fn observe_for_reconnect<P: Platform>(
     Ok((observation, choices, effects))
 }
 
+/// [`observe_for_reconnect`] after a start that failed before any core was
+/// installed. With no live producer a retained receipt only proves its record
+/// can go, so no core is needed; a runtime that holds a producer must
+/// reconcile through its core instead.
+pub async fn observe_without_core<P: Platform>(
+    shared: &Rc<SeatShared<P>>,
+    policy: RetryPolicy,
+) -> Result<(UiPresentationProducerObservation, Vec<ReconnectChoice>), RuntimeError> {
+    if shared.current_producer().is_some() {
+        return Err(RuntimeError::Fatal(
+            "a live producer reconciles through its core".to_owned(),
+        ));
+    }
+    let (coordinate, root, key, session_id) = {
+        let delivery = shared.delivery.borrow();
+        let (Some(coordinate), Some(root), Some(key)) = (
+            delivery.coordinate.clone(),
+            delivery.root.clone(),
+            delivery.retention_key.clone(),
+        ) else {
+            return Err(RuntimeError::Fatal(
+                "producer observation requires a retained presentation".to_owned(),
+            ));
+        };
+        (coordinate, root, key, delivery.session_id.clone())
+    };
+    let platform = &*shared.platform;
+    if let Some(reconciled) =
+        reconcile_retained_append(platform, &session_id, &root, &coordinate, &key, policy)
+            .await
+            .map_err(append_failure)?
+    {
+        let record = &reconciled.record;
+        retention::clear_matching(
+            platform.store(),
+            &key,
+            &record.operation_id,
+            &record.producer_incarnation,
+            Some(record.encoded_request.as_str()),
+        )?;
+    }
+    let observation = observe_producer(platform, &coordinate, &root).await?;
+    let choices = replacement_choices(&observation);
+    Ok((observation, choices))
+}
+
+/// [`ensure_settled`] for a runtime that never installed a core: only the
+/// unresolved append and its retained record can be unsettled.
+pub fn ensure_settled_without_core<P: Platform>(
+    shared: &Rc<SeatShared<P>>,
+) -> Result<(), RuntimeError> {
+    let delivery = shared.delivery.borrow();
+    let retained = delivery
+        .retention_key
+        .as_deref()
+        .and_then(|key| shared.platform.store().get(key))
+        .is_some();
+    if delivery.pending.is_some() || retained {
+        return Err(RuntimeError::Fatal(
+            "queued seat mutations must settle before reconnect".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// A replacement may start only when nothing local is unsettled: no
 /// unresolved append, no retained record and no unmirrored event. Queued
 /// local work is never discarded, even for an independent presentation.
@@ -264,4 +329,120 @@ pub fn ensure_settled<P: Platform>(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn observation(
+        producer: serde_json::Value,
+        predecessor_kind: &str,
+    ) -> UiPresentationProducerObservation {
+        serde_json::from_value(json!({
+            "presentation_id": "presentation",
+            "thread_id": "thread",
+            "chain_root_id": "chain",
+            "root_binding": {
+                "binding_attachment_id": "root",
+                "binding_generation": 1,
+                "binding_digest": "digest",
+            },
+            "revision": 1,
+            "control_predecessor": {"kind": predecessor_kind, "event_hash": "d".repeat(64)},
+            "producer": producer,
+        }))
+        .expect("a well-formed observation")
+    }
+
+    fn control() -> UiSeatControlPredecessor {
+        UiSeatControlPredecessor::Control {
+            event_hash: "d".repeat(64),
+        }
+    }
+
+    /// Only the observed producer state supplies replacement choices, and each
+    /// choice carries that state's exact incarnation and the observed
+    /// predecessor.
+    #[test]
+    fn replacement_choices_follow_the_observed_producer_state() {
+        let incarnation = "c".repeat(64);
+        let active = observation(
+            json!({"kind": "active", "producer_incarnation": incarnation}),
+            "control",
+        );
+        assert_eq!(
+            replacement_choices(&active),
+            vec![ReconnectChoice::Takeover {
+                expected_producer_incarnation: incarnation.clone(),
+                predecessor: control(),
+            }]
+        );
+
+        let relinquished = observation(
+            json!({"kind": "relinquished", "producer_incarnation": incarnation}),
+            "control",
+        );
+        assert_eq!(
+            replacement_choices(&relinquished),
+            vec![
+                ReconnectChoice::Resume {
+                    expected_producer_incarnation: incarnation.clone(),
+                    predecessor: control(),
+                },
+                ReconnectChoice::Takeover {
+                    expected_producer_incarnation: incarnation.clone(),
+                    predecessor: control(),
+                },
+            ]
+        );
+
+        let closed = observation(
+            json!({"kind": "closed", "producer_incarnation": incarnation}),
+            "control",
+        );
+        assert!(replacement_choices(&closed).is_empty());
+        let unclaimed = observation(json!({"kind": "unclaimed"}), "initialization");
+        assert!(replacement_choices(&unclaimed).is_empty());
+    }
+
+    /// A choice becomes the start that carries exactly its own claim for the
+    /// given presentation; an independent choice prepares a new presentation.
+    #[test]
+    fn start_mode_carries_the_choice_and_its_predecessor() {
+        let incarnation = "c".repeat(64);
+        let resume = ReconnectChoice::Resume {
+            expected_producer_incarnation: incarnation.clone(),
+            predecessor: control(),
+        };
+        assert_eq!(
+            resume.start_mode("presentation"),
+            SeatStart::Retained {
+                presentation_id: "presentation".to_owned(),
+                claim: RetainedClaim::Resume {
+                    expected_producer_incarnation: incarnation.clone(),
+                    predecessor: control(),
+                },
+            }
+        );
+        let takeover = ReconnectChoice::Takeover {
+            expected_producer_incarnation: incarnation.clone(),
+            predecessor: control(),
+        };
+        assert_eq!(
+            takeover.start_mode("other"),
+            SeatStart::Retained {
+                presentation_id: "other".to_owned(),
+                claim: RetainedClaim::Takeover {
+                    expected_producer_incarnation: incarnation,
+                    predecessor: control(),
+                },
+            }
+        );
+        assert_eq!(
+            ReconnectChoice::Independent.start_mode("presentation"),
+            SeatStart::Fresh
+        );
+    }
 }

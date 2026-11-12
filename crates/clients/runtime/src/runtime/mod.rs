@@ -43,12 +43,16 @@ use crate::api::{MAX_SEAT_BATCH_EVENTS, chain_events_stream_path, session_events
 use crate::effects::{
     AdapterHandler, EffectEnv, execute_batch, failure_result, unsupported_adapter,
 };
+use crate::documents::DocumentOffers;
 use crate::error::{RuntimeError, SeatOpenStage};
 use crate::history::{HistoryCompletion, LiveEvent, LiveHistory, SeatCoordinate};
 use crate::inbox::{Idle, Inbox, InboxPayload, Stream, StreamTag, TaskResult, WakeFn};
 use crate::layout::LayoutPersistence;
 use crate::platform::{Clock, Platform, Spawner, Store, TaskHandle};
-use crate::recovery::{ReconnectChoice, ensure_settled, observe_for_reconnect, reconcile_pending};
+use crate::recovery::{
+    ReconnectChoice, ensure_settled, ensure_settled_without_core, observe_for_reconnect,
+    observe_without_core, reconcile_pending,
+};
 use crate::replay::{
     CoreConfig, ReplayCommit, new_core, replay_acknowledged_events, require_producer_ready,
 };
@@ -183,6 +187,7 @@ pub struct ClientRuntime<P: Platform + 'static> {
     inbox: Rc<Inbox>,
     retry: RetryPolicy,
     adapter: AdapterHandler,
+    documents: Option<Rc<DocumentOffers>>,
     config: CoreConfig,
     viewport: Rc<Cell<BrowserViewport>>,
     intent: ClaimIntent,
@@ -221,6 +226,7 @@ impl<P: Platform + 'static> ClientRuntime<P> {
             inbox: Rc::new(Inbox::new(wake)),
             retry,
             adapter: unsupported_adapter(),
+            documents: None,
             config: CoreConfig::default(),
             viewport: Rc::new(Cell::new(BrowserViewport::default())),
             intent,
@@ -255,6 +261,32 @@ impl<P: Platform + 'static> ClientRuntime<P> {
     pub fn with_adapter(mut self, adapter: AdapterHandler) -> Self {
         self.adapter = adapter;
         self
+    }
+
+    /// Offer independent presentation documents as links (a host that can
+    /// show one). The host reads [`ClientRuntime::documents`] to draw them.
+    pub fn with_documents(mut self) -> Self {
+        self.documents = Some(DocumentOffers::new(self.inbox.wake_fn()));
+        self
+    }
+
+    /// The offered documents, when this host offers them.
+    pub fn documents(&self) -> Option<&Rc<DocumentOffers>> {
+        self.documents.as_ref()
+    }
+
+    /// Repeat an unconfirmed document preparation with its original request.
+    pub fn retry_document(&mut self, id: u64) {
+        let Some(retry) = self
+            .documents
+            .as_ref()
+            .and_then(|documents| documents.retry(&self.shared.platform, id))
+        else {
+            return;
+        };
+        let task = self.shared.platform.spawner().spawn(retry);
+        self.io_tasks.retain(|task| !task.is_finished());
+        self.io_tasks.push(task);
     }
 
     fn platform(&self) -> &P {
@@ -571,6 +603,7 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         let env = EffectEnv {
             shared: self.shared.clone(),
             adapter: self.adapter.clone(),
+            documents: self.documents.clone(),
             viewport: self.viewport.clone(),
             config: self.config,
             inbox: self.inbox.clone(),
@@ -732,6 +765,43 @@ impl<P: Platform + 'static> ClientRuntime<P> {
             ));
         }
         observe_for_reconnect(&self.shared, core, self.retry).await
+    }
+
+    /// [`ClientRuntime::observe_reconnect`] after [`ClientRuntime::start`]
+    /// failed and no core was installed.
+    pub async fn observe_reconnect_without_core(
+        &mut self,
+    ) -> Result<(UiPresentationProducerObservation, Vec<ReconnectChoice>), RuntimeError> {
+        observe_without_core(&self.shared, self.retry).await
+    }
+
+    /// [`ClientRuntime::reconnect_mode`] after a failed start, with no core.
+    pub fn reconnect_mode_without_core(
+        &self,
+        choice: &ReconnectChoice,
+    ) -> Result<StartMode, RuntimeError> {
+        ensure_settled_without_core(&self.shared)?;
+        if matches!(choice, ReconnectChoice::Independent) {
+            return Ok(StartMode::Fresh);
+        }
+        Ok(choice.start_mode(&self.prepared_presentation()?))
+    }
+
+    fn prepared_presentation(&self) -> Result<String, RuntimeError> {
+        self.shared
+            .delivery
+            .borrow()
+            .coordinate
+            .as_ref()
+            .map(|coordinate| coordinate.presentation_id.clone())
+            .ok_or_else(|| {
+                RuntimeError::Fatal("reconnect requires an exact prepared presentation".to_owned())
+            })
+    }
+
+    /// Whether a presentation was prepared, so the writer can be inspected.
+    pub fn has_prepared_presentation(&self) -> bool {
+        self.shared.delivery.borrow().coordinate.is_some()
     }
 
     /// The start that carries out `choice` for this seat's presentation, once

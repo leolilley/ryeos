@@ -1,16 +1,14 @@
 //! Replays `boot-attachment.json` against the admission selection functions.
 //!
-//! Three kinds of case are adapter-owned or JavaScript-typed and are skipped
-//! by name: the URL rewriting of `retainedPresentationUrl` (the adapter owns
-//! the address bar) and the seat bound given as a JavaScript `Number` rather
-//! than a `BigInt` (a JSON document has only one integer type).
+//! The seat bound given as a JavaScript `Number` rather than a `BigInt` is
+//! skipped by name: a JSON document has only one integer type.
 
 mod common;
 
 use common::{load, name_of, typed};
 use ryeos_client_runtime::admission::{
-    prepared_presentation_selection, query_values, session_root_attachment,
-    session_seat_append_bound,
+    prepared_presentation_selection, query_values, retained_presentation_url,
+    session_root_attachment, session_seat_append_bound,
 };
 use ryeos_client_runtime::codec::decode_exact;
 use serde_json::{Value, json};
@@ -51,6 +49,16 @@ fn boot_attachment_vectors() {
         let function = case["function"].as_str().unwrap().to_owned();
         let input = &case["input"];
         if function.starts_with("retainedPresentationUrl") {
+            let url = retained_presentation_url(
+                input["url"].as_str().unwrap(),
+                input["presentation_id"].as_str().unwrap(),
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let (before_hash, hash) = url.split_at(url.find('#').unwrap_or(url.len()));
+            let search = before_hash.find('?').map_or("", |at| &before_hash[at..]);
+            assert_eq!(search, case["expected"]["ok"]["search"], "{name}");
+            assert_eq!(hash, case["expected"]["ok"]["hash"], "{name}");
+            checked += 1;
             continue;
         }
         let mut session = session_of(input);
@@ -161,5 +169,5 @@ fn boot_attachment_vectors() {
         }
         checked += 1;
     }
-    assert!(checked >= 28, "only {checked} admission cases ran");
+    assert!(checked >= 31, "only {checked} admission cases ran");
 }

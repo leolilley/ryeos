@@ -146,12 +146,8 @@ pub fn web_adapter() -> crate::effects::AdapterHandler {
                         .map_err(|error| host("navigation", &error))?;
                     Ok(None)
                 }
-                RyeOsEffectKind::OpenNewPresentationDocument { .. }
-                | RyeOsEffectKind::ShowPreparedPresentationDocument { .. } => {
-                    Err(RuntimeError::BindingRequest(
-                        "presentation document requires its prepare-first document host".to_owned(),
-                    ))
-                }
+                // Presentation documents are offered by the runtime
+                // (`ClientRuntime::with_documents`), never by this adapter.
                 _ => Err(RuntimeError::BindingRequest(
                     "this effect is not a browser host action".to_owned(),
                 )),
@@ -630,6 +626,26 @@ impl WebPlatform {
     /// names.
     pub fn document_url(&self) -> String {
         window().location().href().unwrap_or_default()
+    }
+
+    /// Replace the page's address without navigating or adding a history
+    /// entry, keeping the entry's state.
+    pub fn replace_location(&self, url: &str) -> Result<(), RuntimeError> {
+        let history = window()
+            .history()
+            .map_err(|error| RuntimeError::BindingRequest(js_message(&error)))?;
+        let state = history.state().unwrap_or(JsValue::NULL);
+        history
+            .replace_state_with_url(&state, "", Some(url))
+            .map_err(|error| RuntimeError::BindingRequest(js_message(&error)))
+    }
+
+    /// `path` on this page's origin, as an absolute URL.
+    pub fn same_origin_url(&self, path: &str) -> Option<String> {
+        let base = window().location().href().ok()?;
+        let url = web_sys::Url::new_with_base(path, &base).ok()?;
+        let origin = window().location().origin().ok()?;
+        (url.origin() == origin).then(|| url.href())
     }
 
     /// The page's size in CSS pixels and its device pixel ratio.

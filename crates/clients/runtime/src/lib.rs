@@ -12,6 +12,7 @@
 //!   machine (claim, append, touch, relinquish, reproof, replacement);
 //! * [`streams`], [`effects`], [`inbox`], [`recovery`]: hints and tails, effect
 //!   execution, the ordered inbox, and what to offer when a seat is lost;
+//! * [`documents`]: independent presentation documents offered as links;
 //! * [`runtime`]: [`ClientRuntime`], the object a host drives.
 //!
 //! Platform bindings (HTTP, timers, storage) are selected by target
@@ -21,6 +22,7 @@
 pub mod admission;
 pub mod api;
 pub mod codec;
+pub mod documents;
 pub mod effects;
 pub mod error;
 pub mod history;

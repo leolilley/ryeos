@@ -51,6 +51,7 @@ pub use bootstrap::{
     read_session, replace_session_in_place, reproof_seat, session_unchanged,
 };
 pub use control::{observe_producer, relinquish_claimed_seat, relinquish_current, touch_seat};
+pub(crate) use control::{control_post, encode_control};
 
 /// Frames of a platform's history streams.
 pub type Frames<P> = <<P as Platform>::Transport as Transport>::Frames;
@@ -675,5 +676,98 @@ mod tests {
         );
         assert!(delivery.accept_verified(&testimony_for(1)));
         assert!(delivery.accept_verified(&testimony_for(REMEMBERED_RECEIPTS)));
+    }
+}
+
+#[cfg(test)]
+mod claim_writer_tests {
+    use super::*;
+    use serde_json::json;
+
+    const BAD_INCARNATION: &str = "claim returned invalid producer incarnation";
+    const BAD_FRONTIER: &str = "seat service returned no valid exact u64 for next_engine_seq";
+
+    fn claimed(incarnation: Value, frontier: Value) -> Value {
+        json!({"producer_incarnation": incarnation, "next_engine_seq": frontier})
+    }
+
+    /// The incarnation must be exactly 64 lowercase hex digits.
+    #[test]
+    fn claim_writer_requires_a_canonical_incarnation() {
+        for bad in [
+            json!("A".repeat(64)),
+            json!("a".repeat(63)),
+            json!("a".repeat(65)),
+            json!("g".repeat(64)),
+            json!(""),
+            json!(7),
+            Value::Null,
+        ] {
+            assert_eq!(
+                claim_writer(&claimed(bad.clone(), json!("0"))),
+                Err(BAD_INCARNATION.to_owned()),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            claim_writer(&json!({"next_engine_seq": "0"})),
+            Err(BAD_INCARNATION.to_owned())
+        );
+    }
+
+    /// The frontier is an exact u64: a JSON integer or a canonical decimal
+    /// string, and anything else is refused.
+    #[test]
+    fn claim_writer_requires_an_exact_frontier() {
+        let producer = "a".repeat(64);
+        for bad in [
+            json!("01"),
+            json!("-1"),
+            json!(""),
+            json!("1.5"),
+            json!("+1"),
+            json!("18446744073709551616"),
+            json!(1.5),
+            json!(-1),
+            Value::Null,
+            json!(true),
+        ] {
+            assert_eq!(
+                claim_writer(&claimed(json!(producer), bad.clone())),
+                Err(BAD_FRONTIER.to_owned()),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            claim_writer(&json!({"producer_incarnation": producer})),
+            Err(BAD_FRONTIER.to_owned())
+        );
+        for (good, expected) in [
+            (json!("0"), 0),
+            (json!(0), 0),
+            (json!(41), 41),
+            (json!("9007199254740993"), 9_007_199_254_740_993),
+        ] {
+            assert_eq!(
+                claim_writer(&claimed(json!(producer), good.clone())),
+                Ok((producer.clone(), expected)),
+                "{good}"
+            );
+        }
+    }
+
+    /// The last usable frontier is `u64::MAX - 1`, kept exact; `u64::MAX`
+    /// means the producer is exhausted.
+    #[test]
+    fn claim_writer_keeps_a_large_frontier_exact_and_refuses_exhaustion() {
+        let producer = "b".repeat(64);
+        assert_eq!(
+            claim_writer(&claimed(json!(producer), json!("18446744073709551614"))),
+            Ok((producer.clone(), u64::MAX - 1))
+        );
+        assert_eq!(
+            claim_writer(&claimed(json!(producer), json!("18446744073709551615"))),
+            Err("producer engine sequence is exhausted".to_owned())
+        );
     }
 }

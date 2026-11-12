@@ -14,8 +14,10 @@
 //!   remote state and failed at delivery or decoding; everything else is a
 //!   definite refusal;
 //! * effects the runtime cannot perform itself (hash navigation, clipboard,
-//!   opening URLs and documents, and navigating to a successor session) are
-//!   handed to the host's [`AdapterHandler`].
+//!   opening URLs, and navigating to a successor session) are handed to the
+//!   host's [`AdapterHandler`]; independent presentation documents are
+//!   prepared here and offered through [`DocumentOffers`] when the host
+//!   installs them, else handed to the adapter too.
 //!
 //! A batch of effects runs concurrently and reports as one message, in
 //! emission order.
@@ -39,6 +41,7 @@ use crate::api::{
     transfer_prepare_request,
 };
 use crate::codec::decode_strict;
+use crate::documents::DocumentOffers;
 use crate::error::RuntimeError;
 use crate::inbox::{Inbox, Stream, StreamTag, result_kind_for};
 use crate::platform::{Auth, Platform, ReplacementMode, Transport};
@@ -78,6 +81,9 @@ pub fn unsupported_adapter() -> AdapterHandler {
 pub struct EffectEnv<P: Platform> {
     pub shared: Rc<SeatShared<P>>,
     pub adapter: AdapterHandler,
+    /// Where independent presentation documents are offered, for a host that
+    /// offers them; otherwise those effects go to the adapter.
+    pub documents: Option<Rc<DocumentOffers>>,
     pub viewport: Rc<Cell<BrowserViewport>>,
     pub config: CoreConfig,
     pub inbox: Rc<Inbox>,
@@ -337,9 +343,34 @@ async fn run<P: Platform>(
                 Ok((RyeOsEffectResultKind::BrowserOnly, data))
             }
         },
-        RyeOsEffectKind::OpenNewPresentationDocument { .. }
-        | RyeOsEffectKind::ShowPreparedPresentationDocument { .. }
-        | RyeOsEffectKind::SetLocationHash { .. }
+        RyeOsEffectKind::OpenNewPresentationDocument {
+            expected_session_id,
+            root_binding,
+        } => match &env.documents {
+            Some(documents) => {
+                documents
+                    .prepare_new(&*env.shared.platform, expected_session_id, root_binding)
+                    .await?;
+                Ok((RyeOsEffectResultKind::BrowserOnly, None))
+            }
+            None => {
+                let data = (env.adapter)(effect.clone()).await?;
+                Ok((RyeOsEffectResultKind::BrowserOnly, data))
+            }
+        },
+        RyeOsEffectKind::ShowPreparedPresentationDocument { presentation_id } => {
+            match &env.documents {
+                Some(documents) => {
+                    documents.offer_prepared(presentation_id)?;
+                    Ok((RyeOsEffectResultKind::BrowserOnly, None))
+                }
+                None => {
+                    let data = (env.adapter)(effect.clone()).await?;
+                    Ok((RyeOsEffectResultKind::BrowserOnly, data))
+                }
+            }
+        }
+        RyeOsEffectKind::SetLocationHash { .. }
         | RyeOsEffectKind::CopyToClipboard { .. }
         | RyeOsEffectKind::OpenUrl { .. } => {
             let data = (env.adapter)(effect.clone()).await?;

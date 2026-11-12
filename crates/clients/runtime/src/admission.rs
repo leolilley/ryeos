@@ -136,6 +136,40 @@ pub fn session_root_attachment(
     attachment_coordinate(session_attachment(session, &root_id)?)
 }
 
+/// The address that resumes `presentation_id` from `current`: the UI root on
+/// the same origin, selecting only that presentation and keeping the page's
+/// hash route. Every other selector is dropped, so a reload reopens exactly
+/// the installed presentation.
+pub fn retained_presentation_url(
+    current: &str,
+    presentation_id: &str,
+) -> Result<String, RuntimeError> {
+    let path = crate::documents::document_path(presentation_id)
+        .map_err(|_| fatal("installed presentation identity is invalid"))?;
+    let (scheme, rest) = current
+        .split_once("://")
+        .ok_or_else(|| fatal("the page address is not absolute"))?;
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|authority| !authority.is_empty())
+        .ok_or_else(|| fatal("the page address has no origin"))?;
+    let hash = current.find('#').map_or("", |at| &current[at..]);
+    Ok(format!("{scheme}://{authority}{path}{hash}"))
+}
+
+/// The session's id and the coordinate of one of its attachments, read
+/// without trusting array order.
+pub fn session_attachment_coordinate(
+    session: &Value,
+    attachment_id: &str,
+) -> Result<(String, UiBindingAttachmentCoordinate), RuntimeError> {
+    let session = record(session)?;
+    let session_id = required_text(session, "session_id")?;
+    let coordinate = attachment_coordinate(session_attachment(session, attachment_id)?)?;
+    Ok((session_id, coordinate))
+}
+
 /// The signed seat-append byte bound of one attachment, an integer in
 /// `1..=2^53-1` so every client reads the same limit.
 pub fn session_seat_append_bound(

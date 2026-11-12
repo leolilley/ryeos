@@ -201,6 +201,11 @@ impl std::fmt::Debug for Inbox {
 }
 
 impl Inbox {
+    /// The host's wake callback, for state the host reads outside the inbox.
+    pub(crate) fn wake_fn(&self) -> WakeFn {
+        self.wake.clone()
+    }
+
     pub fn new(wake: WakeFn) -> Self {
         Self {
             state: RefCell::new(State {
