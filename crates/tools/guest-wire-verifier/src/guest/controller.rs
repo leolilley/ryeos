@@ -35,6 +35,9 @@ pub struct ExchangeOutcome {
     pub command_terminated: bool,
 }
 
+/// The most owner frames one answer carries, as the node bounds its response.
+const MAX_RESPONSE_OWNER_FRAMES: usize = 16;
+
 pub struct Controller {
     bootstrap: ExternalSupervisorBootstrap,
     key: SigningKey,
@@ -43,6 +46,10 @@ pub struct Controller {
     transcript: Vec<serde_json::Value>,
     supervisor_frames: BTreeMap<u64, (String, Vec<u8>)>,
     responses: BTreeMap<u64, Vec<u8>>,
+    /// Every owner frame authored, by sequence: the outbox each answer draws
+    /// from, as the node returns the owner frames a guest has not yet
+    /// acknowledged on any exchange.
+    owner_frames: BTreeMap<u64, (String, Vec<u8>)>,
     last_supervisor_digest: Option<String>,
     last_owner_digest: Option<String>,
     owner_sequence: u64,
@@ -84,6 +91,7 @@ impl Controller {
             transcript: Vec::new(),
             supervisor_frames: BTreeMap::new(),
             responses: BTreeMap::new(),
+            owner_frames: BTreeMap::new(),
             last_supervisor_digest: None,
             last_owner_digest: None,
             owner_sequence: 0,
@@ -222,6 +230,10 @@ impl Controller {
                 .context("replayed frame has no retained response")?;
             let mut replay: ExternalChannelExchangeResponse = serde_json::from_slice(cached)?;
             replay.incoming_new = false;
+            // A replay (the guest's poll) collects whatever the owner has
+            // authored since, not only what answered this frame the first time.
+            replay.outbound_frames = self.pending_owner_frames(frame.acknowledged_peer_sequence)?;
+            replay.validate_shape()?;
             return json_reply(200, &replay);
         }
         let expected_sequence = self.supervisor_frames.len() as u64 + 1;
@@ -239,7 +251,6 @@ impl Controller {
             "sequence": frame.sequence,
             "digest": digest,
         }));
-        let mut outbound = Vec::new();
         let mut acknowledgement = None;
         // A leased guest's Ready is held, as the node's readiness gate holds
         // it until the guest is admitted: the reply carries no acknowledgement
@@ -249,12 +260,7 @@ impl Controller {
         // peer acknowledgement ends its chain here.
         if !held && !matches!(frame.payload, ExecutionChannelPayload::Acknowledge { .. }) {
             let owner = self.acknowledge(&frame, &digest, &binding)?;
-            acknowledgement = Some(owner.digest.clone());
-            outbound.push(ExternalChannelResponseFrame::new(
-                owner.sequence,
-                owner.digest,
-                &owner.wire,
-            )?);
+            acknowledgement = Some(owner);
         }
         // The capability report completes the leased guest's handshake; the
         // owner then releases the candidate, which the guest launches only on
@@ -263,14 +269,9 @@ impl Controller {
             frame.payload,
             ExecutionChannelPayload::CapabilityReport { .. }
         ) {
-            let release =
-                self.author(ExecutionChannelPayload::Release, frame.sequence, &binding)?;
-            outbound.push(ExternalChannelResponseFrame::new(
-                release.sequence,
-                release.digest,
-                &release.wire,
-            )?);
+            self.author(ExecutionChannelPayload::Release, frame.sequence, &binding)?;
         }
+        let outbound = self.pending_owner_frames(frame.acknowledged_peer_sequence)?;
         let response = ExternalChannelExchangeResponse {
             schema: EXTERNAL_CHANNEL_TRANSPORT_SCHEMA,
             incoming_new: !held,
@@ -367,7 +368,7 @@ impl Controller {
         frame: &ExecutionFrame,
         digest: &str,
         binding: &ExecutionChannelBinding,
-    ) -> Result<OwnerFrame> {
+    ) -> Result<String> {
         self.author(
             ExecutionChannelPayload::Acknowledge {
                 peer_frame_sequence: frame.sequence,
@@ -379,13 +380,25 @@ impl Controller {
         )
     }
 
+    /// The owner frames after the guest's cumulative acknowledgement, oldest
+    /// first, bounded like the node's response.
+    fn pending_owner_frames(&self, acknowledged: u64) -> Result<Vec<ExternalChannelResponseFrame>> {
+        self.owner_frames
+            .range(acknowledged + 1..)
+            .take(MAX_RESPONSE_OWNER_FRAMES)
+            .map(|(sequence, (digest, wire))| {
+                ExternalChannelResponseFrame::new(*sequence, digest.clone(), wire)
+            })
+            .collect()
+    }
+
     /// Sign the next owner frame carrying `payload`.
     fn author(
         &mut self,
         payload: ExecutionChannelPayload,
         acknowledged_peer_sequence: u64,
         binding: &ExecutionChannelBinding,
-    ) -> Result<OwnerFrame> {
+    ) -> Result<String> {
         let sequence = self.owner_sequence + 1;
         let owner = ExecutionFrame {
             schema: 1,
@@ -401,23 +414,15 @@ impl Controller {
         let owner_digest = lillux::sha256_hex(&wire);
         self.owner_sequence = sequence;
         self.last_owner_digest = Some(owner_digest.clone());
+        self.owner_frames
+            .insert(sequence, (owner_digest.clone(), wire));
         self.transcript.push(serde_json::json!({
             "direction": "owner_to_supervisor",
             "sequence": sequence,
             "digest": owner_digest,
         }));
-        Ok(OwnerFrame {
-            sequence,
-            digest: owner_digest,
-            wire,
-        })
+        Ok(owner_digest)
     }
-}
-
-struct OwnerFrame {
-    sequence: u64,
-    digest: String,
-    wire: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -656,9 +661,11 @@ mod tests {
                 lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(20)),
             )
             .unwrap();
-            // The report's answer acknowledges it and releases the candidate;
-            // an exact replay is answered from the retained response.
-            let replay = channel.exchange(&report_wire).unwrap();
+            // After the handshake the supervisor's control loop re-sends
+            // Ready, its first queued frame, and polls with it: that exchange
+            // must collect the owner's acknowledgement of the report and the
+            // Release, as the node's outbox returns them on any exchange.
+            let replay = channel.exchange(&wire).unwrap();
             assert!(!replay.incoming_new);
             let payloads = replay
                 .outbound_frames
