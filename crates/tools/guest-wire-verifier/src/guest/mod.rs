@@ -374,7 +374,8 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         bail!(
             "the exchange ended before the direct command's terminal acknowledgement \
              (frames {}, receipt {}, program {}, launcher spec {}, launcher occurrence {}; \
-             owner exit_code {} timed_out {}; owner stderr tail: {})",
+             owner exit_code {} timed_out {}; controller dropped connections {:?}; \
+             owner stderr tail: {})",
             outcome.frame_count,
             outcome.applied_launch_receipt_digest.is_some(),
             outcome.candidate_program_digest.is_some(),
@@ -382,6 +383,7 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
             outcome.launcher_occurrence_digest.is_some(),
             owner_result.exit_code,
             owner_result.timed_out,
+            server.dropped_connections(),
             tail
         );
     }

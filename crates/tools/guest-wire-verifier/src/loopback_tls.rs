@@ -230,7 +230,12 @@ pub struct LoopbackHttpsServer {
     listener: TcpListener,
     config: Arc<rustls::ServerConfig>,
     port: u16,
+    /// Why the most recent connections were dropped without a reply.
+    dropped: std::sync::Mutex<Vec<String>>,
 }
+
+/// How many dropped-connection reasons the server keeps.
+const MAX_DROPPED_REASONS: usize = 8;
 
 enum ReadOutcome {
     Request(HttpsRequest),
@@ -435,7 +440,27 @@ impl LoopbackHttpsServer {
             listener,
             config: Arc::new(config),
             port,
+            dropped: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// The reasons the most recent connections were dropped without a reply,
+    /// oldest first. A client sees such a drop only as a failed TLS setup or
+    /// a closed connection; this is the server's side of it.
+    pub fn dropped_connections(&self) -> Vec<String> {
+        self.dropped
+            .lock()
+            .map(|reasons| reasons.clone())
+            .unwrap_or_default()
+    }
+
+    fn note_dropped(&self, reason: String) {
+        if let Ok(mut reasons) = self.dropped.lock() {
+            if reasons.len() == MAX_DROPPED_REASONS {
+                reasons.remove(0);
+            }
+            reasons.push(reason);
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -476,18 +501,27 @@ impl LoopbackHttpsServer {
                 }
                 Err(e) => return Err(anyhow::Error::new(e).context("accept loopback connection")),
             };
-            if tcp.set_nonblocking(false).is_err()
-                || tcp.set_read_timeout(Some(CONN_TIMEOUT)).is_err()
-                || tcp.set_write_timeout(Some(CONN_TIMEOUT)).is_err()
+            if let Err(error) = tcp
+                .set_nonblocking(false)
+                .and_then(|()| tcp.set_read_timeout(Some(CONN_TIMEOUT)))
+                .and_then(|()| tcp.set_write_timeout(Some(CONN_TIMEOUT)))
             {
+                self.note_dropped(format!("socket setup: {error}"));
                 continue;
             }
-            let Ok(conn) = rustls::ServerConnection::new(Arc::clone(&self.config)) else {
-                continue;
+            let conn = match rustls::ServerConnection::new(Arc::clone(&self.config)) {
+                Ok(conn) => conn,
+                Err(error) => {
+                    self.note_dropped(format!("TLS session: {error}"));
+                    continue;
+                }
             };
             let mut stream = rustls::StreamOwned::new(conn, tcp);
             match read_request(&mut stream, max_body_bytes, deadline, stop) {
-                Err(_) => continue,
+                Err(error) => {
+                    self.note_dropped(format!("read request: {} ({:?})", error, error.kind()));
+                    continue;
+                }
                 Ok(ReadOutcome::Reject(status, message)) => {
                     if write_reply(&mut stream, status, &reject_body(message)).is_ok() {
                         finish(stream);
