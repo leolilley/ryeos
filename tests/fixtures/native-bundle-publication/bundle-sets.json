@@ -29,13 +29,6 @@
       "core",
       "graph"
     ],
-    "f5r-controller": [
-      "core",
-      "graph",
-      "knowledge",
-      "codex",
-      "render-sandbox"
-    ],
     "full": [
       "core",
       "central-auth",
@@ -50,6 +43,13 @@
       "ryeos-ui",
       "codex",
       "opencode"
+    ],
+    "hosted-controller": [
+      "core",
+      "graph",
+      "knowledge",
+      "codex",
+      "render-sandbox"
     ],
     "hosted-workflow": [
       "core",
@@ -103,8 +103,8 @@
     "core-scheduling": "core-scheduling",
     "core-workflow": "core-workflow",
     "development": "full",
-    "f5r-controller": "f5r-controller",
     "full": "full",
+    "hosted-controller": "hosted-controller",
     "hosted-node": "core",
     "hosted-workflow": "hosted-workflow",
     "local-inference": "local-inference",

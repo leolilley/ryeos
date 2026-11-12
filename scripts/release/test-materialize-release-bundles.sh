@@ -60,7 +60,7 @@ run() {
     "$script" --version "$version" \
         --archive "$tmp/$name/$archive_name" \
         --checksum "$tmp/$name/$archive_name.sha256" \
-        --set f5r-controller --output "$out"
+        --set hosted-controller --output "$out"
 }
 
 expect_rejected() {
@@ -113,7 +113,7 @@ cp "$tmp/good/$archive_name.sha256" "$tmp/badname/ryeos-bundles-9.9.9-x86_64.tar
 expect_rejected "archive name" "$script" --version "$version" \
     --archive "$tmp/badname/ryeos-bundles-9.9.9-x86_64.tar.gz" \
     --checksum "$tmp/badname/ryeos-bundles-9.9.9-x86_64.tar.gz.sha256" \
-    --set f5r-controller --output "$tmp/out-badname"
+    --set hosted-controller --output "$tmp/out-badname"
 
 # Negative: render-sandbox missing from the archive.
 mv "$fixture/render-sandbox" "$tmp/render-sandbox.held"

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:23ae2ff7abf536732dc45037e52da88ec623890675eba42845994a722fc20cd6:7r8vN1BaY89pnootpyEeqgRZjg2nnMUnhIWLcYU+4RqkxJfH9sJtMAyEe/k+0FUrCac+qnvZjsR5pVbooShdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:39:06Z:8cd01256c004f102a6c28fb4a7e35bcc643d5d23aa98a608af1bee389d600eb4:SqVSUt206GLpBIxmAxvCV9AMszLYfHt3iPFd42ilrAuGH/SnN6CUmLv/Fbz519TcuQDTmnwugsHDMg7jhunSDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -230,6 +230,25 @@ existed cannot say which sections were chosen: the cut lists every section
 that differs from the profile and needs each named with `--keep-section` or
 `--reset-section`. Nothing is reset silently. The pinned request digest
 covers the carried result, so a rerun after a crash reproduces it exactly.
+
+The same cut moves a node to a renamed profile. A node records the profile it
+was initialized under in its substrate identity; a release that renames a
+profile ships no profile under the old name, so the node keeps running on its
+current generation but cannot be cut again under the old name. The remote
+Codex controller profile `f5r-controller` is now `hosted-controller`, built
+as the image `ryeos-hosted-controller`. Move a controller with:
+
+```bash
+ryeos node reset policy-generation --node-profile hosted-controller --host-class <recorded class> --confirm
+```
+
+The host class is the one the node recorded; it does not change. The cut
+records `hosted-controller` in the substrate identity. On a hosted container,
+sign the same `node.reset.policy-generation` operation against the
+`ryeos-hosted-controller` image's seed and substrate digest (see
+`deploy/composition-images.md`), move the service to that image, and set
+`RYEOS_INIT_NODE_PROFILE=hosted-controller` wherever the deployment overrides
+the image's value.
 
 ### `ryeos node external-execution compose`
 

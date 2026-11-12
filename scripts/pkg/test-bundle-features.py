@@ -75,7 +75,7 @@ GOLDEN = {
     "standard-central-auth": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "local-inference": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "hosted-workflow": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
-    "f5r-controller": (HANDLERS_GRAPH, ""),
+    "hosted-controller": (HANDLERS_GRAPH, ""),
     "release-authority": (HANDLERS_GRAPH, ""),
     "release-artifacts": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "core-scheduling": (HANDLERS_CORE, "scheduling"),

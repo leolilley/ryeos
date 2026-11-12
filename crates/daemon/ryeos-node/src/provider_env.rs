@@ -217,7 +217,7 @@ mod tests {
             validate_declaration(&provider, &execution)
                 .unwrap_or_else(|error| panic!("{profile_name}: {error:#}"));
             let expected: &[&str] = match profile_name.as_str() {
-                "f5r-controller" | "hosted-workflow" => &["OPENAI_API_KEY"],
+                "hosted-controller" | "hosted-workflow" => &["OPENAI_API_KEY"],
                 // Authority-class profiles never declare a provider source.
                 "release-authority"
                 | "central-host"
@@ -229,7 +229,10 @@ mod tests {
                 _ => panic!("add an explicit provider-environment expectation for {profile_name}"),
             };
             assert_eq!(provider.declared_names(), expected, "{profile_name}");
-            if matches!(profile_name.as_str(), "f5r-controller" | "hosted-workflow") {
+            if matches!(
+                profile_name.as_str(),
+                "hosted-controller" | "hosted-workflow"
+            ) {
                 // The hosted workflow delivers its key only to holders of
                 // the dedicated receive capability.
                 let recipients = &provider.names[0].recipients;

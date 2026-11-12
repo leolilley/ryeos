@@ -229,7 +229,7 @@ Composition images, one per bundle set:
 | `ryeos-core-workflow` | core, graph | `core-workflow` |
 | `ryeos-core-knowledge` | core, knowledge | `core-knowledge` |
 | `ryeos-standard` | standard | `standard` |
-| `ryeos-f5r-controller` | f5r-controller | `f5r-controller` |
+| `ryeos-hosted-controller` | hosted-controller | `hosted-controller` |
 | `ryeos-local-inference` | local-inference | `local-inference` |
 | `ryeos-hosted-workflow` | hosted-workflow | `hosted-workflow` |
 | `ryeos-central-host` | central-host | `central-host` |
