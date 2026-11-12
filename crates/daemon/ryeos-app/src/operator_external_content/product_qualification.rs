@@ -2056,6 +2056,7 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
     relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
     evidence: &ProductQualificationEvidence,
     subject_manifest_hash: &str,
+    origin: QualificationOrigin,
 ) -> anyhow::Result<()> {
     let (retained, current) = prepare_current_consumer_content_for_selection(
         state,
@@ -2065,6 +2066,7 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
         relationship,
         evidence,
         subject_manifest_hash,
+        origin,
     )?;
     if current.portable() != retained.portable() {
         bail!("current consumer source, environment or runtime member changed");
@@ -2072,9 +2074,23 @@ pub(in crate::operator_external_content) fn require_current_consumer_content_for
     Ok(())
 }
 
-/// The retained content of the evidence, after its closure is confirmed in
-/// this node's CAS, and the content this node prepares today for the same
-/// relationship aligned to the selected runtime member.
+/// Which node issued the qualification being selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::operator_external_content) enum QualificationOrigin {
+    /// This node issued it, so its retained consumer content lives in this
+    /// node's CAS and must still be complete there.
+    Local,
+    /// Another node issued it and testified to it. Its retained content lives
+    /// there; this node compares the content-addressed identity only, against
+    /// what it prepares from its own signed Bundles.
+    Remote,
+}
+
+/// The retained content of the evidence (for a local qualification, after its
+/// closure is confirmed in this node's CAS), and the content this node
+/// prepares today for the same relationship aligned to the selected runtime
+/// member.
+#[allow(clippy::too_many_arguments)]
 fn prepare_current_consumer_content_for_selection<'a>(
     state: &AppState,
     authority: &ryeos_state::PinnedStateAuthority,
@@ -2083,6 +2099,7 @@ fn prepare_current_consumer_content_for_selection<'a>(
     relationship: &ryeos_state::external_content::products::composition::ProductRelationship,
     evidence: &'a ProductQualificationEvidence,
     subject_manifest_hash: &str,
+    origin: QualificationOrigin,
 ) -> anyhow::Result<(
     &'a ProductQualificationConsumerContentIdentity,
     ProductQualificationConsumerContentIdentity,
@@ -2091,9 +2108,11 @@ fn prepare_current_consumer_content_for_selection<'a>(
         .consumer_content
         .as_ref()
         .context("consumer qualification evidence has no retained content")?;
-    with_state_guard(authority, |guard| {
-        require_retained_consumer_content_closure(authority, guard, limits, retained)
-    })?;
+    if origin == QualificationOrigin::Local {
+        with_state_guard(authority, |guard| {
+            require_retained_consumer_content_closure(authority, guard, limits, retained)
+        })?;
+    }
     let mut current = prepare_current_bundle_consumer_content_inputs(
         state,
         policy_source,
@@ -5180,6 +5199,7 @@ pub(in crate::operator_external_content) fn verify_loaded_qualification_against_
             relationship,
             &proof.evidence,
             &product.evidence.manifest_hash,
+            QualificationOrigin::Local,
         )?;
         // The shared evidence and execution_evidence::verify_current below
         // must also rejoin the exact settled Q transcript and enclosing root.

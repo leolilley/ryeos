@@ -46,10 +46,11 @@ use ryeos_state::{CasMutationGuard, PinnedStateAuthority};
 
 use super::content_qualification::{load_current_qualified_content, prepare_source};
 use super::product_qualification::{
-    load_current_qualification, require_current_consumer_content_for_selection,
-    require_unguarded_resolution, resolve_consumer_definition_in_generation,
-    resolve_current_bundle_qualification_policy, verify_current_external_runtime_qualification,
-    verify_current_product_qualification_for_export, with_state_guard,
+    QualificationOrigin, load_current_qualification,
+    require_current_consumer_content_for_selection, require_unguarded_resolution,
+    resolve_consumer_definition_in_generation, resolve_current_bundle_qualification_policy,
+    verify_current_external_runtime_qualification, verify_current_product_qualification_for_export,
+    with_state_guard,
 };
 use super::product_receipt::{ProductSourceVerification, load_product_source};
 use crate::handler_context::HandlerContext;
@@ -682,6 +683,7 @@ pub(crate) fn verify_current_remote_selection_testimony(
         relationship,
         evidence,
         &product.evidence.manifest_hash,
+        QualificationOrigin::Remote,
     )?;
     // The acceptance and its product must still be the same after the
     // unguarded resolution above.
