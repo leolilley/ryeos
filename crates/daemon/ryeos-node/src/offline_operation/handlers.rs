@@ -407,6 +407,7 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
         "node_fingerprint": report.node_key_fingerprint,
         "bundles": report.bundles_installed,
         "policy_generation": expected,
+        "capacity_amendment": report.capacity_amendment,
     }))
 }
 

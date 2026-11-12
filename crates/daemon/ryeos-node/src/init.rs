@@ -195,6 +195,11 @@ pub struct InitReport {
     /// between; present only when a confirmed replacement happened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub substrate_image_replacement: Option<SubstrateImageReplacement>,
+    /// The capacity issuance amendment a policy replacement carried, when
+    /// its `native_capacity` policy is in force through an amendment
+    /// document; `already_applied` marks a rerun that found it in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_amendment: Option<crate::native_capacity::CapacityPolicyAmendmentReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
 }
@@ -205,6 +210,9 @@ pub struct SubstrateImageReplacement {
     pub new_image_digest: String,
 }
 
+/// The command a policy replacement records as the actor of the capacity
+/// amendment it carries.
+const INIT_REPLACEMENT_COMMAND: &str = "ryeos init --replace-node-policy-generation";
 const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v4";
 const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v2";
 const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
@@ -1068,6 +1076,35 @@ fn run_init_under_lock_on_storage(
     )
     .context("prospective init source set failed definition admission")?;
 
+    // A replacement may carry a `native_capacity` policy other than the one
+    // the capacity issuance is in force under. The issuance pins its policy,
+    // so the replacement amends it with the operator-signed document
+    // `policy-apply native_capacity` publishes. Every precondition of that
+    // amendment (no outstanding debit, the current image fitting the new
+    // policy, the evidence log) is checked here, before the first change
+    // below, so a refusal leaves the node as it was. The document itself is
+    // published beside the new policy generation.
+    let capacity_policy = prospective_policy.require::<
+        ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy,
+    >()?;
+    let capacity_amendment_reason = format!(
+        "node policy generation {}",
+        prospective_policy.generation_digest()
+    );
+    let capacity_amendment_request = || crate::native_capacity::CapacityPolicyAmendmentRequest {
+        app_root: &opts.app_root,
+        state_lock,
+        operator_key: &user_key,
+        policy: capacity_policy,
+        reason: &capacity_amendment_reason,
+        command: INIT_REPLACEMENT_COMMAND,
+    };
+    let amends_capacity = opts.replace_node_policy_generation
+        && crate::native_capacity::capacity_issuance_published(&opts.app_root)?
+        && crate::native_capacity::prepare_capacity_policy_amendment(capacity_amendment_request())
+            .context("the replacement's native_capacity policy cannot amend the capacity issuance; nothing was changed")?
+            .involves_amendment();
+
     // Re-init inherits the existing immutable node policy, but resolves its
     // selected backend and all supporting kinds through the prospective source
     // generation. Consulting the predecessor installed generation here would
@@ -1337,6 +1374,17 @@ fn run_init_under_lock_on_storage(
 
     // ── 8b. Node-owned default policies ──
     materialize_node_derived_views(&opts.app_root)?;
+    // Checked before any change above; preparing again re-reads the account
+    // under the same lock, and an amendment already in force is a no-op.
+    let capacity_amendment = if amends_capacity {
+        Some(
+            crate::native_capacity::amend_capacity_policy(capacity_amendment_request()).context(
+                "amend the capacity issuance to the replacement's native_capacity policy",
+            )?,
+        )
+    } else {
+        None
+    };
     if let Some(update) = selected_node_policy_update.as_ref() {
         let identity = ryeos_node_runtime::identity::NodeIdentity::load(&node_key_path)
             .context("load node identity for policy-set bootstrap")?;
@@ -1386,7 +1434,7 @@ fn run_init_under_lock_on_storage(
         &user_key,
         user_key_created,
         &node_fp,
-        prospective_policy.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
+        capacity_policy,
     )?;
     write_init_completion(
         &opts.app_root,
@@ -1411,6 +1459,7 @@ fn run_init_under_lock_on_storage(
         host_class: opts.host_class.clone(),
         substrate_identity: load_substrate_identity_record(&opts.app_root)?,
         substrate_image_replacement,
+        capacity_amendment,
         next_steps,
     })
 }
@@ -3593,6 +3642,234 @@ mod tests {
         assert!(
             format!("{refused:#}").contains("disagrees with the class"),
             "got: {refused:#}"
+        );
+    }
+
+    /// The replacement that re-selects the `full` profile a fixture node was
+    /// initialized under.
+    fn full_profile_replacement(state: &Path) -> InitOptions {
+        InitOptions {
+            substrate_identity: None,
+            replace_node_policy_generation: true,
+            ..make_opts(state, state)
+        }
+    }
+
+    fn fixture_operator_key(state: &Path) -> SigningKey {
+        load_or_create_operator_key(&state.join(".ai/config/keys/signing/private_key.pem"), None)
+            .expect("fixture operator key")
+            .0
+    }
+
+    /// The `full` profile's `native_capacity` policy, the one a fixture node
+    /// is issued under.
+    fn full_profile_capacity(
+        state: &Path,
+    ) -> ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy {
+        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let profile =
+            load_trusted_init_node_profile(&workspace_root().join("bundles"), "full", &trust)
+                .unwrap();
+        serde_json::from_value(
+            profile.policies()
+                [ryeos_node_runtime::node_policy::sections::native_capacity::SECTION_NAME]
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    /// Initialize a `full` node, then amend its capacity issuance to a policy
+    /// other than the profile's, so the issuance in force differs from what a
+    /// replacement with the same profile carries. Returns the profile's policy
+    /// and the one in force.
+    fn node_issued_under_another_capacity_policy(
+        state: &Path,
+    ) -> (
+        ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy,
+        ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy,
+    ) {
+        run_init(&make_opts(state, state)).expect("initial full generation");
+        let profile = full_profile_capacity(state);
+        let mut other = profile.clone();
+        other.incarnation.rollover_work_margin_steps = other
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        assert_ne!(other, profile);
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(state),
+        )
+        .unwrap();
+        let operator = fixture_operator_key(state);
+        let report = crate::native_capacity::amend_capacity_policy(
+            crate::native_capacity::CapacityPolicyAmendmentRequest {
+                app_root: state,
+                state_lock: &lock,
+                operator_key: &operator,
+                policy: &other,
+                reason: "fixture",
+                command: "fixture",
+            },
+        )
+        .expect("amend the fixture issuance away from the profile");
+        assert!(!report.already_applied);
+        (profile, other)
+    }
+
+    fn amendment_evidence(
+        state: &Path,
+    ) -> Vec<crate::native_capacity::CapacityPolicyAmendmentEvidence> {
+        crate::native_capacity::read_capacity_policy_amendments(&state.join(".ai/state")).unwrap()
+    }
+
+    /// The bytes of every record a refused replacement must leave untouched.
+    fn replacement_subjects(state: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut subjects = BTreeMap::new();
+        for path in [init_completion_path(state), substrate_identity_path(state)] {
+            subjects.insert(path.clone(), fs::read(&path).unwrap());
+        }
+        let policies = ryeos_node_runtime::node_policy::generation::policy_directory(state);
+        for entry in fs::read_dir(&policies).unwrap() {
+            let path = entry.unwrap().path();
+            subjects.insert(path.clone(), fs::read(&path).unwrap());
+        }
+        for entry in fs::read_dir(state.join(".ai/bundles")).unwrap() {
+            let path = entry.unwrap().path().join(".ai/manifest.yaml");
+            if let Ok(bytes) = fs::read(&path) {
+                subjects.insert(path, bytes);
+            }
+        }
+        subjects
+    }
+
+    #[test]
+    fn a_policy_replacement_amends_a_differing_capacity_issuance_and_reruns_as_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let (profile, _) = node_issued_under_another_capacity_policy(&state);
+        assert_eq!(amendment_evidence(&state).len(), 1);
+
+        let report = run_init(&full_profile_replacement(&state)).expect("replacement");
+        let amendment = report
+            .capacity_amendment
+            .clone()
+            .expect("the replacement names its capacity amendment");
+        assert!(!amendment.already_applied);
+        let document = amendment.document_digest.clone().expect("a document");
+        let completion = verify_init_completion(&state).unwrap().unwrap();
+        let sealed = serde_json::to_value(&completion.capacity_account).unwrap();
+        assert_eq!(sealed["policy"], serde_json::to_value(&profile).unwrap());
+        assert_eq!(
+            sealed["reanchor"]["document_digest"],
+            serde_json::json!(document),
+            "the sealed binding names its amendment"
+        );
+        let evidence = amendment_evidence(&state);
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[1].document_digest, document);
+        assert_eq!(evidence[1].command, INIT_REPLACEMENT_COMMAND);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["capacity_amendment"]["document_digest"],
+            serde_json::json!(document)
+        );
+
+        let rerun = run_init(&full_profile_replacement(&state)).expect("rerun");
+        let again = rerun.capacity_amendment.expect("the rerun names it too");
+        assert!(again.already_applied);
+        assert_eq!(again.document_digest.as_deref(), Some(document.as_str()));
+        assert_eq!(amendment_evidence(&state).len(), 2);
+        assert_eq!(
+            verify_init_completion(&state)
+                .unwrap()
+                .unwrap()
+                .capacity_account,
+            completion.capacity_account
+        );
+    }
+
+    #[test]
+    fn a_capacity_amendment_the_account_refuses_leaves_the_node_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let (_, other) = node_issued_under_another_capacity_policy(&state);
+        let operator = fixture_operator_key(&state);
+        let in_force = crate::native_capacity::load_existing_capacity_binding(
+            &state,
+            &compute_fingerprint(&operator.verifying_key()),
+            &ryeos_node_runtime::identity::node_identity_fingerprint(&state).unwrap(),
+            &other,
+        )
+        .expect("the binding in force");
+        crate::native_capacity::leave_outstanding_debit(&state, &in_force).unwrap();
+        let before = replacement_subjects(&state);
+        let evidence = amendment_evidence(&state);
+
+        let refused = run_init(&full_profile_replacement(&state))
+            .expect_err("an outstanding debit refuses the amendment");
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains("incarnation debit is outstanding")
+                && message.contains("nothing was changed"),
+            "{message}"
+        );
+        assert_eq!(replacement_subjects(&state), before);
+        assert_eq!(amendment_evidence(&state), evidence);
+    }
+
+    #[test]
+    fn a_policy_replacement_under_the_issued_capacity_policy_amends_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        run_init(&make_opts(&state, &state)).expect("initial full generation");
+        let before = verify_init_completion(&state).unwrap().unwrap();
+
+        let report = run_init(&full_profile_replacement(&state)).expect("replacement");
+        assert!(report.capacity_amendment.is_none());
+        assert!(
+            serde_json::to_value(&report)
+                .unwrap()
+                .get("capacity_amendment")
+                .is_none()
+        );
+        assert!(amendment_evidence(&state).is_empty());
+        assert_eq!(
+            verify_init_completion(&state)
+                .unwrap()
+                .unwrap()
+                .capacity_account,
+            before.capacity_account
+        );
+    }
+
+    #[test]
+    fn a_generation_missing_a_required_section_is_replaced_with_its_capacity_amended() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let (profile, _) = node_issued_under_another_capacity_policy(&state);
+        // A generation published by a build that did not yet require the
+        // section: every remaining member is still node-signed.
+        fs::remove_file(
+            ryeos_node_runtime::node_policy::generation::policy_directory(&state)
+                .join("launch_trust.yaml"),
+        )
+        .unwrap();
+
+        let report = run_init(&full_profile_replacement(&state)).expect("replacement");
+        assert!(
+            !report
+                .capacity_amendment
+                .expect("the replacement amends capacity")
+                .already_applied
+        );
+        let completion = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&completion.capacity_account).unwrap()["policy"],
+            serde_json::to_value(&profile).unwrap()
+        );
+        assert!(
+            ryeos_node_runtime::node_policy::generation::policy_directory(&state)
+                .join("launch_trust.yaml")
+                .is_file()
         );
     }
 

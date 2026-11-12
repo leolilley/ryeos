@@ -407,6 +407,17 @@ impl std::error::Error for IssuancePreparationFailure {
     }
 }
 
+/// Whether this node's operator-signed capacity issuance is published. An
+/// absent onboarding directory is an uninitialized node and has none.
+pub(crate) fn capacity_issuance_published(app_root: &Path) -> Result<bool> {
+    let Some(onboarding) = PinnedDirectory::open(&app_root.join(".ai/config/onboarding"))? else {
+        return Ok(false);
+    };
+    Ok(onboarding
+        .open_pinned_regular(OsStr::new("native-capacity-issuance.json"), false)?
+        .is_some())
+}
+
 /// Initial issuance belongs to the actual stopped-node operator ceremony.
 /// `operator_created` is the result of that ceremony's create-once private-key
 /// operation, never an option supplied by a live caller. Existing operators

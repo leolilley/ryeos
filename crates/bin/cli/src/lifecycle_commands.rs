@@ -617,6 +617,7 @@ fn run_node_policy_generation_reset_command(
             "app_root": app_root,
             "node_fingerprint": applied.result["node_fingerprint"],
             "bundles": applied.result["bundles"],
+            "capacity_amendment": applied.result.get("capacity_amendment").filter(|value| !value.is_null()),
             "receipt": applied.receipt.digest()?,
         }))?;
     } else {
@@ -1651,6 +1652,20 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
                 format!(
                     "{} -> {}",
                     replacement.previous_image_digest, replacement.new_image_digest
+                ),
+            ));
+        }
+        if let Some(amendment) = &report.capacity_amendment {
+            status.rows.push(crate::tty::Row::key_value(
+                "capacity issuance",
+                format!(
+                    "{} policy {}",
+                    if amendment.already_applied {
+                        "already carries"
+                    } else {
+                        "amended to"
+                    },
+                    amendment.policy_digest
                 ),
             ));
         }

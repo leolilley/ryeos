@@ -572,6 +572,57 @@ fn append_evidence(directory: &PinnedDirectory, evidence: &CapacityReissueEviden
     Ok(())
 }
 
+/// Leave an outstanding incarnation debit in a stopped node's account, as a
+/// start that crashed before release would have: one debit redo published
+/// and applied under `binding`, the binding in force.
+#[cfg(test)]
+pub(crate) fn leave_outstanding_debit(
+    app_root: &Path,
+    binding: &NativeCapacityAccountBinding,
+) -> Result<()> {
+    let open = |path: &str| -> Result<PinnedDirectory> {
+        PinnedDirectory::open(&app_root.join(path))?.with_context(|| format!("{path} absent"))
+    };
+    let policy = &binding.policy;
+    let issuance = binding.issuance_digest()?;
+    let mut owner = StoppedCapacityAccount::open(
+        open(".ai/node/native-capacity")?,
+        binding.account_identity,
+        open(".ai/config/onboarding")?,
+        open(".ai/state")?,
+        issuance,
+        policy,
+    )?;
+    let deadline = owner.budget.deadline;
+    owner.anchor.load(policy, &issuance, deadline, &|steps| {
+        owner.budget.pay(steps)
+    })?;
+    let current = *owner.anchor.current()?;
+    let before = *current.target();
+    let (sequence, consumed) = before.prepare_debit(policy.allowance, policy.incarnation.units)?;
+    let (_, _, debited) = super::redo::controls::fixture();
+    let target = CapacityRecord {
+        sequence,
+        consumed,
+        outstanding: Some(super::IncarnationDebit {
+            units: policy.incarnation.units,
+            ..debited.outstanding.context("fixture debit")?
+        }),
+        ..before
+    };
+    let next = current.successor(Operation::Debit, target, policy)?;
+    owner
+        .anchor
+        .publish(next, policy, &issuance, deadline, &|steps| {
+            owner.budget.pay(steps)
+        })?;
+    owner
+        .account
+        .apply_redo(owner.anchor.current()?, deadline, &|steps| {
+            owner.budget.pay(steps)
+        })
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod controls {
     //! Filesystem controls for the stopped-node owner. The records are the
