@@ -9,6 +9,10 @@ chrome, optional navigation slots, view set tabs, contextual input and the
 launcher. Overview/Development and the launcher can be opened; other controls
 are appearance specimens. No production implementation is claimed.
 
+The study predates the removal of surface navigation: its navigation slot and
+toggle are historical. The shipped client mounts destinations as ordinary
+views.
+
 Open `view-set.html` in a browser. Use the top view set tabs, Launch button,
 or Ctrl/Cmd+K. The navigation-slot button toggles the left region.
 

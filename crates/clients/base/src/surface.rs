@@ -311,7 +311,7 @@ impl<'de> Deserialize<'de> for SlotContentSpec {
 pub struct SurfaceStyleSpec {
     #[serde(default)]
     pub border: BorderStyleSpec,
-    /// ViewSet navigation remains visible independently of optional status.
+    /// Show the view set tab strip, independently of optional status.
     #[serde(default)]
     pub view_set_tabs: bool,
 }

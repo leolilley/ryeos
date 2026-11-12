@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:57:28Z:5cb8371db997be49b8f6993641f1588cc85084121ff224af3dc6cd907bdea640:eHdeXQsKlZ4zErXkwsZ7Ypz9FKR4MvqwtI0wJmmC11N9aosr2Re9VXA94nhpBi4hUcJ33X4dteSh25eaDinJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T19:53:22Z:62c2c179e28bfb9d1f0067719b83f1b11f32c01c0a6179d83b78137f99310414:CNerJDZ0huJrZKIOwKOkYVl7w2t7mJb0CKb+bwT76TUpYR+BoynfS9lEvBFujFJxjhwBmxGQ3BkzryRxKwiIBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -503,15 +503,12 @@ and cannot be inferred from drawing order. Keyboard focus has a non-colour
 structural cue even when tile chrome is hidden or the mount occupies an edge
 slot, and remains distinct from selected content or running state.
 
-At narrow widths (760 points or less) the authored navigation remains reachable
-through a renderer-local drawer opened from the system bar, and only the
-focused tile's branch of the split tree is shown; the authored tree is never
-rewritten. The renderer measures itself and sends the core `Resize`. Open/closed
-state, focus return and outside-press dismissal are renderer mechanics only; destinations and activation intents remain the
-Rust projection. Dismissal restores the opener only while the drawer still owns
-focus; an activated destination that took focus keeps it. Never hide an authored
-navigation region with no accessible replacement or introduce a browser route
-model to solve responsive layout.
+At narrow widths (760 points or less) only the focused tile's branch of the
+split tree is shown; the authored tree is never rewritten, and the other tiles
+stay reachable by cycling the set's tiles (`CycleViewTab`). The renderer
+measures itself and sends the core `Resize`. Destinations are ordinary views
+mounted in slots, so there is no separate navigation region to collapse. Never
+introduce a browser route model to solve responsive layout.
 
 Execution views must project coverage as data. Bounded child trees declare
 complete versus truncated closure, candidate views distinguish not applicable,
