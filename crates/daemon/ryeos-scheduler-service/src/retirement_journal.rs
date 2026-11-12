@@ -5721,13 +5721,37 @@ pub(crate) mod late_recovery_controls {
     use super::*;
     use ryeos_scheduler_contract::SchedulerRetirementPhase as Phase;
 
+    /// Extending a prefix keeps the records already published, as production
+    /// keeps its retained bytes: a signature carries its signing time, so
+    /// re-signing an equal value would publish different bytes.
+    fn publish_or_retain<T>(
+        runtime: &lillux::PinnedDirectory,
+        identity: &NodeIdentity,
+        name: &str,
+        value: &T,
+    ) -> Result<Vec<u8>>
+    where
+        T: serde::Serialize + for<'de> serde::Deserialize<'de> + PartialEq + Clone,
+    {
+        if runtime.entry_no_follow(OsStr::new(name))?.is_none() {
+            return publish_signed(runtime, identity, name, value);
+        }
+        let existing = read_signed_bytes(runtime, name)?;
+        let retained: T = verify_signed(&existing, identity)?;
+        ensure!(
+            &retained == value,
+            "extended signed prefix differs from its retained record {name}"
+        );
+        Ok(existing)
+    }
+
     pub(crate) fn signed_prefix(
         runtime: &lillux::PinnedDirectory,
         identity: &NodeIdentity,
         intent: &SchedulerRetirementIntent,
         count: usize,
     ) -> Result<()> {
-        publish_signed(
+        publish_or_retain(
             runtime,
             identity,
             &format!("{INTENT_PREFIX}{}", intent.generation),
@@ -5786,7 +5810,7 @@ pub(crate) mod late_recovery_controls {
                 phase,
                 role_identity,
             };
-            let bytes = publish_signed(
+            let bytes = publish_or_retain(
                 runtime,
                 identity,
                 &phase_name(&intent.generation, record.sequence),
