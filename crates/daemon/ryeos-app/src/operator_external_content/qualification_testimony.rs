@@ -181,11 +181,7 @@ pub fn export_testimony_blocking(
             && current.evidence == witness.evidence,
         "qualification changed while the origin re-verified it"
     );
-    let expires_at = witness
-        .attestation
-        .expires_at
-        .clone()
-        .context("a qualification without an expiry cannot be testified")?;
+    let expires_at = testimony_expiry(&witness.attestation, now)?;
     let body = RemoteQualificationTestimonyBody::new_product(
         witness.attestation.clone(),
         state.threads.site_id().to_owned(),
@@ -259,7 +255,7 @@ pub fn export_content_testimony_blocking(
             && published.evidence.purpose.owner_fingerprint == owner_principal,
         "published content qualification differs from the requested coordinate or operator"
     );
-    let expires_at = content_testimony_expiry(&published.attestation, now)?;
+    let expires_at = testimony_expiry(&published.attestation, now)?;
     let body = RemoteQualificationTestimonyBody::new_content(
         published.attestation.clone(),
         state.threads.site_id().to_owned(),
@@ -280,7 +276,10 @@ pub fn export_content_testimony_blocking(
     })
 }
 
-fn content_testimony_expiry(qualification: &Attestation, now: &str) -> anyhow::Result<String> {
+/// Testimony expires at the qualification's own expiry or the maximum
+/// testimony age after export, whichever is sooner. A local qualification
+/// carries no expiry of its own; the testimony bound is what limits it.
+fn testimony_expiry(qualification: &Attestation, now: &str) -> anyhow::Result<String> {
     let parse = |label: &str, value: &str| {
         chrono::DateTime::parse_from_rfc3339(value)
             .map(|time| time.with_timezone(&chrono::Utc))
@@ -1580,15 +1579,15 @@ mod tests {
     }
 
     #[test]
-    fn a_content_testimony_expires_with_the_qualification_or_the_maximum_age() {
+    fn a_testimony_expires_with_the_qualification_or_the_maximum_age() {
         let fixture = fixture();
         let mut unbounded = fixture.testimony.clone();
         unbounded.expires_at = None;
-        let expiry = content_testimony_expiry(&unbounded, "2026-10-21T00:00:00Z").unwrap();
+        let expiry = testimony_expiry(&unbounded, "2026-10-21T00:00:00Z").unwrap();
         assert_eq!(expiry, "2026-11-21T00:00:00Z");
         let mut sooner = fixture.testimony;
         sooner.expires_at = Some("2026-10-25T00:00:00Z".into());
-        let expiry = content_testimony_expiry(&sooner, "2026-10-21T00:00:00Z").unwrap();
+        let expiry = testimony_expiry(&sooner, "2026-10-21T00:00:00Z").unwrap();
         assert_eq!(expiry, "2026-10-25T00:00:00Z");
     }
 
