@@ -162,7 +162,7 @@ fn read_slot(file: &lillux::PinnedRegularFile, max_bytes: u64) -> Result<Vec<u8>
 }
 
 /// Install the runtime archive as the exact tree the snapshot producer
-/// emits: four members, in order, with fixed modes and bounded sizes.
+/// emits: three members, in order, with fixed modes and bounded sizes.
 fn install_runtime(archive: &[u8], root: &lillux::PinnedDirectory) -> Result<()> {
     let mut archive = tar::Archive::new(Cursor::new(archive));
     let mut entries = archive.entries().context("read runtime archive")?;

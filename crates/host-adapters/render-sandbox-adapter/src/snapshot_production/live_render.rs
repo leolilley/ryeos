@@ -312,7 +312,7 @@ fn append_tar_entry(
     Ok(())
 }
 
-/// The adapter's four-entry guest package shape, with an owner executable of
+/// The adapter's three-entry guest package shape, with an owner executable of
 /// the size the real package has. The filler is pseudo-random so no hop on the
 /// path can shrink it.
 fn guest_package_tar() -> Result<Vec<u8>> {

@@ -614,6 +614,7 @@ impl StateStore {
             .decode(&reservation.channel_owner_public_key)?
             .try_into()
             .map_err(|_| anyhow!("guest assignment owner key changed length"))?;
+        let node_key = g.signer.verifying_key();
         let assignment = GuestOccurrenceAssignmentDocument {
             schema: GUEST_OCCURRENCE_ASSIGNMENT_SCHEMA,
             placement_thread_id: reservation.placement_thread_id.clone(),
@@ -626,7 +627,7 @@ impl StateStore {
             supervisor_runtime_hash: intent.supervisor_runtime_hash.clone(),
             guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
             owner_public_key_hex: hex::encode(owner_bytes),
-            controller_public_key_hex: hex::encode(g.signer.verifying_key().to_bytes()),
+            controller_public_key_hex: hex::encode(node_key.to_bytes()),
             attachment_deadline_ms: intent.attachment_deadline_ms,
         };
         let signature = g.signer.sign(&assignment.signing_bytes()?);
@@ -639,6 +640,11 @@ impl StateStore {
             signature_hex: hex::encode(signature),
         };
         signed.validate_shape()?;
+        anyhow::ensure!(
+            signed.assignment.controller_public_key_hex == hex::encode(node_key.to_bytes())
+                && signed.verify_controller_signature()? == node_key,
+            "guest assignment does not verify under this node's own key"
+        );
         Ok(signed)
     }
 

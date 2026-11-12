@@ -274,13 +274,16 @@ impl VerifiedGuestOccurrenceAssignment {
     }
 }
 
-/// Sign `assignment` as `controller`, naming the controller's public key in
-/// the signed document.
+/// Sign `assignment` as `controller`. The document must already name the
+/// controller's own public key; a different named key is refused.
 pub fn sign_guest_occurrence_assignment(
-    mut assignment: GuestOccurrenceAssignmentDocument,
+    assignment: GuestOccurrenceAssignmentDocument,
     controller: &SigningKey,
 ) -> Result<SignedGuestOccurrenceAssignment> {
-    assignment.controller_public_key_hex = hex::encode(controller.verifying_key().to_bytes());
+    ensure!(
+        assignment.controller_public_key_hex == hex::encode(controller.verifying_key().to_bytes()),
+        "guest assignment names a controller key other than its signer's"
+    );
     assignment.validate_shape()?;
     let signature = controller.sign(&assignment.signing_bytes()?);
     Ok(SignedGuestOccurrenceAssignment {
@@ -737,6 +740,14 @@ mod tests {
             attachment_deadline_ms: assignment.attachment_deadline_ms,
         };
         let signed_bytes = ryeos_external_execution_contract::canonical_json(&signed).unwrap();
+        assert!(
+            sign_guest_occurrence_assignment(
+                assignment_document.clone(),
+                &SigningKey::from_bytes(&[42; 32])
+            )
+            .is_err(),
+            "a signer cannot name another controller's key"
+        );
         let signed_assignment =
             sign_guest_occurrence_assignment(assignment_document.clone(), &root).unwrap();
         let assignment_bytes =

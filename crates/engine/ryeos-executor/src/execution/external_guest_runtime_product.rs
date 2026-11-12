@@ -1,7 +1,8 @@
 //! Controller-owned staging of one retained guest-owner product for provider installation.
 //!
 //! This operation does not contact a provider or qualify a snapshot. It keeps
-//! the product witness and exact re-observed bytes together while producing a fresh private tree for a later descriptor-bound transfer.
+//! the product witness and exact re-observed bytes together while producing a
+//! fresh private tree for a later descriptor-bound transfer.
 
 use std::ffi::OsStr;
 
@@ -58,7 +59,7 @@ impl StagedGuestOwnerRuntimeProduct {
         Ok(())
     }
 
-    /// Package exactly the admitted four-entry tree as an application/x-tar
+    /// Package exactly the admitted three-entry tree as an application/x-tar
     /// directory upload. Content is read through pinned Lillux descriptors,
     /// never through a reconstructed CAS or ambient project path.
     pub fn sealed_snapshot_upload(&self) -> Result<GuestOwnerSnapshotUpload> {
