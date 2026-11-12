@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-12T04:42:05Z:f4e48482595df48799089553b1fae1d97beec789b4b8d2a875c727ad19ab86d8:wlWtl+IPH+blAuIFSeNm56VShS04OtVDFCEdFqwEqy7j5cxsJUff94KmJ4ScjTCzW5dWf9mM7FukVmRFFKIEDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T10:40:20Z:df4703a5e2b30630121e7b11bcef1ebcd113631a92030bf483ada4998372f233:FGojhGNOzTX50Pgf8w+gG+JmpvJa0bhIJZVrc2DXfoeVX/5OYst56C/T/9fHdoFpnqIy6wlz5SmuWVdWqx2lCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "2.1.0"
+version: "2.2.0"
 location:
   directory: surfaces
 
@@ -70,10 +70,6 @@ composer_config:
     # so the keyed merge would silently drop them.
     - name: library
       strategy: replace_root_last
-      expect_value_type: sequence
-    - name: navigation
-      strategy: keyed_seq_merge_root_last
-      key: id
       expect_value_type: sequence
     - name: launch_entry
       strategy: replace_root_last
@@ -241,19 +237,6 @@ composed_value_contract:
           required:
             group: { type: single, prim: string }
             views: { type: single, prim: sequence, elements: { type: single, prim: string } }
-          optional: {}
-    navigation:
-      type: single
-      prim: sequence
-      elements:
-        type: single
-        prim: mapping
-        contract:
-          root_type: mapping
-          required:
-            id: { type: single, prim: string }
-            label: { type: single, prim: string }
-            view: { type: single, prim: string }
           optional: {}
 
 metadata:

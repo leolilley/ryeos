@@ -73,11 +73,9 @@ pub struct Local {
     pub(crate) viewport: Option<(f32, f32)>,
     /// Device pixels per point, as the last frame was drawn.
     scale: std::cell::Cell<f32>,
-    /// Whether the narrow layout's navigation drawer is open.
-    pub(crate) navigation_open: bool,
 }
 
-/// At or under this width the shell shows one tile and a navigation drawer.
+/// At or under this width the shell shows only the focused tile.
 pub(crate) const NARROW: f32 = 760.0;
 /// At or under this width side docks give up width to the view set.
 pub(crate) const COMPACT: f32 = 980.0;
@@ -691,9 +689,6 @@ impl App {
             return;
         }
         self.local.viewport = Some((width, height));
-        if width > NARROW {
-            self.local.navigation_open = false;
-        }
         let Some(core) = self.core() else {
             return;
         };
@@ -707,10 +702,6 @@ impl App {
             },
         };
         self.dispatch(RyeOsEvent::Resize { viewport });
-    }
-
-    pub(crate) fn set_navigation_open(&mut self, open: bool) {
-        self.local.navigation_open = open;
     }
 
     pub(crate) fn set_split_extent(&mut self, key: String, extent: f32) {

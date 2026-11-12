@@ -1,7 +1,7 @@
-# ryeos:signed:2026-11-08T06:41:16Z:5a05e9f4e61cf85e47139d147cb3f30547ab6a27e01dc040945587ec5e8eb3bb:i9XNnVicK7K1h2vxnhLBaESZTc8sDsxmwYBNhYgI3Y2kSGRN5zymAyq5CZ5q6pqlzi9SCg93IrkfPrvIc6a9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T10:40:20Z:2e9bc47f03906bce8d62959f03a696416b3f89ef96762e4352b634a94bcf01be:WQ3j4FOkPLpNxGlgDjFxZ5EWds+4PhBtHWxbxfeUd4q93h0ptj/3jSuI+wl1gSnjtSX0KJ+4Agb9cTDEoccuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-assistant
 title: Assistant
-version: "3.1.0"
+version: "3.2.0"
 description: Named tiled RyeOS view sets with contextual views
 
 extends: surface:ryeos/ui/lens
@@ -10,7 +10,6 @@ tiling:
   mode: master_stack
 
 tiles: []
-navigation: []
 style:
   border: thin
   view_set_tabs: true

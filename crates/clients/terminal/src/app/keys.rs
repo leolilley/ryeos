@@ -393,6 +393,7 @@ mod tests {
                     TileId::new(1),
                 ),
                 tile_id: "1".into(),
+                current: true,
                 focused: true,
                 maximized: false,
                 title: "Feed".into(),

@@ -122,9 +122,71 @@ fn the_launcher_chord_from_the_composer_keeps_the_draft() {
 }
 
 #[test]
-fn a_narrow_page_moves_navigation_behind_a_toggle() {
-    let narrow = shell("", (700.0, 800.0));
-    assert!(keyed(&narrow, "navigation-toggle").is_some());
-    let wide = shell("", (1280.0, 800.0));
-    assert!(keyed(&wide, "navigation-toggle").is_none());
+fn a_narrow_page_shows_only_the_focused_tile() {
+    let tiles = |rt: &Runtime<App>| {
+        rt.elements()
+            .into_iter()
+            .filter(|element| {
+                element
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("tile:"))
+            })
+            .count()
+    };
+    assert_eq!(tiles(&shell("", (700.0, 800.0))), 1);
+    assert_eq!(tiles(&shell("", (1280.0, 800.0))), 2);
+}
+
+/// Every field the presentation shows, wherever it is mounted.
+fn fields(vm: &RyeOsViewModel) -> Vec<Value> {
+    fn walk(value: &Value, found: &mut Vec<Value>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(field) = map.get("field")
+                    && field.get("entities").is_some()
+                {
+                    found.push(field.clone());
+                }
+                map.values().for_each(|child| walk(child, found));
+            }
+            Value::Array(items) => items.iter().for_each(|child| walk(child, found)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    walk(&serde_json::to_value(vm).unwrap(), &mut found);
+    found
+}
+
+#[test]
+fn the_field_scene_draws_its_execution_entities() {
+    let rt = shell("field", (1440.0, 900.0));
+    let vm = model(&rt);
+    let field = fields(&vm).pop().expect("the execution field is mounted");
+    let stage = keyed(&rt, "field-stage:").expect("the stage is drawn");
+    let entities: Vec<[f32; 4]> = rt
+        .elements()
+        .into_iter()
+        .filter(|element| {
+            element
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("field-entity:"))
+        })
+        .map(|element| element.rect)
+        .collect();
+    assert_eq!(
+        entities.len(),
+        field["entities"].as_array().map_or(0, Vec::len),
+        "every entity is drawn"
+    );
+    let first = entities
+        .iter()
+        .map(|rect| rect[0])
+        .fold(f32::MAX, f32::min);
+    assert!(
+        first < stage[0] + stage[2] / 2.0,
+        "the authored first group opens the stage, not an empty one ({first} in {stage:?})"
+    );
 }

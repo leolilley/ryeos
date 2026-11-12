@@ -14,7 +14,7 @@ use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
 use ryeos_client_runtime::documents::{DocumentOffer, DocumentState};
 
-use crate::theme::{self, NAV_WIDTH, Palette, STATUS_HEIGHT, STRIP_HEIGHT, SYSTEM_HEIGHT};
+use crate::theme::{self, Palette, STATUS_HEIGHT, STRIP_HEIGHT, SYSTEM_HEIGHT};
 use crate::views;
 use crate::{App, Local, RenameTarget};
 
@@ -87,9 +87,6 @@ pub fn shell(
         .child(view_set_strip(&chrome.top_bar, local))
         .child(body(vm, local))
         .child(status_bar(&chrome.status_bar));
-    if local.narrow() && local.navigation_open && !vm.navigation.items.is_empty() {
-        page = page.child(navigation_drawer(vm, local));
-    }
     if !vm.notices.is_empty() || !documents.is_empty() {
         page = page.child(notices(&vm.notices, documents));
     }
@@ -172,23 +169,6 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
                 .font(theme::data(10.0).tracking(0.4))
                 .color(p.muted),
         );
-    let state = if local.narrow() && !vm.navigation.items.is_empty() {
-        let open = local.navigation_open;
-        state.child(
-            text("Views")
-                .key(NAVIGATION_TOGGLE)
-                .font(theme::ui(11.0))
-                .color(if open { p.accent_bright } else { p.text })
-                .px(6.0)
-                .role("button")
-                .label("Views")
-                .expanded(open)
-                .hover(p.plane_selected)
-                .on_press(move |app: &mut App| app.set_navigation_open(!open)),
-        )
-    } else {
-        state
-    };
     row()
         .w_full()
         .h(SYSTEM_HEIGHT)
@@ -535,103 +515,14 @@ fn rename_form(local: &Local, trigger: String, label: &str, (save, cancel): (&st
 }
 
 fn body(vm: &RyeOsViewModel, local: &Local) -> El {
-    let mut body = row()
+    row()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
         .pt(14.0)
         .pb(14.0)
         .px(18.0)
-        .gap(12.0);
-    if !vm.navigation.items.is_empty() && !local.narrow() {
-        body = body.child(navigation(vm).w(NAV_WIDTH));
-    }
-    body.child(view_set(vm, local))
-}
-
-/// The narrow layout's navigation: a drawer over a scrim under the system
-/// bar; choosing a view or pressing outside closes it.
-fn navigation_drawer(vm: &RyeOsViewModel, local: &Local) -> El {
-    let p = Palette::get();
-    let width = (local.width() - 44.0).clamp(0.0, 320.0);
-    el().pin(
-        Some(0.0),
-        Some(SYSTEM_HEIGHT),
-        Some(0.0),
-        Some(STATUS_HEIGHT),
-    )
-    .fill(p.bg.alpha(0.68))
-    .modal(true, |app: &mut App| app.set_navigation_open(false))
-    .focus_return(NAVIGATION_TOGGLE)
-    .child(
-        navigation(vm)
-            .pin(Some(0.0), Some(0.0), None, Some(0.0))
-            .w(width),
-    )
-}
-
-/// The narrow system bar's drawer control; focus returns to it on close.
-const NAVIGATION_TOGGLE: &str = "navigation-toggle";
-
-fn navigation(vm: &RyeOsViewModel) -> El {
-    let p = Palette::get();
-    let mut items = col().w_full().py(10.0);
-    for item in &vm.navigation.items {
-        let intent = item.intent.clone();
-        let (ink, rule, fill) = if item.selected {
-            (p.text, p.accent_bright, p.plane_selected)
-        } else {
-            (p.muted, p.plane.alpha(0.0), p.plane.alpha(0.0))
-        };
-        items = items.child(
-            row()
-                .key(format!("nav:{}", item.id))
-                .w_full()
-                .min_h(42.0)
-                .pl(15.0)
-                .pr(12.0)
-                .center_y()
-                .fill(fill)
-                .border_sides([0.0, 0.0, 0.0, 2.0], rule)
-                .hover(p.plane_selected.alpha(0.5))
-                .child(
-                    el().w(20.0)
-                        .child(text("◇").font(theme::ui(13.0)).color(p.yellow)),
-                )
-                .child(text(item.label.clone()).font(theme::ui(13.0)).color(ink))
-                .on_press(move |app: &mut App| {
-                    app.set_navigation_open(false);
-                    app.ui(RyeOsUiEvent::Activate {
-                        intent: intent.clone(),
-                    });
-                }),
-        );
-    }
-    col()
-        .h_full()
-        .min_h(0.0)
-        .fill(p.plane)
-        .border(1.0, p.line)
-        .child(
-            row()
-                .w_full()
-                .h(40.0)
-                .px(14.0)
-                .center_y()
-                .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-                .child(
-                    text("EXPLORER")
-                        .font(theme::data(9.0).tracking(1.26))
-                        .color(p.muted)
-                        .grow(1.0),
-                )
-                .child(
-                    text(format!("{:02}", vm.navigation.items.len()))
-                        .font(theme::data(9.0).tracking(1.26))
-                        .color(p.muted),
-                ),
-        )
-        .child(items)
+        .child(view_set(vm, local))
 }
 
 fn view_set(vm: &RyeOsViewModel, local: &Local) -> El {
@@ -852,11 +743,11 @@ fn divider(
 const DIVIDER: f32 = 11.0;
 const SPLIT_GAP: f32 = 3.0;
 
-/// Whether the focused tile is under `node`.
+/// Whether the set's current tile is under `node`.
 fn holds_focus(node: &RyeOsLayoutNodeVm) -> bool {
     match node {
         RyeOsLayoutNodeVm::Split { first, second, .. } => holds_focus(first) || holds_focus(second),
-        RyeOsLayoutNodeVm::Tile { focused, .. } => *focused,
+        RyeOsLayoutNodeVm::Tile { current, .. } => *current,
     }
 }
 

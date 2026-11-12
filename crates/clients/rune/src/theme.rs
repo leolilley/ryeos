@@ -91,7 +91,6 @@ pub const fn data(size: f32) -> TextStyle {
 pub const SYSTEM_HEIGHT: f32 = 24.0;
 pub const STRIP_HEIGHT: f32 = 53.0;
 pub const STATUS_HEIGHT: f32 = 27.0;
-pub const NAV_WIDTH: f32 = 205.0;
 pub const HEADER_HEIGHT: f32 = 34.0;
 
 /// Which embedded face a string is set in.

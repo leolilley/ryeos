@@ -127,10 +127,6 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
             "master": { "side": "left", "arrange": "vertical", "ratio": 0.6, "count": 1 },
             "stack": { "arrange": "vertical" }, "insert": "end" },
         "tiles": tiles,
-        "navigation": [
-            { "id": "threads", "label": "Threads", "view": "view:ryeos/threads/history" },
-            { "id": "timeline", "label": "Timeline", "view": "view:ryeos/chain/timeline" }
-        ],
         "views": {
             "view:ryeos/threads/history": view(THREADS)?,
             "view:ryeos/development/execution": execution()?,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T05:40:00Z:29a940ea2f133ce004c7b6480c9e46ebe7488a2492fcb3717666f2543f100b3e:ewnPUHEDjEhsRsa0S5k2Yi1Q4o1X8ePvlJqGZwHBX4DleyAXy4y61RE80r2lzi6JcvOEceBZsQZeGlVu+0FCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T10:40:20Z:02281eb5c13efae3f1f24bf694d2d69bfa09126c46fdc3c53dce0b9d48067db6:FUCtAJbOQUt8dfisL0IzzuMCzn+YHkRX8dSSAVl3NVNCVEyNopLMFSQ6bHmCtSfmdHG44ZBGJHD2Svx+BLCkAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -232,7 +232,7 @@ RyeOS UI
 |       `-- Fire History
 |-- Layouts / Surfaces
 |   |-- Assistant
-|   |   |-- Signed navigation: Home / Work / Review / Sites / Programs
+|   |   |-- Explorer group: Home / Work / Review / Sites / Programs views
 |   |   |-- Center: One selected lens
 |   |   |-- Bottom: Routed Input
 |   |   `-- Optional context through signed views
@@ -431,8 +431,8 @@ surface:ryeos/ui/assistant
 `-- operator surface
     |-- view-set strip: independently retained compositions
     |-- active view set: one authored layout of mounted views
-    |-- optional top/left/right/bottom slots: ordinary supporting views
-    `-- navigation: signed destination-to-view bindings
+    |-- optional top/left/right/bottom slots: one ordinary view each
+    `-- destinations: ordinary views in the layout or a slot (no navigation chrome)
 
 surface:ryeos/ui/thread
 `-- focused thread surface

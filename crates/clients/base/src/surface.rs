@@ -88,11 +88,6 @@ pub struct SurfaceSpec {
     /// lensable views surface under path-derived groups).
     #[serde(default)]
     pub library: Vec<SurfaceLibraryGroupSpec>,
-    /// Ordered, signed shell destinations. Renderers receive these through
-    /// the semantic view model and dispatch their existing `OpenView` intent;
-    /// they do not own a page enum or infer navigation from view names.
-    #[serde(default)]
-    pub navigation: Vec<SurfaceNavigationSpec>,
     #[serde(default)]
     pub affordances: Vec<SurfaceCommandSpec>,
     #[serde(default)]
@@ -108,14 +103,6 @@ pub struct SurfaceLibraryGroupSpec {
     pub group: String,
     #[serde(default)]
     pub views: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SurfaceNavigationSpec {
-    pub id: String,
-    pub label: String,
-    pub view: String,
 }
 
 /// Capability-pattern ceilings for sources and executable affordances named by
@@ -728,7 +715,6 @@ pub fn builtin_default() -> SurfaceSpec {
         sources: BTreeMap::new(),
         views: None,
         library: Vec::new(),
-        navigation: Vec::new(),
         affordances: Vec::new(),
         instruments: Vec::new(),
         capabilities: None,

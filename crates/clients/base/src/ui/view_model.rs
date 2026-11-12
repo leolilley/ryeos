@@ -9,18 +9,18 @@ use super::model::{RyeOsCore, RyeOsDockEdge};
 use super::seat::InvokeTemplate;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
-use crate::view_set::{TileState, ViewLocalState, ViewSpec};
+use crate::view_set::{TileState, ViewLocalState};
 
 mod dialogs;
 mod execution;
-mod navigation;
+mod session;
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 #[cfg(test)]
 use execution::status_tone;
 pub(crate) use execution::timeline_summary_entry;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use navigation::{RyeOsNavigationItemVm, RyeOsNavigationVm, RyeOsSessionVm};
+pub use session::RyeOsSessionVm;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -35,7 +35,6 @@ pub struct RyeOsViewModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_url: Option<String>,
     pub session: RyeOsSessionVm,
-    pub navigation: RyeOsNavigationVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
     pub view_set: Option<RyeOsViewSetVm>,
@@ -296,6 +295,11 @@ pub enum RyeOsLayoutNodeVm {
         tabs: Vec<RyeOsViewTabVm>,
         instance_key: RyeOsViewInstanceKey,
         tile_id: String,
+        /// The set's current tile: the one a narrow page shows. It stays
+        /// current while a dock or dialog holds focus.
+        #[serde(default)]
+        current: bool,
+        /// Whether this tile holds the shared focus (at most one mount does).
         focused: bool,
         maximized: bool,
         title: String,
@@ -794,7 +798,6 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         tail_url,
         presentation: presentation_vm(core, &chrome, view_set.as_ref()),
         session,
-        navigation: navigation_vm(core),
         chrome,
         view_set,
         docks: dock_plane_vm(core),
@@ -803,36 +806,6 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
     }
-}
-
-fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
-    let destination = core
-        .seat
-        .fold()
-        .get(super::seat::KEY_NAVIGATION_DESTINATION)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let focused = core
-        .active_view_set()
-        .and_then(|set| set.tiles.get(&set.focused_tile))
-        .map(|tile| tile.view.view_ref.as_str());
-    let items = core
-        .surface_navigation()
-        .into_iter()
-        .map(|entry| {
-            let selected = destination.as_deref() == Some(entry.id.as_str())
-                || (destination.is_none() && focused == Some(entry.view.as_str()));
-            RyeOsNavigationItemVm {
-                id: entry.id,
-                label: entry.label,
-                selected,
-                intent: RyeOsUiIntent::OpenView {
-                    view: ViewSpec::bound(entry.view),
-                },
-            }
-        })
-        .collect();
-    RyeOsNavigationVm { items }
 }
 
 fn transport_vm(core: &RyeOsCore) -> RyeOsTransportVm {
@@ -2594,7 +2567,17 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                     .map(|tile| tile.instance_key.clone())
                     .expect("validated presentation layout names a mounted tile"),
                 tile_id: tile_id_text(*tile_id),
-                focused: *tile_id == view_set.focused_tile,
+                current: *tile_id == view_set.focused_tile,
+                focused: match core.focus_target() {
+                    Some(super::model::RyeOsFocusTarget::ViewSetTile { tile_id: target }) => {
+                        target == tile_id.0.to_string()
+                    }
+                    Some(super::model::RyeOsFocusTarget::MountedView { instance_key }) => view_set
+                        .tiles
+                        .get(tile_id)
+                        .is_some_and(|tile| tile.instance_key == instance_key),
+                    _ => false,
+                },
                 maximized: view_set.maximized_tile == Some(*tile_id),
                 title,
                 attachment_label: view_set
@@ -2715,7 +2698,7 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
             .presentation
             .iter()
             .flat_map(|p| p.ordered_surfaces())
-            .map(|surface| navigation::RyeOsSurfaceChoiceVm {
+            .map(|surface| session::RyeOsSurfaceChoiceVm {
                 surface_instance_id: surface.id().clone(),
                 ordinal: surface.ordinal(),
                 title: surface.title().to_owned(),

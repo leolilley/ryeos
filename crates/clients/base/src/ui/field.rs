@@ -1139,7 +1139,7 @@ fn project_field_impl(
         }
     }
 
-    let mut groups = projection
+    let groups = projection
         .groups
         .iter()
         .map(|group| RyeOsFieldGroupVm {
@@ -1151,7 +1151,6 @@ fn project_field_impl(
             aggregate: group.aggregate.clone(),
         })
         .collect::<Vec<_>>();
-    groups.sort_by(|left, right| left.id.cmp(&right.id));
 
     let mut entities = merged_entities
         .values()

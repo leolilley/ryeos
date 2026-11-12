@@ -25,6 +25,8 @@ use crate::theme::{self, Palette};
 use crate::{App, Local};
 
 const GROUP_WIDTH: f32 = 520.0;
+/// An empty group's header box.
+const EMPTY_GROUP_WIDTH: f32 = 200.0;
 const RANK_SPACING: f32 = 210.0;
 const GROUP_RIGHT_GUTTER: f32 = 300.0;
 const GROUP_HEADER_HEIGHT: f32 = 26.0;
@@ -304,11 +306,17 @@ fn layout(field: &RyeOsFieldVm) -> Layout<'_> {
         let entry = deepest.entry(*group).or_insert(0);
         *entry = (*entry).max(*rank);
     }
+    // An empty group shows only its header, so it takes only that width.
+    let occupied: BTreeSet<usize> = buckets.keys().map(|(group, _, _)| *group).collect();
     let mut origins: HashMap<usize, f32> = HashMap::new();
     let mut next_origin = 0.0;
     for (group, rank) in &deepest {
         origins.insert(*group, next_origin);
-        next_origin += GROUP_WIDTH.max(*rank as f32 * RANK_SPACING + GROUP_RIGHT_GUTTER);
+        next_origin += if occupied.contains(group) {
+            GROUP_WIDTH.max(*rank as f32 * RANK_SPACING + GROUP_RIGHT_GUTTER)
+        } else {
+            EMPTY_GROUP_WIDTH + 24.0
+        };
     }
 
     let mut nodes = Vec::new();
@@ -361,7 +369,7 @@ fn layout(field: &RyeOsFieldVm) -> Layout<'_> {
                     .get(&index)
                     .copied()
                     .unwrap_or(index as f32 * GROUP_WIDTH);
-                (20.0 + origin, 20.0, 200.0, GROUP_HEADER_HEIGHT + 12.0)
+                (20.0 + origin, 20.0, EMPTY_GROUP_WIDTH, GROUP_HEADER_HEIGHT + 12.0)
             } else {
                 let min_x = members
                     .iter()
@@ -1111,6 +1119,7 @@ fn entity(instance: &RyeOsViewInstanceKey, node: &Node, changed: bool) -> El {
     let mut node_el = canvas(shape)
         .absolute(node.x - w / 2.0 - pad, node.y - h / 2.0 - pad)
         .size(w + pad * 2.0, h + pad * 2.0)
+        .key(format!("field-entity:{}", entity.id))
         .role("treeitem")
         .label(if entity.accessibility_label.is_empty() {
             entity.label.clone()
@@ -2000,10 +2009,10 @@ mod tests {
         .expect("valid field fixture")
     }
 
-    /// Geometry the browser shell's layout computes for the same fixture, so
-    /// both renderers place every entity identically.
+    /// Every entity's place: groups in authored order, each as wide as its
+    /// deepest rank, an empty group only as wide as its header.
     #[test]
-    fn layout_matches_the_browser_shell() {
+    fn layout_places_groups_in_order_and_empty_groups_narrow() {
         let field = fixture();
         let layout = layout(&field);
         let mut nodes: Vec<(&str, [f32; 4], usize)> = layout
@@ -2026,8 +2035,8 @@ mod tests {
                 ("c", [330.0, 90.0, 136.0, 74.0], 1),
                 ("d", [1060.0, 390.0, 136.0, 52.0], 2),
                 ("e", [1060.0, 476.0, 136.0, 52.0], 2),
-                ("f", [2720.0, 240.0, 136.0, 52.0], 1),
-                ("h", [1880.0, 390.0, 136.0, 52.0], 1),
+                ("f", [2424.0, 240.0, 136.0, 52.0], 1),
+                ("h", [1584.0, 390.0, 136.0, 52.0], 1),
             ]
         );
         let edges: Vec<(&str, Vec<[f32; 2]>)> = layout
@@ -2077,18 +2086,18 @@ mod tests {
                     "r6",
                     vec![
                         [1128.0, 476.0],
-                        [1890.0, 476.0],
-                        [1890.0, 240.0],
-                        [2652.0, 240.0]
+                        [1742.0, 476.0],
+                        [1742.0, 240.0],
+                        [2356.0, 240.0]
                     ]
                 ),
                 (
                     "r8",
                     vec![
-                        [1948.0, 390.0],
-                        [2300.0, 390.0],
-                        [2300.0, 240.0],
-                        [2652.0, 240.0]
+                        [1652.0, 390.0],
+                        [2004.0, 390.0],
+                        [2004.0, 240.0],
+                        [2356.0, 240.0]
                     ]
                 ),
             ]
@@ -2106,7 +2115,7 @@ mod tests {
                 ("empty", [1260.0, 20.0, 200.0, 38.0]),
             ]
         );
-        assert_eq!((layout.width, layout.height), (2956.0, 628.0));
+        assert_eq!((layout.width, layout.height), (2660.0, 628.0));
     }
 
     #[test]
