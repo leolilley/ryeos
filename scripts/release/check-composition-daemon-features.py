@@ -89,7 +89,7 @@ def daemon_features(root, stage_map, source):
     match = re.search(r"ryeos_bundle_set_cargo_features (\S+) ", body)
     if not match:
         return set()
-    if "--no-default-features -p ryeosd" not in body:
+    if "ryeos_build_daemon_pair " not in body:
         return None
     return selected(root, match.group(1))
 

@@ -121,23 +121,26 @@ workload_cook="$(cook_with '--package ryeos-workload-client')"
 grep -q -- 'cargo build --release --locked -p ryeos-core-tools' <<<"$real_builds" || fail "core tools build changed; update the cooks"
 [[ -n "$(cook_with '--package ryeos-core-tools$' | grep -v -- '--target')" ]] || fail "no cook for the core tools build"
 
-# Every node and CLI pair: one cook per distinct (no-default-features, features).
+# Every node and CLI pair: ryeos_build_daemon_pair builds each package in its own
+# invocation with its own unqualified features, so each needs a cook with exactly that.
 pair_cooks="$(cook_with '--no-default-features')"
-for set in core core-scheduling core-workflow core-knowledge standard f5r-controller; do
-    features=""
+for set in core core-scheduling core-workflow core-knowledge standard f5r-controller central-host local-inference hosted-workflow; do
     for package in ryeosd ryeos-cli; do
-        selected="$(ryeos_bundle_set_cargo_features "$set" "$package")"
-        [[ -z "$selected" ]] || features="${features:+$features,}$selected"
+        features="$(ryeos_bundle_set_cargo_features "$set" "$package" | tr ',' '\n' | sed -n "s|^$package/||p" | paste -sd, -)"
+        cook="$(sed 's/"\$package"/'"$package"'/' <<<"$pair_cooks")"
+        found=0
+        while IFS= read -r line; do
+            [[ "$(packages_of "$line")" == "$package " ]] || continue
+            [[ "$(features_of "$line")" == "$features" ]] && found=1
+        done <<<"$cook"
+        (( found == 1 )) || fail "no $package cook with the $set features: '$features'"
     done
-    found=0
-    while IFS= read -r cook; do
-        [[ "$(packages_of "$cook")" == "ryeos-cli ryeosd " ]] || continue
-        [[ "$(features_of "$cook")" == "$features" ]] && found=1
-    done <<<"$pair_cooks"
-    (( found == 1 )) || fail "no pair cook with the $set features: '$features'"
 done
-no_default="$(grep -c -- '--no-default-features -p ryeosd -p ryeos-cli' <<<"$real_builds")"
-(( no_default >= 6 )) || fail "expected the node and CLI pair builds in the real stages"
+helper="$(cat "$root/scripts/pkg/composition-features.sh")"
+grep -Fq -- 'cargo build --release --locked --no-default-features -p "$package" "${args[@]}"' <<<"$helper" \
+    || fail "ryeos_build_daemon_pair must build one package per invocation without default features"
+grep -q -- '-p ryeosd -p ryeos-cli' <<<"$real_builds" && fail "a real stage builds ryeosd and ryeos-cli in one invocation"
+(( "$(grep -c 'ryeos_build_daemon_pair [a-z0-9-]*-pair' <<<"$real_stages")" >= 9 )) || fail "expected the node and CLI pair builds in the real stages"
 
 # 4. The bake file and workflow carry the registry cache for every target.
 targets="$(grep -o '^target "[a-z0-9-]*" {' "$bake" | grep -v '_composition' | cut -d'"' -f2)"
