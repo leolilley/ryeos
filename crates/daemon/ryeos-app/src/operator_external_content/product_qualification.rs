@@ -4054,7 +4054,13 @@ fn prepare_remote_consumer_verifier_from_admitted_sources_in_generation(
             let current = resolve_bundle_producer_recipe_in_generation(generation, recipe_ref)?;
             require_direct_consumer_target(policy_source, &current, subject_manifest_hash)?;
             let producer_source = current.source_identity()?;
-            if producer_sources.get(scenario_id) != Some(&producer_source) {
+            // Signed content only: a retained purpose re-verifies after a restart, and the
+            // launch entry points check the admitted generation separately.
+            if producer_sources
+                .get(scenario_id)
+                .map(|source| source.content_identity())
+                != Some(producer_source.content_identity())
+            {
                 bail!("remote verifier producer source changed before capture");
             }
             Some(producer_source)
