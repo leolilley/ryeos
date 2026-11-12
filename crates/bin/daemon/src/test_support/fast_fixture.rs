@@ -1020,6 +1020,11 @@ fn materialize_seed_node_policy_generation(
         fs::write(target_dir.join(format!("{name}.yaml")), signed)
             .with_context(|| format!("write `{name}` test node policy"))?;
     }
+    // Init records which sections an operator chose; a fresh node has none.
+    let record =
+        lillux::signature::sign_content_at("sections: []\n", node, "#", None, FAST_FIXTURE_TIME);
+    fs::write(target_dir.join("_operator-sections.yaml"), record)
+        .context("write the test node policy operator record")?;
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-04T06:06:06Z:b5adb0555d39a6fb07f1b91558e4357ef7bd71a8aeb9cd16b6848cfc19846eb8:jzFL1vPoscBSx/LrunngSlO+CTmoJf0eLx7+e3GY66DXN5Y7g0TaDLm75SzpmEx+z11hCjwOZWk0FORLjcfMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T07:09:43Z:23ae2ff7abf536732dc45037e52da88ec623890675eba42845994a722fc20cd6:7r8vN1BaY89pnootpyEeqgRZjg2nnMUnhIWLcYU+4RqkxJfH9sJtMAyEe/k+0FUrCac+qnvZjsR5pVbooShdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -201,7 +201,7 @@ daemon to be stopped:
 ryeos node reset authorization --confirm
 ryeos node reset replay-indexes --confirm
 ryeos node reset external-content-bindings [--dry-run | --confirm]
-ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]...
+ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]... [--keep-section <section>]... [--reset-section <section>]...
 ```
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
@@ -218,8 +218,18 @@ inside the same locked init. The preceding completion record is durably
 invalidated before the first mutation; a new signed fence is written only
 after the operation completes, and startup refuses an absent or contradictory
 fence. The cut preserves node identity, vault credentials, projects, and
-execution history while deliberately retiring predecessor policy
-customization.
+execution history.
+
+Sections an operator applied with `ryeos node policy-apply` carry forward.
+Every generation records them in a signed `_operator-sections.yaml` member,
+and the cut compiles each carried body under the current section schema. If
+any no longer validates, the cut refuses before changing anything and names
+each one; `--reset-section <section>` takes the profile's body instead. Every
+other section comes from the profile. A generation published before the record
+existed cannot say which sections were chosen: the cut lists every section
+that differs from the profile and needs each named with `--keep-section` or
+`--reset-section`. Nothing is reset silently. The pinned request digest
+covers the carried result, so a rerun after a crash reproduces it exactly.
 
 ### `ryeos node external-execution compose`
 

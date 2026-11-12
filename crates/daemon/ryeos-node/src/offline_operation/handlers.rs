@@ -66,6 +66,14 @@ pub struct PolicyReplaceArguments {
     /// Publisher trust documents to pin, as paths inside the seed tree. The
     /// seed digest covers them.
     pub trust_documents: Vec<String>,
+    /// The operator's keep/reset choices for sections the replacement would
+    /// otherwise refuse to decide. Absent when there are none, so a request
+    /// without choices is byte-identical to one made before they existed.
+    #[serde(
+        default,
+        skip_serializing_if = "ryeos_node_runtime::node_policy::generation::PolicyCarryChoices::is_empty"
+    )]
+    pub policy_carry: ryeos_node_runtime::node_policy::generation::PolicyCarryChoices,
 }
 
 impl PolicyReplaceArguments {
@@ -392,6 +400,7 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
             host_class: Some(arguments.host_class.clone()),
             substrate_identity: None,
             replace_node_policy_generation: true,
+            policy_carry: arguments.policy_carry.clone(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: false,
@@ -1033,6 +1042,7 @@ mod tests {
                 .unwrap(),
             ),
             replace_node_policy_generation: false,
+            policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
             skip_preflight: true,

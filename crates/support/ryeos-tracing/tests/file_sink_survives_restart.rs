@@ -30,6 +30,7 @@ fn init_node_once(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::Pa
                 .unwrap(),
         ),
         replace_node_policy_generation: false,
+        policy_carry: Default::default(),
         replace_substrate_identity: false,
         confirm_substrate_identity_replacement: false,
         skip_preflight: true,

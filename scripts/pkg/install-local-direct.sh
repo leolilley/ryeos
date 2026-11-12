@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-11T02:56:41Z:8e4b617dcb804e06ecbcb3d4a3bf4ef68d6446882dd4be0e8708678921dc70bd:pQ+X6/yTLV+3ixQIBHRWKVUbin6bXTSyjctPruzYiShGWNWpo7kXfdNRhO/8PG6lAsXIO5E2nw5rjH82ZXB8DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T07:09:43Z:6373442756bfb9e436f7e323fa69d6191eb27aac178171f773f13e1677095380:2N5m3S9ie1lSlLeNdEfXWSDBxn+PxxO6UPUn3CjVngAHAeyfzx/NeiKRrCxfgWxSMx10G9kRH8u9cg2wIZQTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -50,6 +50,14 @@ Options:
                         Explicitly replace an obsolete complete node-policy
                         generation from this bundle set's signed init profile.
                         Requires init and preserves all non-policy node state.
+                        Sections an operator applied carry forward.
+  --keep-section NAME   With --reset-node-policy-generation: keep this
+                        section's installed policy (repeatable). Needed once
+                        for a node whose generation predates the operator
+                        record; the replacement names any section it needs.
+  --reset-section NAME  With --reset-node-policy-generation: take this section
+                        from the profile even if an operator applied it
+                        (repeatable).
   --app-root DIR        Select the exact existing node to initialize and manage.
                         This explicit value survives the root-owned package
                         transaction; no privileged re-exec inherits it from the
@@ -551,6 +559,7 @@ restart_daemon=1
 cleanup_shadows=1
 trust_source_publishers=0
 reset_node_policy_generation=0
+policy_carry_args=()
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="RyeOS Development"
 bundle_set="full"
@@ -588,6 +597,11 @@ while [[ $# -gt 0 ]]; do
         --reset-node-policy-generation)
             reset_node_policy_generation=1
             shift
+            ;;
+        --keep-section|--reset-section)
+            [[ $# -ge 2 && "$2" =~ ^[a-z][a-z0-9_]*$ ]] || die "$1 requires a section name"
+            policy_carry_args+=("$1" "$2")
+            shift 2
             ;;
         --app-root)
             [[ $# -ge 2 && -n "$2" ]] || die "--app-root requires a path"
@@ -675,6 +689,9 @@ if [[ $run_populate -eq 0 && ( -n "$crates" || $populate_all -eq 1 ) ]]; then
 fi
 if [[ $reset_node_policy_generation -eq 1 && $run_init -eq 0 ]]; then
     die "--reset-node-policy-generation cannot be combined with --no-init"
+fi
+if [[ ${#policy_carry_args[@]} -gt 0 && $reset_node_policy_generation -eq 0 ]]; then
+    die "--keep-section and --reset-section require --reset-node-policy-generation"
 fi
 if [[ -n "$node_profile_override" && $run_init -eq 0 ]]; then
     die "--node-profile cannot be combined with --no-init"
@@ -1107,6 +1124,7 @@ if [[ $run_init -eq 1 ]]; then
         init_args+=(--app-root "$init_app_root")
     fi
     init_args+=("${INSTALL_INIT_PROFILE_ARGS[@]}")
+    init_args+=("${policy_carry_args[@]}")
     substrate_identity_path="$state_root/.ai/node/substrate-identity.json"
     if [[ ! -e "$substrate_identity_path" && ! -L "$substrate_identity_path" ]]; then
         native_substrate_sha256="$(native_substrate_digest)" || \
@@ -1133,10 +1151,14 @@ if [[ $run_init -eq 1 ]]; then
     done
     if [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 1 ]]; then
         selected_node_init_profile="$share_dir/.ai/node/init/profiles/$node_init_profile.yaml"
+        # Every generation this build publishes carries its signed operator
+        # record beside the profile's sections.
         expected_node_policies="$(
-            ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
-                | sed 's/$/.yaml/' \
-                | sort
+            {
+                ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
+                    | sed 's/$/.yaml/'
+                printf '%s\n' _operator-sections.yaml
+            } | sort
         )"
         node_policy_dir="$state_root/.ai/node/policies"
         [[ -n "$expected_node_policies" && -d "$node_policy_dir" && ! -L "$node_policy_dir" ]] || \
