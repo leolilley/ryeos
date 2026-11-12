@@ -3189,10 +3189,12 @@ pub struct NativeLaunchResult {
     pub result_project_snapshot_hash: Option<String>,
 }
 
-/// Spawn gate for a resolved launch: the root and every ancestor must come
-/// from a space and carry a trust class their kind admits under current node
-/// policy, and the folded class may never be unsigned. Refusals stay typed
-/// launch-policy errors all the way to the HTTP boundary.
+/// Spawn gate for a resolved launch: the root, every ancestor and every
+/// referenced item must come from a space and carry a trust class its own
+/// kind admits under current node policy, and the folded class may never be
+/// unsigned. A referenced item reaches the launch's context, so it is held to
+/// the same lists as a launch root of its kind (operator admission included).
+/// Refusals stay typed launch-policy errors all the way to the HTTP boundary.
 pub(crate) fn enforce_effective_trust(
     kinds: &ryeos_engine::kind_registry::KindRegistry,
     node_policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
@@ -3213,22 +3215,29 @@ pub(crate) fn enforce_effective_trust(
         },
         None,
     )?;
-    for ancestor in &resolution.ancestors {
-        let ancestor_kind =
-            ryeos_engine::canonical_ref::CanonicalRef::parse(&ancestor.resolved_ref)
-                .map_err(|error| {
-                    DispatchError::InvalidRef(ancestor.resolved_ref.clone(), error.to_string())
-                })?
-                .kind;
+    let ancestors = resolution
+        .ancestors
+        .iter()
+        .map(|item| (item, LaunchTrustPosition::Ancestor(&item.resolved_ref)));
+    let references = resolution
+        .referenced_items
+        .iter()
+        .map(|item| (item, LaunchTrustPosition::Reference(&item.resolved_ref)));
+    for (item, position) in ancestors.chain(references) {
+        let item_kind = ryeos_engine::canonical_ref::CanonicalRef::parse(&item.resolved_ref)
+            .map_err(|error| {
+                DispatchError::InvalidRef(item.resolved_ref.clone(), error.to_string())
+            })?
+            .kind;
         enforce_launch_trust(
             kinds,
             node_policy,
             LaunchTrustSubject {
-                item_ref: &ancestor.resolved_ref,
-                kind: &ancestor_kind,
-                space: ancestor.source_space,
-                class: ancestor.trust_class,
-                position: LaunchTrustPosition::Ancestor(&ancestor.resolved_ref),
+                item_ref: &item.resolved_ref,
+                kind: &item_kind,
+                space: item.source_space,
+                class: item.trust_class,
+                position,
             },
             None,
         )?;
