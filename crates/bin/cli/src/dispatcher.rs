@@ -333,7 +333,15 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         )))?;
     }
     let rendered_lines = presenter.loading(&command_label, route_path)?;
-    let result = match post_to_daemon(&app_root, route_path, &body).await {
+    let busy_wait = |wait: std::time::Duration| {
+        console
+            .info(&crate::tty::Diagnostic::info(format!(
+                "process creation is busy on the node; retrying in {} ms",
+                wait.as_millis()
+            )))
+            .map_err(CliError::Io)
+    };
+    let result = match post_to_daemon(&app_root, route_path, &body, busy_wait).await {
         Ok(result) => result,
         Err(error) if launch_id.is_some() && accepted_launch_delivery_is_uncertain(&error) => {
             let launch_id = launch_id.expect("guarded accepted launch id");
@@ -1107,11 +1115,60 @@ fn strip_project_control_flags(tail: &[String]) -> Vec<String> {
     ryeos_app::command_invocation::strip_project_control_flags(tail)
 }
 
+/// How long the CLI keeps reissuing a request the daemon refused as
+/// `process_creation_busy`. Matches the control-plane request bound.
+const PROCESS_CREATION_BUSY_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bounds on a daemon-supplied retry hint.
+const PROCESS_CREATION_BUSY_MIN_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+const PROCESS_CREATION_BUSY_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The wait before reissuing a request the daemon refused with the typed
+/// `process_creation_busy` 503. The daemon raises that refusal only before it
+/// admits the request, so nothing ran and reissuing the same request is safe.
+/// Returns `None` for any other failure, a refusal not marked retryable, or a
+/// wait that does not fit in what is left of the retry budget.
+fn process_creation_busy_wait(
+    error: &crate::error::CliDispatchError,
+    remaining: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let crate::error::CliDispatchError::Transport(crate::error::CliTransportError::HttpError {
+        status: 503,
+        body,
+    }) = error
+    else {
+        return None;
+    };
+    let body: Value = serde_json::from_str(body).ok()?;
+    if body.get("code").and_then(Value::as_str) != Some("process_creation_busy")
+        || body.get("retryable").and_then(Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    let wait = body
+        .get("retry_after_ms")
+        .and_then(Value::as_u64)
+        .map_or(
+            PROCESS_CREATION_BUSY_MIN_WAIT,
+            std::time::Duration::from_millis,
+        )
+        .clamp(
+            PROCESS_CREATION_BUSY_MIN_WAIT,
+            PROCESS_CREATION_BUSY_MAX_WAIT,
+        );
+    (wait < remaining).then_some(wait)
+}
+
 /// POST a JSON body to a daemon execute route and return the response.
+///
+/// A typed `process_creation_busy` refusal is reissued, freshly signed, within
+/// [`PROCESS_CREATION_BUSY_RETRY_BUDGET`]; `on_busy_wait` reports each wait.
+/// Every other failure is returned at once.
 async fn post_to_daemon(
     app_root: &std::path::Path,
     route_path: &str,
     body: &Value,
+    mut on_busy_wait: impl FnMut(std::time::Duration) -> Result<(), CliError>,
 ) -> Result<Value, CliError> {
     crate::daemon_preflight::lifecycle_preflight(app_root).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
@@ -1122,11 +1179,23 @@ async fn post_to_daemon(
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
-
     let url = format!("{}{}", discovered.base_url, route_path);
-    let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
-    Ok(payload)
+    let retry_until = std::time::Instant::now() + PROCESS_CREATION_BUSY_RETRY_BUDGET;
+    loop {
+        // Each attempt carries its own nonce and timestamp.
+        let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
+        match crate::transport::http::post_json(&url, &headers, &body_bytes).await {
+            Ok(payload) => return Ok(payload),
+            Err(error) => {
+                let remaining = retry_until.saturating_duration_since(std::time::Instant::now());
+                let Some(wait) = process_creation_busy_wait(&error, remaining) else {
+                    return Err(error.into());
+                };
+                on_busy_wait(wait)?;
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
 }
 
 /// POST to the gateway `/execute/stream`, render the live execution log to
@@ -1351,6 +1420,86 @@ mod tests {
     use super::*;
     use clap::Parser as _;
     use ryeos_runtime::CommandArgumentKind;
+
+    fn http_refusal(status: u16, body: Value) -> crate::error::CliDispatchError {
+        crate::error::CliDispatchError::Transport(crate::error::CliTransportError::HttpError {
+            status,
+            body: body.to_string(),
+        })
+    }
+
+    #[test]
+    fn busy_refusal_is_retried_within_budget() {
+        let refusal = http_refusal(
+            503,
+            serde_json::json!({
+                "code": "process_creation_busy",
+                "error": "process creation is busy; retry after 250 ms",
+                "retryable": true,
+                "retry_after_ms": 250,
+            }),
+        );
+        assert_eq!(
+            process_creation_busy_wait(&refusal, std::time::Duration::from_secs(30)),
+            Some(std::time::Duration::from_millis(250))
+        );
+        // The wait must fit in what is left of the budget.
+        assert_eq!(
+            process_creation_busy_wait(&refusal, std::time::Duration::from_millis(100)),
+            None
+        );
+        // A hint outside the bounds is clamped.
+        let unbounded = http_refusal(
+            503,
+            serde_json::json!({
+                "code": "process_creation_busy",
+                "retryable": true,
+                "retry_after_ms": 3_600_000,
+            }),
+        );
+        assert_eq!(
+            process_creation_busy_wait(&unbounded, std::time::Duration::from_secs(30)),
+            Some(PROCESS_CREATION_BUSY_MAX_WAIT)
+        );
+    }
+
+    #[test]
+    fn other_refusals_are_not_retried() {
+        let budget = std::time::Duration::from_secs(30);
+        for refusal in [
+            // Another bounded-resource refusal.
+            http_refusal(
+                503,
+                serde_json::json!({"code": "service_unavailable", "retryable": true}),
+            ),
+            // Not marked retryable by the daemon.
+            http_refusal(
+                503,
+                serde_json::json!({"code": "process_creation_busy", "retryable": false}),
+            ),
+            // The code under another status is not the typed refusal.
+            http_refusal(
+                500,
+                serde_json::json!({"code": "process_creation_busy", "retryable": true}),
+            ),
+            crate::error::CliDispatchError::Transport(crate::error::CliTransportError::HttpError {
+                status: 503,
+                body: "not json".to_string(),
+            }),
+            crate::error::CliDispatchError::Transport(
+                crate::error::CliTransportError::Unreachable {
+                    bind: "127.0.0.1:1".to_string(),
+                    detail: "refused".to_string(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                process_creation_busy_wait(&refusal, budget),
+                None,
+                "{refusal}"
+            );
+        }
+    }
 
     #[test]
     fn no_project_is_a_global_selector_before_the_command() {

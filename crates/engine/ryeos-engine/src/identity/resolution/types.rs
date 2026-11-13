@@ -149,6 +149,9 @@ pub enum ResolutionFailureClass {
     InvalidDefinition,
     /// A resolver dependency was unavailable while resolving the item.
     DependencyUnavailable,
+    /// A handler process could not be created because the fork window stayed
+    /// closed past its setup deadline. Transient: no handler ran.
+    ProcessCreationBusy,
     /// An engine/handler invariant was violated.
     InternalInvariant,
 }

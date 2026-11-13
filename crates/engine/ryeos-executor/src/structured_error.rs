@@ -55,6 +55,10 @@ pub struct StructuredErrorPayload {
     pub installed_bundles: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Transient-refusal hint: how long to wait before reissuing the same
+    /// request (`process_creation_busy`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl StructuredErrorPayload {
@@ -76,6 +80,7 @@ impl StructuredErrorPayload {
             item_ref: None,
             installed_bundles: None,
             hint: None,
+            retry_after_ms: None,
         }
     }
 
@@ -217,6 +222,10 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 binding: binding.clone(),
                 ..Self::generic(code, public_error.to_string())
             },
+            DispatchError::ProcessCreationBusy { .. } => Self {
+                retry_after_ms: Some(crate::dispatch_error::PROCESS_CREATION_BUSY_RETRY_AFTER_MS),
+                ..Self::generic(public_error.code(), public_error.to_string())
+            },
             _ => Self::generic(public_error.code(), public_error.to_string()),
         };
         payload.retryable = public_error.retryable();
@@ -318,6 +327,28 @@ mod tests {
         let p = StructuredErrorPayload::from(&de);
         assert_eq!(p.code, "invalid_ref");
         assert!(p.details.is_none());
+    }
+
+    #[test]
+    fn process_creation_busy_is_503_with_code_and_retry_after() {
+        let error = crate::dispatch_error::DispatchError::ProcessCreationBusy {
+            detail: "retained scopes: ThreadId(7): crates/x.rs:1:1 (1 scope)".to_owned(),
+        };
+        assert_eq!(
+            error.http_status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let value = dispatch_error_value(&error);
+        assert_eq!(value["code"], "process_creation_busy");
+        assert_eq!(value["retryable"], true);
+        assert_eq!(
+            value["retry_after_ms"],
+            crate::dispatch_error::PROCESS_CREATION_BUSY_RETRY_AFTER_MS
+        );
+        // The holder sites go to the daemon log, never to the caller.
+        let message = value["error"].as_str().unwrap();
+        assert!(!message.contains("retained scopes"), "{message}");
+        assert!(!message.contains("crates/x.rs"), "{message}");
     }
 
     #[test]

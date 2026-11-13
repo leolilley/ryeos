@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:45:28Z:b33a6bb389ded9ee2565ce2e6a19e57ca17fca6842c7a16837349d11dfdc941c:zQoTKktGu/kwWG2+7aaiNSSJzqfmylPE1U2UqFdm8LK3l9ybuwkEM6NOsqd+rma01J4a1T887FchpG+o3MJqDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:49:49Z:04532a02c96939356cb121d1215541b948bbda2354bd1d215227aa587c82aee6:GxTsHaBSB+2WeX8dfoE21rZoGn7ZvM3B63y+Yox3NTgmY3voxvMkbCoV1GLEbTPrSapPLA/zB7PGv5NiZhW0Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -36,6 +36,27 @@ Execute an item or service. Authenticated.
 - **Request:** JSON execution envelope (`item_ref`, `parameters`,
   `project_path`, and optional project source fields)
 - **Response:** execution result envelope
+
+#### Transient refusal: `process_creation_busy`
+
+When the daemon cannot create a handler process it needs to resolve the
+requested item, because fork-sensitive descriptor authority stayed held past
+the five-second setup deadline, it refuses with HTTP 503 and:
+
+```json
+{
+  "code": "process_creation_busy",
+  "error": "process creation is busy; retry after 250 ms",
+  "retryable": true,
+  "retry_after_ms": 250
+}
+```
+
+The refusal is raised only while resolving the root item, before the request
+is admitted, so nothing ran and the same request may be reissued after
+`retry_after_ms`. The body names no holder; the daemon log records the held
+lease sites. A stranded fork window or a missing handler binary is not this
+refusal and is not retryable.
 
 ### `POST /execute/stream`
 

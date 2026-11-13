@@ -329,6 +329,7 @@ mod tests {
             output_limit_exceeded: None,
             stdout_truncated: false,
             stderr_truncated: false,
+            process_creation_busy: None,
         }
     }
 
@@ -409,6 +410,7 @@ mod tests {
                 output_limit_exceeded: None,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                process_creation_busy: None,
             };
             let error = lifecycle_adapter_output(LifecycleAdapterInvocation::Operate, result)
                 .err()

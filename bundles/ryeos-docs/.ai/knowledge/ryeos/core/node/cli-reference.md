@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:49:46Z:076903e578b1b66968e77c70c20d927c2b27c42cc69a6e50a9210be7e12f8aab:wUwtbs454ES2qoc4EEofn+c85+T3B4UUM6VtECbeMiyB0tQuaIhPiyZI7L2wUhwZiGy4YVm/6kVihkl0bZcTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:49:49Z:d221443cd50411102b65d0b849a2918ebb58c8d3a900f32aa8c019ab0b18e35b:hF7aL6j9fPz3T7UkPtAkl/Vp9DlbAEd6Boomk2gALBjnsXr5TvpYHOY7QEH7IvFOaybhUs2P6uqqAjHbup+vBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -382,6 +382,13 @@ physical vault key.
 - `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
 - `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
 - `ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` — verify one or more items' signatures, trust, and path anchoring.
+
+When the daemon refuses a buffered request with the typed
+`process_creation_busy` 503 (see [HTTP API](http-api.md)), the CLI prints
+the wait and reissues the same request, freshly signed, after the daemon's
+`retry_after_ms`, for up to 30 seconds. The daemon raises that refusal only
+before it admits the request, so the retry repeats nothing. Every other
+failure, and a streamed run, is reported at once.
 
 ## Bundle Management
 
