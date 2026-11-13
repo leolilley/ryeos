@@ -840,6 +840,9 @@ async fn validate_only_preview_sees_vault_secret() {
         mock.captured_headers().await.is_empty(),
         "validate-only must not reach the provider"
     );
+    drop(project);
+    drop(mock);
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn operator_vault_is_refused_without_capability_and_still_reaches_the_operator() {
