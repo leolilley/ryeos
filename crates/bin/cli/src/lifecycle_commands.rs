@@ -2403,9 +2403,15 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     let mut daemon_running = false;
     let mut daemon_stale_pid: Option<u32> = None;
     let mut daemon_stale = false;
+    let mut live_service_window: Option<ryeos_node::ServiceWindow> = None;
     match controller.status().await {
-        Ok(LifecycleStatus::Running { metadata, .. }) => {
+        Ok(LifecycleStatus::Running {
+            metadata,
+            service_window,
+            ..
+        }) => {
             daemon_running = true;
+            live_service_window = service_window;
             let installed_revision = installed_ryeosd_revision();
             let skew =
                 is_revision_skew(metadata.revision.as_deref(), installed_revision.as_deref())
@@ -2595,6 +2601,10 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // not recovery: a torn or foreign record is reported, never repaired here.
     if initialized {
         checks.push(native_capacity_check(&config.app_root));
+        checks.push(service_window_check(
+            daemon_running,
+            live_service_window.as_ref(),
+        ));
         checks.push(durable_identity_check(&config.app_root));
     } else {
         checks.push(check(
@@ -3549,6 +3559,35 @@ fn native_capacity_check(
             serde_json::json!({
                 "error": format!("{error:#}"),
                 "fix": "the account or its anchor is unreadable or foreign. If the app root was moved to another filesystem, `ryeos node capacity reanchor --reason \"...\"` anchors it at the new place; otherwise re-provision the node, do not repair records by hand",
+            }),
+        ),
+    }
+}
+
+/// The running incarnation's headroom before its planned rollover, as the
+/// daemon reported it in this doctor's lifecycle status read. A driver
+/// compares it with the declared needs of what it is about to run; the
+/// doctor reports it and judges nothing.
+fn service_window_check(
+    daemon_running: bool,
+    window: Option<&ryeos_node::ServiceWindow>,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{NA, OK};
+    match (daemon_running, window) {
+        (true, Some(window)) => check("service_window", OK, serde_json::json!(window)),
+        (true, None) => check(
+            "service_window",
+            NA,
+            serde_json::json!({
+                "note": "the running node reports no native service window (no capacity issuance, or its service already ended)"
+            }),
+        ),
+        (false, _) => check(
+            "service_window",
+            NA,
+            serde_json::json!({
+                "note": "the node is not running; the window opens when it starts",
+                "fix": "ryeos start",
             }),
         ),
     }
@@ -4615,6 +4654,7 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
             ready_at,
             capacity,
             capacity_error,
+            service_window,
             ..
         } => {
             let mut banner = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "RUNNING");
@@ -4622,6 +4662,11 @@ fn render_lifecycle_status(console: &crate::tty::Console, status: &LifecycleStat
                 capacity.as_ref(),
                 capacity_error.as_deref(),
             ) {
+                banner.rows.push(crate::tty::Row::key_value(key, value));
+            }
+            for (key, value) in
+                ryeos_node::status::service_window_status_rows(service_window.as_ref())
+            {
                 banner.rows.push(crate::tty::Row::key_value(key, value));
             }
             if let Some(pid) = metadata.pid {
@@ -5144,6 +5189,27 @@ mod tests {
         let check = remote_content_testimonies_check(directory.path());
         assert_eq!(check.name, "remote_content_testimonies");
         assert_eq!(check.status, ryeos_core_tools::actions::doctor::NA);
+    }
+
+    #[test]
+    fn doctor_service_window_row_is_na_when_stopped() {
+        use ryeos_core_tools::actions::doctor::{NA, OK};
+        let stopped = service_window_check(false, None);
+        assert_eq!(stopped.name, "service_window");
+        assert_eq!(stopped.status, NA);
+        assert_eq!(stopped.detail["fix"], "ryeos start");
+        let unreported = service_window_check(true, None);
+        assert_eq!(unreported.status, NA);
+        let window = ryeos_node::ServiceWindow {
+            seconds_until_rollover: 4_380,
+            work_steps_until_rollover: 61_000_000,
+            rolls_at: "2026-07-14T01:13:00Z".into(),
+        };
+        let running = service_window_check(true, Some(&window));
+        assert_eq!(running.status, OK);
+        assert_eq!(running.detail["seconds_until_rollover"], 4_380);
+        assert_eq!(running.detail["work_steps_until_rollover"], 61_000_000);
+        assert_eq!(running.detail["rolls_at"], "2026-07-14T01:13:00Z");
     }
 
     #[test]

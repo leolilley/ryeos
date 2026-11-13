@@ -44,7 +44,7 @@ pub use init::{
 pub use init_check::{InitDiagnostics, InitState, require_initialized};
 pub use lifecycle_wire::{
     LIFECYCLE_FRAME_MAX_BYTES, LIFECYCLE_PROTOCOL_VERSION, LifecycleIdentity, LifecycleResponse,
-    LifecycleWireState, StartupPhase, StartupSnapshot,
+    LifecycleWireState, ServiceWindow, StartupPhase, StartupSnapshot,
 };
 pub use metadata::DaemonMetadata;
 pub use model_setup::{

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T13:04:03Z:a4e381c966877bce220a88b805ca3398b9171e1a83fe22ddd61e194ce2366565:L+H4Qjjlp60dtspjewt5+FH9mMUzTYO7DDzAK54ZjGFqlSP3jBHIff79QAFoxHRx4xZrY45g6UUYJlmL87/iAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T13:28:40Z:328915a5bf699f608903791e95910167633cc6213f59cc08f9cd03985723115f:xqqH1rG8G/WTuDoOkTPaB8m74m+H7Hi/N2/hZu3G9M6lAKrLNu8ZA/CSYuX//y7exql9HV9tsoetu6V1O4ejCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -204,6 +204,34 @@ bootstrap configuration cannot be decoded, status may report retained terminal
 startup-failure testimony for the selected app root, but it does not infer a
 TCP or UDS endpoint from defaults or stale process metadata.
 
+A running node on a native-capacity issuance also reports its **service
+window**: what remains of this incarnation before its planned rollover. The
+rollover is an orderly stop that begins at whichever comes first: the signed
+`rollover_drain_margin_ms` ahead of the service edge (the edge itself is
+`maximum_occupancy_ms − cleanup_occupancy_ms` after the window opened, on
+`CLOCK_BOOTTIME`), or the signed `rollover_work_margin_steps` before the
+prepaid service work runs out. The JSON report carries it as
+`Running.service_window`:
+
+| Field | Meaning |
+|---|---|
+| `seconds_until_rollover` | seconds until the drain margin is reached |
+| `work_steps_until_rollover` | native work (SQL VM steps) left before the work margin |
+| `rolls_at` | wall-clock (UTC) estimate of `seconds_until_rollover`; the daemon schedules on `CLOCK_BOOTTIME`, not on this |
+
+The text report shows one row, for example `service window: 73 min / 61000000
+work steps until rollover (about 2026-11-13T02:05:00Z)`. A script that is about
+to run a chain of placements compares these numbers with the sum of the chain's
+declared needs (each placement's `timeout_seconds + cleanup_timeout_seconds`
+and `native_work_steps`), and waits for the rollover when they do not fit. Do
+not derive the window from `daemon.json` `started_at`: that is wall-clock time
+and ignores both margins. The node admits each fresh external placement against
+the same numbers and refuses one that does not fit with
+`native_headroom_insufficient`, carrying `dimension` (`service_seconds` or
+`work_steps`), `declared` and `remaining`. To open a fresh window on purpose,
+`ryeos stop && ryeos start`; that costs one incarnation of the epoch, while an
+orderly rollover renews it.
+
 ### `ryeos node doctor`
 
 ```bash
@@ -221,6 +249,12 @@ from the report the daemon writes after each recovery pass. Its
 `stale_publication` row lists `publish_ready` hosted candidates whose base HEAD
 has moved (session, candidate, base and current HEAD); each settles to
 `base_superseded` on its owner's next publish.
+
+The `service_window` row reports the running node's service window (see
+`ryeos node status`) as read for this doctor run: `ok` with
+`seconds_until_rollover`, `work_steps_until_rollover` and `rolls_at` while the
+node runs, and `n/a` while it is stopped or reports no window. It judges
+nothing; the caller compares it with what it is about to run.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and

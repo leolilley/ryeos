@@ -188,6 +188,22 @@ pub struct LifecycleIdentity {
     pub build_date: Option<String>,
 }
 
+/// What remains of the running incarnation before its planned rollover, read
+/// live at each `lifecycle.status`. The rollover begins at whichever comes
+/// first: the signed drain margin ahead of the service edge, or the signed
+/// work margin. A driver compares these with the declared needs of what it is
+/// about to run. Only the authenticated local lifecycle surface carries it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceWindow {
+    pub seconds_until_rollover: u64,
+    pub work_steps_until_rollover: u64,
+    /// Wall-clock estimate of when the drain margin is reached, if work does
+    /// not run out first. The daemon schedules on `CLOCK_BOOTTIME`, not on
+    /// this value.
+    pub rolls_at: String,
+}
+
 /// Versioned `lifecycle.status` result. `Running` is valid only when `ready`
 /// is true; clients deliberately reject inconsistent responses.
 #[derive(Debug, Clone, PartialEq)]
@@ -203,6 +219,8 @@ pub struct LifecycleResponse {
     /// this value; the authenticated local lifecycle surface returns it.
     pub error: Option<String>,
     pub thread_projection: Option<serde_json::Value>,
+    /// Present only while running on a node with a native service window.
+    pub service_window: Option<ServiceWindow>,
 }
 
 /// Exact flat v1 wire shape. A dedicated DTO avoids Serde's unsupported
@@ -233,6 +251,8 @@ struct LifecycleResponseWire {
     error: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     thread_projection: Option<serde_json::Value>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    service_window: Option<ServiceWindow>,
 }
 
 impl Serialize for LifecycleResponse {
@@ -257,6 +277,7 @@ impl Serialize for LifecycleResponse {
             startup: self.startup.clone(),
             error: self.error.clone(),
             thread_projection: self.thread_projection.clone(),
+            service_window: self.service_window.clone(),
         }
         .serialize(serializer)
     }
@@ -287,6 +308,7 @@ impl<'de> Deserialize<'de> for LifecycleResponse {
             startup: wire.startup,
             error: wire.error,
             thread_projection: wire.thread_projection,
+            service_window: wire.service_window,
         })
     }
 }
@@ -303,6 +325,7 @@ impl LifecycleResponse {
             startup,
             error: None,
             thread_projection: None,
+            service_window: None,
         }
     }
 
@@ -329,6 +352,7 @@ impl LifecycleResponse {
             startup,
             error: None,
             thread_projection: None,
+            service_window: None,
         }
     }
 
@@ -362,6 +386,7 @@ impl LifecycleResponse {
             startup,
             error: Some(error),
             thread_projection: None,
+            service_window: None,
         }
     }
 
@@ -372,6 +397,9 @@ impl LifecycleResponse {
         self.startup.validate()?;
         if self.startup.started_at != self.identity.started_at {
             return Err("lifecycle identity and startup timestamps disagree");
+        }
+        if self.service_window.is_some() && self.status != LifecycleWireState::Running {
+            return Err("only a running node reports a service window");
         }
         match self.status {
             LifecycleWireState::Starting
@@ -472,6 +500,34 @@ mod tests {
     }
 
     #[test]
+    fn only_a_running_node_reports_a_service_window() {
+        let window = ServiceWindow {
+            seconds_until_rollover: 4_380,
+            work_steps_until_rollover: 61_000_000,
+            rolls_at: "2026-07-14T01:13:00Z".into(),
+        };
+        let mut running = LifecycleResponse::running(
+            identity(),
+            "2026-07-14T00:00:01Z",
+            StartupSnapshot::bootstrapping("2026-07-14T00:00:00Z"),
+        );
+        running.service_window = Some(window.clone());
+        assert_eq!(running.validate(), Ok(()));
+        let round_trip: LifecycleResponse =
+            serde_json::from_value(serde_json::to_value(&running).unwrap()).unwrap();
+        assert_eq!(round_trip.service_window, Some(window.clone()));
+        let mut starting = LifecycleResponse::starting(
+            identity(),
+            StartupSnapshot::bootstrapping("2026-07-14T00:00:00Z"),
+        );
+        starting.service_window = Some(window);
+        assert_eq!(
+            starting.validate(),
+            Err("only a running node reports a service window")
+        );
+    }
+
+    #[test]
     fn lifecycle_rejects_impossible_progress() {
         let mut response = LifecycleResponse::starting(
             identity(),
@@ -500,6 +556,7 @@ mod tests {
             "failed_at",
             "error",
             "thread_projection",
+            "service_window",
         ] {
             let mut missing = complete.clone();
             missing.as_object_mut().unwrap().remove(key);

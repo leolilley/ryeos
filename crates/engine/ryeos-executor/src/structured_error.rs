@@ -259,7 +259,13 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 retry_after_ms: Some(crate::dispatch_error::PROCESS_CREATION_BUSY_RETRY_AFTER_MS),
                 ..Self::generic(public_error.code(), public_error.to_string())
             },
-            _ => Self::generic(public_error.code(), public_error.to_string()),
+            _ => match crate::dispatch_error::native_headroom_refusal(public_error) {
+                Some(refusal) => Self {
+                    details: Some(refusal.details()),
+                    ..Self::generic(refusal.code(), refusal.to_string())
+                },
+                None => Self::generic(public_error.code(), public_error.to_string()),
+            },
         };
         payload.retryable = public_error.retryable();
         payload

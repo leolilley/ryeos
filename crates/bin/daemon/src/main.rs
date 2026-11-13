@@ -7208,6 +7208,23 @@ fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
     }
 }
 
+/// What remains of the live native factory before its planned rollover,
+/// read at each admission and each status read: the factory measures it to
+/// the signed rollover drain and work margins (`service_headroom`). Once the
+/// factory refuses service, every read refuses, and so does every fresh
+/// placement.
+fn native_service_headroom_reader(
+    factory: Arc<ryeos_node::native_capacity::LiveNativeFactory>,
+) -> ryeos_app::native_headroom::NativeServiceHeadroomReader {
+    ryeos_app::native_headroom::NativeServiceHeadroomReader::new(move || {
+        let headroom = factory.service_headroom()?;
+        Ok(ryeos_app::native_headroom::NativeServiceHeadroom {
+            work_steps: headroom.work_until_rollover,
+            service_seconds: headroom.service_until_rollover.as_secs(),
+        })
+    })
+}
+
 /// The reader launch admission judges declared node guarantees with. Each
 /// read re-reads the recorded report and verifies its digest and this
 /// node's signature over it, then refuses it unless it still describes the
@@ -7234,29 +7251,6 @@ fn defer_attached(deferred: &mut DeferredRows, item: &DrainAttached) {
 /// nothing this daemon does while it runs makes them stand. Only a failure
 /// to read the report file, the node identity or the host generation is an
 /// unreadable report, which a later attempt may read.
-/// What remains of the live native factory's prepaid work and service
-/// window, read at each admission. The work left is the envelope less the
-/// cleanup reserve less what service SQL has spent; the time left runs to
-/// the deadline by which this incarnation's service SQL must end. Once the
-/// factory refuses service, every read refuses, and so does every fresh
-/// placement.
-fn native_service_headroom_reader(
-    factory: Arc<ryeos_node::native_capacity::LiveNativeFactory>,
-) -> ryeos_app::native_headroom::NativeServiceHeadroomReader {
-    ryeos_app::native_headroom::NativeServiceHeadroomReader::new(move || {
-        let budget = factory.ready_factory()?.budget_snapshot()?;
-        let work_steps = budget
-            .allocator_steps_limit
-            .saturating_sub(budget.cleanup_reserved)
-            .saturating_sub(budget.allocator_steps);
-        let service_seconds = factory.original_sql_deadline()?.remaining().as_secs();
-        Ok(ryeos_app::native_headroom::NativeServiceHeadroom {
-            work_steps,
-            service_seconds,
-        })
-    })
-}
-
 fn node_capability_report_reader(
     app_root: std::path::PathBuf,
     policy_generation: String,

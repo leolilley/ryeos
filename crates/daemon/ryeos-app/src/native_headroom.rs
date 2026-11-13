@@ -9,12 +9,16 @@
 //! spend and the lifetime it may hold, and a fresh placement is admitted
 //! only when what remains of this incarnation covers both. The node reports
 //! what remains; the workload declares what it needs; neither side reasons
-//! about the other. A node composed without a native service (a test state,
+//! about the other. The headroom ends where the planned rollover begins (the
+//! signed drain and work margins), not at the service edge, because the
+//! rollover's graceful stop cuts whatever is still running. A refusal is a
+//! typed `native_headroom_insufficient` naming the dimension that does not
+//! fit. A node composed without a native service (a test state,
 //! a standalone tool) has no envelope to fit, so it admits every placement.
 //! This is a floor at admission, not a reservation: concurrent placements
 //! share the remaining envelope.
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result};
 
 use crate::node_config::sections::external_execution::ExternalPlacementBackendContract;
 use crate::state::AppState;
@@ -23,10 +27,11 @@ use crate::state::AppState;
 /// an admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeServiceHeadroom {
-    /// Prepaid native work still available to service SQL, in VM steps; the
-    /// cleanup reserve is already excluded.
+    /// Prepaid native work still available before the planned work
+    /// rollover, in VM steps; the cleanup reserve and the rollover work
+    /// margin are already excluded.
     pub work_steps: u64,
-    /// Seconds until this incarnation's service SQL must end.
+    /// Seconds until this incarnation's planned rollover begins its drain.
     pub service_seconds: u64,
 }
 
@@ -84,25 +89,107 @@ pub fn admit_fresh_placement_headroom(
     headroom_fits(what, &headroom, &need)
 }
 
+/// Which part of the node's headroom a placement does not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeHeadroomDimension {
+    WorkSteps,
+    ServiceSeconds,
+}
+
+impl NativeHeadroomDimension {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkSteps => "work_steps",
+            Self::ServiceSeconds => "service_seconds",
+        }
+    }
+}
+
+/// A fresh placement refused because what it declares exceeds what remains
+/// of this incarnation before its planned rollover. A driver waits for the
+/// rollover (or stops and starts the node for a fresh window) and retries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeHeadroomInsufficient {
+    /// The refused admission, e.g. "external qualification start".
+    pub what: String,
+    pub dimension: NativeHeadroomDimension,
+    pub declared: u64,
+    pub remaining: u64,
+}
+
+impl NativeHeadroomInsufficient {
+    pub const CODE: &'static str = "native_headroom_insufficient";
+
+    pub fn code(&self) -> &'static str {
+        Self::CODE
+    }
+
+    /// The structured fields a refusal carries on every error surface.
+    pub fn details(&self) -> serde_json::Value {
+        serde_json::json!({
+            "dimension": self.dimension.as_str(),
+            "declared": self.declared,
+            "remaining": self.remaining,
+        })
+    }
+
+    /// The refusal in `error`'s cause chain, if any.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+}
+
+impl std::fmt::Display for NativeHeadroomInsufficient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let what = &self.what;
+        let (declared, remaining) = (self.declared, self.remaining);
+        match self.dimension {
+            NativeHeadroomDimension::WorkSteps => write!(
+                formatter,
+                "{what} refused: this placement declares {declared} steps of native work and \
+                 this node incarnation has {remaining} left before its planned rollover; wait \
+                 for the rollover, or stop and start the node for a fresh window"
+            ),
+            NativeHeadroomDimension::ServiceSeconds => write!(
+                formatter,
+                "{what} refused: this placement may hold {declared}s and this node \
+                 incarnation's planned rollover begins in {remaining}s; wait for the rollover, \
+                 or stop and start the node for a fresh window"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NativeHeadroomInsufficient {}
+
 pub(crate) fn headroom_fits(
     what: &str,
     headroom: &NativeServiceHeadroom,
     need: &NativeWorkNeed,
 ) -> Result<()> {
-    ensure!(
-        need.work_steps <= headroom.work_steps,
-        "{what} refused: this placement declares {} steps of native work and this node \
-         incarnation has {} left; it would end the incarnation before the placement settles",
-        need.work_steps,
-        headroom.work_steps
-    );
-    ensure!(
-        need.lifetime_seconds <= headroom.service_seconds,
-        "{what} refused: this placement may hold {}s and this node incarnation's service ends \
-         in {}s; the placement would outlive the incarnation",
-        need.lifetime_seconds,
-        headroom.service_seconds
-    );
+    let refuse = |dimension, declared, remaining| {
+        anyhow::Error::new(NativeHeadroomInsufficient {
+            what: what.to_owned(),
+            dimension,
+            declared,
+            remaining,
+        })
+    };
+    if need.work_steps > headroom.work_steps {
+        return Err(refuse(
+            NativeHeadroomDimension::WorkSteps,
+            need.work_steps,
+            headroom.work_steps,
+        ));
+    }
+    if need.lifetime_seconds > headroom.service_seconds {
+        return Err(refuse(
+            NativeHeadroomDimension::ServiceSeconds,
+            need.lifetime_seconds,
+            headroom.service_seconds,
+        ));
+    }
     Ok(())
 }
 
@@ -128,15 +215,32 @@ mod tests {
         };
         fits(8_000_000, 900).unwrap();
         fits(10_000_000, 3_600).unwrap();
-        let refusal = fits(10_000_001, 900).unwrap_err().to_string();
-        assert!(
-            refusal.starts_with("placement refused: this placement declares 10000001 steps")
-                && refusal.contains("has 10000000 left"),
-            "{refusal}"
+        let error = fits(10_000_001, 900).unwrap_err();
+        let refusal = NativeHeadroomInsufficient::find(&error).expect("typed refusal");
+        assert_eq!(refusal.code(), "native_headroom_insufficient");
+        assert_eq!(
+            (refusal.dimension, refusal.declared, refusal.remaining),
+            (NativeHeadroomDimension::WorkSteps, 10_000_001, 10_000_000)
         );
-        let refusal = fits(1, 3_601).unwrap_err().to_string();
+        let message = error.to_string();
         assert!(
-            refusal.contains("may hold 3601s") && refusal.contains("ends in 3600s"),
+            message.starts_with("placement refused: this placement declares 10000001 steps")
+                && message.contains("has 10000000 left before its planned rollover"),
+            "{message}"
+        );
+        let error = fits(1, 3_601).unwrap_err().context("start the placement");
+        let refusal = NativeHeadroomInsufficient::find(&error).expect("typed refusal");
+        assert_eq!(
+            (refusal.dimension, refusal.declared, refusal.remaining),
+            (NativeHeadroomDimension::ServiceSeconds, 3_601, 3_600)
+        );
+        assert_eq!(
+            refusal.details(),
+            serde_json::json!({"dimension": "service_seconds", "declared": 3601, "remaining": 3600})
+        );
+        assert!(
+            refusal.to_string().contains("may hold 3601s")
+                && refusal.to_string().contains("begins in 3600s"),
             "{refusal}"
         );
     }

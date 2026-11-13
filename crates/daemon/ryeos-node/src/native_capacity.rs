@@ -50,7 +50,7 @@ pub use account::{CapacityAccountSummary, inspect_capacity_account};
 pub use factory::{
     LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPreparationFailure,
     LiveNativeProducerPublicationFailure, LiveProducerControlCensus, PlannedMarginWake,
-    ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
+    ServiceHeadroom, ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
 };
 #[cfg(target_os = "linux")]
 pub use reservation::OperatorLockCustody;
