@@ -180,6 +180,22 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 remediation: Some(remediation.clone()),
                 ..Self::generic(public_error.code(), public_error.to_string())
             },
+            DispatchError::AmbiguousItemFormats {
+                item_ref,
+                space,
+                candidates,
+            } => Self {
+                item_ref: Some(item_ref.clone()),
+                details: Some(serde_json::json!({
+                    "space": space,
+                    "candidates": candidates,
+                })),
+                remediation: Some(format!(
+                    "keep exactly one of these files and remove the others: {}",
+                    candidates.join(", ")
+                )),
+                ..Self::generic(public_error.code(), public_error.to_string())
+            },
             DispatchError::MissingCap { required } => {
                 Self::missing_cap(public_error.to_string(), required)
             }
@@ -238,6 +254,33 @@ mod tests {
             v.get("details").is_none(),
             "generic must not include details"
         );
+    }
+
+    #[test]
+    fn ambiguous_formats_map_to_typed_conflict_with_candidates_and_cure() {
+        let error = crate::dispatch_error::DispatchError::AmbiguousItemFormats {
+            item_ref: "tool:demo/x".to_string(),
+            space: "project (project)".to_string(),
+            candidates: vec![
+                ".ai/tools/demo/x.py".to_string(),
+                ".ai/tools/demo/x.yaml".to_string(),
+            ],
+        };
+        assert_eq!(error.http_status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.code(), "ambiguous_item_formats");
+        assert!(!error.retryable());
+
+        let v = dispatch_error_value(&error);
+        assert_eq!(v["code"], "ambiguous_item_formats");
+        assert_eq!(v["item_ref"], "tool:demo/x");
+        assert_eq!(v["details"]["space"], "project (project)");
+        assert_eq!(
+            v["details"]["candidates"],
+            serde_json::json!([".ai/tools/demo/x.py", ".ai/tools/demo/x.yaml"])
+        );
+        let remediation = v["remediation"].as_str().expect("remediation present");
+        assert!(remediation.contains(".ai/tools/demo/x.py"));
+        assert!(remediation.contains(".ai/tools/demo/x.yaml"));
     }
 
     #[test]

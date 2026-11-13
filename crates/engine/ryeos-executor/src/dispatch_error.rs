@@ -64,6 +64,18 @@ pub enum DispatchError {
     InvalidRef(String, String),
     #[error("kind '{kind}' is not root-executable: {detail}")]
     NotRootExecutable { kind: String, detail: String },
+    /// One item name exists in more than one format in the folder that would
+    /// win resolution. Resolution never ranks formats silently; the operator
+    /// keeps exactly one of the candidate files.
+    #[error(
+        "item '{item_ref}' exists in more than one format in {space} ({}); keep exactly one of these files",
+        candidates.join(", ")
+    )]
+    AmbiguousItemFormats {
+        item_ref: String,
+        space: String,
+        candidates: Vec<String>,
+    },
     #[error(
         "insufficient capabilities for runtime '{runtime}': required {required:?}, caller_scopes {caller_scopes:?}"
     )]
@@ -462,6 +474,7 @@ impl DispatchError {
             // State-conflict: push-first, checkout race, etc.
             Self::ProjectSource(_)
             | Self::ProjectSourcePushFirst(_)
+            | Self::AmbiguousItemFormats { .. }
             | Self::Conflict(_)
             | Self::LaunchCancelled { .. }
             | Self::RuntimeActionResultUnavailable { .. } => StatusCode::CONFLICT,
@@ -536,6 +549,7 @@ impl DispatchError {
         match self {
             Self::InvalidRef(..) => "invalid_ref",
             Self::NotRootExecutable { .. } => "not_root_executable",
+            Self::AmbiguousItemFormats { .. } => "ambiguous_item_formats",
             Self::InsufficientCaps { .. } => "insufficient_caps",
             Self::AliasCycle { .. } => "alias_cycle",
             Self::AliasChainTooLong { .. } => "alias_chain_too_long",
