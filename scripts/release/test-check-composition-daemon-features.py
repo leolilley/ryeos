@@ -13,7 +13,7 @@ spec.loader.exec_module(check)
 PAIR = """FROM composition-publication AS {pair}
 RUN source scripts/pkg/bundle-sets.sh && for package in ryeosd ryeos-cli; do \\
   selected="$(ryeos_bundle_set_cargo_features {features_set} "$package")"; done && \\
-  cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli
+  ryeos_build_daemon_pair {pair}
 FROM debian AS ryeos-image
 COPY --from={pair} /build/target/x/ryeosd /usr/local/bin/ryeosd
 ENV RYEOS_INIT_NODE_PROFILE=hosted-workflow
