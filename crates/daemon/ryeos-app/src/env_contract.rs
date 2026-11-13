@@ -481,6 +481,10 @@ fn validate_protocol_injection_name(
                 EnvInjectionSource::ThreadAuthToken,
                 "RYEOSD_THREAD_AUTH_TOKEN"
             )
+            | (
+                EnvInjectionSource::ActingPrincipal,
+                "RYEOSD_ACTING_PRINCIPAL"
+            )
     );
     if allowed {
         return Ok(());
@@ -833,6 +837,34 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn acting_principal_protocol_injection_is_admitted() {
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_ACTING_PRINCIPAL",
+                format!("fp:{}", "a".repeat(64)),
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::ActingPrincipal,
+                },
+            )])
+            .unwrap();
+
+        for other in [
+            EnvInjectionSource::ThreadId,
+            EnvInjectionSource::CallbackToken,
+            EnvInjectionSource::ThreadAuthToken,
+        ] {
+            let err = EnvContractBuilder::new()
+                .with_typed_bindings(vec![EnvBinding::new(
+                    "RYEOSD_ACTING_PRINCIPAL",
+                    "fp:forged",
+                    EnvSourceDetail::ProtocolInjection { source: other },
+                )])
+                .unwrap_err();
+            assert!(format!("{err:#}").contains("RYEOSD_ACTING_PRINCIPAL"));
+        }
     }
 
     #[test]
