@@ -5042,6 +5042,35 @@ pub struct RootDispatchPreflight {
     pub workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
 }
 
+/// Refuse, before any thread row exists, a fresh managed root whose caller does
+/// not cover every capability the composed item declares. Root admission makes
+/// the same judgement at launch; a synchronous caller of an accepted launch
+/// must hear it at admission, as the typed `caller_capability_not_covered`
+/// launch-policy refusal, rather than after a thread was minted. Only fresh
+/// root entry points call this: a child launch is bounded by its parent and a
+/// continuation by its sealed capsule.
+pub fn require_preflight_caller_coverage(
+    preflight: &RootDispatchPreflight,
+    ctx: &ExecutionContext,
+) -> Result<(), DispatchError> {
+    if preflight.class != RootDispatchClass::ManagedSubprocess {
+        return Ok(());
+    }
+    let Some(admission) = preflight.root_admission.as_ref() else {
+        return Ok(());
+    };
+    crate::execution::launch::preflight_root_caller_coverage(
+        &admission.resolution_output().composed,
+        crate::execution::launch::principal_caller_scopes(&ctx.plan_ctx.requested_by),
+        &ctx.principal_fingerprint,
+        &preflight
+            .requested_subject
+            .resolved
+            .canonical_ref
+            .to_string(),
+    )
+}
+
 /// Enforce the caller's durable-effect claim against the exact composed
 /// subject captured by [`preflight_root_dispatch`].  This check belongs at
 /// the pre-contact boundary: a replay lookup must never bypass a callee whose

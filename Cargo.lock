@@ -4373,6 +4373,7 @@ dependencies = [
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
+ "ryeos-state",
  "serde",
  "serde_json",
  "serde_yaml",

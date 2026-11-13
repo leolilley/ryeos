@@ -686,6 +686,7 @@ mod tests {
                 body: RawRequestBody::None,
             },
             source_file: std::path::PathBuf::from("/test/ui_launch.yaml"),
+            authority: None,
         }
     }
 

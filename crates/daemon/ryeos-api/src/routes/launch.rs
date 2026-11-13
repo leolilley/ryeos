@@ -470,21 +470,44 @@ fn preflight_dispatch_launch_core(
         request.provenance,
     )
     .map_err(DispatchError::Internal)?;
-    ryeos_executor::dispatch::preflight_root_dispatch_for_provenance_with_remote_consumer(
-        request.item_ref.as_str(),
-        request.item_ref.kind(),
-        request.parameters,
-        request.ref_bindings,
-        request.product_selections,
-        request.usage_subject,
-        request.usage_subject_asserted_by,
-        &project_binding,
-        request.remote_consumer,
-        &exec_ctx,
-        request.provenance,
-        request.state,
-        request.launch_timings,
-    )
+    let preflight =
+        ryeos_executor::dispatch::preflight_root_dispatch_for_provenance_with_remote_consumer(
+            request.item_ref.as_str(),
+            request.item_ref.kind(),
+            request.parameters,
+            request.ref_bindings,
+            request.product_selections,
+            request.usage_subject,
+            request.usage_subject_asserted_by,
+            &project_binding,
+            request.remote_consumer,
+            &exec_ctx,
+            request.provenance,
+            request.state,
+            request.launch_timings,
+        )?;
+    // The caller must cover what the item declares. Refusing here is the
+    // synchronous admission answer, before any thread id is exposed or any
+    // row exists.
+    ryeos_executor::dispatch::require_preflight_caller_coverage(&preflight, &exec_ctx)?;
+    Ok(preflight)
+}
+
+/// The typed route refusal for a launch-policy admission failure (for example
+/// `caller_capability_not_covered`), carrying the dispatch error's own stable
+/// code, HTTP status and body. `None` for every other admission failure, which
+/// each route frames in its own way.
+pub(crate) fn typed_launch_policy_refusal(
+    error: &DispatchError,
+) -> Option<crate::route_error::RouteDispatchError> {
+    matches!(error, DispatchError::LaunchPolicyForbidden { .. }).then(|| {
+        crate::route_error::RouteDispatchError::Structured {
+            code: error.code().to_string(),
+            status: error.http_status().as_u16(),
+            body: ryeos_executor::structured_error::dispatch_error_value(error),
+            thread_id: None,
+        }
+    })
 }
 
 pub(crate) struct OwnedDispatchPreflight {

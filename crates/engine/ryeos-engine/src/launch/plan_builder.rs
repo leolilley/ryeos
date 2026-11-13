@@ -78,6 +78,9 @@ struct RuntimeSourceAuthorityDecls {
     /// Handler-route operator-vault bound; judged by route dispatch, not here.
     #[serde(default, rename = "operator_vault")]
     _operator_vault: bool,
+    /// Route-principal authority bound; judged by route dispatch, not here.
+    #[serde(default, rename = "route_capabilities")]
+    _route_capabilities: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]

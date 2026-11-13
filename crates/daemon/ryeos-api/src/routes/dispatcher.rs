@@ -226,12 +226,22 @@ pub async fn route_dispatcher_from_ingress(
         }
     };
 
-    let principal = match auth_result {
+    let mut principal = match auth_result {
         RouteInvocationResult::Principal(p) => p,
         // invoke_checked guarantees Principal; any other variant is already
         // caught as an Internal error by the enforcement layer.
         _ => unreachable!("invoke_checked enforces Principal for auth"),
     };
+    // A route with no human caller lends its principal the authority its
+    // signed declaration states, once its bundle's signed manifest backs it.
+    if let Err(error) =
+        crate::routes::route_authority::lend_route_authority(&route, &app_state, &mut principal)
+    {
+        if let Some(timings) = launch_timings.as_ref() {
+            timings.emit("route_authority_refused");
+        }
+        return error.into_response();
+    }
     if let Some(timings) = launch_timings.as_ref() {
         timings.record_top_level_since_start("http_request_to_principal");
         timings.mark("principal_resolved");

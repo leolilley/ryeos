@@ -642,7 +642,7 @@ async fn admit_pinned_subject(
     let preflight_exec_ctx = exec_ctx.clone();
     let preflight_state = state.clone();
     let preflight = tokio::task::spawn_blocking(move || {
-        ryeos_executor::dispatch::preflight_root_dispatch(
+        let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
             &preflight_item_ref,
             &preflight_kind,
             &preflight_parameters,
@@ -654,7 +654,12 @@ async fn admit_pinned_subject(
             &preflight_exec_ctx,
             &preflight_state,
             None,
-        )
+        )?;
+        ryeos_executor::dispatch::require_preflight_caller_coverage(
+            &preflight,
+            &preflight_exec_ctx,
+        )?;
+        Ok(preflight)
     })
     .await
     .map_err(|error| {
@@ -662,10 +667,12 @@ async fn admit_pinned_subject(
             "dispatch invoker for '{item_ref}': admission worker failed: {error}"
         ))
     })?
-    .map_err(|error| {
-        RouteDispatchError::Internal(format!(
-            "dispatch invoker for '{item_ref}': admission failed: {error}"
-        ))
+    .map_err(|error: ryeos_executor::dispatch_error::DispatchError| {
+        crate::routes::launch::typed_launch_policy_refusal(&error).unwrap_or_else(|| {
+            RouteDispatchError::Internal(format!(
+                "dispatch invoker for '{item_ref}': admission failed: {error}"
+            ))
+        })
     })?;
 
     let admission = preflight.root_admission.ok_or_else(|| {

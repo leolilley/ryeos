@@ -813,7 +813,7 @@ fn validate_result_config(
     Ok(())
 }
 
-fn bundle_root_from_route_source(source_file: &Path) -> Option<PathBuf> {
+pub(crate) fn bundle_root_from_route_source(source_file: &Path) -> Option<PathBuf> {
     let mut roots = Vec::new();
     for ai_dir in source_file.ancestors().filter(|path| {
         path.file_name().and_then(|name| name.to_str()) == Some(ryeos_engine::AI_DIR)
@@ -1116,6 +1116,7 @@ mod tests {
             execute: None,
             request: RawRequest::default(),
             source_file: PathBuf::from("/tmp/ryeos-email/.ai/node/routes/click.yaml"),
+            authority: None,
         }
     }
 

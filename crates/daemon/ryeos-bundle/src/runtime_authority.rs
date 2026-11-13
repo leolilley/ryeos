@@ -198,12 +198,36 @@ impl RuntimeAuthorityDecls {
             && self.item_authoring.is_empty()
             && self.project_snapshots.is_empty()
             && !self.operator_vault
+            && self.route_capabilities.is_empty()
     }
 
     /// Whether this signed manifest allows its bundle's handler routes to
     /// expose the node operator's vault. A route must still declare it.
     pub fn allows_operator_vault_routes(&self) -> bool {
         self.operator_vault
+    }
+
+    /// Judge a route's signed `authority.capabilities` against this signed
+    /// manifest. Returns every declared capability the manifest does not back;
+    /// an empty result means the declaration is within the bound.
+    ///
+    /// The operator-vault capability is bounded by the dedicated
+    /// `operator_vault` flag, every other capability by the
+    /// `route_capabilities` patterns.
+    pub fn route_capabilities_not_backed(&self, declared: &[String]) -> Vec<String> {
+        declared
+            .iter()
+            .filter(|cap| {
+                if cap.as_str() == ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY {
+                    return !self.operator_vault;
+                }
+                !self
+                    .route_capabilities
+                    .iter()
+                    .any(|pattern| ryeos_state::capability::pattern_covers(pattern, cap))
+            })
+            .cloned()
+            .collect()
     }
 
     /// The full set of caps this manifest grants `bundle_id` as an authority
@@ -258,6 +282,18 @@ impl RuntimeAuthorityDecls {
         }
         for decl in &self.item_authoring {
             validate_item_author_pattern(&decl.kind, &decl.namespace)?;
+        }
+        for pattern in &self.route_capabilities {
+            validate_scope_pattern(pattern)
+                .map_err(|reason| format!("route_capabilities entry {pattern:?}: {reason}"))?;
+            if composed_grant_overlaps_manifest_runtime_authority(pattern) {
+                return Err(format!(
+                    "route_capabilities entry {pattern:?} overlaps manifest runtime authority; \
+                     bundle-event, vault, item-authoring and project-snapshot capabilities are \
+                     minted from their own manifest families, and operator-vault exposure is \
+                     bounded by `operator_vault`"
+                ));
+            }
         }
         Ok(())
     }
@@ -916,6 +952,81 @@ mod tests {
         assert!(!allowed.is_empty());
         // The bound is not itself a minted callback capability.
         assert!(allowed.declared_caps("arc").is_empty());
+    }
+
+    #[test]
+    fn route_capabilities_bound_judges_each_declared_capability() {
+        let operator_vault = ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY;
+        let none = RuntimeAuthorityDecls::default();
+        assert_eq!(
+            none.route_capabilities_not_backed(&["ryeos.execute.tool.echo".to_owned()]),
+            vec!["ryeos.execute.tool.echo".to_owned()],
+            "a manifest with no bound backs nothing"
+        );
+        assert!(none.route_capabilities_not_backed(&[]).is_empty());
+
+        let bounded = RuntimeAuthorityDecls {
+            route_capabilities: vec!["ryeos.execute.tool.*".to_owned()],
+            ..Default::default()
+        };
+        assert!(!bounded.is_empty());
+        assert!(
+            bounded
+                .route_capabilities_not_backed(&[
+                    "ryeos.execute.tool.echo".to_owned(),
+                    "ryeos.execute.tool.*".to_owned(),
+                ])
+                .is_empty()
+        );
+        assert_eq!(
+            bounded.route_capabilities_not_backed(&[
+                "ryeos.execute.service.health/status".to_owned(),
+                "ryeos.execute.tool.echo".to_owned(),
+            ]),
+            vec!["ryeos.execute.service.health/status".to_owned()]
+        );
+        // The vault capability follows its own flag, never the pattern list.
+        assert_eq!(
+            bounded.route_capabilities_not_backed(&[operator_vault.to_owned()]),
+            vec![operator_vault.to_owned()]
+        );
+        let vault = RuntimeAuthorityDecls {
+            operator_vault: true,
+            ..Default::default()
+        };
+        assert!(
+            vault
+                .route_capabilities_not_backed(&[operator_vault.to_owned()])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn route_capabilities_bound_refuses_reserved_and_malformed_patterns() {
+        for pattern in [
+            "*",
+            "ryeos.*",
+            "ryeos.use.vault.operator",
+            "ryeos.append.bundle-events.*",
+            "ryeos.p*.vault.x",
+        ] {
+            let decls = RuntimeAuthorityDecls {
+                route_capabilities: vec![pattern.to_owned()],
+                ..Default::default()
+            };
+            assert!(
+                decls.validate().is_err(),
+                "route_capabilities must refuse {pattern}"
+            );
+        }
+        let ok = RuntimeAuthorityDecls {
+            route_capabilities: vec![
+                "ryeos.execute.tool.*".to_owned(),
+                "ryeos.read.project.live".to_owned(),
+            ],
+            ..Default::default()
+        };
+        assert!(ok.validate().is_ok());
     }
 
     #[test]

@@ -57,6 +57,8 @@ pub enum RouteConfigError {
         mode: String,
         reason: String,
     },
+    #[error("invalid authority declaration for route '{id}': {reason}")]
+    InvalidRouteAuthority { id: String, reason: String },
     #[error("unknown streaming source '{src}' for route '{id}'")]
     UnknownStreamingSource { id: String, src: String },
     #[error("{0}")]

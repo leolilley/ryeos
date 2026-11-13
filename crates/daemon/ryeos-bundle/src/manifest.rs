@@ -83,6 +83,13 @@ pub struct RuntimeAuthorityDecls {
     /// signed manifest allows it. Nothing is granted by this flag alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub operator_vault: bool,
+    /// Upper bound for the authority this bundle's routes lend the principal
+    /// of a launch that has no human caller (an `auth: none` or `auth: hmac`
+    /// route). A route's signed `authority.capabilities` is honored only for
+    /// capabilities some pattern here covers. Nothing is granted by this list
+    /// alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route_capabilities: Vec<String>,
 }
 
 /// One declared smoke execution: an item the bundle's author nominates as a

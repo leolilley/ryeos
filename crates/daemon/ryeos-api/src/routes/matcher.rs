@@ -212,6 +212,7 @@ mod tests {
                 body: RawRequestBody::None,
             },
             source_file: std::path::PathBuf::new(),
+            authority: None,
         };
         Arc::new(CompiledRoute {
             id: id.to_string(),

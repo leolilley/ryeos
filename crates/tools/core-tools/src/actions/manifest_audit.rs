@@ -265,6 +265,14 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
         _ => {}
     }
 
+    // ── route_capabilities (route-principal bound) ──
+    diff_kind_list(
+        &old.runtime_authority.route_capabilities,
+        &new.runtime_authority.route_capabilities,
+        "route_capabilities",
+        &mut findings,
+    );
+
     // ── provides / requires / uses kinds ──
     diff_kind_list(
         &old.provides_kinds,
@@ -641,6 +649,27 @@ mod tests {
         }));
         assert!(diff_authority(&new, &old).iter().any(|finding| {
             finding.risk == Risk::Removed && finding.message == "operator_vault: -[handler routes]"
+        }));
+        assert!(diff_authority(&new, &new).is_empty());
+    }
+
+    #[test]
+    fn route_capabilities_bound_is_audited() {
+        let old = manifest("arc", RuntimeAuthorityDecls::default());
+        let new = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                route_capabilities: vec!["ryeos.execute.tool.*".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(diff_authority(&old, &new).iter().any(|finding| {
+            finding.risk == Risk::Added
+                && finding.message == "route_capabilities: +ryeos.execute.tool.*"
+        }));
+        assert!(diff_authority(&new, &old).iter().any(|finding| {
+            finding.risk == Risk::Removed
+                && finding.message == "route_capabilities: -ryeos.execute.tool.*"
         }));
         assert!(diff_authority(&new, &new).is_empty());
     }
