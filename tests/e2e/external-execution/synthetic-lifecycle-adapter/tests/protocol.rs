@@ -3230,6 +3230,7 @@ fn composed_controller_attachment_on(
             &authoring.root,
             "external-candidate-authoring",
             Some(&qualification_inputs.grant),
+            None,
         )
     };
     let (qualified, placement_qualification) = runtime_host.block_on(qualify_runtime_selection(

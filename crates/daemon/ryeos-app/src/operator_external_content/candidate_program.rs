@@ -143,62 +143,36 @@ fn admit_blocking(
     // own node key. A remote selection loads this node's acceptance of the
     // origin's testimony instead, owned by the attesting operator, and
     // yields the origin's evidence; it is never read as a local publication.
-    let (evidence, owner_principal, remote_testimony, receiver_source) = match &request
-        .remote_testimony
-    {
-        None => {
-            let published = load_current_qualified_content(
-                state,
-                context,
-                &request.activation_ref,
-                &request.coordinate_id,
-                &request.attestation_hash,
-                &request.runtime_manifest_hash,
-            )?;
-            ensure!(
-                published.coordinate_id == request.coordinate_id
-                    && published.attestation_hash == request.attestation_hash,
-                "published content qualification differs from the requested coordinate"
-            );
-            (published.evidence, owner_principal, None, None)
-        }
-        Some(remote) => {
-            // The emitter runs the source preparation under the caller's own
-            // context, so only the attesting operator may emit its testimony.
-            ensure!(
-                remote.owner_principal == owner_principal,
-                "the remote testimony names another operator"
-            );
-            let attester = crate::operator_authority::admitted_operator_authority_for_principal(
-                state,
-                &remote.owner_principal,
-            )?;
-            let acceptance = remote.acceptance();
-            let selection = ExternalRuntimeContentQualificationBinding {
-                activation_ref: request.activation_ref.clone(),
-                coordinate_id: request.coordinate_id.clone(),
-                attestation_hash: request.attestation_hash.clone(),
-                owner_principal: remote.owner_principal.clone(),
-                required_claims: request.required_claims.clone(),
-                remote_testimony: Some(acceptance.clone()),
-            };
-            let verified =
-                super::qualification_testimony::verify_current_remote_runtime_content_testimony(
+    let (evidence, owner_principal, remote_testimony, receiver_source) =
+        match &request.remote_testimony {
+            None => {
+                let published = load_current_qualified_content(
                     state,
-                    &attester.handler_context(),
-                    &selection,
+                    context,
+                    &request.activation_ref,
+                    &request.coordinate_id,
+                    &request.attestation_hash,
                     &request.runtime_manifest_hash,
                 )?;
-            // The check prepared this node's own activation; it is the source
-            // the program is derived from, not the origin's realization.
-            (
-                verified.evidence,
-                remote.owner_principal.clone(),
-                Some(acceptance),
-                Some(verified.receiver_source),
-            )
-        }
-    };
+                ensure!(
+                    published.coordinate_id == request.coordinate_id
+                        && published.attestation_hash == request.attestation_hash,
+                    "published content qualification differs from the requested coordinate"
+                );
+                (published.evidence, owner_principal, None, None)
+            }
+            Some(remote) => {
+                let verified = verify_remote_selection(state, request, remote, &owner_principal)?;
+                // The check prepared this node's own activation; it is the source
+                // the program is derived from, not the origin's realization.
+                (
+                    verified.evidence,
+                    remote.owner_principal.clone(),
+                    Some(remote.acceptance()),
+                    Some(verified.receiver_source),
+                )
+            }
+        };
     let source = match receiver_source {
         Some(source) => source,
         None => {
@@ -244,6 +218,81 @@ fn admit_blocking(
         owner_principal,
         remote_testimony,
     )
+}
+
+/// The remote-testimony check the emitter shares with launch. The emitter
+/// runs source preparation under the caller's own context, so only the
+/// attesting operator may emit its testimony; the check itself runs under
+/// that operator's current admitted authority on this node.
+fn verify_remote_selection(
+    state: &AppState,
+    request: &CandidateProgramRequest,
+    remote: &CandidateRemoteTestimony,
+    owner_principal: &str,
+) -> anyhow::Result<super::qualification_testimony::VerifiedRemoteRuntimeContentTestimony> {
+    ensure!(
+        remote.owner_principal == owner_principal,
+        "the remote testimony names another operator"
+    );
+    let attester = crate::operator_authority::admitted_operator_authority_for_principal(
+        state,
+        &remote.owner_principal,
+    )?;
+    let selection = ExternalRuntimeContentQualificationBinding {
+        activation_ref: request.activation_ref.clone(),
+        coordinate_id: request.coordinate_id.clone(),
+        attestation_hash: request.attestation_hash.clone(),
+        owner_principal: remote.owner_principal.clone(),
+        required_claims: request.required_claims.clone(),
+        remote_testimony: Some(remote.acceptance()),
+    };
+    super::qualification_testimony::verify_current_remote_runtime_content_testimony(
+        state,
+        &attester.handler_context(),
+        &selection,
+        &request.runtime_manifest_hash,
+    )
+}
+
+/// What the emitter's remote-testimony check established, for composed tests.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct RemoteContentTestimonyUse {
+    pub acceptance_hash: String,
+    /// The origin's subject, from its signed evidence.
+    pub origin_subject:
+        ryeos_state::external_content::qualification_subject::ContentQualificationSubject,
+    /// This node's own freshly prepared subject.
+    pub receiver_subject:
+        ryeos_state::external_content::qualification_subject::ContentQualificationSubject,
+}
+
+/// Run exactly the emitter's remote-testimony check, which launch runs too,
+/// and stop before the candidate Worker's requirement is read. A composed test
+/// whose activated consumer is not a candidate Worker drives the check this
+/// way; nothing here is reachable from a production build.
+#[cfg(any(test, feature = "test-support"))]
+pub fn check_remote_testimony(
+    state: &AppState,
+    context: &HandlerContext,
+    request: &CandidateProgramRequest,
+) -> anyhow::Result<RemoteContentTestimonyUse> {
+    let fingerprint = crate::operator_authority::require_admitted_operator(state, context)?;
+    request.validate()?;
+    let remote = request
+        .remote_testimony
+        .as_ref()
+        .context("the request selects no remote testimony")?;
+    let verified = verify_remote_selection(state, request, remote, &format!("fp:{fingerprint}"))?;
+    let QualificationSubject::ActivatedContent { content } = &verified.evidence.purpose.subject
+    else {
+        bail!("remote content qualification has no activated content subject");
+    };
+    Ok(RemoteContentTestimonyUse {
+        acceptance_hash: verified.acceptance_hash,
+        origin_subject: content.clone(),
+        receiver_subject: verified.receiver_source.subject,
+    })
 }
 
 /// Derive the program and binding from already authenticated evidence. The
