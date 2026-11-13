@@ -22,10 +22,10 @@ pub mod ui_remotes;
 #[cfg(feature = "scheduling")]
 pub mod ui_schedules;
 pub mod ui_seat;
-pub mod ui_sessions_admin;
 pub mod ui_session_attachments;
 pub mod ui_session_current;
 pub mod ui_session_end;
+pub mod ui_sessions_admin;
 pub mod ui_thread_tree;
 pub mod ui_threads;
 pub mod ui_work;
