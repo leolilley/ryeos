@@ -147,7 +147,10 @@ pub fn inspect_remote_content_testimonies(app_root: &Path) -> Result<RemoteConte
             &receipts,
         ));
     }
-    for namespace in RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES {
+    for namespace in RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES
+        .iter()
+        .copied()
+    {
         for head in own_heads(namespace)? {
             // Classified from the outer record only: a superseded acceptance
             // is listed with its cure and never decoded as a current one.
