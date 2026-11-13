@@ -86,6 +86,20 @@ pub struct LaunchPlanningCapacityExceeded;
 #[error("launch planning coordinate is already reserved")]
 pub struct LaunchPlanningAlreadyReserved;
 
+/// An execution-history reset found process-scope obligations no daemon
+/// recovery has retired. Only a running daemon's recovery retires them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "execution_history_scopes_unretired: execution-history reset requires completed process-scope retirement; {unretired_scopes} process-scope obligation(s) are unretired. Fix: start the node once so its recovery retires them, stop it, then rerun the reset"
+)]
+pub struct ExecutionHistoryScopesUnretired {
+    pub unretired_scopes: u64,
+}
+
+impl ExecutionHistoryScopesUnretired {
+    pub const CODE: &'static str = "execution_history_scopes_unretired";
+}
+
 /// Result of recording one operational parent/child lineage edge.
 ///
 /// Exact replays are expected when a durable launch is re-driven. A child is
@@ -15899,10 +15913,9 @@ impl RuntimeDb {
             // Offline daemon exclusion is not process settlement. Preserve the
             // existing scope/workspace recovery owner even if every PID is dead.
             // The outer reset calls this inspection before publishing its intent.
-            if self.unsettled_process_scope_count(None)? != 0 {
-                bail!(
-                    "execution-history reset requires completed process-scope retirement; preserve the runtime and settle its workspaces first"
-                );
+            let unretired_scopes = self.unsettled_process_scope_count(None)?;
+            if unretired_scopes != 0 {
+                return Err(ExecutionHistoryScopesUnretired { unretired_scopes }.into());
             }
             if !self.unsettled_scoped_child_attempt_ids()?.is_empty() {
                 bail!("execution-history reset requires settlement of every scoped child attempt");
@@ -15923,7 +15936,10 @@ impl RuntimeDb {
             if dry_run {
                 return Ok(RuntimeThreadHistoryDiscardReport {
                     scoped_child_attempts: count(connection, "scoped_child_attempt")?,
-                    scoped_child_input_operations: count(connection, "scoped_child_input_operation")?,
+                    scoped_child_input_operations: count(
+                        connection,
+                        "scoped_child_input_operation",
+                    )?,
                     thread_runtime: count(connection, "thread_runtime")?,
                     in_process_handler_reservations: count(
                         connection,
@@ -25033,11 +25049,21 @@ mod tests {
                 "terminal/reaped does not settle resource retirement"
             );
             for dry_run in [true, false] {
+                let refusal = db.fixture_discard_all_thread_history(dry_run).unwrap_err();
                 assert!(
-                    db.fixture_discard_all_thread_history(dry_run)
-                        .unwrap_err()
+                    refusal
                         .to_string()
                         .contains("completed process-scope retirement")
+                );
+                // The refusal is typed: its code and the count it saw.
+                let typed = refusal
+                    .downcast_ref::<ExecutionHistoryScopesUnretired>()
+                    .expect("an unretired scope refuses with its typed code");
+                assert!(typed.unretired_scopes >= 1, "{typed:?}");
+                assert!(
+                    refusal
+                        .to_string()
+                        .starts_with(ExecutionHistoryScopesUnretired::CODE)
                 );
             }
         }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T23:13:03Z:34476d6a7af993854c338ddfa76b33e61be6d4b46c905253ccc5bbbb6b049444:C6e/HeJJvy3/i2CCOlaPyYIwlRB4pt4p9vMxOWRWRhEa6Si7QFljV/xgmLyZaRoaF8gj8BAuNz05FU2Kdyo2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:26:53Z:849b7e114cb3c75d6c1cc9b09c8923462ddc3aaefe670d273d8e65b538d8a0e1:3bN7IAlOg7cbLeDj4dZ/8UAVfd70Wvyb5BVicZCJnBdv+9jOOzuzvPJDFBB//hLQgxA6kqYY40fvIUghvHOLBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -221,7 +221,15 @@ predecessor/current epoch pair with `--schema-cut-from` and `--schema-cut-to`.
 The command refuses a different predecessor or a future runtime. Repeating it
 after the named cut returns `already_current` without retiring new work. This
 allows platform restarts to redrive one authorized cut without turning later
-schema changes into implicit authorization.
+schema changes into implicit authorization. An already-current cut changes
+nothing, so it inspects no execution history: its counts are zero and rows it
+would never touch cannot refuse it. The scheduler namespace check still runs.
+
+A reset that would retire history refuses with
+`execution_history_scopes_unretired` while process-scope obligations remain
+that no daemon recovery has retired (a Q session that ended by disconnect
+leaves one). The refusal names how many it saw. Start the node once so its
+recovery retires them, stop it, then rerun the reset.
 
 The other clean-cut reset scopes share the same namespace and require the
 daemon to be stopped:

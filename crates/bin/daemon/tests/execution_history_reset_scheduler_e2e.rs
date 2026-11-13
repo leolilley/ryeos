@@ -652,6 +652,49 @@ async fn core_only_reset_completes_without_scheduler_state() -> Result<()> {
     Ok(())
 }
 
+/// A schema cut naming the epoch a fresh node already holds is a no-op that
+/// inspects no history: run twice through the real CLI, each run reports
+/// `already_current` without performing, and the daemon is ready afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn core_only_already_current_schema_cut_repeats_without_change() -> Result<()> {
+    let mut h = stopped_core_only_node().await?;
+    let current = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+    let predecessor = current
+        .checked_sub(1)
+        .context("the current runtime epoch has a predecessor")?;
+    for attempt in 1..=2 {
+        let output = reset_command(&h)
+            .args(["--schema-cut-from", &predecessor.to_string()])
+            .args(["--schema-cut-to", &current.to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("spawn ryeos node reset execution-history")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "already-current cut {attempt} exited {}; stdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).context("decode reset JSON report")?;
+        assert_eq!(
+            report["schema_cut"]["status"], "already_current",
+            "attempt {attempt}: {report}"
+        );
+        assert_eq!(report["performed"], false, "attempt {attempt}: {report}");
+        assert_eq!(report["dry_run"], false, "attempt {attempt}: {report}");
+        assert_eq!(
+            report["schema_cut"]["observed"], current,
+            "attempt {attempt}: {report}"
+        );
+    }
+    h.respawn_with(|_| {}).await?;
+    Ok(())
+}
+
 /// A refusal names its cause and the one shared remedy, whose steps are the
 /// real CLI shapes an operator follows to retire scheduler state.
 fn assert_names_remedy(refusal: &str, cause: &str) {
