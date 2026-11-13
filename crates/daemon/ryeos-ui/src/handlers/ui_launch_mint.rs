@@ -142,7 +142,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let session_policy = state.node_policy.require::<
         ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
     >()?;
-    let granted_caps = effective_session_caps(&ctx.scopes, &session_policy, req.scopes.as_deref())?;
+    let granted_caps = effective_session_caps(&ctx.scopes, session_policy, req.scopes.as_deref())?;
     // Every compile and admission after this point sees the session's
     // grant, never the minter's own scopes.
     let mut session_ctx = ctx.clone();
@@ -175,7 +175,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         compiled_binding: std::sync::Arc::new(compiled_binding),
         presentation,
         granted_caps: granted_caps.clone(),
-        timing: SessionTiming::from_policy(&session_policy),
+        timing: SessionTiming::from_policy(session_policy),
         user_principal_id,
         project_authority,
         registered_project_id,

@@ -29,7 +29,7 @@ pub fn intersect_capabilities(left: &[String], right: &[String]) -> Vec<String> 
     }
     common.sort();
     common.dedup();
-    let minimal = common
+    common
         .iter()
         .filter(|candidate| {
             !common
@@ -37,8 +37,7 @@ pub fn intersect_capabilities(left: &[String], right: &[String]) -> Vec<String> 
                 .any(|other| other != *candidate && pattern_covers(other, candidate))
         })
         .cloned()
-        .collect();
-    minimal
+        .collect()
 }
 
 #[cfg(test)]
