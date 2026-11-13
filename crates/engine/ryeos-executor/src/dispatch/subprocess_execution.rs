@@ -635,8 +635,13 @@ async fn dispatch_managed_subprocess(
         // Fresh launches and operator follow-ups inject their inputs as the
         // opening stimulus; only an autonomous machine continuation suppresses it.
         suppress_stimulus: false,
-        // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
-        capability_policy: crate::execution::launch::CapabilityPolicy::AdmissionDefault,
+        // Fresh root: the caller must cover every declared cap; the thread runs
+        // with exactly declared ∪ manifest runtime authority.
+        capability_policy: crate::execution::launch::CapabilityPolicy::RootAdmission {
+            caller_scopes: crate::execution::launch::principal_caller_scopes(
+                &prepared.resolved.plan_context.requested_by,
+            ),
+        },
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
         pre_pinned_checkpoint_authority: None,
