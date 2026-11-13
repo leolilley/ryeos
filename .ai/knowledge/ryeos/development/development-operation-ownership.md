@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T00:09:46Z:13265b642a135913e68e2dcb574cd698614469684b158bfa988a46dd461f45c7:kIp3GcZvbGLe8FfnDQoTLIStNpix1yY3qIQenvvPPOhjB0+dd7bNjb750pKp7NJyLhhY94CUBk0Em3b24fZ3Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:11:20Z:240d819a486e8ba0c685689727ddb4f95e5387e5b45fabf6f52519e93fb02262:mAVEB8W7S0xtvObSP+g1t86scuMR30mRXYPBG8OCahkQCFrl4pMsz5TjNx7qWvorn/4CS60kZN21SnQz4H/AAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.6.0"
+version: "1.7.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -105,12 +105,78 @@ Routine non-core bundle updates must reuse admitted environment products;
 they must not repeat compiler acquisition or rebuild the serving host image.
 Do not narrow the agreed end-to-end proof merely to avoid its current gates.
 
-## Complete source inventory and disposition
+## What may live in `scripts/`
 
-This inventory covers every file in the 59-file pre-cleanup `scripts/` tree.
-Paths in this table are relative to `scripts/` unless stated otherwise.
-"Final owner" describes the required end state; an open gate is not completed
-by moving source into a different directory.
+`scripts/` holds only external entries that something calls: CI, Docker,
+release and install plumbing that must run before a RyeOS node exists, plus
+their tests. The rule:
+
+- Add no file to `scripts/` without a caller in the same change: a workflow,
+  a Dockerfile or bake file, `gate.sh`, or another script listed below. A new
+  `test-*` file is named in `ci.yml` or `gate.sh` in the same change.
+- Temporary, personal or one-off scripts go in the gitignored `.tmp/`, never
+  in the tracked tree.
+- Reusable development tooling goes in the repository-root `.ai` development
+  bundle under `.ai/tools/ryeos/development/`: an admitted operation as a
+  Tool with its `ryeos-tool` header, a host-run helper as signed source in a
+  `lib/` directory (which Tool resolution excludes).
+- Tests live beside their subject: `bundles/<bundle>/tests/`,
+  `tests/development/`, or the matching `tests/e2e/` family.
+
+## Current `scripts/` tree
+
+After the 2026-11-13 cleanup `scripts/` holds 68 files. Paths are relative to
+`scripts/`. Every test named here runs in the CI `static-policy` job unless
+the row says otherwise.
+
+| Files | Caller | Note |
+| --- | --- | --- |
+| `gate.sh` | `ci.yml` workspace jobs, maintainers | Broad test orchestration. |
+| `test-gate-package-selection.py` | none yet | Each fake-Cargo `gate.sh` call is bounded to 10 s, but `gate.sh` first runs the custody check, which can exceed that on a loaded host. Wire it once that bound is fixed. |
+| `populate-bundles.sh` | Dockerfiles, `gate.sh` | Pre-install bundle build and staging entry. |
+| `lib/ryeos-terminal.sh`, `pkg/test-ryeos-terminal.sh` | sourced by the shell entries here | Shared external-shell presentation. |
+| `ci/install-static-linters.sh`, `ci/lint-workflows-and-shell.sh` | `ci.yml` | The lint script holds the ShellCheck file list. |
+| `ci/check-custody-tokens.sh`, `ci/strip-rust-comments.py` | `ci.yml`, `gate.sh` | The Python file is the check's helper. |
+| `ci/prepare-runner.sh`, `ci/pack-bundle-state.sh`, `ci/unpack-bundle-state.sh` | `ci.yml` | Runner and bundle-state hand-off between jobs. |
+| `ci/test-daemon-image-init-policy.sh`, `ci/test-image-build-cache.sh`, `ci/test-publisher-trust-policy.sh` | `ci.yml` | Tests of Docker, init and publisher boundaries. |
+| `ci/check-test-support-feature-leak.sh` | ShellCheck list only | Nothing executes it. Decision pending: run it in CI or remove it. |
+| `pkg/install-local-direct.sh`, `pkg/bundle-sets.sh`, `pkg/bundle-features.py`, `pkg/composition-features.sh`, `pkg/fixtures/payload-ownership.parsed.json` | `Dockerfile.release`, `ci.yml`, `gate.sh` | Host install entry and its bundle-set data helpers. |
+| `pkg/test-bundle-sets.sh`, `pkg/test-bundle-features.py`, `pkg/test-bundle-features-signature.py`, `pkg/test-install-lifecycle.sh` | `ci.yml` | `test-bundle-sets.sh` runs the two bundle-features tests. |
+| `pkg/install-contained-docker-runtime.py`, `pkg/setup-contained-docker-node.py`, `pkg/test-contained-docker-node.py`, `pkg/test-contained-docker-runtime.py` | operator (documented `sudo` commands) | Host installers for a contained Docker node. |
+| `release/resolve-version.sh`, `release/official-publisher-fingerprint.sh`, `release/prepare-aur.sh`, `release/package-bundle-artifact.sh`, `release/verify-bundle-artifact.sh`, `release/materialize-release-bundles.sh` and their `test-*` files | release workflows, `Dockerfile.release` | Workflow-input adapters and bundle artifact packaging. |
+| `release/package-workload-client-realization.sh`, `release/verify-workload-client-realization.sh`, `release/test-workload-client-realization.sh` | `Dockerfile.release`, `publish-ryeosd.yml` | The test needs a built binary and release coordinates; it is a manual qualification step, not run in CI. |
+| `release/author-local-inference-realizations.py`, `release/local-inference-qwen3-0.6b-v1.json`, `release/verify-local-inference-release.py` | local-inference workflows | Open conversion to Tools and Config, below. |
+| `release/check-workspace-versions.py`, `release/versioned-crates.txt`, `release/test-check-workspace-versions.py` | `publish-ryeosd.yml` | Publish-time version gate. |
+| `release/check-composition-daemon-features.py` and its test | `ci.yml` | |
+| `release/contained-oci-hook-artifact.py` and its test | `Dockerfile.release` | |
+| `release/bundle-payload-ownership.py`, `release/shared-static-payloads.py`, `release/shared-static-payloads.yaml`, `release/test-shared-static-payloads.py` | `populate-bundles.sh`, `ci.yml` | Payload ownership parser shared by the build entries. |
+| `release/test-native-bundle-wp0.py` | `ci.yml` | Checks `pkg/bundle-sets.sh`, payload ownership and runtime images against `tests/fixtures/native-bundle-publication/`. Update that fixture when a bundle set changes. |
+| `release/acquire-development-toolchain-stage0.sh` | `Dockerfile.development-realizations`, Stage-0 bootstrap | Pre-RyeOS acquisition entry, below. |
+| `release/fetch-development-registry.py`, `release/test-development-registry.py` | operator first bootstrap | First-bootstrap transport entry, below. |
+| `release/release-candidate.py`, `release/audit-bundle-generation.py`, `release/inspect-native-bundle-input.py`, `release/inspect-core-native-set.py` and their four tests | tests only; `inspect-core-native-set.py` also by a daemon Rust test | Producer and verifier for bundle-release's `release_candidate` kind. They belong in that bundle, but three load `release/bundle-payload-ownership.py` as a sibling. They can move only once they read the signed payload-ownership Config. Bundle-release Tools load their whole item directory as source, and their closure contract forbids naming that parser. |
+
+Moved out on 2026-11-13: the bundle-release source tests to
+`bundles/bundle-release/tests/`; `sign-dev.sh` and `revert-sig-churn.sh` to
+`.ai/tools/ryeos/development/maintainer/lib/`; `dev-tui.sh` and
+`dev-ui-assets.sh` to `.ai/tools/ryeos/development/interactive-host/lib/`;
+`rebuild-build-support-inputs.py` to
+`.ai/tools/ryeos/development/build-support-inputs/lib/`;
+`prove-contained-oci-provider.py` to
+`.ai/tools/ryeos/development/contained-oci-provider/lib/`, with their tests
+in `tests/e2e/authoring-environment/` and `tests/development/`. Removed:
+`check-ui-wasm-fresh.sh` (call `browser-assets-production/publish.sh --check`),
+`release/verify-contained-oci-hook.sh`,
+`release/validate-native-deployment-coordinates.sh` (`deploy/entrypoint.sh`
+makes the same checks), and the personal `dev/free-build-space.py` and
+`dev/rehearse-guest-relay-loopback.sh`.
+
+## Source ownership backlog and disposition
+
+This table records the final owner of each operation family that came from
+`scripts/`, including families since moved out. Paths are relative to
+`scripts/` unless stated otherwise. "Final owner" describes the required end
+state; an open gate is not completed by moving source into a different
+directory.
 
 | Source family | Final owner / external boundary | Completion criterion |
 | --- | --- | --- |
