@@ -669,7 +669,7 @@ fn opt_in_trusted_portable_session(state_path: &Path, node: &SigningKey) -> Resu
         "fixture isolation policy is not signed by its exact node"
     );
     let mut policy: serde_json::Value = serde_yaml::from_str(&body)?;
-    let class = common::fast_fixture::FAST_FIXTURE_HOST_CLASS;
+    let class = common::fast_fixture::fixture_host_class_of_policy(&policy)?;
     anyhow::ensure!(
         policy.pointer(&format!("/policy/host_classes/{class}/mode"))
             == Some(&serde_json::json!("disabled"))

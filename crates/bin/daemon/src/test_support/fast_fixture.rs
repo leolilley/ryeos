@@ -477,7 +477,7 @@ pub fn populate_initialized_state_with_profile_and_identities(
         format!("sha256:{}", "1".repeat(64)),
         1,
         Some(profile.name().to_owned()),
-        Some(FAST_FIXTURE_HOST_CLASS.to_owned()),
+        Some(fixture_host_class_of_profile(profile)?.to_owned()),
     )
     .context("construct fast-fixture substrate identity")?;
     let substrate_path = state_path.join(AI_DIR).join("node/substrate-identity.json");
@@ -985,15 +985,14 @@ fn materialize_seed_node_policy_generation(
             selected_profile.name()
         );
     }
-    // Every fast-fixture node runs under its profile's unconfined class.
-    let mut profile = profile
-        .for_host_class(FAST_FIXTURE_HOST_CLASS)
-        .with_context(|| {
-            format!(
-                "select the fixture host class of profile {}",
-                selected_profile.name()
-            )
-        })?;
+    // Every fast-fixture node runs under its profile's fixture host class.
+    let host_class = fixture_host_class(profile.host_classes()?.iter().map(String::as_str))?;
+    let mut profile = profile.for_host_class(host_class).with_context(|| {
+        format!(
+            "select the fixture host class of profile {}",
+            selected_profile.name()
+        )
+    })?;
     let isolation = profile
         .policies
         .get_mut("isolation")
@@ -1032,10 +1031,58 @@ fn materialize_seed_node_policy_generation(
     Ok(())
 }
 
-/// Host class every fast-fixture node is initialized under. Fixture tests
-/// judge behaviour other than the sandbox, so they run on the unconfined
-/// class; the enforced class needs a host that proves the sandbox.
-pub const FAST_FIXTURE_HOST_CLASS: &str = "local_unconfined";
+/// The host class a fast-fixture node is initialized under, chosen from the
+/// classes its profile declares. Fixture tests judge behaviour other than the
+/// sandbox, so a profile's explicit unconfined class wins; a profile without
+/// one runs on its `local` class, which the fixture narrows to what a direct
+/// child can prove.
+pub fn fixture_host_class<'a>(declared: impl IntoIterator<Item = &'a str>) -> Result<&'static str> {
+    let declared: Vec<&str> = declared.into_iter().collect();
+    if declared.contains(&"local_unconfined") {
+        Ok("local_unconfined")
+    } else if declared.contains(&"local") {
+        Ok("local")
+    } else {
+        anyhow::bail!(
+            "node profile declares no local host class for the fixture; it declares {}",
+            declared.join(", ")
+        )
+    }
+}
+
+/// [`fixture_host_class`] over an isolation policy document's
+/// `policy.host_classes` table.
+pub fn fixture_host_class_of_policy(isolation: &serde_json::Value) -> Result<&'static str> {
+    let classes = isolation
+        .pointer("/policy/host_classes")
+        .and_then(serde_json::Value::as_object)
+        .context("isolation policy has no host_classes table")?;
+    fixture_host_class(classes.keys().map(String::as_str))
+}
+
+/// The fixture host class of a selected fast-fixture profile, read from the
+/// authored profile source.
+fn fixture_host_class_of_profile(selected_profile: FastFixtureProfile) -> Result<&'static str> {
+    let profile = load_authored_profile(selected_profile)?;
+    let declared = profile.host_classes()?;
+    fixture_host_class(declared.iter().map(String::as_str))
+}
+
+fn load_authored_profile(
+    selected_profile: FastFixtureProfile,
+) -> Result<ryeos_node_runtime::node_policy::generation::NodeInitProfile> {
+    let source = super::workspace_root()
+        .join("bundles")
+        .join(AI_DIR)
+        .join("node")
+        .join("init")
+        .join("profiles")
+        .join(format!("{}.yaml", selected_profile.name()));
+    let raw = fs::read_to_string(&source)
+        .with_context(|| format!("read node init profile {}", source.display()))?;
+    serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw))
+        .with_context(|| format!("parse node init profile {}", source.display()))
+}
 
 /// Author a profile source root for switching a fast-fixture node to
 /// `profile` through the real `ryeos node reset policy-generation`.
@@ -1148,15 +1195,14 @@ pub fn node_isolation_mode(state_path: &Path) -> Result<String> {
     let document: serde_json::Value =
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw))
             .with_context(|| format!("parse node isolation policy {}", path.display()))?;
+    let class = fixture_host_class_of_policy(&document)?;
     document
-        .pointer(&format!(
-            "/policy/host_classes/{FAST_FIXTURE_HOST_CLASS}/mode"
-        ))
+        .pointer(&format!("/policy/host_classes/{class}/mode"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned)
         .with_context(|| {
             format!(
-                "node isolation policy {} names no mode for the {FAST_FIXTURE_HOST_CLASS} class",
+                "node isolation policy {} names no mode for the {class} class",
                 path.display()
             )
         })
@@ -1186,8 +1232,9 @@ pub fn node_isolation_mode(state_path: &Path) -> Result<String> {
 /// authored profiles keep their floors; tests of per-scope containment need
 /// an administrator-prepared host-backed node, not this harness.
 fn direct_host_isolation(isolation: &mut serde_json::Value) -> Result<()> {
+    let class = fixture_host_class_of_policy(isolation)?;
     let policy = isolation
-        .pointer_mut(&format!("/policy/host_classes/{FAST_FIXTURE_HOST_CLASS}"))
+        .pointer_mut(&format!("/policy/host_classes/{class}"))
         .and_then(serde_json::Value::as_object_mut)
         .context("isolation member has no fast-fixture host class")?;
     let scoped = matches!(
