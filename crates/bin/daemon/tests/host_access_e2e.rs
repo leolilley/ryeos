@@ -250,3 +250,215 @@ async fn an_exact_operator_grant_runs_the_tool_and_records_what_ran() {
         "the live project authority records what ran: {thread:#}"
     );
 }
+
+// ── An enforcing lane ───────────────────────────────────────────────────
+
+/// Prints the PID namespace it runs in, nothing else.
+const ORDINARY_PROBE_TOOL: &str = "category: hostdirect
+executor_id: \"@subprocess\"
+execution_protocol: \"protocol:ryeos/core/opaque\"
+effects: live
+config:
+  command: /bin/sh
+  args: [\"-c\", \"echo ordinary-probe; readlink /proc/self/ns/pid\"]
+";
+
+/// A graph whose one action runs the host-authority probe as a child.
+const HOST_CHILD_GRAPH: &str = "category: test
+version: \"1.0.0\"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.hostdirect/probe
+config:
+  start: probe
+  nodes:
+    probe:
+      action:
+        item_id: \"tool:hostdirect/probe\"
+        ref_bindings: {}
+        params: {}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+";
+
+/// The fixture's local lane switched to enforced isolation through the
+/// signed Core backend, as the other enforced e2e fixtures do, and offering
+/// host-direct execution.
+fn enforce_with_host_direct(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/isolation.yaml");
+    let mut document: Value = serde_yaml::from_str(&lillux::signature::strip_signature_lines(
+        &std::fs::read_to_string(&path)?,
+    ))?;
+    let document_policy: ryeos_engine::isolation::IsolationPolicyDocument =
+        serde_json::from_value(document["policy"].clone())?;
+    let mut isolation = document_policy
+        .into_selected_policy()
+        .map_err(anyhow::Error::msg)?;
+    isolation.mode = ryeos_engine::isolation::IsolationMode::Enforce;
+    isolation.backend = Some(ryeos_isolation_protocol::IsolationBackendSelection {
+        bundle: "core".into(),
+        implementation: "linux-lillux".into(),
+    });
+    isolation.filesystem.proc_filesystem =
+        ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespace;
+    isolation.host_direct = ryeos_engine::isolation::IsolationHostDirect::OperatorGranted;
+    ryeos_engine::isolation::IsolationRuntime::validate_policy(&isolation)?;
+    document["policy"] = serde_json::to_value(
+        ryeos_engine::isolation::IsolationPolicyDocument::from_selected_policy(isolation),
+    )?;
+    write_policy(
+        state_path,
+        node,
+        "isolation",
+        &serde_yaml::to_string(&document)?,
+    );
+    Ok(())
+}
+
+fn daemon_pid_namespace() -> String {
+    // The harness spawns the daemon directly: it shares this PID namespace.
+    std::fs::read_link("/proc/self/ns/pid")
+        .expect("read this process's PID namespace")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn confinement_kind(thread: &Value) -> Option<&str> {
+    thread
+        .pointer("/project_authority/live_access/confinement/kind")
+        .and_then(Value::as_str)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_an_enforcing_lane_only_granted_host_tools_leave_the_sandbox() {
+    let setup = |state_path: &Path,
+                 _user: &Path,
+                 fixture: &common::fast_fixture::FastFixture|
+     -> anyhow::Result<()> {
+        common::fast_fixture::register_workflow_bundles(state_path, fixture)?;
+        enforce_with_host_direct(state_path, &fixture.node)?;
+        let signer = lillux::signature::compute_fingerprint(&fixture.user.verifying_key());
+        let grant = serde_json::json!({
+            "schema": 1,
+            "grants": [{
+                "id": "hostdirect-probe",
+                "item": PROBE_REF,
+                "signer": signer,
+                "source_closure": null,
+                "runtime": {
+                    "ref": SUBPROCESS_RUNTIME,
+                    "content_hash": subprocess_runtime_hash(state_path),
+                },
+                "origins": ["direct", "graph_child"],
+                "host_env": ["PATH"],
+                "containment": "group_allowed",
+            }],
+        });
+        write_policy(
+            state_path,
+            &fixture.node,
+            "host_access",
+            &serde_yaml::to_string(&grant)?,
+        );
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(setup, |_| {})
+        .await
+        .expect("start an enforcing daemon with a host-direct lane");
+    assert_eq!(
+        common::fast_fixture::node_isolation_mode(&h.state_path).expect("node isolation mode"),
+        "enforce"
+    );
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant(project.path(), "probe", PROBE_TOOL, &fixture.user);
+    plant(
+        project.path(),
+        "ordinary",
+        ORDINARY_PROBE_TOOL,
+        &fixture.user,
+    );
+    let graphs = project.path().join(".ai/graphs");
+    std::fs::create_dir_all(&graphs).expect("create graphs dir");
+    std::fs::write(
+        graphs.join("hostflow.yaml"),
+        lillux::signature::sign_content(HOST_CHILD_GRAPH, &fixture.user, "#", None),
+    )
+    .expect("write graph");
+    let host_namespace = daemon_pid_namespace();
+
+    // An ordinary tool on this node stays in the sandbox: its own PID
+    // namespace, and a confined live project.
+    let (status, body) = execute(&h, project.path(), "tool:hostdirect/ordinary").await;
+    assert!(status.is_success(), "status={status}; body={body:#}");
+    let text = body.to_string();
+    assert!(text.contains("ordinary-probe"), "{text}");
+    assert!(text.contains("pid:["), "{text}");
+    assert!(
+        !text.contains(&host_namespace),
+        "an ordinary tool must not share the daemon's PID namespace: {text}"
+    );
+
+    // The granted host tool runs on the host, in the daemon's namespace.
+    let (status, body) = execute(&h, project.path(), PROBE_REF).await;
+    assert!(status.is_success(), "status={status}; body={body:#}");
+    let text = body.to_string();
+    assert!(text.contains("host-direct-probe"), "{text}");
+    assert!(
+        text.contains(&host_namespace),
+        "the granted host tool runs in the daemon's PID namespace: {text}"
+    );
+    let direct_thread = body["thread"]["thread_id"].as_str().expect("thread id");
+    let direct = h
+        .get_thread(direct_thread)
+        .await
+        .expect("get thread")
+        .expect("thread exists");
+    assert_eq!(
+        confinement_kind(&direct),
+        Some("unconfined_host"),
+        "{direct:#}"
+    );
+
+    // A graph child: the child runs on the host and is sealed unconfined,
+    // while its graph parent stays confined.
+    let (status, body) = execute(&h, project.path(), "graph:hostflow").await;
+    assert!(status.is_success(), "status={status}; body={body:#}");
+    assert_eq!(
+        body.pointer("/result/success").and_then(Value::as_bool),
+        Some(true),
+        "{body:#}"
+    );
+    let graph_thread = body["thread"]["thread_id"]
+        .as_str()
+        .expect("graph thread id")
+        .to_owned();
+    let threads = h.list_threads(100).await.expect("list threads");
+    let child = threads
+        .iter()
+        .find(|thread| thread.item_ref == PROBE_REF && thread.chain_root_id == graph_thread)
+        .unwrap_or_else(|| panic!("graph child thread not listed: {threads:#?}"));
+    let child = h
+        .get_thread(&child.thread_id)
+        .await
+        .expect("get child thread")
+        .expect("child thread exists");
+    assert_eq!(
+        confinement_kind(&child),
+        Some("unconfined_host"),
+        "{child:#}"
+    );
+    let parent = h
+        .get_thread(&graph_thread)
+        .await
+        .expect("get graph thread")
+        .expect("graph thread exists");
+    assert_eq!(
+        confinement_kind(&parent),
+        Some("descriptor_rooted_fixed_parents"),
+        "the graph parent keeps its confinement: {parent:#}"
+    );
+}
