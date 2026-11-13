@@ -5669,7 +5669,6 @@ owner = "RyeOS Development"
             _thread_id: &str,
             event_type: &str,
             payload: Value,
-            _storage_class: &str,
         ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
             self.events
                 .lock()

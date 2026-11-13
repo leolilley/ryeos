@@ -7,31 +7,7 @@ use crate::callback::{
     CallbackError, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
 };
 use crate::envelope::EnvelopeCallback;
-use crate::events::{RuntimeEventType, StorageClass};
-
-/// Map a typed event to the storage class accepted by the daemon.
-pub fn storage_class_for(event_type: RuntimeEventType) -> &'static str {
-    event_type.storage_class().as_str()
-}
-
-fn storage_class_for_payload(event_type: RuntimeEventType, payload: &Value) -> &'static str {
-    // Progressive streamed cognition_out is live-only (ephemeral): deltas, partial
-    // tool args, AND complete `tool_use` blocks. The DURABLE record of a turn's
-    // tool calls is `emit_turn_complete`'s `cognition_out{tool_calls}` — persisting
-    // the mid-stream `tool_use` too would fold a spurious extra assistant turn on
-    // resume (reconstruct_messages reads `tool_calls`, not `tool_use`). Must stay
-    // in lock-step with the daemon's `is_ephemeral_allowed`. (The payload keys are
-    // JSON field names, not event types, so they stay string-keyed.)
-    if event_type == RuntimeEventType::CognitionOut
-        && (payload.get("delta").is_some()
-            || payload.get("tool_use_partial").is_some()
-            || payload.get("tool_use").is_some())
-    {
-        return StorageClass::Ephemeral.as_str();
-    }
-
-    storage_class_for(event_type)
-}
+use crate::events::RuntimeEventType;
 
 /// Inline cap for tool result bodies in `tool_call_result` SSE
 /// payloads. Bodies up to this size are serialized into the event
@@ -273,12 +249,11 @@ impl CallbackClient {
         event_type: RuntimeEventType,
         payload: Value,
     ) -> Result<()> {
-        let storage_class = storage_class_for_payload(event_type, &payload);
         let is_transcript = event_type.is_transcript();
         match &self.inner {
             Some(client) => {
                 client
-                    .append_event(&self.thread_id, event_type.as_str(), payload, storage_class)
+                    .append_event(&self.thread_id, event_type.as_str(), payload)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
@@ -297,10 +272,10 @@ impl CallbackClient {
     /// progress where one acknowledged daemon RPC per event would otherwise
     /// backpressure the producer.
     ///
-    /// The storage class remains a per-event decision derived from the same
-    /// typed event and payload policy as [`Self::append_runtime_event`]. A batch
-    /// containing any transcript-bearing event fails closed when the callback
-    /// channel is absent.
+    /// The daemon stores each event under the node's signed `event_storage`
+    /// policy; the runtime sends no storage class. A batch containing any
+    /// transcript-bearing event fails closed when the callback channel is
+    /// absent.
     pub async fn append_runtime_events(
         &self,
         events: Vec<(RuntimeEventType, Value)>,
@@ -317,11 +292,9 @@ impl CallbackClient {
                 let events = events
                     .into_iter()
                     .map(|(event_type, payload)| {
-                        let storage_class = storage_class_for_payload(event_type, &payload);
                         serde_json::json!({
                             "event_type": event_type.as_str(),
                             "payload": payload,
-                            "storage_class": storage_class,
                         })
                     })
                     .collect();
@@ -1078,14 +1051,12 @@ impl CallbackClient {
             )
         })?;
         let event_type = RuntimeEventType::CognitionIn;
-        let storage_class = storage_class_for(event_type);
         let events = payloads
             .into_iter()
             .map(|payload| {
                 serde_json::json!({
                     "event_type": event_type.as_str(),
                     "payload": payload,
-                    "storage_class": storage_class,
                 })
             })
             .collect();
@@ -1269,11 +1240,10 @@ impl CallbackClient {
             )
         })?;
         let event_type = RuntimeEventType::ThreadUsage;
-        let storage_class = storage_class_for(event_type);
         let payload = serde_json::to_value(usage)
             .map_err(|e| anyhow::anyhow!("serialize ThreadUsage: {e}"))?;
         client
-            .append_event(&self.thread_id, event_type.as_str(), payload, storage_class)
+            .append_event(&self.thread_id, event_type.as_str(), payload)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
@@ -1352,39 +1322,6 @@ mod tests {
     const TEST_OPERATION_ID: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
 
-    #[test]
-    fn progressive_cognition_out_is_ephemeral() {
-        // delta / tool_use_partial / complete tool_use are all live-only so they
-        // don't fold a spurious extra assistant turn on resume.
-        for payload in [
-            json!({"turn": 1, "delta": "hi"}),
-            json!({"turn": 1, "tool_use_partial": {"id": "x"}}),
-            json!({"turn": 1, "tool_use": {"id": "x", "name": "f", "arguments": {}}}),
-        ] {
-            assert_eq!(
-                storage_class_for_payload(RuntimeEventType::CognitionOut, &payload),
-                StorageClass::Ephemeral.as_str(),
-                "payload {payload} should be ephemeral"
-            );
-        }
-    }
-
-    #[test]
-    fn turn_complete_cognition_out_is_indexed() {
-        // The durable record of a turn (with tool_calls array) is indexed.
-        let payload = json!({"turn": 1, "content": "done", "tool_calls": []});
-        assert_eq!(
-            storage_class_for_payload(RuntimeEventType::CognitionOut, &payload),
-            StorageClass::Indexed.as_str()
-        );
-        // An interrupted seal (no progressive keys) is also durable.
-        let interrupted = json!({"turn": 1, "content": "par", "interrupted": true});
-        assert_eq!(
-            storage_class_for_payload(RuntimeEventType::CognitionOut, &interrupted),
-            StorageClass::Indexed.as_str()
-        );
-    }
-
     // ── Mock callback that records events in memory ──────────────────
 
     struct EventRecorder {
@@ -1445,7 +1382,6 @@ mod tests {
             _thread_id: &str,
             event_type: &str,
             payload: Value,
-            _storage_class: &str,
         ) -> Result<Value, CallbackError> {
             self.events
                 .lock()
@@ -2014,7 +1950,6 @@ mod tests {
             "graph_foreach_iteration",
             "thread_usage",
         ];
-        const VALIDATOR_STORAGE: &[&str] = &["indexed", "journal_only", "ephemeral"];
 
         // Every event the runtime can emit, post-P2.2:
         let runtime_emits = [
@@ -2037,35 +1972,7 @@ mod tests {
                 "runtime emits {wire_name:?} but the daemon's validate_event_type \
                  does not accept it — runtime <> daemon vocabulary drift"
             );
-            let sc = storage_class_for(ev);
-            assert!(
-                VALIDATOR_STORAGE.contains(&sc),
-                "storage_class_for({wire_name:?}) returned {sc:?} which is not in \
-                 the daemon's accepted set"
-            );
         }
-    }
-
-    #[test]
-    fn cognition_out_progressive_payloads_are_ephemeral() {
-        assert_eq!(
-            storage_class_for_payload(
-                RuntimeEventType::CognitionOut,
-                &json!({"turn": 1, "delta": "hi"}),
-            ),
-            "ephemeral"
-        );
-        assert_eq!(
-            storage_class_for_payload(
-                RuntimeEventType::CognitionOut,
-                &json!({"turn": 1, "tool_use_partial": {"id": "c", "delta": "{}"}}),
-            ),
-            "ephemeral"
-        );
-        assert_eq!(
-            storage_class_for_payload(RuntimeEventType::CognitionOut, &json!({"turn": 1})),
-            "indexed"
-        );
     }
 
     #[tokio::test]
@@ -2138,13 +2045,7 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
-        async fn append_event(
-            &self,
-            _: &str,
-            _: &str,
-            _: Value,
-            _: &str,
-        ) -> Result<Value, CallbackError> {
+        async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {

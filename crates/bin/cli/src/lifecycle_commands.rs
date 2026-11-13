@@ -2390,6 +2390,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // The complete signed policy generation, compiled as the daemon compiles
+    // it. A section this release newly requires is named with its cure.
+    if initialized {
+        checks.push(node_policy_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "node_policy",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // Use the same policy loader as daemon and offline execution. Disabled is
     // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
     if initialized {
@@ -3521,6 +3533,44 @@ struct IsolationPolicyInspection {
     status: &'static str,
 }
 
+/// Compile the node's signed policy generation as the daemon does.
+fn node_policy_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match crate::node_descriptors::load_verified_policy_snapshot(app_root) {
+        Ok(snapshot) => check(
+            "node_policy",
+            OK,
+            serde_json::json!({ "generation_digest": snapshot.generation_digest() }),
+        ),
+        Err(error) => check("node_policy", FAIL, node_policy_failure_detail(&error)),
+    }
+}
+
+/// A generation missing a newly required section gets its typed code and the
+/// replacement that cures it; any other failure is reported as it is.
+fn node_policy_failure_detail(error: &anyhow::Error) -> serde_json::Value {
+    use ryeos_node_runtime::node_policy::generation::{
+        NodePolicySectionsMissing, POLICY_GENERATION_RESET_COMMAND,
+    };
+    match error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<NodePolicySectionsMissing>())
+    {
+        Some(missing) => serde_json::json!({
+            "code": "node_policy_section_missing",
+            "sections": missing.sections,
+            "error": format!("{error:#}"),
+            "fix": format!(
+                "stop the daemon, then run: {POLICY_GENERATION_RESET_COMMAND}"
+            ),
+        }),
+        None => serde_json::json!({
+            "error": format!("{error:#}"),
+            "fix": "publish a complete valid `.ai/node/policies/` generation; then run `ryeos node doctor` again",
+        }),
+    }
+}
+
 fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolicyInspection> {
     use ryeos_core_tools::actions::doctor::{NA, OK};
     use ryeos_engine::isolation::IsolationMode;
@@ -4237,6 +4287,36 @@ mod tests {
         );
         let missing = durable_identity_check(&directory.path().join("absent"));
         assert_eq!(missing.status, ryeos_core_tools::actions::doctor::FAIL);
+    }
+
+    #[test]
+    fn doctor_names_the_cure_for_a_newly_required_policy_section() {
+        use ryeos_node_runtime::node_policy::generation::{
+            NodePolicySectionsMissing, POLICY_GENERATION_RESET_COMMAND,
+        };
+        let error = anyhow::Error::new(NodePolicySectionsMissing {
+            directory: PathBuf::from("/node/.ai/node/policies"),
+            sections: vec!["event_storage".to_owned()],
+        })
+        .context("load verified node policy generation");
+        let detail = node_policy_failure_detail(&error);
+        assert_eq!(detail["code"], "node_policy_section_missing");
+        assert_eq!(detail["sections"], serde_json::json!(["event_storage"]));
+        assert!(
+            detail["fix"]
+                .as_str()
+                .unwrap()
+                .contains(POLICY_GENERATION_RESET_COMMAND)
+        );
+
+        let other = node_policy_failure_detail(&anyhow::anyhow!("signature mismatch"));
+        assert!(other.get("code").is_none());
+        assert!(
+            other["error"]
+                .as_str()
+                .unwrap()
+                .contains("signature mismatch")
+        );
     }
 
     #[test]

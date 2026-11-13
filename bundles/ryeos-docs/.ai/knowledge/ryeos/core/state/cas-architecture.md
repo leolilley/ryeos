@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-23T01:51:04Z:3f31e3043cd3347deb7f902ba46de30b54dfe4d2089f120fb80b6d2302cff0cc:i82ZrR6Uw/A5ptYff7fq7R/ruB+Q/pqcY9l6hOUboxlkDIlbsdeLo5P80Kd1lOEgJt68v211DJ/mBP879c8VAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:19:00Z:61c768e8f7034fbbeeb48cbde63c94d31894d16592a582f87a642647662cdf7b:z12Qoi6JsCQZ0JWfFH89X5SKi/PpXjuK3jRzncFKaQQW6DrVbscpNgf3TSaMkxkIFKvf6y2x4Rnz9zAc9PN2BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -399,8 +399,8 @@ Events have three tiers that control CAS storage and SQLite indexing:
 | Tier | CAS Stored? | SQLite Indexed? | Survives Crash? | Use Case |
 |---|---|---|---|---|
 | `Durable` | Yes | Yes | Yes | State changes, artifacts, lifecycle |
-| `Journal` | Yes | No | Yes | Audit trail, tool calls |
-| `Ephemeral` | No | No | No | Token deltas, streaming logs |
+| `Journal` | Yes | No | Yes | Observations, foreach iteration results |
+| `Ephemeral` | No | No | No | Token deltas, streaming snapshots, reasoning |
 
 The SQLite `events` table has a CHECK constraint that only accepts
 `'durable'`:
@@ -413,9 +413,13 @@ Journal events are in CAS (recoverable on rebuild) but not queryable
 through the projection. Ephemeral events are transient — lost on process
 crash.
 
-Events are assigned tiers by the runtime: high-frequency progressive
-events (`token_delta`, `stream_snapshot`, `graph_foreach_iteration`)
-are journal-only; all lifecycle and audit events are durable.
+The daemon assigns tiers from the node's signed `event_storage` policy; a
+runtime sends no storage class. In every shipped profile, token, stream-snapshot and
+reasoning deltas (`token_delta`, `stream_snapshot`, `cognition_reasoning`) are
+ephemeral, because the turn-complete `cognition_out` keeps their content, and
+`observation` and `graph_foreach_iteration` are journal-only. Only these
+progressive events can leave the durable tier; all lifecycle and audit events
+are always durable. See [Event Braid](event-braid.md#durability-tiers).
 
 ## CAS-First Write Contract
 

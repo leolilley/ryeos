@@ -147,7 +147,6 @@ impl ryeos_runtime::callback::RuntimeCallbackAPI for AuthorityClient {
         _: &str,
         event_type: &str,
         _: Value,
-        _: &str,
     ) -> Result<Value, CallbackError> {
         self.event_types
             .lock()

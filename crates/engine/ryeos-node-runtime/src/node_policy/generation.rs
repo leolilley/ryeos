@@ -27,6 +27,43 @@ const MAX_POLICY_DEPTH: usize = 1;
 const OPERATOR_SECTIONS_FILE: &str = "_operator-sections.yaml";
 const OPERATOR_SECTIONS_KEY: &str = "sections";
 
+/// The installed generation lacks a section this release registers. Every
+/// registered section is mandatory and has no code fallback, so the node
+/// does not load. The cure is the stopped-node policy generation
+/// replacement: it takes each newly required section from this release's
+/// profile and carries operator-applied sections forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodePolicySectionsMissing {
+    pub directory: PathBuf,
+    pub sections: Vec<String>,
+}
+
+impl std::fmt::Display for NodePolicySectionsMissing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sections = self
+            .sections
+            .iter()
+            .map(|section| format!("`{section}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            formatter,
+            "the node policy generation at {} has no {sections} section, which this release \
+             requires; with the daemon stopped, replace the generation from this release's \
+             profile with `{POLICY_GENERATION_RESET_COMMAND}` (the new section comes from \
+             the profile, and operator-applied sections carry forward)",
+            self.directory.display(),
+        )
+    }
+}
+
+impl std::error::Error for NodePolicySectionsMissing {}
+
+/// The stopped-node command that replaces a policy generation from the
+/// release's profile, as an operator types it.
+pub const POLICY_GENERATION_RESET_COMMAND: &str = "ryeos node reset policy-generation \
+     --node-profile <profile> --host-class <host-class> --source <source> --confirm";
+
 /// Publisher-authored initial policy generation. `exact_bundles` is the exact
 /// bundle inventory selected by this node profile, not a minimum dependency
 /// list.
@@ -707,6 +744,19 @@ fn load_policy_generation_from_directory(
         policies,
         operator_sections,
     } = read_signed_policy_bodies(app_root, directory, trust_store)?;
+    let missing = policy_table
+        .sections()
+        .map(|section| section.name())
+        .filter(|name| !policies.contains_key(*name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(NodePolicySectionsMissing {
+            directory: directory.path().to_path_buf(),
+            sections: missing,
+        }
+        .into());
+    }
     validate_policy_generation(policy_table, policies, operator_sections, directory.path())
 }
 
@@ -1573,5 +1623,81 @@ mod tests {
         // the next replacement drop earlier, unknown operator changes.
         fixture.install(&policies, None);
         assert_eq!(apply().operator_sections(), None);
+    }
+
+    #[test]
+    fn a_generation_missing_a_registered_section_refuses_with_the_cure() {
+        let fixture = CarryFixture::new();
+        let section = crate::node_policy::sections::event_storage::SECTION_NAME;
+        let mut installed = fixture.profile.policies().clone();
+        installed.remove(section);
+        fixture.install(&installed, Some(&[]));
+        let error = load_policy_generation(fixture.root.path(), &fixture.trust, &fixture.table)
+            .expect_err("a generation without a registered section does not load");
+        let missing = error
+            .downcast_ref::<NodePolicySectionsMissing>()
+            .expect("the refusal is typed");
+        assert_eq!(missing.sections, vec![section.to_owned()]);
+        let message = error.to_string();
+        assert!(
+            message.contains(POLICY_GENERATION_RESET_COMMAND) && message.contains(section),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_replacement_takes_a_newly_required_section_from_the_profile() {
+        let fixture = CarryFixture::new();
+        let section = crate::node_policy::sections::event_storage::SECTION_NAME;
+        let mut installed = fixture.profile.policies().clone();
+        installed.remove(section);
+        installed.insert("ingest_ignore".into(), operator_ingest_ignore());
+
+        // Recorded generation: the operator's section carries forward and the
+        // new section comes from the profile, with or without naming it.
+        fixture.install(&installed, Some(&["ingest_ignore"]));
+        for choices in [
+            PolicyCarryChoices::default(),
+            PolicyCarryChoices {
+                reset: sections(&[section]),
+                ..Default::default()
+            },
+        ] {
+            let cut = fixture.cut(&choices).unwrap();
+            assert_eq!(cut.policies()[section], fixture.profile.policies()[section]);
+            assert_eq!(cut.policies()["ingest_ignore"], operator_ingest_ignore());
+            assert_eq!(cut.operator_sections(), Some(&sections(&["ingest_ignore"])));
+        }
+        // A section the installed generation lacks cannot be kept.
+        let refused = fixture
+            .cut(&PolicyCarryChoices {
+                keep: sections(&[section]),
+                ..Default::default()
+            })
+            .expect_err("an absent section cannot be kept")
+            .to_string();
+        assert!(refused.contains("section to keep"), "{refused}");
+
+        // Unrecorded generation: only sections it holds that differ from the
+        // profile need a choice; the new section is not one of them.
+        fixture.install(&installed, None);
+        let refused = format!(
+            "{:#}",
+            fixture
+                .cut(&PolicyCarryChoices::default())
+                .expect_err("the unrecorded difference still needs a choice")
+        );
+        assert!(
+            refused.contains("ingest_ignore") && !refused.contains(section),
+            "{refused}"
+        );
+        let cut = fixture
+            .cut(&PolicyCarryChoices {
+                keep: sections(&["ingest_ignore"]),
+                reset: sections(&[section]),
+            })
+            .unwrap();
+        assert_eq!(cut.policies()[section], fixture.profile.policies()[section]);
+        assert_eq!(cut.policies()["ingest_ignore"], operator_ingest_ignore());
     }
 }
