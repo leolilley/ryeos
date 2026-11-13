@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:57:19Z:6759d9cea373353b7fccee2228331b94008c2152f3362db70eceb0835315f003:VQ3AxEXS4nAg0bH/xG8qos1hd34v53kJIhlOL+iXuO5kaUKFX+ReyyMPRhHi+ROT4tlIlZjjHrJnQf1NUVBVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:57:23Z:8190b265a71f3ba733d6da38c54ba2fccfa3dfd8e78c22aca49b8f6439f9b162:yiJiAWug4iGouRbwkjf9cjHmEyvUP2FBP6J4X1FcaUxYY/sKirAMzrPP/7S29q3Zw6Y0mrzsUVHxBAZWLdd+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -57,6 +57,7 @@ call made by the node itself is signed by the node key alone.
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
 | `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
 | `ryeos remote thread-status` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads/{thread_id}` |
+| `ryeos remote admit --as-principal` | `ryeos.execute.service.remote/admit-principal` | none (the remote's token and the origin node's co-signature are the authority) | `POST /admission/claim` |
 | `ryeos remote delegate` | `ryeos.execute.service.remote/delegate` | none | none (the node stores the signed delegation) |
 | `ryeos remote delegation list` | `ryeos.execute.service.remote/delegation-list` | none | none |
 | `ryeos remote delegation revoke` | `ryeos.execute.service.remote/delegation-revoke` | `ryeos.execute.service.identity/revoke-delegation` (lent by the delegation; the remote operator may instead run `ryeos delegation tombstone`) | `POST /revoke-delegation` |
@@ -290,6 +291,13 @@ ryeos remote admit \
   --scopes ryeos.execute.service.objects/get \
   --scopes ryeos.execute.service.system/push-head
 ```
+
+With `--as-principal` the command admits the calling principal rather than
+this node. The CLI signs a v3 `remote_principal` claim with the caller's own
+key and sends it to the caller's node, which checks the signature is the
+caller's, co-signs it as the origin site and forwards it to the remote. The
+token must be a `remote_principal` token minted for this node's site. See
+"Getting admitted as a principal" in Remote Operations.
 
 `remote admit` binds `scopes` as a typed array, so pass one repeatable
 `--scopes` flag per exact scope. The target-side `admission-token` authoring

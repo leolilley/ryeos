@@ -261,6 +261,117 @@ pub(crate) async fn remote_delegate(
     .await
 }
 
+/// Claim an admission token on a remote. Without `--as-principal` the claim
+/// is the node's own, made by the node-owned `remote/admit` service. With it,
+/// the claim is a `remote_principal` claim signed here with the caller's own
+/// key and handed to the caller's node, which co-signs and forwards it.
+pub(crate) async fn remote_admit(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+    let remote = parameters
+        .get("remote")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let token = parameters
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| local("remote admit needs --token, the one-time admission token"))?;
+    let label = parameters.get("label").and_then(Value::as_str);
+    let mut scopes = delegation_scopes(parameters.get("scopes"))?;
+    let as_principal = match parameters.get("as_principal") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(text)) => text == "true",
+        Some(_) => return Err(local("--as-principal takes no value")),
+    };
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    if !as_principal {
+        let mut params = json!({ "remote": remote, "token": token, "scopes": scopes });
+        if let Some(label) = label {
+            params["label"] = json!(label);
+        }
+        return execute_service(
+            app_root,
+            &signer,
+            json!({
+                "item_ref": "service:remote/admit",
+                "ref_bindings": {},
+                "product_selections": [],
+                "parameters": params,
+            }),
+        )
+        .await;
+    }
+
+    // The claim is signed over sorted, unique scopes.
+    scopes.sort();
+    scopes.dedup();
+    let template = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:remote/admit-principal",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "remote": remote },
+        }),
+    )
+    .await?;
+    let facts = template
+        .get("template")
+        .ok_or_else(|| local("the node did not return admission facts"))?;
+    let field = |name: &str| {
+        facts
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| local(format!("admission facts omit {name}")))
+    };
+    let (audience, origin_site_id, public_key) = (
+        field("audience")?,
+        field("origin_site_id")?,
+        field("public_key")?,
+    );
+    let signed_at = lillux::time::unix_secs_now();
+    let mut nonce_bytes = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_bytes);
+    let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
+    let claim = ryeos_api::handlers::admission_claim::claim_string(
+        &audience,
+        &lillux::cas::sha256_hex(token.as_bytes()),
+        ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
+        &public_key,
+        Some(&origin_site_id),
+        &scopes,
+        signed_at,
+        &nonce,
+    );
+    let digest = lillux::cas::sha256_hex(claim.as_bytes());
+    let signature = signer.sign_bytes_base64(digest.as_bytes());
+    let mut params = json!({
+        "remote": remote,
+        "token": token,
+        "scopes": scopes,
+        "signed_at": signed_at,
+        "nonce": nonce,
+        "signature": signature,
+    });
+    if let Some(label) = label {
+        params["label"] = json!(label);
+    }
+    execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:remote/admit-principal",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": params,
+        }),
+    )
+    .await
+}
+
 /// `--scopes` is a comma-separated list, or a JSON array from a structured
 /// overlay.
 fn delegation_scopes(value: Option<&Value>) -> Result<Vec<String>, CliError> {

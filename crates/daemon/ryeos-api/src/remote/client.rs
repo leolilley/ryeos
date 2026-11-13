@@ -1920,6 +1920,12 @@ impl RemoteClient {
         self.unsigned_post("/admission/claim", &body).await
     }
 
+    /// POST /admission/claim with a claim body another party already signed
+    /// and co-signed. The caller owns every signature in the body.
+    pub async fn post_admission_claim(&self, body: &Value) -> Result<Value> {
+        self.unsigned_post("/admission/claim", body).await
+    }
+
     /// POST /revoke-delegation (authenticated): ask the remote to tombstone one
     /// delegation digest.
     pub async fn revoke_delegation(
@@ -2355,7 +2361,7 @@ fn admission_token_hash(token: &str) -> String {
     lillux::cas::sha256_hex(token.as_bytes())
 }
 
-fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
+pub(crate) fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     let mut normalized: Vec<String> = scopes
         .iter()
         .map(|s| s.trim().to_string())
