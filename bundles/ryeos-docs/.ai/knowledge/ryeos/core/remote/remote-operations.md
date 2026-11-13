@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-22T05:18:30Z:c9facce46c2322fef77081b27eb3582594766d5179a082ca9ec0ff3b29aa5fde:HQbHoH8HoRO0HGhZxYI7COZ0dJqgGwudYMvU9Yv2/Buw6I5YehgIaiNIUjNkNUcSsTEQFWmyWxadgrQuMMb6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:33:33Z:7e606be2d4e47edb3636de92e57d8c6b14db8ded9b93f1be5753724b27159cc7:f54M5xbno2HwCVM5hsy3zFNqUhYG4Odn1z2SdRX42l2uRjUVWwMyM3YCVpSta6LAghXd1tIqYwjD5yQig7HhAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -412,7 +412,7 @@ ryeos remote pull --remote production --blob-hashes def456 --output-dir /tmp/blo
 ```
 
 **Fail-closed**: aborts if any requested hash is missing. No partial fetches.
-Local capability and remote target scope: `ryeos.execute.service.objects/get`
+Local capability: `ryeos.execute.service.remote/pull`. Remote target scope: `ryeos.execute.service.objects/get`.
 
 ### Remote Bundle Install
 
