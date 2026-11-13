@@ -22,6 +22,7 @@
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
 //!   - `ryeos node reset policy-generation` — explicit node-policy schema cut
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
+//!   - `ryeos node host-access grant|revoke|list` — the operator's host-direct grants (a `host_access` policy apply)
 //!   - `ryeos node bundle-set update` — install one exact remotely published bundle set
 //!   - `ryeos node host setup` — one-time administrator-owned host association
 //!   - `ryeos node external-execution compose` — compose and install a node-signed external placement binding on a stopped node
@@ -201,6 +202,21 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "policy-apply"],
         summary: "Validate and install a node-owned policy",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "host-access", "grant"],
+        summary: "Grant one exact host-authority tool host-direct execution",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "host-access", "revoke"],
+        summary: "Remove one host_access grant",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "host-access", "list"],
+        summary: "List host_access grants and whether they match a project",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -384,6 +400,18 @@ pub async fn try_dispatch(
         }
         ("node", Some("policy-apply")) => {
             run_node_policy_apply_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("host-access")) if argv.get(2).map(String::as_str) == Some("grant") => {
+            crate::lifecycle_host_access::run_grant(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("host-access")) if argv.get(2).map(String::as_str) == Some("revoke") => {
+            crate::lifecycle_host_access::run_revoke(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("host-access")) if argv.get(2).map(String::as_str) == Some("list") => {
+            crate::lifecycle_host_access::run_list(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("bundle-set")) if argv.get(2).map(String::as_str) == Some("update") => {
@@ -2410,6 +2438,15 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
             serde_json::json!({ "note": "not initialized" }),
         ));
     }
+    if initialized {
+        checks.push(host_access_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "host_access",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
 
     // The wall clock the node issues external execution windows from. Always
     // reported; a node policy that requires a synchronized clock turns an
@@ -2999,6 +3036,95 @@ fn inspect_schedule_grant_generations(
     )
 }
 
+/// The operator's host-direct grants. Each one hands an item
+/// operator-equivalent authority, so the row lists them all. It warns when a
+/// grant allows process-group containment (a descendant that leaves the group
+/// survives cancel) and fails when a grant names an unpinned signer or the
+/// node's own key, which a valid generation never contains.
+fn host_access_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    use ryeos_node_runtime::node_policy::sections::host_access::{
+        HostAccessContainment, NodeHostAccessPolicy,
+    };
+    let fix = "ryeos node host-access grant|revoke|list (with --project to compare grants with an item's current bytes)";
+    let inspected = (|| -> Result<_> {
+        let snapshot = crate::node_descriptors::load_verified_policy_snapshot(app_root)?;
+        let policy = snapshot.require::<NodeHostAccessPolicy>()?.clone();
+        let lane = snapshot
+            .require::<ryeos_engine::isolation::IsolationPolicy>()?
+            .clone();
+        let trust_store = ryeos_engine::trust::TrustStore::load(
+            None,
+            &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
+        )?;
+        let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
+        Ok((policy, lane, trust_store, node_key))
+    })();
+    let (policy, lane, trust_store, node_key) = match inspected {
+        Ok(inspected) => inspected,
+        Err(error) => {
+            return check(
+                "host_access",
+                FAIL,
+                serde_json::json!({ "error": format!("{error:#}"), "fix": fix }),
+            );
+        }
+    };
+    let mut status = OK;
+    let mut findings = Vec::new();
+    let grants = policy
+        .grants
+        .iter()
+        .map(|grant| {
+            let signer = trust_store.get(&grant.signer);
+            if grant.signer == node_key {
+                status = FAIL;
+                findings.push(format!(
+                    "grant `{}` names the node's own key as signer",
+                    grant.id
+                ));
+            } else if signer.is_none() {
+                status = FAIL;
+                findings.push(format!(
+                    "grant `{}` names signer {}, which is not pinned",
+                    grant.id, grant.signer
+                ));
+            } else if grant.containment == HostAccessContainment::GroupAllowed && status == OK {
+                status = WARN;
+            }
+            if grant.containment == HostAccessContainment::GroupAllowed {
+                findings.push(format!(
+                    "grant `{}` allows group containment: descendants that leave the process group survive cancel",
+                    grant.id
+                ));
+            }
+            serde_json::json!({
+                "id": grant.id,
+                "item": grant.item,
+                "signer": grant.signer,
+                "signer_label": signer.and_then(|signer| signer.label.clone()),
+                "source_closure": grant.source_closure,
+                "runtime": grant.runtime,
+                "origins": grant.origins,
+                "host_env": grant.host_env,
+                "containment": grant.containment,
+            })
+        })
+        .collect::<Vec<_>>();
+    check(
+        "host_access",
+        status,
+        serde_json::json!({
+            "host_class": lane.host_class,
+            "host_direct": lane.host_direct,
+            "grants": grants,
+            "findings": findings,
+            "note": "each grant runs its item on the host, unconfined, with the operator's authority",
+            "fix": fix,
+        }),
+    )
+}
+
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -3528,6 +3654,7 @@ fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolic
             "policy": runtime.source(),
             "version": runtime.version(),
             "mode": runtime.mode(),
+            "host_direct": inspection.host_direct,
             "policy_digest": runtime.digest(),
             "backend": inspection.backend,
             "backend_status": inspection.backend.status,
