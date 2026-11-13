@@ -1311,30 +1311,63 @@ async fn handle_finalize(
     // it while this authenticated callback still blocks the managed runtime;
     // terminal state then commits the exact snapshot identity in the same
     // transition. Discard-only and borrowed executions return `None`.
-    let pending_project_result =
-        ryeos_executor::execution::prepare_managed_runtime_terminal_project_result(
-            state,
-            capability,
-            &completion.status,
-        )
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                thread_id = %params.thread_id,
-                launch_owner,
-                item_ref = capability.item_ref.as_deref().unwrap_or(""),
-                effective_definition_digest = capability
-                    .effective_definition_digest
-                    .as_deref()
-                    .unwrap_or(""),
-                error = %format!("{error:#}"),
-                "failed to prepare managed runtime terminal project result"
-            );
-            error.context("prepare managed runtime terminal project result")
-        })?;
+    let prepared = ryeos_executor::execution::prepare_managed_runtime_terminal_project_result(
+        state,
+        capability,
+        &completion.status,
+    )
+    .await;
+    // A fold-back HEAD advance refused before any write is a terminal fact,
+    // not a callback failure: the thread fails `head_advance_not_applied`
+    // with the retained generation, and the managed envelope is rebuilt from
+    // that failure so a parent following this child never resumes on the
+    // runtime's success.
+    let (completion, managed_envelope, pending_project_result, not_applied_generation) =
+        match prepared {
+            Ok(pending) => (completion, managed_envelope, pending, None),
+            Err(error) => match ryeos_executor::execution::HeadAdvanceNotApplied::find(&error) {
+                Some(not_applied) => {
+                    tracing::warn!(
+                        thread_id = %params.thread_id,
+                        launch_owner,
+                        error = %not_applied,
+                        "managed runtime HEAD advance was not applied; failing with the retained generation"
+                    );
+                    let failed = not_applied.failed_completion(&completion);
+                    let envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+                        &params.thread_id,
+                        failed.status.as_str(),
+                        None,
+                        failed.error.as_ref(),
+                        raw_cost.as_ref(),
+                        &serde_json::Value::Null,
+                        &params.warnings,
+                    );
+                    (failed, envelope, None, Some(not_applied.retained.clone()))
+                }
+                None => {
+                    tracing::error!(
+                        thread_id = %params.thread_id,
+                        launch_owner,
+                        item_ref = capability.item_ref.as_deref().unwrap_or(""),
+                        effective_definition_digest = capability
+                            .effective_definition_digest
+                            .as_deref()
+                            .unwrap_or(""),
+                        error = %format!("{error:#}"),
+                        "failed to prepare managed runtime terminal project result"
+                    );
+                    return Err(error.context("prepare managed runtime terminal project result"));
+                }
+            },
+        };
+    // The retained generation joins the failed terminal, as it does for any
+    // post-exit sealed result, so it stays reachable from thread history
+    // after the workspace journal closes.
     let result_generation = pending_project_result
         .as_ref()
-        .map(|pending| pending.generation());
+        .map(|pending| pending.generation())
+        .or(not_applied_generation.as_ref());
     let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
         launch_owner,

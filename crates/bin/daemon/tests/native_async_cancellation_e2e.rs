@@ -12,8 +12,9 @@
 //!     → daemon's `resolve_shutdown_action` returns
 //!       `ShutdownAction::Graceful(3s)`
 //!
-//! Plus the rich form (`graceful` / `hard`) and the explicit
-//! `false`-rejection from the engine handler.
+//! Plus the rich form (`graceful` / `hard`), the explicit
+//! `false`-rejection from the engine handler, and the execution-config stop
+//! policy every subprocess without `native_async` records.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -91,6 +92,38 @@ description: "native_async demo"
     project_dir
 }
 
+/// A tool routed through a local runtime that declares no `native_async`
+/// block: an ordinary subprocess whose stop policy comes from the signed
+/// execution config.
+fn synth_project_with_plain_tool() -> PathBuf {
+    let project_dir = unique_project_dir("plain");
+    let tools_dir = project_dir.join(".ai").join("tools");
+    let runtime_dir = tools_dir.join("local_plain_runtime");
+    fs::create_dir_all(&runtime_dir).unwrap();
+    fs::write(
+        runtime_dir.join("runtime.yaml"),
+        r#"version: "1.0.0"
+executor_id: "@subprocess"
+category: local_plain_runtime
+description: "test runtime without native_async"
+
+config:
+  command: "/bin/true"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        tools_dir.join("plain_demo.yaml"),
+        r#"version: "1.0.0"
+executor_id: "tool:local_plain_runtime/runtime"
+category: ""
+description: "plain demo"
+"#,
+    )
+    .unwrap();
+    project_dir
+}
+
 fn build_engine_against_bundle() -> Engine {
     let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
@@ -138,11 +171,22 @@ fn plan_ctx(project_dir: &Path) -> PlanContext {
 fn build_and_extract_cancellation(
     native_async_yaml: &str,
 ) -> Result<Option<CancellationMode>, String> {
-    let engine = build_engine_against_bundle();
     let project_dir = synth_project_with_async_tool(native_async_yaml);
+    Ok(build_and_extract_spec(project_dir, "tool:async_demo")?
+        .execution
+        .native_async
+        .as_ref()
+        .map(|a| a.cancellation_mode))
+}
+
+fn build_and_extract_spec(
+    project_dir: PathBuf,
+    item_ref: &str,
+) -> Result<ryeos_engine::contracts::PlanSubprocessSpec, String> {
+    let engine = build_engine_against_bundle();
     let ctx = plan_ctx(&project_dir);
 
-    let item = CanonicalRef::parse("tool:async_demo").map_err(|e| e.to_string())?;
+    let item = CanonicalRef::parse(item_ref).map_err(|e| e.to_string())?;
     let resolved = engine.resolve(&ctx, &item).map_err(|e| e.to_string())?;
     let verified = engine.verify(&ctx, resolved).map_err(|e| e.to_string())?;
     let plan = engine
@@ -158,20 +202,44 @@ fn build_and_extract_cancellation(
 
     let _ = fs::remove_dir_all(&project_dir);
 
-    let spec = plan
-        .nodes
+    plan.nodes
         .iter()
         .find_map(|n| match n {
             PlanNode::DispatchSubprocess { spec, .. } => Some(spec.as_ref().clone()),
             _ => None,
         })
-        .ok_or_else(|| "no DispatchSubprocess node in plan".to_string())?;
+        .ok_or_else(|| "no DispatchSubprocess node in plan".to_string())
+}
 
-    Ok(spec
-        .execution
-        .native_async
-        .as_ref()
-        .map(|a| a.cancellation_mode))
+#[test]
+fn subprocess_without_native_async_records_execution_config_stop_policy() {
+    // No `native_async` block: the stop policy comes from the signed core
+    // execution config (`cancellation_mode: graceful`,
+    // `cancellation_grace_secs: 5`) and reaches launch metadata, so the daemon
+    // never stops this process under an undeclared grace.
+    let spec = build_and_extract_spec(synth_project_with_plain_tool(), "tool:plain_demo")
+        .expect("plan builds");
+    assert!(spec.execution.native_async.is_none());
+    assert_eq!(
+        spec.execution.cancellation_mode,
+        Some(CancellationMode::Graceful { grace_secs: 5 })
+    );
+    let metadata = RuntimeLaunchMetadata::from_spec(&spec);
+    assert_eq!(
+        metadata.cancellation_mode,
+        Some(CancellationMode::Graceful { grace_secs: 5 })
+    );
+}
+
+#[test]
+fn native_async_declaration_leaves_no_execution_config_stop_policy() {
+    let spec = build_and_extract_spec(
+        synth_project_with_async_tool(r#"{"cancel_mode": "hard"}"#),
+        "tool:async_demo",
+    )
+    .expect("plan builds");
+    assert!(spec.execution.cancellation_mode.is_none());
+    assert_eq!(spec.execution.stop_policy(), Some(CancellationMode::Hard));
 }
 
 #[test]

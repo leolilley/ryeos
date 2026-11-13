@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:46:03Z:fd9d81eefaa2d78a14a4a1d8666e0f3e4dc2f855a22000a9f9abe3b8ac3c6394:BC9FK23Unh/KBVlasBfve0U3+Mn+fZTqwrHl7OMZj687qt03JwM6Vz+5al/gAK6sBC/8ix2jSo3bF8bu3y0KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:48:58Z:12043046ebec3c117229181f2855d2cc653b9b2b2f957e0ce3f803cf83425f1e:D1fiW84xJHlhsyYOxHy3KB/Z3AmHHhnOHaenUh5/9iD1diqakBLJ2VyL9ublaHFS+HnX1J93RJwQX2AHKpxvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -276,6 +276,28 @@ restart the node.
 `--pin-project` remains the explicit complete-project snapshot/COW workflow. It
 does not control ordinary admitted source or external-content delivery, and is
 not required merely to run a definition that already retains those exact bytes.
+A pinned execution whose terminal publication advances HEAD freezes its result
+generation, binds it to the workspace journal, and only then compare-and-swaps
+HEAD from the admitted base. Three outcomes follow: HEAD advances (published);
+the CAS is refused before any write, most often because HEAD moved off the
+base, and the thread fails with outcome `head_advance_not_applied` in every
+lane (direct item, managed runtime callback, and a managed runtime that exited
+before its callback), its error naming the reason, expected and observed HEAD,
+the runtime's reported status where there is one, and the retained
+`retained_snapshot_hash` / `retained_output_capture_hash`. The retained
+generation joins the failed terminal, so it stays reachable after the
+workspace closes, and a parent following the thread receives a failure
+envelope; or fold-back itself breaks, which stays `foldback_failed`. Recovery
+never publishes. A run interrupted after its freeze has the generation bound by
+recovery; if it cannot resume it fails `head_advance_not_applied` with reason
+`interrupted` (expected and, if readable, observed HEAD and the retained
+hashes) and the generation joins that failed terminal, while a resumable run
+relaunches and its next finish takes the normal path. If HEAD already names
+the recovered generation, the advance applied before the interruption: the
+thread fails `head_advanced_before_interruption`, recording the generation,
+the new HEAD and the base it advanced from, with the generation joined to the
+terminal, since the run never confirmed its own completion. A not-applied result is never retried or
+merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
 publication. Their writes are discarded at process cleanup and never fold back
 to the live project. Durable outputs use structured results or explicit
@@ -731,7 +753,20 @@ daemon exit, the exclusive state lock proves that any still-live, exactly
 matched attachment belongs to the previous daemon; startup kills that group
 before recovery launches a replacement. A same-boot attachment whose leader
 birth identity can no longer be proven is quarantined rather than cleared or
-signalled.
+signalled. The quarantine is recorded on the thread's runtime row
+(`process_quarantine`: reason `same_boot_group_present` or
+`boot_comparison_unavailable`, first seen, last checked). `thread get` shows it
+under `runtime`, `ryeos node doctor` lists it as a `process_quarantine`
+finding, and it clears with the identity once a later recovery pass proves the
+group gone.
+
+A graceful stop sends SIGTERM to the exact target only, never to its process
+group or scope. The retained launcher stays alive to publish the real exit, and
+the target owns cooperative cancellation of its own children: it forwards
+SIGTERM or stops them at its own boundary. The node's guarantee is the SIGKILL
+of the whole pinned group (or the kernel kill of the scope) at the grace
+deadline, which reaches every descendant the target did not stop. A hard stop
+skips SIGTERM and kills the group at once.
 
 The native pre-exec hold removes the former local spawn-to-attachment crash
 window. Parent death before durable attachment kills the still-held direct

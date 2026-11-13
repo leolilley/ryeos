@@ -6379,6 +6379,9 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
             _ = tick.tick() => {}
+            // A stop left for recovery to settle wakes the pass at once
+            // instead of waiting out the period.
+            _ = ryeos_app::recovery_nudge::nudged() => {}
         }
 
         let pass_result = run_periodic_recovery_pass(&state, &cleanup_backoff).await;
@@ -6598,6 +6601,7 @@ async fn run_periodic_recovery_pass(
     let active = reconcile::reconcile_live_threads(state)
         .await
         .context("periodic active-thread reconcile")?;
+    ryeos_api::handlers::dedicated_sessions::mirror_stale_publication_report(state);
     let mut targets = active.active_thread_ids;
     dispatch_resume_intents(state, active.resume_intents)
         .await
@@ -9368,10 +9372,12 @@ mod shutdown_mapping_tests {
     }
 
     #[test]
-    fn no_mode_falls_back_to_three_second_default() {
+    fn no_mode_uses_named_node_fallback() {
         assert_eq!(
             resolve_shutdown_action(None),
-            ShutdownAction::Graceful(Duration::from_secs(3))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
         );
     }
 

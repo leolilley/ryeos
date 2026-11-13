@@ -30,8 +30,8 @@ pub use runtime_db::{
     DedicatedSessionRecord, HookDispatchReservation, LaunchPlanningAlreadyReserved,
     LaunchPlanningCapacityExceeded, LaunchPlanningRecord, NewCommandRecord, NewCredentialProfile,
     NewCredentialProfileReservation, NewDedicatedSession, NewDedicatedSessionApproval,
-    NewDedicatedSessionCommand, NewHookDispatch, ObservationBatchReservation, RuntimeInfo,
-    StopIntent, WorkerProcessRecord,
+    NewDedicatedSessionCommand, NewHookDispatch, ObservationBatchReservation, ProcessQuarantine,
+    ProcessQuarantineReason, QuarantinedProcess, RuntimeInfo, StopIntent, WorkerProcessRecord,
 };
 
 mod live_destination_join;

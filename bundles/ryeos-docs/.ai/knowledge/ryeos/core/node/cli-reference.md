@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:48:41Z:d5017d50043bbb8f72e630729bbd62b96c663b9058f57036c4013a9820088db8:Ls/xmglDYCQq2FqAFsREZZANXG2jZ+t1cgDvWyBZgNPn6Jw/5QxinsvkbOY6FkIPbfXskDI9uc23HPogL45xDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:48:58Z:1ab130852f9b5f70f319125be711f6bcbe182bfe9056a91fff3e183df63332a6:gbWaRDD43paGDSMvKC9xBWLKtoF40CY38GoD7KMnbo46u5umc4PeCWDEO1tBVVUelu+uf+jbaijVRmJijghNAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -177,7 +177,12 @@ Runs the offline node checklist. Its isolation row uses the production strict
 loader: disabled is a healthy inactive opt-out, while enforced mode resolves
 and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
-[Execution Isolation](execution-isolation.md).
+[Execution Isolation](execution-isolation.md). Its `process_quarantine` row
+warns about threads whose attached process group recovery cannot prove gone,
+from the report the daemon writes after each recovery pass. Its
+`stale_publication` row lists `publish_ready` hosted candidates whose base HEAD
+has moved (session, candidate, base and current HEAD); each settles to
+`base_superseded` on its owner's next publish.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:31Z:5579875b4a42e4f24a6336e4464ecaa7a1fec3d695f8cb2064cf73a880324178:sDHhcOv+oMoBt4EJs+7Ugz7+VtB2jfH5eTr460OnOKcoN/1pazjllgF+lp949HuWRFwzmGGEv1OUgZk4SjPPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:45:28Z:b33a6bb389ded9ee2565ce2e6a19e57ca17fca6842c7a16837349d11dfdc941c:zQoTKktGu/kwWG2+7aaiNSSJzqfmylPE1U2UqFdm8LK3l9ybuwkEM6NOsqd+rma01J4a1T887FchpG+o3MJqDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -126,6 +126,10 @@ Cancel a running thread. Authenticated.
 
 - **Source:** thread cancellation control surface
 - **Response:** cancellation confirmation or error
+- **`409 stop_pending_settlement`:** SIGKILL reached the thread's process
+  group, but the group was still present at the 5-second settle bound. The
+  stop request is durable; recovery is woken at once and finalizes the thread
+  once the group is gone. Poll the thread rather than retrying the cancel.
 
 ## Object and CAS Routes
 

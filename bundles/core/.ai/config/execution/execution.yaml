@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-02T10:46:51Z:e8f32a0020be0282a4b4dec6e7501ccd21858c2309de7a89b51f9f778fb5cbd8:WijsIjnbUphGapuY6LYwKtBEVXKMeGw2deBc2uUFmg2oiRAb8rx8k974LSokpyQnFlY548uJAzlU6qd7FkM5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T01:36:23Z:6dfb62b561313832f77a67dec4207a8a7774b31f6ba9c05bafc456f5426dd03a:QNGSgJ2JiT7UaY1wxoPsRcPF3bU7b7AIqZopCNeYQqedtEKfQoSMjah0DPXYnMRjkwMZJWnR1yu5Wjh571k6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Execution config — system defaults
 # Override per-project: .ai/config/execution/execution.yaml
 category: "execution"
@@ -10,12 +10,12 @@ defaults:
   timeout: 86400
   max_steps: 100
   max_concurrency: 10
-  # Cancellation policy applied when the daemon kills a running tool.
-  # Read by `NativeAsyncHandler` when the tool declares
-  # `native_async: true`. Tools that supply the rich form
-  # (`native_async: { cancel_mode, graceful_shutdown_secs }`) override
-  # these per-tool. Modes: "graceful" (SIGTERM, wait, SIGKILL) | "hard"
-  # (SIGKILL immediately).
+  # Stop policy for every managed launch (runtimes, tools, workers), recorded
+  # in its launch metadata and applied when the daemon stops it. Items that
+  # supply the rich `native_async: { cancel_mode, graceful_shutdown_secs }`
+  # form override these per item. Modes: "graceful" (SIGTERM to the target,
+  # wait, then SIGKILL the group) | "hard" (SIGKILL immediately). The node
+  # caps the grace at 5 seconds.
   cancellation_mode: "graceful"
   cancellation_grace_secs: 5
 
