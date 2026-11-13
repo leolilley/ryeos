@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T09:57:23Z:d33d204e977ca69456d007dcbe437310e127704a608584e90dc6791be3e33ee8:5z8aojotqAtfUNhqTR2Ht3w9qhM2D4p4fREvDa6c1b5vKNq3vxAtDlbeB4ZadUxz0iz92C2LZKFBjH7LMVfcAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:49:28Z:7603e3e4d4839f10213640db5d3d7fed0224cfc28a15a39a96fadc6a09a80539:/EK8rCcTcbd0hRtPVd61oo1tICpNP8cMnyahx3HnCa0QNCbqlJAXKfw2alpApJRN461UtKuG1QO2JZXw0+jyAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.pin
 required_caps: ["ryeos.execute.service.remote/pin"]

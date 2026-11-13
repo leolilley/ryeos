@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T14:12:02Z:440d77866cc7e45919a4fbb1254d60cacb244755e70ffe0cbd866608ce624874:gT+09vtmphCk56Vusi6CYawRZjIdLo/43OHU3ye+ZfsxetaqI4SpNxQzL6Jnie86zOcl6eFHswphXUUq66cNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:49:28Z:440d77866cc7e45919a4fbb1254d60cacb244755e70ffe0cbd866608ce624874:gT+09vtmphCk56Vusi6CYawRZjIdLo/43OHU3ye+ZfsxetaqI4SpNxQzL6Jnie86zOcl6eFHswphXUUq66cNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core

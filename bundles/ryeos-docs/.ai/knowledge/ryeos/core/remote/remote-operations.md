@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:13:17Z:dd29c8401900489ad96e67910a9b4362f86f8a0c3922f8f61da150c1b6722f53:RNhTanBv3yUdzHLv24mHkosSZx2a8l1eQyZ405Uw3gXbmIuc3edK7m6K76oFLeNFiTfr+445TuorURjhgf5KCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:49:28Z:5ea63f41b42509ef548b04b545f3f3b26191c5026ccf5c3a7fc513f3fa5b4f00:Kli6SyfiStiuIOgg/3LkJQRGucAwHAhmm9lan6kiN9KXb5QPTcvcgsC42o9Pi0HEvY6kfn8XpvdPAMhGRiqlAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]

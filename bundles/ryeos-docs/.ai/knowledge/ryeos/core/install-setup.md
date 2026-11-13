@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T14:12:02Z:8f8d286a1219691bec4329149d1c27d7107c36c75b14a9705601a633f488758f:fzmKmQ+vABuLujV8ZJl2dRwZ53gBwijZWE/JS3hIEQP8PexeySyleXd6OfUc9NZlfSdBzIJXoAdo6nus9lhMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:49:28Z:8f8d286a1219691bec4329149d1c27d7107c36c75b14a9705601a633f488758f:fzmKmQ+vABuLujV8ZJl2dRwZ53gBwijZWE/JS3hIEQP8PexeySyleXd6OfUc9NZlfSdBzIJXoAdo6nus9lhMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
