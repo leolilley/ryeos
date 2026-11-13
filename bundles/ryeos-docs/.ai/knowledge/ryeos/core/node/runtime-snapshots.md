@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T10:01:44Z:4d3401dca28e4f3dc51c6fca2ed7b2f2d1bad710a4863f728fdf52f5da4e44b4:zAuSFdryUIorIwVgrsD2weSx1liyvnj+vIOxVKna03u6uwzWddC5Mq0ZGtrQcEkJNrqhZzS+YK4HmhCRNyoABg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:39:36Z:4292514865b17ed910b493a3c8d951266e552fb6cfabc0a9b71f387021e4dd40:2L7YaBrsJuxYpC2opT9m8lWpHvqYKIkNC3ZkEFn9Aq20C3jOCxw7ATelTp8VQEWx7iHkOUuBu0aCOOR+i05ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, external-execution, runtime-snapshot, qualification, recompose, operator]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Operator procedure for runtime snapshot bindings: the three bindings a
   snapshot needs, and how to bring them back in line with the installed
@@ -34,24 +34,16 @@ executable (`ryeos init`, `ryeos node reset policy-generation`,
 The next produce, qualify or launch through them would be refused. Bring them
 back in line in this order:
 
-1. **Settle open work first.** Terminate every open qualification occurrence
-   and bootstrap source made under the bindings you are about to recompose,
-   and let in-flight snapshot operations finish
-   (`ryeos external-content terminate-runtime-snapshot-qualification`,
-   `ryeos external-content terminate-bootstrap-runtime-source`). Their
-   termination looks up the binding they were made under by digest; once it is
-   recomposed, that lookup fails and the occurrence is left to its provider
-   timeout. Recompose does not check this for you yet.
-2. **Doctor.** With the node stopped, run `ryeos node doctor` and read the
+1. **Doctor.** With the node stopped, run `ryeos node doctor` and read the
    `external_bindings` findings: each names the binding, the pinned field and
    what is installed.
-3. **Derive consumer selections, if any.** When the qualification binding
+2. **Derive consumer selections, if any.** When the qualification binding
    selects consumer verifiers, start the node, run
    `ryeos external-content derive-consumer-qualification-context`, save the
    response's `consumer_verifier_selections` map (scenario id to selection) as
    a JSON file, and stop the node again. The scenario source
    digest is only known to a running node.
-4. **Recompose.**
+3. **Recompose.**
 
    ```bash
    ryeos node external-execution recompose --dry-run
@@ -64,13 +56,52 @@ back in line in this order:
    typed and publishes nothing; `recompose_settings_schema_changed` means the
    adapter's settings changed shape and the binding must be composed again
    with `compose`.
-5. **Start** the node and run `ryeos node doctor` again: the
-   `external_bindings` row is clean.
-6. **Produce and qualify** a new snapshot. A snapshot produced under the old
+4. **Start** the node and run `ryeos node doctor` again: the
+   `external_bindings` row is clean. Work opened before the recompose keeps
+   the generation it was made under (see below) and shows in the
+   `external_capacity` row until it settles.
+5. **Produce and qualify** a new snapshot. A snapshot produced under the old
    producer cannot be qualified under the new one; the qualification-session
    binding keeps naming its snapshot until it is composed again with
    `qualification-session-compose --snapshot-id <new>`. Recompose never picks
    a snapshot.
+
+## Open work keeps its generation
+
+Recompose never waits on open work. Every qualification occurrence and
+bootstrap source retains, from the moment it is reserved, the exact generation
+it was made under: the signed production (and qualification) binding and a
+protected copy of that producer's lifecycle artifacts (adapter, supervisor,
+launcher, restoration verifier, provider and snapshot specs). Terminating
+and cleaning up that work resolve through the retained generation,
+never through what node config or the installed bundles pin now, so an
+occurrence started before a recompose is still terminated with the adapter
+that created it (`ryeos external-content terminate-runtime-snapshot-qualification`,
+and the daemon's recovery pass for bootstrap sources). External placements
+keep their own retained binding generation the same way and are cleaned up
+by the exact adapter generation, or by the one installed successor that reads
+the same settings schema.
+
+A retained generation is released when nothing open references it:
+
+- a qualification once its termination is terminal, or, if it never bound an
+  occurrence, once its attempt deadline plus its maximum lifetime has passed;
+- a bootstrap source once its termination is terminal and no staged snapshot
+  is still being created from it.
+
+The release happens as the work settles, in the daemon's normal path: the
+artifact copy stops being a CAS root, and the next scheduled maintenance GC
+reclaims the bytes no other open operation still uses. The signed journal rows
+themselves stay, like every other runtime journal row. Nothing needs an
+operator command, and a restart changes nothing: what is retained is derived
+from the journal each time.
+
+While a superseded generation is retained, `ryeos node doctor` (running node)
+lists it in the `external_capacity` row under `retained_generations`, with
+its binding, the retained and current digests, and each operation still
+referencing it. A running qualification occurrence makes the row fail until
+it is terminated, since nothing on the node ends it otherwise; a bootstrap
+source warns while recovery settles it.
 
 ## Credentials
 

@@ -175,15 +175,13 @@ pub(crate) fn admit_signed_qualification(
     let document: QualificationDocument =
         serde_json::from_value(body).context("invalid runtime snapshot qualification binding")?;
     document.validate()?;
-    let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
-        "domain": "ryeos.runtime-snapshot-qualification-binding.v1",
-        "id": id,
-        "signer": identity.fingerprint(),
-        "signed_source": lillux::sha256_hex(signed.as_bytes()),
-    }))?;
+    let digest = super::binding_digest(id, identity.fingerprint(), signed)?;
     Ok(super::InstalledRuntimeSnapshotQualificationBinding {
         id: id.to_owned(),
         document,
+        signer: identity.fingerprint().to_owned(),
+        signer_verifying_key: identity.verifying_key().to_bytes(),
+        signed_source: signed.into(),
         digest,
     })
 }

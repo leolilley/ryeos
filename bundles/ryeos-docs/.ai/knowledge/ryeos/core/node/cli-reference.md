@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:21:48Z:6573d5cf33f37842a2d9ccd980762c9bafa7c8f991a827d4eb2330cac67f6ef9:hBLj8il9jcobpJOsApS7NFxZwxDpofgXXSulhepWSh9CDfxs6Ri3+OOOg0wL/Og54JJHKyGn0UXwdjD9ZyZnCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:39:36Z:f004ecfaabd92af626a271663bb6194cd547e49fbbb75da2b9a6bf2808ef3c37:HAN662DmjIvilJmB41P953Sh+M1isCAhyN0Qy18yJDeOZCszJfeDj2IN0RaU1J+97TFAaqaJHX2Xm7nBOB7RBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -308,8 +308,11 @@ The `external_capacity` and `credential_profiles` rows ask the running daemon
 external capacity or a credential-profile lock. With the node stopped both are
 `n/a` with `state: not_checked`; a daemon that does not answer makes them warn
 `not_checked` with the error. `external_capacity` covers unsettled
-allocations and open Q local starts, `credential_profiles` every held profile
-lock with the session, Q start or continuation reservation that holds it.
+allocations, open Q local starts and `retained_generations` (runtime snapshot
+binding generations a recompose superseded while a qualification occurrence or
+bootstrap source made under them is still open, each with the operations that
+reference it), `credential_profiles` every held profile lock with the session,
+Q start or continuation reservation that holds it.
 Every listed row carries an `attention` and a `fix`:
 
 | Attention | Meaning | Row status |
@@ -592,9 +595,10 @@ A rerun converges: a re-pin that changes nothing publishes nothing. A
 `binding_credential_absent` finding is listed, not recomposed. `--dry-run`
 prints what would be recomposed. Hosted controllers accept
 `node.external-execution.recompose` from their origin operator as a signed
-offline operation, as they do `compose`. Terminate open qualification
-occurrences and bootstrap sources before recomposing the bindings they were
-made under; see [Runtime Snapshots](runtime-snapshots.md).
+offline operation, as they do `compose`. Recompose never waits on open work:
+a qualification occurrence or bootstrap source keeps the generation it was
+made under and is terminated through it; see
+[Runtime Snapshots](runtime-snapshots.md).
 
 ### `ryeos node external-execution provision-credential`
 
@@ -680,7 +684,8 @@ Each change appends a node-signed, hash-chained key event under
 ## Core daemon-backed verbs
 
 - `ryeos external-execution status` — list unsettled external allocations, open
-  Q local starts and held credential-profile locks, each with its owner,
+  Q local starts, superseded snapshot binding generations open work still
+  references, and held credential-profile locks, each with its owner,
   attention and fix. Local configured operator only; the doctor's
   `external_capacity` and `credential_profiles` rows read it.
 - `ryeos execute <ref> [params...]` — execute an item by canonical ref.
