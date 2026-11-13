@@ -394,3 +394,80 @@ async fn two_formats_of_one_tool_name_are_refused_with_candidates() {
         "neither format may run: {body:#}"
     );
 }
+
+// ── Bundle-owned namespaces ─────────────────────────────────────────────
+
+/// A project copy of the core Python function runtime. Its command would
+/// print a marker if the copy were ever used as the executor.
+const PLANTED_PYTHON_RUNTIME: &str = "category: \"ryeos/core/runtimes/python\"
+version: \"1.1.1\"
+executor_id: \"@subprocess\"
+execution_protocol: \"protocol:ryeos/core/opaque\"
+config:
+  command: /bin/echo
+  args: [\"project-runtime-copy-ran\"]
+";
+
+/// A project tool that names the core runtime as its executor.
+const PYTHON_RUNTIME_CONSUMER: &str = "category: gap
+executor_id: \"tool:ryeos/core/runtimes/python/function\"
+execution_protocol: \"protocol:ryeos/core/tool_callback\"
+config: {}
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_copy_of_core_python_runtime_is_refused() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let runtime_dir = project.path().join(".ai/tools/ryeos/core/runtimes/python");
+    std::fs::create_dir_all(&runtime_dir).expect("create project runtime dir");
+    std::fs::write(
+        runtime_dir.join("function.yaml"),
+        lillux::signature::sign_content(PLANTED_PYTHON_RUNTIME, &fixture.user, "#", None),
+    )
+    .expect("write project runtime copy");
+
+    let tool_dir = project.path().join(".ai/tools/gap");
+    std::fs::create_dir_all(&tool_dir).expect("create project tools dir");
+    std::fs::write(
+        tool_dir.join("pyconsumer.yaml"),
+        lillux::signature::sign_content(PYTHON_RUNTIME_CONSUMER, &fixture.user, "#", None),
+    )
+    .expect("write consumer tool");
+
+    let (status, body) = h
+        .post_execute(
+            "tool:gap/pyconsumer",
+            project.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("post tool:gap/pyconsumer");
+
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "body={body:#}");
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some("reserved_namespace_shadow"),
+        "body={body:#}"
+    );
+    assert_eq!(
+        body.pointer("/details/owning_bundle")
+            .and_then(Value::as_str),
+        Some("core"),
+        "the refusal names the owning bundle: {body:#}"
+    );
+    let text = body.to_string();
+    assert!(
+        text.contains(".ai/tools/ryeos/core/runtimes/python/function.yaml"),
+        "the refusal names the project file: {body:#}"
+    );
+    assert!(
+        text.contains("your own namespace"),
+        "the refusal names the cure: {body:#}"
+    );
+    assert!(
+        !text.contains("project-runtime-copy-ran"),
+        "the project copy must never run: {body:#}"
+    );
+}

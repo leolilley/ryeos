@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:902ab4a49a3155a6b2575101f269762a9bfb871e5bac62432cafa519bf934907:2Qo1bvcz66AQWFMW/KYctisfX82VBvOwywl+0qyDQJamKKq6miRE/sJPHafnvnbo9tyljUmkn6Qa9sZlkU4kBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:44:36Z:143738cd3954c9f07486142bb8ed966d4dc96382a370045b4c094040f613450c:4lwVcJWdelOu5Xa12DvkYvfpwpdQjIpF1Ag6RS2NNsAcDe99i2giJYThzca8SXn/R/7HXW8/Fkm55OyPtL+7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -134,7 +134,46 @@ For a canonical ref like `tool:ryeos/core/sign`:
 ```
 
 If a project-level item exists, it **shadows** the system version.
-This allows local overrides without modifying bundles.
+This allows local overrides without modifying bundles, with one exception:
+names inside a bundle-owned namespace (below) are never shadowed.
+
+Shadowing is always reported. `ryeos fetch` and `items.effective` mark an
+item with `shadows_bundle_item: true` when the project copy won and a bundle
+also ships an item under that ref, so an override is visible rather than
+silent.
+
+### Owned namespaces
+
+A bundle declares the namespaces it owns in its signed manifest, in
+`.ai/manifest.source.yaml` (the generated `.ai/manifest.yaml` carries it
+forward and is re-signed by the publish pipeline):
+
+```yaml
+# <bundle>/.ai/manifest.source.yaml
+name: core
+owns_namespaces:
+  - ryeos/core
+```
+
+An entry is a literal run of `/`-separated segments (letters, digits, `-`,
+`_`, `.`). Wildcards, empty or `..` segments, and entries inside one another
+are refused when the manifest is generated or loaded. `ryeos/core` owns
+`tool:ryeos/core/runtimes/python/function`, `handler:ryeos/core/...` and
+every other kind's ref whose bare id equals `ryeos/core` or starts with
+`ryeos/core/`.
+
+A project file whose ref is inside an owned namespace is not a candidate. It
+is refused with a 409 `reserved_namespace_shadow` that names the owning
+bundle, the project file and the cure, and the project copy never runs. The
+same holds for executor-chain hops: a tool whose `executor_id` names a
+runtime in an owned namespace gets that runtime from the bundle only. To
+customize, put your copy in your own namespace (for example
+`.ai/tools/<project>/runtimes/python/function.yaml`) and point `executor_id`
+at it.
+
+Two installed bundles cannot claim overlapping namespaces: bundle install and
+`ryeos bundle verify` refuse the candidate, and a node refuses to start on an
+installed set that does.
 
 ## Bundle Discovery
 

@@ -191,6 +191,7 @@ external_content:
             .zip(roots.iter().cloned())
             .map(
                 |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: name.into(),
                     canonical_root,
                 },
