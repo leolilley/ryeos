@@ -433,8 +433,9 @@ fn fold(
         .expect("the canonical composition folds from the seat's own history")
 }
 
-/// A copy export of every View set of the seat's first Surface, in the exact
-/// shape its canonical composition holds them.
+/// A copy export of every View set of the seat's first Surface that mounts no
+/// Views (Home mounts them; the neutral base does not), in the exact shape its
+/// canonical composition holds them.
 fn surface_view_sets_export(
     replay: &UiCompositionReplay,
     presentation_id: &str,
@@ -442,14 +443,13 @@ fn surface_view_sets_export(
     let surface = replay
         .composition
         .ordered_surfaces()
-        .next()
-        .expect("the seat holds its authored Surface");
+        .find(|surface| surface.view_sets().iter().all(|set| set.root.is_none()))
+        .expect("the seat holds an authored Surface that mounts no Views");
     let surface_id = surface.id().clone();
     let sets = surface
         .view_sets()
         .iter()
         .map(|set| {
-            assert!(set.root.is_none(), "the exported Surface mounts no Views");
             let handle = replay.template_ids[&set.id].clone();
             UiTransferSetExport {
                 handle: handle.clone(),
@@ -557,11 +557,11 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
             affordance_id: "open",
             purpose: "open_surface",
             surface_open_target: json!({
-                "selection": {"kind": "authored", "surface_ref": "surface:ryeos/ui/base-observe"},
+                "selection": {"kind": "authored", "surface_ref": "surface:ryeos/ui/base"},
                 "placement": {"kind": "new_surface"},
             }),
             particular_selection: Value::Null,
-            record: json!({"canonical_ref": "surface:ryeos/ui/base-observe"}),
+            record: json!({"canonical_ref": "surface:ryeos/ui/base"}),
         },
     )
     .await;

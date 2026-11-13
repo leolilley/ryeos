@@ -118,7 +118,14 @@ pub fn frame(spec: FrameSpec<'_>, local: &crate::Local) -> El {
         .min_w(0.0)
         .min_h(0.0)
         .fill(p.plane.alpha(if spec.transparent { 0.78 } else { 0.94 }))
-        .border(1.0, if spec.focused { p.accent } else { p.accent.alpha(0.0) })
+        .border(
+            1.0,
+            if spec.focused {
+                p.accent
+            } else {
+                p.accent.alpha(0.0)
+            },
+        )
         // Content taller than its slot stays inside the frame.
         .clip_rounded(0.0);
     if !spec.chrome_hidden {

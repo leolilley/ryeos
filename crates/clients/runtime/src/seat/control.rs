@@ -14,11 +14,11 @@ use ryeos_client_base::ui::{
 };
 use serde_json::{Value, json};
 
+use crate::api::SESSION_CURRENT_PATH;
 use crate::api::{SEAT_CLOSE_PATH, SEAT_OPEN_PATH, SEAT_TOUCH_PATH};
 use crate::codec::{decode_strict, encode_exact};
 use crate::error::RuntimeError;
 use crate::history::SeatCoordinate;
-use crate::api::SESSION_CURRENT_PATH;
 use crate::platform::{Clock, Platform, Transport};
 
 use super::ack::unwrap_result;
