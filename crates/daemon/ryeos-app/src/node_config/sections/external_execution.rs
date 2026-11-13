@@ -2202,7 +2202,7 @@ mod persistent_placement_credential_tests {
         let access = binding.credential_access().unwrap();
         let retained = reopened.placement_credential(&access).unwrap();
         assert_eq!(access.decode(retained).unwrap().secret(), "fixture-secret");
-        assert!(reopened.read_all("fixture-operator").unwrap().is_empty());
+        assert!(reopened.read_all().unwrap().is_empty());
     }
 
     #[test]

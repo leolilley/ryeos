@@ -200,12 +200,12 @@ mod tests {
                 .secret(),
             "new-secret"
         );
-        assert!(vault.read_all("operator").unwrap().is_empty());
-        assert!(vault.list_keys("operator").unwrap().is_empty());
+        assert!(vault.read_all().unwrap().is_empty());
+        assert!(vault.list_keys().unwrap().is_empty());
         let name = old.physical_key();
-        assert!(vault.set_secret("operator", name, "overwrite").is_err());
-        assert!(vault.delete_secret("operator", name).is_err());
-        assert!(read_named_secret(&vault, "operator", name).is_err());
+        assert!(vault.set_secret(name, "overwrite").is_err());
+        assert!(vault.delete_secret(name).is_err());
+        assert!(read_named_secret(&vault, name).is_err());
         assert!(
             authorize_secret_delivery(
                 &crate::vault::vault_only_sources(&vault),
