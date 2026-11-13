@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-04T04:58:11Z:9cfc9c3e1dab48fb84f429f8e5badd052c41c6c4a578722a4ec2e521e6519c7a:1Vsak9FWvukzjQIOGNVCBcGQA6Cz8yOhEssURcVllTmVxam0ycMJEkp320RnSF1IDhFvzOALcDO30XCrV9EYAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T12:54:31Z:bf48286969f0c51c1326c82f202a6f8e026540346af264e217c219b886713a88:03oVH0/Iq3nktLhrTuQiXEp+M5LqT4BwknrrUmqBp26zmC7iBCpUCBvlQ130paySjLrt63iI9SLilxxwrde3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Trusted variant of consumer-qualification-policy, for a node that does not enforce isolation and accepts trusted process-group sessions; independent consumer qualification of the exact Codex guest runtime;
