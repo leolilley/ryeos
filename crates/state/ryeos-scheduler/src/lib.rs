@@ -119,6 +119,22 @@ pub trait SchedulerContext: Send + Sync + 'static {
         thread_id: &str,
     ) -> impl std::future::Future<Output = Result<ScheduledProjectBinding>> + Send;
 
+    /// Pause one schedule by itself, through the same signed pause write an
+    /// operator's `scheduler.pause` uses, recording `reason` in the signed
+    /// source. The implementation takes the scheduler mutation gate, so the
+    /// caller must not hold the runtime gate.
+    ///
+    /// Returns `false` without writing when the schedule is gone, already
+    /// paused, or no longer the generation `expected_spec_hash` names: a
+    /// schedule its owner changed after the triggering observation is judged
+    /// again on its own next pass instead of being paused for a stale reason.
+    fn auto_pause_schedule(
+        &self,
+        schedule_id: &str,
+        expected_spec_hash: &str,
+        reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+    ) -> impl std::future::Future<Output = Result<bool>> + Send;
+
     /// Dispatch a scheduled item from an already-durable project binding.
     ///
     /// The daemon constructs the `DispatchRequest` and `ExecutionContext`,
@@ -193,6 +209,17 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
     ) -> Result<ScheduledProjectBinding> {
         (**self)
             .bind_scheduled_project_authority(spec, fire, thread_id)
+            .await
+    }
+
+    async fn auto_pause_schedule(
+        &self,
+        schedule_id: &str,
+        expected_spec_hash: &str,
+        reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+    ) -> Result<bool> {
+        (**self)
+            .auto_pause_schedule(schedule_id, expected_spec_hash, reason)
             .await
     }
 }

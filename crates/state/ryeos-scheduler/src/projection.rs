@@ -582,8 +582,12 @@ mod tests {
                 policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
                     ryeos_engine::execution_contract::ExecutionResponse::Accepted,
                 ),
+                limits: None,
+                max_fires: None,
+                expires_at: None,
             },
             managed_by: None,
+            paused_reason: None,
         }
     }
 

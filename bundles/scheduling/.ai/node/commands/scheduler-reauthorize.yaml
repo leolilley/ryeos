@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-13T01:19:55Z:e93dd3891a0de655cdf457917a3c18b5a6c100982baaca75c6cf37d6d922b51b:eFkOWSDnwZPS/WCcCQ/l4XJ1YcinHFAOi/DDv9x5RSVHRwQmu8cXEj31xm9e88jwusbowmTiTePwhWpJXTQ5Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- scheduler
+- reauthorize
+description: Re-pin a schedule to its owner's current grant generation
+forms:
+- slots:
+  - field: schedule_id
+dispatch:
+  kind: execute_ref
+  execute: service:scheduler/reauthorize

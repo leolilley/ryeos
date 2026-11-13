@@ -4,18 +4,21 @@
 //! belongs here.
 
 mod accounting;
+mod authority;
 mod execution;
 mod expression;
 mod maintenance;
 mod native_handoff;
+mod pause;
 mod project;
 mod retirement;
 mod vocabulary;
 
 pub use accounting::{SchedulerFireHistoryAccounting, SchedulerFireHistoryDiscardReport};
+pub use authority::{ScheduledAuthorityRefusal, ScheduledAuthorityRefusalKind};
 pub use execution::{
-    ScheduleExecution, ScheduleExecutionAuthority, validate_schedule_execution,
-    validate_schedule_ref_bindings,
+    SCHEDULE_MAX_FIRES_LIMIT, ScheduleExecution, ScheduleExecutionAuthority,
+    validate_schedule_bounds, validate_schedule_execution, validate_schedule_ref_bindings,
 };
 pub use expression::{parse_iso_ts, validate_expression, validate_schedule_id, validate_timezone};
 pub use maintenance::{
@@ -28,6 +31,7 @@ pub use native_handoff::{
     SchedulerNativeStoreSourceRole, TakenSchedulerNativeDatabaseSource,
     prepare_scheduler_schema_reference,
 };
+pub use pause::ScheduleAutoPauseReason;
 pub use vocabulary::{MisfirePolicy, OverlapPolicy, parse_misfire_policy, parse_overlap_policy};
 
 pub use project::{

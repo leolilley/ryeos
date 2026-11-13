@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T01:24:40Z:7a5adf7014d9477d20d85d6a53111549b59c5e6d9ffe7e739904ea5ea25bdd1e:jmHew4FL2YuwErv55UDicZcuLxatiSDFibhW7RtcBL+0JEbaLT4/qvBLWpY42+X0gatbjXsdnyWFGHccNy+5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T01:08:33Z:6b5f3a48a5b3d033cb7c857cdea23f4a5f2766ed59d5930d2fab41c7ce05d3ea:Qtm4IQxeiOAASgUDwv9z1Mwm5CERYlwvvipRNfhljpoeLpW7DSlSaXj8JDvs+SVGAsRw+MU6dYD/SlErEWfDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "register"
 kind: service
@@ -19,4 +19,7 @@ schema:
   capabilities: array
   project_root: string?
   execution_policy: object
+  limits: object?
+  max_fires: integer?
+  expires_at: string?
 description: "Create or update a schedule spec"

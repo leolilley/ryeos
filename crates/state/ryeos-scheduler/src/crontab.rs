@@ -117,6 +117,26 @@ fn find_most_recent_cron(
     most_recent
 }
 
+/// The `n`th cron boundary strictly after `start_ms` (1-based).
+///
+/// Lifetime bounds call this with `n <= SCHEDULE_MAX_FIRES_LIMIT`, the same
+/// iteration cap [`find_most_recent_cron`] uses.
+pub fn nth_cron_boundary_after(
+    expression: &str,
+    timezone: &str,
+    start_ms: i64,
+    n: u32,
+) -> Option<i64> {
+    let index = usize::try_from(n.checked_sub(1)?).ok()?;
+    let schedule = cron::Schedule::from_str(expression).ok()?;
+    let tz: chrono_tz::Tz = timezone.parse().ok()?;
+    let start = chrono::DateTime::from_timestamp_millis(start_ms)?.with_timezone(&tz);
+    schedule
+        .after(&start)
+        .nth(index)
+        .map(|boundary| boundary.timestamp_millis())
+}
+
 // ── Interval ────────────────────────────────────────────────────────
 
 fn next_interval_fire(
@@ -333,5 +353,23 @@ mod tests {
                 .unwrap()
                 .to_rfc3339();
         assert!(!is_at_past(&future, lillux::time::timestamp_millis()));
+    }
+
+    #[test]
+    fn nth_cron_boundary_counts_from_the_start_exclusive() {
+        // Every minute, from exactly one minute boundary.
+        let start = 1_700_000_040_000; // 22:14:00 UTC
+        assert_eq!(
+            nth_cron_boundary_after("0 * * * * *", "UTC", start, 1),
+            Some(start + 60_000)
+        );
+        assert_eq!(
+            nth_cron_boundary_after("0 * * * * *", "UTC", start, 3),
+            Some(start + 180_000)
+        );
+        assert_eq!(
+            nth_cron_boundary_after("0 * * * * *", "UTC", start, 0),
+            None
+        );
     }
 }
