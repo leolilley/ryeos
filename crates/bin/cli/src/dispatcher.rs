@@ -560,6 +560,16 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(Some)
         }
+        "remote_delegate" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "remote-delegate.yaml",
+            )?;
+            crate::client_handlers::remote_delegate(app_root, &parameters)
+                .await
+                .map(Some)
+        }
         other => Err(CliError::Local {
             detail: format!("unknown verified local client handler `{other}`"),
         }),

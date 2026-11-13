@@ -93,6 +93,7 @@ pub mod remote_bind_project;
 pub mod remote_bundle_install;
 pub mod remote_configure;
 pub mod remote_descriptor;
+pub mod remote_delegation;
 pub mod remote_doctor;
 pub mod remote_execute;
 pub mod remote_import_admitted_head;
@@ -326,6 +327,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
     renew_key::DESCRIPTOR,
+    remote_delegation::DELEGATE,
+    remote_delegation::LIST,
+    remote_delegation::REVOKE,
+    remote_delegation::TOMBSTONE,
     authorize_client::DESCRIPTOR,
     offline_operations::SUBMIT,
     offline_operations::FACTS,

@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-13T14:29:21Z:995f880f8d53dde6559b789d9fadd6ec0f6b693bfbbab2e0736fd09c507c4560:9BsaNH86MfKdZyGi95Vj9IOYSFSA0grZJOxbRp7cc2/7f2Pe6Vk7pjhSQYUKsjy+6TFmw0pk371WzBnbM9gDDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- remote
+- delegation
+- list
+description: List the delegations stored for you on this node
+dispatch:
+  kind: execute_ref
+  execute: service:remote/delegation-list

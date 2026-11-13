@@ -437,10 +437,12 @@ fn write_node_signed(
     let signed = lillux::signature::sign_content(body, node.signing_key(), "#", None);
     let _lock = directory.lock_exclusive()?;
     directory.ensure_path_binding()?;
+    // Replace the incumbent, if any, as exactly the file that was observed.
+    let incumbent = directory.open_pinned_regular(std::ffi::OsStr::new(name), false)?;
     directory
         .replace_pinned_bytes_if_matches_atomic(
             std::ffi::OsStr::new(name),
-            None,
+            incumbent.as_ref(),
             |_| Ok(()),
             signed.as_bytes(),
             0o600,
