@@ -172,6 +172,8 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
+    // A direct URL needs an out-of-band key pin (no trust on first use).
+    let fingerprint = public_key["fingerprint"].as_str().unwrap().to_owned();
     let (url, _contacts) = start_mock_remote(public_key).await.unwrap();
     let app_root = local_state.config.app_root.clone();
 
@@ -180,7 +182,7 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
             remote: Some("normalized".to_owned()),
             url: Some(format!("{url}/")),
             descriptor: None,
-            expect_fingerprint: None,
+            expect_fingerprint: Some(fingerprint),
         },
         Arc::new(local_state),
     )
