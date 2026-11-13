@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:41:47Z:5476014279d9587d20e729a8aec3c9dd5962b0984f8087fab538b398d52f9e5b:M6/oT5Lv+bBZuLsDf1nSfYJnBYdBuzoJTIvTHo/EB62EA+MgyFF0pBbztfwbME5TiDLscc4yHwydhDWiNYGlBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:48:24Z:4f836b6272dc8bb654f6aa4f008b5df9941cb85e832268d702a6c595b155db7d:UFZOfAtYdgvm5gI4WhdaqsALdH8U0z4IT538msF3uhxYem2jwERMfdbK07B/DpYg4EYmZe2WSEAxhBjBt89RDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -438,8 +438,15 @@ Execution phases:
 
 1. Push a typed project snapshot, or an empty project snapshot in `--no-project`
    mode.
-2. Call remote `/execute` using the pushed project source.
-3. Pull result objects and apply changed project files locally.
+2. Call remote `/execute` using the pushed project source, asking the
+   remote to sign its result (`attest_result: true`).
+3. Verify the remote's `result_attestation`: signed by the pinned remote key,
+   bound to this exact request digest and the requested item ref, over the
+   returned result. An unsigned result is refused with
+   `remote_result_unsigned`; a mismatched or invalid one with
+   `remote_result_attestation_invalid`. Nothing is pulled after a refusal.
+   See [Result Verification](remote-operations.md#result-verification).
+4. Pull result objects and apply changed project files locally.
 
 Clean-base guard: if local tracked files changed since the push, the
 pull-back apply aborts without partial writes.
@@ -451,7 +458,10 @@ coordinate alongside the push, remote result, and pull summaries:
 {
   "job_id": "remote-execute:<uuid>",
   "push": { "snapshot_hash": "<source-snapshot>" },
-  "remote": { "snapshot_hash": "<result-snapshot>", "result": {} },
+  "remote": {
+    "snapshot_hash": "<result-snapshot>",
+    "result": { "thread": {}, "result": {}, "result_attestation": {} }
+  },
   "pull": { "snapshot_hash": "<result-snapshot>" }
 }
 ```

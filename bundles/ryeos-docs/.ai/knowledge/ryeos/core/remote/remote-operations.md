@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:41:47Z:a4f2e2b976ea6b5c4d1767ee3d3ab65eabc07d9e053cfce8a160d296dd7852c1:D61sDUy3VPrPxiHmirUKyDjv+ihCfpEC2qc1DUjOmC0oLHRgH4BXAJ9aK/JFk7lxzpgYkhS05ZqTCXp91WoACA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:48:24Z:f2c9df48763e113949228bc0723288d4cf4aca314f58ac4d44746f0c1e4ca62c:mEUBVB7WhSW07ZrXtpc/IjFQ/lGBcWzQhOkYhMdGc5TAI61EVts0rW3XR0Evobmwq54/9OWVge0SduzR5rQEDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -591,6 +591,39 @@ Resuming a `pushed_head` thread under the per-request overlay is
 tracked separately; the resume path falls back to the daemon engine.
 Detached children from callbacks are disallowed at the callback
 dispatcher (inline only).
+
+## Result Verification
+
+The remote node signs every remote-execute result it returns. The forwarding
+node sends `attest_result: true` on `/execute`; the remote then adds a
+`result_attestation` member to its successful response, signed with its node
+key over a `ryeos.remote_execute_result.v1` statement that binds:
+
+- `request_digest`: the `ryeos-request-v1` content hash of the exact signed
+  request (method, path, body hash, timestamp, nonce, audience), so a result
+  cannot be replayed onto another request;
+- `item_ref`: the canonical item ref the remote executed;
+- `result_digest`: the SHA-256 of the canonical JSON of the whole response
+  without `result_attestation`.
+
+Before it reads the thread status, the result snapshot or anything else from
+the response, the forwarding node checks that the signer is the pinned remote
+principal, that the request digest and item ref are the ones it sent, that
+the result digest matches, and that the signature verifies under the key
+pinned by `remote configure`. It refuses with:
+
+- `remote_result_unsigned` when the response has no attestation;
+- `remote_result_attestation_invalid` when the attestation names another
+  signer, request or item, does not match the returned result, or does not
+  verify under the pinned key.
+
+A refused result fails the sync job in phase `remote_result_unverified`;
+nothing is pulled or applied locally. The check is only as strong as the pin,
+which is why `remote configure` requires a descriptor or an expected
+fingerprint.
+
+Both nodes must run a version with result attestation. An older remote rejects
+the `attest_result` request field, and the forwarding node fails closed.
 
 ## Pull-Back
 

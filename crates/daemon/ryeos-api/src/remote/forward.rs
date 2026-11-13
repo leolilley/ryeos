@@ -25,6 +25,7 @@ use crate::remote::client::RemoteClient;
 use crate::remote::config::ResolvedRemote;
 use crate::remote::pull::{PullResultsError, extract_snapshot_hash, pull_results};
 use crate::remote::push::{PushResult, push_project, push_snapshot_generation};
+use crate::remote::result_attestation::ResultAttestationError;
 use ryeos_app::execution_policy::{
     ExecutionPolicy, ExecutionTarget, PinnedRealization, PinnedSource, ProjectExecutionPolicy,
     TerminalPublication,
@@ -160,6 +161,34 @@ fn validate_remote_wait_completion(response: &Value) -> Result<(), String> {
     }
 }
 
+/// Verify the remote's signed result attestation against the pinned remote
+/// identity, the exact request this node signed and the requested item ref.
+fn verify_remote_result(
+    remote: &ResolvedRemote,
+    body: &Value,
+    request_digest: &str,
+    item_ref: &str,
+) -> Result<(), RemoteForwardError> {
+    let pinned_key = remote.remote.pinned_signing_key().map_err(|error| {
+        RemoteForwardError::ResultAttestationInvalid {
+            reason: format!("remote has no valid pinned signing key: {error:#}"),
+        }
+    })?;
+    crate::remote::result_attestation::verify(
+        body,
+        &remote.remote.principal_id,
+        &pinned_key,
+        request_digest,
+        item_ref,
+    )
+    .map_err(|error| match error {
+        ResultAttestationError::Missing => RemoteForwardError::ResultUnsigned,
+        ResultAttestationError::Invalid(reason) => {
+            RemoteForwardError::ResultAttestationInvalid { reason }
+        }
+    })
+}
+
 /// Errors from the unary forward pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteForwardError {
@@ -185,6 +214,13 @@ pub enum RemoteForwardError {
     /// Remote /execute failed.
     #[error("remote execute failed: {0}")]
     ExecuteFailed(String),
+    /// The remote returned a result without a signed result attestation.
+    #[error("remote result is unsigned; refusing it")]
+    ResultUnsigned,
+    /// The remote's result attestation does not prove this result for this
+    /// request under the pinned remote key.
+    #[error("remote result attestation refused: {reason}")]
+    ResultAttestationInvalid { reason: String },
     /// A wait-mode execution promised a retained terminal project generation,
     /// but its authoritative execution envelope omitted that identity.
     #[error("remote result missing authoritative result_project_snapshot_hash")]
@@ -217,6 +253,8 @@ impl RemoteForwardError {
             Self::JobLedgerFailed(_) => "remote_job_ledger_failed",
             Self::PushFailed(_) => "remote_push_failed",
             Self::ExecuteFailed(_) => "remote_execute_failed",
+            Self::ResultUnsigned => "remote_result_unsigned",
+            Self::ResultAttestationInvalid { .. } => "remote_result_attestation_invalid",
             Self::MissingSnapshotHash => "remote_missing_snapshot_hash",
             Self::PullLocalConflict { .. } => "remote_pull_local_conflict",
             Self::PullMissingSnapshotHash => "remote_pull_missing_snapshot_hash",
@@ -566,7 +604,7 @@ pub async fn execute_unary_forward(
     )?;
 
     // 2. Execute on the remote against the exact snapshot published above.
-    let remote_result = match client
+    let remote_response = match client
         .execute_with_options(
             req.item_ref,
             req.ref_bindings,
@@ -608,6 +646,41 @@ pub async fn execute_unary_forward(
             return Err(RemoteForwardError::ExecuteFailed(message));
         }
     };
+
+    // 2b. Nothing in the result is read before the remote's signature over
+    // it, this exact request and the requested item ref verifies under the
+    // key pinned by `remote configure`.
+    if let Err(error) = verify_remote_result(
+        req.remote,
+        &remote_response.body,
+        &remote_response.request_digest,
+        req.item_ref,
+    ) {
+        let message = error.to_string();
+        finish_sync_job_attempt_and_update_job(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Failed,
+                phase: "remote_result_unverified".to_string(),
+                error: Some(message.clone()),
+                result: None,
+            },
+            &job_id,
+            SyncJobUpdate {
+                state: SyncJobState::Failed,
+                phase: "remote_result_unverified".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![push_result.snapshot_hash.clone()],
+                fetched_hashes: Vec::new(),
+                last_error: Some(message),
+                result: None,
+            },
+        )?;
+        return Err(error);
+    }
+    let remote_result = remote_response.body;
 
     if let Err(message) = validate_remote_wait_completion(&remote_result) {
         finish_sync_job_attempt_and_update_job(
@@ -1024,6 +1097,14 @@ mod tests {
         assert_eq!(
             RemoteForwardError::ExecuteFailed("x".into()).code(),
             "remote_execute_failed"
+        );
+        assert_eq!(
+            RemoteForwardError::ResultUnsigned.code(),
+            "remote_result_unsigned"
+        );
+        assert_eq!(
+            RemoteForwardError::ResultAttestationInvalid { reason: "x".into() }.code(),
+            "remote_result_attestation_invalid"
         );
         assert_eq!(
             RemoteForwardError::MissingSnapshotHash.code(),
