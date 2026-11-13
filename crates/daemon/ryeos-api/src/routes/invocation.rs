@@ -55,6 +55,10 @@ pub struct RoutePrincipal {
 /// hash of the request it verified.
 pub(crate) const SIGNED_REQUEST_DIGEST_METADATA_KEY: &str = "signed_request_digest";
 
+/// Metadata key under which the `ryeos_signed` verifier records the site of the
+/// node that forwarded a delegated request.
+pub(crate) const DELEGATED_VIA_METADATA_KEY: &str = "delegated_via";
+
 impl RoutePrincipal {
     /// Convenience constructor with empty scopes + metadata.
     pub fn anonymous(id: String, verifier_key: &'static str) -> Self {
@@ -99,7 +103,9 @@ impl RoutePrincipal {
                 self.authenticated_origin_site_id.clone(),
             ),
         };
-        context.with_signed_request_digest(signed_request_digest)
+        context
+            .with_signed_request_digest(signed_request_digest)
+            .with_delegated_via(self.metadata.get(DELEGATED_VIA_METADATA_KEY).cloned())
     }
 }
 

@@ -161,6 +161,17 @@ impl RuntimeRoot {
     pub fn authorized_keys_dir(&self) -> PathBuf {
         self.node().join("auth").join("authorized_keys")
     }
+
+    /// Node-signed remote delegations stored for local principals, one
+    /// directory per delegator.
+    pub fn delegations_dir(&self) -> PathBuf {
+        self.node().join("auth").join("delegations")
+    }
+
+    /// Node-signed tombstones of revoked delegations, keyed by digest.
+    pub fn delegation_revocations_dir(&self) -> PathBuf {
+        self.node().join("auth").join("delegation_revocations")
+    }
 }
 
 impl AsRef<Path> for RuntimeRoot {

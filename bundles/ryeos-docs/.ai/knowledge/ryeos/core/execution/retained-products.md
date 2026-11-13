@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:369d6c432d7ff02f8042305d91636da7be2f850ef28ae62c6ec6de404e0a9887:vpzKoOnw2Ht1ucpmkjQSwWlD+2GZnqROCTVI6O2K3GRpH8ibeaNHQugs0yZ5X5Wo/LzlNziZbS6ZXXVXfChQBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:de5f6dd4263a69d236a19664d8fcacf52f604a7a5ba766a69cc48c4067eb2f82:KyLouVjQtfxVt0r3gQQt5+U1BNliD2w4bBzEPpbPJDKbsQzbNcb+jr68OHAgDEUf+woY1eDvYpoIVrJLPdYUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -178,8 +178,9 @@ always present. The two acceptance hashes are different records.
 The receiver admits the selection only for the attesting operator, who also
 owns the received product. From the origin that is `ryeos remote run
 <receiver> service:external-execution/admit-product-program
---outbound-principal configured_operator ...`, and the origin operator's
-grant on the receiver needs
+--outbound-principal delegated ...` (the default), and the origin operator, who
+signs a delegation for the receiver with `ryeos remote delegate`, needs a grant
+on the receiver for
 `ryeos.execute.service.external-execution/admit-product-program`.
 
 `admit-product-program` derives the admitted program for a captured-product

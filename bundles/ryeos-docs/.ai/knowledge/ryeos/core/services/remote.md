@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:15:40Z:8af3de2f67dc4ff9f5787ebee44699b477e079f92c52088fa86c04abf49a1f15:gUEE+/Ux/WkBawgtIRPrT30NGrERBp7AyMjlOLwr8qL84aWzVidnReQeiQaQXj5kMJTkbIV6xGJH2XDqMeZsAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:c1eaea331705fba5ec57562c2d30c7a1c92ec2b5286b91c1dcbbdbc84cbc78d2:+xAJDCsafMCS7LuRrtTt09AXzeH5pBVJz5fGDI60A8n/tQreNNInApufoYFdwu/J7UXewkdh2fxekKVbe0FMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -38,15 +38,20 @@ The authoritative matrix is in
 | `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
+| `remote/delegate` | `remote.delegate` | `ryeos.execute.service.remote/delegate` |
+| `remote/delegation-list` | `remote.delegation-list` | `ryeos.execute.service.remote/delegation-list` |
+| `remote/delegation-revoke` | `remote.delegation-revoke` | `ryeos.execute.service.remote/delegation-revoke` |
 
 ## Operational invariants
 
-- Outbound remote requests normally use the local **node key**. The explicit
-  configured-operator push/run mode uses the exact configured operator only
-  after local operator authentication, and the target must bind it to the
-  forwarding site with an exact-scope `remote_principal` grant. The source node
-  co-signs each exact request, and its independently admitted `remote_node`
-  grant must carry `ryeos.attest.request.forwarded-operator`.
+- Outbound remote requests are signed by the local **node key**. A request made
+  for a principal also carries the principal's own signed delegation
+  (`x-ryeos-delegation`); the daemon never loads a principal's private key,
+  the operator's included. The target binds the principal to the forwarding
+  site with an exact-scope `remote_principal` grant and caps the request to the
+  delegation. The source node co-signs each exact request, and its
+  independently admitted `remote_node` grant must carry
+  `ryeos.attest.request.forwarded-operator`.
 - `remote configure` (configured local operator only) stores remote identity,
   vault fingerprint, URL, ingest-ignore config and the pin source as a
   node-signed record in the local system space under

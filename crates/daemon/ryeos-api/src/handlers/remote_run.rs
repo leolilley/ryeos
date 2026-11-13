@@ -34,10 +34,11 @@ pub struct Request {
     #[serde(default)]
     pub project: Option<PathBuf>,
     /// Principal used to sign the destination request. Retained-current-HEAD
-    /// launches always preserve the configured operator; projectless session
-    /// control selects it explicitly.
+    /// launches are always made as the caller; otherwise the default is the
+    /// caller under its signed delegation, or the node when the caller is the
+    /// node itself.
     #[serde(default)]
-    pub outbound_principal: OutboundPrincipal,
+    pub outbound_principal: Option<OutboundPrincipal>,
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
@@ -91,9 +92,9 @@ pub async fn handle(
             "remote run receives a destination-local policy; target must be `here`".to_string(),
         ));
     }
-    // The destination admits this request under the node or configured
-    // operator identity, not the local caller's. A caller may ask a remote to
-    // expose its operator vault only if it holds that authority itself.
+    // The destination admits this request as the caller under its delegation,
+    // or as the node. A caller may ask a remote to expose its operator vault
+    // only if it holds that authority itself.
     ryeos_app::execution_policy::authorize_operator_vault_exposure(
         state.authorizer.as_ref(),
         &ctx.scopes,
@@ -155,14 +156,12 @@ pub async fn handle(
             binding.sync_scope
         )));
     }
-    let use_configured_operator =
-        retained_current_head || req.outbound_principal == OutboundPrincipal::ConfiguredOperator;
-    let client = if use_configured_operator {
-        RemoteClient::from_remote_cfg_as_configured_operator(&state, &remote_cfg, &ctx)
-            .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?
+    let principal = if retained_current_head {
+        OutboundPrincipal::Delegated
     } else {
-        RemoteClient::from_remote_cfg(&state, &remote_cfg)?
+        OutboundPrincipal::resolve(req.outbound_principal, &state, &ctx)
     };
+    let client = principal.client(&state, &remote_cfg, &ctx)?;
     let accepted =
         req.execution_policy.response == ryeos_app::execution_policy::ExecutionResponse::Accepted;
     match (accepted, req.launch_id.as_deref()) {
@@ -210,7 +209,7 @@ pub async fn handle(
 
     Ok(serde_json::json!({
         "remote": req.remote,
-        "outbound_principal": if use_configured_operator { "configured_operator" } else { "node" },
+        "outbound_principal": principal.as_str(),
         "local_project_path": binding.as_ref().map(|value| &value.local_project_path),
         "remote_project_path": binding.as_ref().map(|value| &value.remote_project_path),
         "sync_scope": binding.as_ref().map(|value| value.sync_scope),
@@ -498,7 +497,34 @@ mod tests {
                 }),
                 project_bindings: std::collections::HashMap::new(),
             };
-            crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(
+            // The operator signs its own delegation; the daemon only stores it.
+            let operator =
+                lillux::crypto::load_signing_key(&fixture.state.config.operator_signing_key_path)
+                    .unwrap();
+            let body = ryeos_node_runtime::remote_delegation::DelegationBody::new(
+                &fixture.context.fingerprint,
+                ryeos_node_runtime::remote_delegation::DelegationParties {
+                    delegate_site: fixture.state.threads.site_id(),
+                    delegate_node: &fixture.state.identity.principal_id(),
+                    audience_site: &remote.site_id,
+                    audience_node: &remote.principal_id,
+                },
+                &["ryeos.execute.service.remote/run".to_owned()],
+                lillux::time::unix_secs_now() + 3600,
+            );
+            let signed =
+                ryeos_node_runtime::remote_delegation::SignedDelegation::sign(body, &operator)
+                    .unwrap();
+            ryeos_node_runtime::remote_delegation::store_delegation(
+                &ryeos_engine::roots::RuntimeRoot::new(fixture.state.config.app_root.clone())
+                    .delegations_dir(),
+                &remote.name,
+                &signed,
+                &fixture.state.identity,
+                lillux::time::unix_secs_now(),
+            )
+            .unwrap();
+            crate::remote::client::RemoteClient::from_remote_cfg_as_delegated(
                 &fixture.state,
                 &remote,
                 &fixture.context,
@@ -546,7 +572,7 @@ mod tests {
                     "selection":{"declaration_id":"fixture-model","witness_hash":"ab".repeat(32),
                         "witness_source":{"kind":"local_capture"},"qualification_hash":null, "remote_testimony": null}
                 }]);
-                payload["outbound_principal"] = serde_json::json!("configured_operator");
+                payload["outbound_principal"] = serde_json::json!("delegated");
                 let request: Request = serde_json::from_value(payload).unwrap();
                 let unscoped = crate::handler_context::HandlerContext::new(
                     "session:test".into(),
@@ -573,7 +599,8 @@ mod tests {
                 assert!(error.to_string().contains("timeout"));
                 let sent = peer.state.requests.lock().unwrap().clone();
                 assert_eq!(sent.len(), 1);
-                assert_eq!(sent[0].0, fixture.context.fingerprint);
+                // The node signs; the operator's own delegation rides with the request.
+                assert_eq!(sent[0].0, fixture.state.identity.principal_id());
                 assert_eq!(
                     sent[0].1["required_origin_site_id"],
                     fixture.state.threads.site_id()
@@ -625,7 +652,7 @@ mod tests {
             .unwrap()
             .remove("launch_id")
             .unwrap();
-        payload["outbound_principal"] = serde_json::json!("configured_operator");
+        payload["outbound_principal"] = serde_json::json!("delegated");
         payload["execution_policy"]["response"] = serde_json::json!("wait");
         payload["execution_policy"]["project"] = serde_json::json!({"kind":"projectless"});
         payload["item_ref"] = serde_json::json!("service:launch/status");
@@ -903,12 +930,12 @@ mod tests {
     }
 
     #[test]
-    fn projectless_control_request_selects_configured_operator_without_project() {
+    fn projectless_control_request_selects_the_delegated_caller_without_project() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "remote": "hosted",
             "item_ref": "service:worker-executions/status",
             "ref_bindings": {},
-            "outbound_principal": "configured_operator",
+            "outbound_principal": "delegated",
             "parameters": {"session_id": "T-session"},
             "execution_policy": {
                 "schema_version": 2,
@@ -924,7 +951,7 @@ mod tests {
         assert!(request.project.is_none());
         assert_eq!(
             request.outbound_principal,
-            crate::handlers::remote_push::OutboundPrincipal::ConfiguredOperator
+            Some(crate::handlers::remote_push::OutboundPrincipal::Delegated)
         );
         assert!(matches!(
             request.execution_policy.project,

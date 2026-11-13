@@ -60,6 +60,14 @@ impl Signer {
         })
     }
 
+    /// Sign raw bytes with this key and return the base64 signature. The caller
+    /// owns what the bytes mean; this is how a principal signs a statement of
+    /// its own, such as a remote delegation, without exposing the key.
+    pub fn sign_bytes_base64(&self, bytes: &[u8]) -> String {
+        let signature = lillux::crypto::Signer::sign(&self.signing_key, bytes);
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    }
+
     /// Build the canonical request string and produce the four `x-ryeos-*`
     /// headers. The daemon rebuilds this exact string from the request it
     /// receives, using its own principal id as the audience, and accepts the

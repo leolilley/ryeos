@@ -63,8 +63,8 @@ struct PullIntent {
     target_signing_key: String,
     local_project_path: String,
     target_project_path: String,
-    operator_fingerprint: String,
-    operator_authority_digest: String,
+    delegator_fingerprint: String,
+    delegation_digest: String,
     chain_root_id: String,
 }
 
@@ -150,8 +150,8 @@ impl PullIntent {
         ryeos_node_runtime::identity::validate_canonical_site_id(&self.target_site_id)?;
         ryeos_runtime::validate_runtime_thread_id(&self.chain_root_id)
             .map_err(|error| anyhow::anyhow!(error))?;
-        validate_hash("operator fingerprint", &self.operator_fingerprint)?;
-        validate_hash("operator authority digest", &self.operator_authority_digest)?;
+        validate_hash("delegator fingerprint", &self.delegator_fingerprint)?;
+        validate_hash("delegation digest", &self.delegation_digest)?;
         let target = self
             .target_principal_id
             .strip_prefix("fp:")
@@ -173,7 +173,7 @@ impl PullIntent {
     }
 
     fn owner_principal(&self) -> String {
-        format!("fp:{}", self.operator_fingerprint)
+        format!("fp:{}", self.delegator_fingerprint)
     }
 }
 
@@ -229,15 +229,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     ryeos_runtime::validate_runtime_thread_id(&req.chain_root_id)
         .map_err(|error| anyhow::anyhow!(error))
         .context("hosted worker-result chain root is not canonical")?;
-    let operator_fingerprint =
-        ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
-    let operator_authority_digest =
-        ryeos_app::operator_authority::admitted_operator_authority_digest(
-            &state,
-            &operator_fingerprint,
-        )?;
+    let delegator_fingerprint = crate::remote::client::delegator_fingerprint(&ctx)?;
     let (local_project_path, remote, target_project_path) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
+    let client = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &ctx)?;
+    let delegation_digest = client
+        .delegation_digest()
+        .context("delegated client carries no delegation")?;
     let intent = PullIntent {
         schema: INTENT_SCHEMA.to_owned(),
         remote: req.remote,
@@ -248,8 +246,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         target_signing_key: remote.signing_key.clone(),
         local_project_path,
         target_project_path,
-        operator_fingerprint,
-        operator_authority_digest,
+        delegator_fingerprint,
+        delegation_digest,
         chain_root_id: req.chain_root_id,
     };
     intent.validate()?;
@@ -259,7 +257,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         .with_state_db(|db| db.get_sync_job(&job_id))?
         .is_none()
     {
-        Some(query_candidate_result(&state, &remote, &intent, &ctx).await?)
+        Some(query_candidate_result(&client, &remote, &intent).await?)
     } else {
         None
     };
@@ -428,11 +426,11 @@ async fn run_attempt(
     // independently verified by its exact hashes.
     let (authority, base_tree) =
         validate_local_base(&state, operation).map_err(AttemptFailure::permanent)?;
-    let client = RemoteClient::from_remote_cfg_as_retained_configured_operator(
+    let client = RemoteClient::from_remote_cfg_as_retained_delegated(
         &state,
         remote,
-        &operation.intent.operator_fingerprint,
-        &operation.intent.operator_authority_digest,
+        &operation.intent.delegator_fingerprint,
+        &operation.intent.delegation_digest,
     )
     .map_err(AttemptFailure::permanent)?;
     let evidence = &operation.candidate_result.evidence;
@@ -472,14 +470,12 @@ async fn run_attempt(
 }
 
 async fn query_candidate_result(
-    state: &AppState,
+    client: &RemoteClient,
     remote: &RemoteConfig,
     intent: &PullIntent,
-    ctx: &HandlerContext,
 ) -> Result<HostedCandidateResultResponse> {
-    let client = RemoteClient::from_remote_cfg_as_configured_operator(state, remote, ctx)?;
     query_candidate_result_with_client(
-        &client,
+        client,
         &intent.chain_root_id,
         &intent.source_site_id,
         &intent.owner_principal(),
@@ -627,13 +623,12 @@ fn resolve_current_route(state: &AppState, intent: &PullIntent) -> Result<Remote
     if state.threads.site_id() != intent.source_site_id {
         bail!("durable hosted worker-result pull belongs to another source site");
     }
-    let current_grant = ryeos_app::operator_authority::admitted_operator_authority_digest(
+    crate::remote::client::require_retained_delegation(
         state,
-        &intent.operator_fingerprint,
+        &intent.remote,
+        &intent.delegator_fingerprint,
+        &intent.delegation_digest,
     )?;
-    if current_grant != intent.operator_authority_digest {
-        bail!("durable hosted worker-result pull operator grant changed");
-    }
     let project = PathBuf::from(&intent.local_project_path);
     let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, &intent.remote)?;
@@ -879,8 +874,8 @@ mod tests {
             ),
             local_project_path: "/source/project".to_owned(),
             target_project_path: "/target/project".to_owned(),
-            operator_fingerprint: "a".repeat(64),
-            operator_authority_digest: "b".repeat(64),
+            delegator_fingerprint: "a".repeat(64),
+            delegation_digest: "b".repeat(64),
             chain_root_id: "T-root".to_owned(),
         }
     }
@@ -900,7 +895,7 @@ mod tests {
                 ..baseline.clone()
             },
             PullIntent {
-                operator_authority_digest: "c".repeat(64),
+                delegation_digest: "c".repeat(64),
                 ..baseline.clone()
             },
         ] {

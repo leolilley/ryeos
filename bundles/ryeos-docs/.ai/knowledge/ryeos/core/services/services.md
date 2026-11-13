@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:10:01Z:d69b7b734f8bf87ec82405044c58a8dd2b2d0acaf1fa5db0cd6a1693c9f12afd:f8rvg0lV/XTTLineWaooyW9buwp560cZK9yVGiMdhMKKENHdj6XhPTIitHmKJPgVK1sF6xTAsmFG6tSGuyojDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:952adc8ff8be16a1d1254d0679c5f1797cdadc9f69682f5e50e90a5149a7bd40:irw3f7AYM5SNUaGm/8cym9fjCbDoc6YycPupA5fjk5lvBemBGjLvEx1Z2LWXXNRtp0PRcD5UnHm/TMlifo5uCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -51,6 +51,7 @@ hashes through CAS.
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
 | `identity/renew-key` | `identity.renew-key` | `ryeos.execute.service.identity/renew-key` |
+| `identity/revoke-delegation` | `identity.revoke-delegation` | `ryeos.execute.service.identity/revoke-delegation` |
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
 | `system/push-head` | `system.push-head` | `ryeos.execute.service.system/push-head` |
@@ -165,6 +166,9 @@ for the full matrix.
 | `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
+| `remote/delegate` | `remote.delegate` | `ryeos.execute.service.remote/delegate` |
+| `remote/delegation-list` | `remote.delegation-list` | `ryeos.execute.service.remote/delegation-list` |
+| `remote/delegation-revoke` | `remote.delegation-revoke` | `ryeos.execute.service.remote/delegation-revoke` |
 
 ## Core Thread Read Services
 

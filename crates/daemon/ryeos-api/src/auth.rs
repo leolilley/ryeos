@@ -12,6 +12,7 @@ use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::{
     AuthorizedKeyError, AuthorizedKeyPrincipalClass, GrantExpiry, NodeIdentity,
 };
+use ryeos_node_runtime::remote_delegation::DelegationError;
 
 const TIMESTAMP_MAX_AGE_SECS: u64 = 300;
 
@@ -30,6 +31,9 @@ pub struct Principal {
     /// `ryeos-request-v1` content hash of the signed request this principal
     /// was verified from.
     pub request_digest: String,
+    /// Site of the node that forwarded this request under the principal's
+    /// delegation, when it did. The principal is then the delegator.
+    pub delegated_via: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +116,10 @@ pub(crate) enum RequestAuthError {
     /// The caller proved it holds the grant's key, and the grant is refused for
     /// a reason the holder is entitled to be told, with its cure.
     Grant(AuthorizedKeyError),
+    /// The forwarding node proved it holds its key, and the delegation it
+    /// presented is refused for a reason the node is entitled to be told, with
+    /// its cure.
+    Delegation(ryeos_node_runtime::remote_delegation::DelegationError),
 }
 
 impl std::fmt::Display for RequestAuthError {
@@ -119,6 +127,7 @@ impl std::fmt::Display for RequestAuthError {
         match self {
             Self::Refused(reason) => formatter.write_str(reason),
             Self::Grant(error) => write!(formatter, "{error}"),
+            Self::Delegation(error) => write!(formatter, "{error}"),
         }
     }
 }
@@ -357,6 +366,9 @@ pub(crate) fn verify_request(
     let forwarding_signature = headers
         .get("x-ryeos-forwarding-signature")
         .and_then(|v| v.to_str().ok());
+    let delegation_header = headers
+        .get(ryeos_node_runtime::remote_delegation::DELEGATION_HEADER)
+        .and_then(|v| v.to_str().ok());
 
     if key_id.is_empty() || timestamp.is_empty() || nonce.is_empty() || signature.is_empty() {
         return Err("missing auth headers".into());
@@ -441,10 +453,31 @@ pub(crate) fn verify_request(
         || forwarding_signature.is_some();
     let (authenticated_site_id, forwarding_authority) = match auth_key.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
-            if forwarding_headers_present {
+            if forwarding_headers_present || delegation_header.is_some() {
                 return Err("local_client request cannot carry forwarding proof".into());
             }
             (None, None)
+        }
+        AuthorizedKeyPrincipalClass::RemoteNode if delegation_header.is_some() => {
+            return verify_delegated(
+                state,
+                &DelegatedRequest {
+                    method,
+                    canonical_path: &canon,
+                    body_hash: &body_hash,
+                    timestamp,
+                    nonce,
+                    audience: &audience,
+                    key_id,
+                    signature,
+                    forwarding_key_id,
+                    forwarding_site_id,
+                    forwarding_signature,
+                    delegation: delegation_header.unwrap_or_default(),
+                    request_digest: content_hash,
+                },
+                &auth_key,
+            );
         }
         AuthorizedKeyPrincipalClass::RemoteNode => {
             if forwarding_headers_present {
@@ -453,6 +486,9 @@ pub(crate) fn verify_request(
             (auth_key.configured_origin_site_id.clone(), None)
         }
         AuthorizedKeyPrincipalClass::RemotePrincipal => {
+            if delegation_header.is_some() {
+                return Err(RequestAuthError::Delegation(DelegationError::NotTransitive));
+            }
             let (forwarding_key_id, forwarding_site_id, forwarding_signature) =
                 match (forwarding_key_id, forwarding_site_id, forwarding_signature) {
                     (Some(key_id), Some(site_id), Some(signature))
@@ -524,6 +560,7 @@ pub(crate) fn verify_request(
                     ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                         source_node_fingerprint: forwarding_fingerprint.to_string(),
                         source_node_grant_hash: forwarding_key.source_file_hash,
+                        delegation_digest: None,
                     },
                 ),
             )
@@ -555,6 +592,172 @@ pub(crate) fn verify_request(
             principal_grant_hash: auth_key.source_file_hash,
             forwarding: forwarding_authority,
         },
+        delegated_via: None,
+    })
+}
+
+/// The facts of a request whose primary signer is a forwarding node acting
+/// under a principal's delegation.
+struct DelegatedRequest<'a> {
+    method: &'a str,
+    canonical_path: &'a str,
+    body_hash: &'a str,
+    timestamp: &'a str,
+    nonce: &'a str,
+    audience: &'a str,
+    key_id: &'a str,
+    signature: &'a str,
+    forwarding_key_id: Option<&'a str>,
+    forwarding_site_id: Option<&'a str>,
+    forwarding_signature: Option<&'a str>,
+    delegation: &'a str,
+    request_digest: String,
+}
+
+/// Authenticate a request that a remote node forwarded for one of its
+/// principals. The node's own signature has already verified. This admits the
+/// principal from this node's grants, checks the node's co-signature and the
+/// principal's signed delegation, and returns the principal with the authority
+/// both its grant and its delegation allow.
+fn verify_delegated(
+    state: &AppState,
+    request: &DelegatedRequest<'_>,
+    node_key: &AuthorizedKey,
+) -> Result<Principal, RequestAuthError> {
+    use ryeos_node_runtime::remote_delegation as delegation_lib;
+    let refuse = RequestAuthError::Delegation;
+
+    let (Some(forwarding_key_id), Some(forwarding_site_id), Some(forwarding_signature)) = (
+        request.forwarding_key_id,
+        request.forwarding_site_id,
+        request.forwarding_signature,
+    ) else {
+        return Err("delegated request requires a complete source-node forwarding proof".into());
+    };
+    if forwarding_key_id != request.key_id {
+        return Err("a delegated request is signed and co-signed by the same node key".into());
+    }
+    ryeos_node_runtime::identity::validate_canonical_site_id(forwarding_site_id)
+        .map_err(|error| format!("{error:#}"))?;
+    if node_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
+        return Err("forwarding site does not match the remote_node grant".into());
+    }
+    if !node_key
+        .scopes
+        .iter()
+        .any(|scope| scope == ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE)
+    {
+        return Err("forwarding-node grant lacks forwarded-operator attestation authority".into());
+    }
+    let forwarding_sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(forwarding_signature)
+        .map_err(|_| "invalid forwarding signature encoding".to_string())?;
+    let forwarding_sig = Signature::from_slice(&forwarding_sig_bytes)
+        .map_err(|_| "invalid forwarding signature".to_string())?;
+    let forwarding_content_hash = forwarding_request_content_hash(
+        request.method,
+        request.canonical_path,
+        request.body_hash,
+        request.timestamp,
+        request.nonce,
+        request.audience,
+        request.key_id,
+        request.signature,
+        forwarding_key_id,
+        forwarding_site_id,
+    );
+    node_key
+        .public_key
+        .verify(forwarding_content_hash.as_bytes(), &forwarding_sig)
+        .map_err(|_| "invalid forwarding signature".to_string())?;
+
+    // From here the forwarding node has proved itself, so refusals name their
+    // cure.
+    let signed =
+        delegation_lib::SignedDelegation::from_header_value(request.delegation).map_err(refuse)?;
+    let own_site = state.threads.site_id();
+    let own_node = state.identity.principal_id();
+    signed
+        .validate_at(
+            lillux::time::unix_secs_now(),
+            delegation_lib::DelegationParties {
+                delegate_site: forwarding_site_id,
+                delegate_node: request.key_id,
+                audience_site: own_site,
+                audience_node: &own_node,
+            },
+        )
+        .map_err(refuse)?;
+
+    let delegator = signed.body.delegator.clone();
+    let delegator_fingerprint = signed.body.delegator_fingerprint().map_err(refuse)?;
+    let principal_grant = load_authorized_key(
+        delegator_fingerprint,
+        &state.config.authorized_keys_dir,
+        &state.identity,
+    )
+    .map_err(|error| match error.downcast::<AuthorizedKeyError>() {
+        Ok(grant_error) => RequestAuthError::Grant(grant_error),
+        Err(_) => refuse(DelegationError::PrincipalNotAdmitted {
+            delegator: delegator.clone(),
+        }),
+    })?;
+    if principal_grant.principal_class != AuthorizedKeyPrincipalClass::RemotePrincipal
+        || principal_grant.configured_origin_site_id.as_deref() != Some(forwarding_site_id)
+    {
+        return Err(refuse(DelegationError::PrincipalNotAdmitted { delegator }));
+    }
+    signed.verify(&principal_grant.public_key).map_err(refuse)?;
+
+    let digest = signed
+        .digest()
+        .map_err(|error| format!("delegation digest: {error:#}"))?;
+    let revocations = ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone())
+        .delegation_revocations_dir();
+    if delegation_lib::is_revoked(&revocations, &digest, &state.identity)
+        .map_err(|error| format!("delegation revocation ledger: {error:#}"))?
+    {
+        return Err(refuse(DelegationError::Revoked { digest }));
+    }
+
+    let scopes = delegation_lib::intersect_scopes(&principal_grant.scopes, &signed.body.scopes);
+
+    {
+        let mut guard = match REPLAY_GUARD.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("replay guard mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
+        let node_fingerprint = request.key_id.strip_prefix("fp:").unwrap_or(request.key_id);
+        if !guard.check_and_record(node_fingerprint, request.nonce) {
+            return Err("replayed request".into());
+        }
+    }
+
+    Ok(Principal {
+        request_digest: request.request_digest.clone(),
+        fingerprint: delegator_fingerprint.to_owned(),
+        scopes,
+        owner: principal_grant.owner,
+        principal_class: AuthorizedKeyPrincipalClass::RemotePrincipal,
+        authenticated_site_id: Some(forwarding_site_id.to_owned()),
+        grant_authority: ryeos_engine::principal_contract::AuthenticatedGrantAuthority {
+            principal_grant_hash: principal_grant.source_file_hash,
+            forwarding: Some(
+                ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
+                    source_node_fingerprint: request
+                        .key_id
+                        .strip_prefix("fp:")
+                        .unwrap_or(request.key_id)
+                        .to_owned(),
+                    source_node_grant_hash: node_key.source_file_hash.clone(),
+                    delegation_digest: Some(digest),
+                },
+            ),
+        },
+        delegated_via: Some(forwarding_site_id.to_owned()),
     })
 }
 
@@ -1141,6 +1344,20 @@ mod tests {
         operator_key: &SigningKey,
         site_id: &str,
     ) -> String {
+        register_remote_principal_key_with_scopes(
+            state,
+            operator_key,
+            site_id,
+            &["ryeos.execute.service.vault/list".to_string()],
+        )
+    }
+
+    fn register_remote_principal_key_with_scopes(
+        state: &ryeos_app::state::AppState,
+        operator_key: &SigningKey,
+        site_id: &str,
+        scopes: &[String],
+    ) -> String {
         let vk = operator_key.verifying_key();
         let fp = lillux::signature::compute_fingerprint(&vk);
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
@@ -1148,7 +1365,7 @@ mod tests {
             &state.config.authorized_keys_dir,
             &fp,
             &key_b64,
-            &["ryeos.execute.service.vault/list".to_string()],
+            scopes,
             "test-remote-principal",
             "test-granter",
             "2026-01-01T00:00:00Z",
@@ -1647,5 +1864,399 @@ mod tests {
             validate_authorized_key_directory(&state.config.authorized_keys_dir, &state.identity)
                 .expect_err("a stale grant keeps the daemon from starting");
         assert!(format!("{error:#}").contains("re-issue"), "{error:#}");
+    }
+
+    // ------------------------------------------------------------------
+    // Delegated requests
+    // ------------------------------------------------------------------
+
+    const SITE_A: &str = "site:source";
+    const GRANT_SCOPES: [&str; 3] = [
+        "ryeos.execute.service.remote/run",
+        "ryeos.execute.service.remote/push",
+        "ryeos.execute.service.vault/list",
+    ];
+
+    /// A node B holding one forwarding node admitted as `remote_node` for
+    /// site A, and one principal admitted as `remote_principal` for site A.
+    struct Delegated {
+        // The application drops before the store that owns its state, which
+        // drops before the directory that holds both.
+        state: ryeos_app::state::AppState,
+        _store_owner: ryeos_app::test_support::TestStateStore,
+        _tmp: TempDir,
+        user_key: SigningKey,
+        node_key: SigningKey,
+        node_fp: String,
+        user_fp: String,
+    }
+
+    impl Delegated {
+        fn new(seed: u8) -> Self {
+            let (tmp, store_owner, state) = build_test_state();
+            // Request verification reads the configured operator's identity to
+            // refuse its key in a `remote_node` grant.
+            NodeIdentity::create(&state.config.operator_signing_key_path).unwrap();
+            let user_key = SigningKey::from_bytes(&[seed; 32]);
+            let node_key = SigningKey::from_bytes(&[seed + 1; 32]);
+            let scopes: Vec<String> = GRANT_SCOPES.iter().map(|s| (*s).to_owned()).collect();
+            let user_fp =
+                register_remote_principal_key_with_scopes(&state, &user_key, SITE_A, &scopes);
+            let node_fp = register_remote_node_key(&state, &node_key, SITE_A);
+            Self {
+                state,
+                _store_owner: store_owner,
+                _tmp: tmp,
+                user_key,
+                node_key,
+                node_fp,
+                user_fp,
+            }
+        }
+
+        fn delegation(
+            &self,
+            scopes: &[&str],
+            not_after: u64,
+        ) -> ryeos_node_runtime::remote_delegation::SignedDelegation {
+            self.delegation_to(scopes, not_after, self.state.threads.site_id())
+        }
+
+        fn delegation_to(
+            &self,
+            scopes: &[&str],
+            not_after: u64,
+            audience_site: &str,
+        ) -> ryeos_node_runtime::remote_delegation::SignedDelegation {
+            use ryeos_node_runtime::remote_delegation::{
+                DelegationBody, DelegationParties, SignedDelegation,
+            };
+            let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+            let body = DelegationBody::new(
+                &format!("fp:{}", self.user_fp),
+                DelegationParties {
+                    delegate_site: SITE_A,
+                    delegate_node: &format!("fp:{}", self.node_fp),
+                    audience_site,
+                    audience_node: &self.state.identity.principal_id(),
+                },
+                &scopes,
+                not_after,
+            );
+            SignedDelegation::sign(body, &self.user_key).unwrap()
+        }
+
+        /// A request the forwarding node signs and co-signs, carrying the
+        /// delegation.
+        fn request(
+            &self,
+            nonce: &str,
+            delegation: Option<&ryeos_node_runtime::remote_delegation::SignedDelegation>,
+            cosign: bool,
+        ) -> (axum::http::Uri, axum::http::HeaderMap, &'static [u8]) {
+            let audience = self.state.identity.principal_id();
+            let uri: axum::http::Uri = "/execute".parse().unwrap();
+            let body: &'static [u8] = br#"{"item_ref":"test"}"#;
+            let mut headers = signed_headers(
+                &self.node_key,
+                &self.node_fp,
+                "POST",
+                &uri,
+                body,
+                unix_now(),
+                nonce,
+                &audience,
+            );
+            if cosign {
+                add_forwarding_proof(
+                    &mut headers,
+                    &self.node_key,
+                    &self.node_fp,
+                    SITE_A,
+                    "POST",
+                    &uri,
+                    body,
+                    &audience,
+                );
+            }
+            if let Some(delegation) = delegation {
+                headers.insert(
+                    ryeos_node_runtime::remote_delegation::DELEGATION_HEADER,
+                    delegation.to_header_value().unwrap().parse().unwrap(),
+                );
+            }
+            (uri, headers, body)
+        }
+
+        fn verify(
+            &self,
+            nonce: &str,
+            delegation: Option<&ryeos_node_runtime::remote_delegation::SignedDelegation>,
+            cosign: bool,
+        ) -> Result<Principal, RequestAuthError> {
+            let (uri, headers, body) = self.request(nonce, delegation, cosign);
+            verify_request(&self.state, "POST", &uri, &headers, body)
+        }
+    }
+
+    fn refusal_code(error: &RequestAuthError) -> Option<&'static str> {
+        match error {
+            RequestAuthError::Delegation(error) => Some(error.code()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn delegated_request_requires_forwarding_cosignature() {
+        let node = Delegated::new(40);
+        let delegation = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        let error = node
+            .verify("nonce-delegated-no-cosign", Some(&delegation), false)
+            .expect_err("a delegated request without the co-signature must fail");
+        assert!(error.to_string().contains("forwarding proof"), "{error}");
+        node.verify("nonce-delegated-cosign", Some(&delegation), true)
+            .expect("the same request with the co-signature verifies");
+    }
+
+    #[test]
+    fn delegated_request_principal_is_delegator() {
+        let node = Delegated::new(42);
+        let delegation = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        let principal = node
+            .verify("nonce-delegated-principal", Some(&delegation), true)
+            .unwrap();
+        assert_eq!(principal.fingerprint, node.user_fp);
+        assert_eq!(
+            principal.principal_class,
+            AuthorizedKeyPrincipalClass::RemotePrincipal
+        );
+        assert_eq!(principal.authenticated_site_id.as_deref(), Some(SITE_A));
+        assert_eq!(principal.delegated_via.as_deref(), Some(SITE_A));
+        let forwarding = principal.grant_authority.forwarding.unwrap();
+        assert_eq!(forwarding.source_node_fingerprint, node.node_fp);
+        assert_eq!(
+            forwarding.delegation_digest,
+            Some(delegation.digest().unwrap())
+        );
+    }
+
+    #[test]
+    fn delegated_request_scopes_are_grant_and_delegation_intersection() {
+        let node = Delegated::new(44);
+        let delegation = node.delegation(
+            &[
+                "ryeos.execute.service.remote/run",
+                "ryeos.execute.service.remote/pull",
+                "ryeos.execute.tool.*",
+            ],
+            unix_now() + 600,
+        );
+        let principal = node
+            .verify("nonce-delegated-scopes", Some(&delegation), true)
+            .unwrap();
+        assert_eq!(
+            principal.scopes,
+            vec!["ryeos.execute.service.remote/run".to_owned()],
+            "the delegation lends tool scopes the grant never held, and withholds the rest of the grant"
+        );
+    }
+
+    #[test]
+    fn delegated_forwarded_request_is_not_transitive() {
+        let node = Delegated::new(46);
+        let delegation = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        // The primary signer is the principal's own key (a request that was
+        // already forwarded once), and it also carries a delegation.
+        let audience = node.state.identity.principal_id();
+        let uri: axum::http::Uri = "/execute".parse().unwrap();
+        let body = br#"{"item_ref":"test"}"#;
+        let mut headers = signed_headers(
+            &node.user_key,
+            &node.user_fp,
+            "POST",
+            &uri,
+            body,
+            unix_now(),
+            "nonce-delegated-transitive",
+            &audience,
+        );
+        add_forwarding_proof(
+            &mut headers,
+            &node.node_key,
+            &node.node_fp,
+            SITE_A,
+            "POST",
+            &uri,
+            body,
+            &audience,
+        );
+        headers.insert(
+            ryeos_node_runtime::remote_delegation::DELEGATION_HEADER,
+            delegation.to_header_value().unwrap().parse().unwrap(),
+        );
+        let error = verify_request(&node.state, "POST", &uri, &headers, body).unwrap_err();
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_not_transitive")
+        );
+    }
+
+    #[test]
+    fn delegated_request_refuses_wrong_audience_expiry_and_tamper() {
+        let node = Delegated::new(48);
+        let wrong_audience = node.delegation_to(
+            &["ryeos.execute.service.remote/run"],
+            unix_now() + 600,
+            "site:elsewhere",
+        );
+        let error = node
+            .verify("nonce-delegated-audience", Some(&wrong_audience), true)
+            .unwrap_err();
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_wrong_audience")
+        );
+
+        let expired = node.delegation(&["ryeos.execute.service.remote/run"], 1_000);
+        let error = node
+            .verify("nonce-delegated-expired", Some(&expired), true)
+            .unwrap_err();
+        assert_eq!(refusal_code(&error), Some("remote_delegation_expired"));
+
+        let mut tampered = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        tampered.body.scopes = vec!["ryeos.execute.service.remote/push".to_owned()];
+        let error = node
+            .verify("nonce-delegated-tamper", Some(&tampered), true)
+            .unwrap_err();
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_bad_signature")
+        );
+    }
+
+    #[test]
+    fn remote_principal_grant_must_name_origin_site() {
+        let node = Delegated::new(50);
+        // The delegator is admitted for a different origin site than the
+        // forwarding node's.
+        let other_user = SigningKey::from_bytes(&[90u8; 32]);
+        let other_fp = register_remote_principal_key_with_scopes(
+            &node.state,
+            &other_user,
+            "site:another-source",
+            &["ryeos.execute.service.remote/run".to_owned()],
+        );
+        use ryeos_node_runtime::remote_delegation::{
+            DelegationBody, DelegationParties, SignedDelegation,
+        };
+        let body = DelegationBody::new(
+            &format!("fp:{other_fp}"),
+            DelegationParties {
+                delegate_site: SITE_A,
+                delegate_node: &format!("fp:{}", node.node_fp),
+                audience_site: node.state.threads.site_id(),
+                audience_node: &node.state.identity.principal_id(),
+            },
+            &["ryeos.execute.service.remote/run".to_owned()],
+            unix_now() + 600,
+        );
+        let delegation = SignedDelegation::sign(body, &other_user).unwrap();
+        let error = node
+            .verify("nonce-delegated-origin", Some(&delegation), true)
+            .unwrap_err();
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_principal_not_admitted")
+        );
+        // A delegator with no grant at all is refused the same way.
+        let stranger = SigningKey::from_bytes(&[91u8; 32]);
+        let body = DelegationBody::new(
+            &format!(
+                "fp:{}",
+                lillux::signature::compute_fingerprint(&stranger.verifying_key())
+            ),
+            DelegationParties {
+                delegate_site: SITE_A,
+                delegate_node: &format!("fp:{}", node.node_fp),
+                audience_site: node.state.threads.site_id(),
+                audience_node: &node.state.identity.principal_id(),
+            },
+            &["ryeos.execute.service.remote/run".to_owned()],
+            unix_now() + 600,
+        );
+        let delegation = SignedDelegation::sign(body, &stranger).unwrap();
+        let error = node
+            .verify("nonce-delegated-stranger", Some(&delegation), true)
+            .unwrap_err();
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_principal_not_admitted")
+        );
+    }
+
+    #[test]
+    fn a_tombstoned_delegation_is_refused_and_others_are_not() {
+        let node = Delegated::new(52);
+        let revoked = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        let kept = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        node.verify("nonce-delegated-before-revoke", Some(&revoked), true)
+            .unwrap();
+        let revocations = ryeos_engine::roots::RuntimeRoot::new(node.state.config.app_root.clone())
+            .delegation_revocations_dir();
+        std::fs::create_dir_all(revocations.parent().unwrap()).unwrap();
+        ryeos_node_runtime::remote_delegation::write_tombstone(
+            &revocations,
+            &revoked.digest().unwrap(),
+            &revoked.body.delegator,
+            &revoked.body.delegator,
+            None,
+            None,
+            &node.state.identity,
+            unix_now(),
+        )
+        .unwrap();
+        let error = node
+            .verify("nonce-delegated-after-revoke", Some(&revoked), true)
+            .unwrap_err();
+        assert_eq!(refusal_code(&error), Some("remote_delegation_revoked"));
+        node.verify("nonce-delegated-other", Some(&kept), true)
+            .expect("only the tombstoned digest is refused");
+    }
+
+    #[test]
+    fn delegated_verification_does_not_depend_on_how_the_origin_is_pinned() {
+        // The receiving node admits the forwarding node from its grants and the
+        // delegation alone. An origin this node pinned inbound-only (a node
+        // that only calls in) must still verify.
+        let node = Delegated::new(54);
+        let origin = SigningKey::from_bytes(&[92u8; 32]);
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(origin.verifying_key().as_bytes());
+        crate::remote::config::write_remote_pin(
+            &node.state.config.app_root,
+            node.state.identity.signing_key(),
+            &crate::remote::config::RemoteConfig {
+                name: "origin".to_owned(),
+                url: None,
+                reachability: crate::remote::config::Reachability::InboundOnly,
+                principal_id: format!(
+                    "fp:{}",
+                    lillux::signature::compute_fingerprint(&origin.verifying_key())
+                ),
+                signing_key: format!("ed25519:{public}"),
+                site_id: SITE_A.to_owned(),
+                vault_fingerprint: "vault".to_owned(),
+                ingest_ignore: None,
+                project_bindings: Default::default(),
+            },
+            crate::remote::config::PinSource::DescriptorWithoutContact,
+            None,
+        )
+        .unwrap();
+        let delegation = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        let principal = node
+            .verify("nonce-delegated-inbound-only", Some(&delegation), true)
+            .expect("an inbound-only pin of the origin does not stop inbound verification");
+        assert_eq!(principal.fingerprint, node.user_fp);
     }
 }

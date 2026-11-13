@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-13T14:29:21Z:1054da4583cb049d8a40f370de6069a26beb97adff5c7842b37da9fe048b3aa4:MAzBj3QVNWD/IRscFgeeLjWFM20aKVZTeugjgqDKWxbxy9Kg60+SbFsi4K/A+qUSEWwSoXhinH7Sud+fuTcHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/revoke-delegation
+path: /revoke-delegation
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 10
+response:
+  mode: json
+  source: service:identity/revoke-delegation

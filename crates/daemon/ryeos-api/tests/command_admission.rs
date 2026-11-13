@@ -262,6 +262,7 @@ async fn forwarded_operator_keeps_verified_authority_without_second_wire_asserti
                 ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                     source_node_fingerprint: "c".repeat(64),
                     source_node_grant_hash: "d".repeat(64),
+                    delegation_digest: None,
                 },
             ),
         },

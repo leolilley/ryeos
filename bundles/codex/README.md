@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:5e66541c45cb25dba7adae83b49ecd7d2b4bb26c6bcb94ae3060548c07756ffe:Hjz4TdBfABTVwPBW7nkfFIO38lH3szp2t7pfI9my+3KlSZ1T9K73tKro9grLy8SstLSLomkTbGlWuedi9/y0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:b768310ba17a3fc4fdeae9d5d8ec0627d851a380dc63348f8be7a407d3627c85:9tVfZLlazYw0oRnXpTVJBRgphy/9pLhLgky/g/p0hAfT3dTevgXPHyEq31sgS5fOFT6s+vgleg6FHEmJL4OCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -194,8 +194,11 @@ credential profile with a projectless, wait-mode service execution:
 There are three independent authorities in these examples. The leading
 `--no-project` selects the source invocation context, the nested
 `execution_policy` selects the destination execution context, and
-`outbound_principal` selects the authorized identity forwarded by the source
-node. None is inferred from either of the others.
+`outbound_principal` selects the identity forwarded by the source node: the
+caller under its own signed delegation (`delegated`, the default for any caller
+that is not the node itself) or the source node (`node`). None is inferred from
+either of the others. Sign the delegation first with `ryeos remote delegate
+--remote hosted --scopes <exact scopes>`.
 
 ```sh
 ryeos --no-project execute service:remote/run --input - <<'JSON'
@@ -203,7 +206,7 @@ ryeos --no-project execute service:remote/run --input - <<'JSON'
   "remote": "hosted",
   "item_ref": "service:credential-profiles/create",
   "ref_bindings": {},
-  "outbound_principal": "configured_operator",
+  "outbound_principal": "delegated",
   "parameters": {"profile_id": "personal"},
   "execution_policy": {
     "schema_version": 2,
@@ -231,7 +234,7 @@ ryeos --no-project execute service:remote/run --input - <<JSON
   "remote": "hosted",
   "item_ref": "worker_execution:codex/login",
   "ref_bindings": {},
-  "outbound_principal": "configured_operator",
+  "outbound_principal": "delegated",
   "parameters": {"credential_profile_id": "personal"},
   "launch_id": "$LOGIN_LAUNCH_ID",
   "execution_policy": {
@@ -294,16 +297,16 @@ ryeos remote bind-project hosted \
   --remote-project /hosted/project \
   --sync-scope full_project
 
-# This opt-in push signs the destination HEAD as the configured operator.
-# Omitting outbound-principal preserves ordinary node-owned push semantics.
+# This push signs the destination HEAD as the calling principal under its
+# delegation. Pass --outbound-principal node for node-owned push semantics.
 ryeos remote push hosted \
   --project /local/project \
-  --outbound-principal configured_operator
+  --outbound-principal delegated
 
 REMOTE_LAUNCH_ID="L-$(uuidgen | tr -d '-')"
 ryeos remote run hosted worker_execution:codex/session \
   --project /local/project \
-  --outbound-principal configured_operator \
+  --outbound-principal delegated \
   --parameters '{"credential_profile_id":"personal"}' \
   --ref-bindings '{"environment":"config:codex/environments/default"}' \
   --launch-id "$REMOTE_LAUNCH_ID" \
@@ -380,7 +383,7 @@ response echoes the same value. The returned `result.thread_id` is the remote
 RyeOS root/session ID. Drive its projectless status, command, approval,
 termination, validation, publication, and discard services through
 projectless wait-mode `service:remote/run` calls from the source node, always
-selecting `outbound_principal: configured_operator`. This generic service path
+selecting `outbound_principal: delegated`. This generic service path
 is also the backend contract for a future RyeOS UI, but neither the current UI
 browser-session principal nor this bundle supplies that configured-operator
 forwarding workflow. Direct target requests are intentionally rejected because
