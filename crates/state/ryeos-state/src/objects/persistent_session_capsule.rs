@@ -42,7 +42,11 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // admitted launch capsules; signed init-v2 remains an independent wire contract.
 // v24 makes the remote-testimony lane of the guest-runtime proof an explicit
 // required-nullable field; a local qualification is never inferred from absence.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 24;
+// v25 retains remote qualification acceptance evidence v4, and a remote
+// runtime-content testimony retains the receiver's own activation join (its
+// receipt, binding and node) beside the origin's evidence. A v24 capsule's
+// acceptance stated a different contract and is not reinterpreted.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 25;
 pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
@@ -801,6 +805,14 @@ pub struct RetainedExternalRuntimeContentQualification {
     /// is this ref.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub remote_testimony: Option<RetainedRemoteQualificationTestimony>,
+    /// Required nullable, present exactly with `remote_testimony`: the
+    /// receiver's own activation of the content the origin qualified, as its
+    /// launch authenticated it. The origin's evidence names the origin's
+    /// receipt, binding and node; this names this node's. A local
+    /// qualification's evidence already names the local join, so it is null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub receiver_join:
+        Option<crate::external_content::qualification_subject::ContentQualificationLocalJoin>,
 }
 
 impl RetainedExternalRuntimeContentQualification {
@@ -826,6 +838,14 @@ impl RetainedExternalRuntimeContentQualification {
                 != self.coordinate_id
         {
             anyhow::bail!("retained session-runtime content differs from its exact testimony");
+        }
+        if self.remote_testimony.is_some() != self.receiver_join.is_some() {
+            anyhow::bail!(
+                "retained runtime content carries a receiver join exactly for a remote testimony"
+            );
+        }
+        if let Some(join) = &self.receiver_join {
+            join.validate()?;
         }
         if let Some(testimony) = &self.remote_testimony {
             testimony.validate()?;
@@ -2089,5 +2109,53 @@ mod tests {
             },
         )]);
         assert!(validate_session_process_environment(&oversized).is_err());
+    }
+
+    #[test]
+    fn retained_remote_content_carries_a_receiver_join_exactly_when_remote() {
+        use super::*;
+        use crate::external_content::qualification_subject::ContentQualificationLocalJoin;
+        let capsule =
+            crate::external_execution::admission::test_support::content_candidate_capsule(
+                &"a".repeat(64),
+            )
+            .unwrap();
+        let local = capsule
+            .retained_external_runtime_content_qualification
+            .unwrap();
+        local.validate().unwrap();
+        assert!(local.remote_testimony.is_none() && local.receiver_join.is_none());
+        let join = ContentQualificationLocalJoin {
+            activation_receipt_hash: "b".repeat(64),
+            binding_hash: "c".repeat(64),
+            target_node_fingerprint: "d".repeat(64),
+        };
+        // A local qualification's evidence already names its own join.
+        let mut joined_local = local.clone();
+        joined_local.receiver_join = Some(join.clone());
+        let error = joined_local.validate().unwrap_err().to_string();
+        assert!(error.contains("receiver join"), "{error}");
+        // A remote testimony without the receiver's join is refused before
+        // its acceptance is read.
+        let mut unjoined_remote = local.clone();
+        unjoined_remote.remote_testimony = Some(RetainedRemoteQualificationTestimony {
+            acceptance_hash: "e".repeat(64),
+            acceptance:
+                crate::external_content::products::qualification_testimony::tests::product_acceptance_evidence(
+                    &"f".repeat(64),
+                ),
+        });
+        let error = unjoined_remote.validate().unwrap_err().to_string();
+        assert!(error.contains("receiver join"), "{error}");
+        // The field is required even when null.
+        let mut value = serde_json::to_value(&local).unwrap();
+        value.as_object_mut().unwrap().remove("receiver_join");
+        assert!(
+            serde_json::from_value::<RetainedExternalRuntimeContentQualification>(value).is_err()
+        );
+        // A noncanonical join is refused.
+        let mut bad = join;
+        bad.binding_hash = "x".into();
+        assert!(bad.validate().is_err());
     }
 }

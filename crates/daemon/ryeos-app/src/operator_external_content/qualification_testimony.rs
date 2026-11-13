@@ -1116,7 +1116,9 @@ pub(crate) fn verify_retained_remote_testimony_guarded(
 /// Recovery check for a retained remote content testimony under the caller's
 /// CAS guard, mirroring the product lane: only the retained keys and the
 /// signed acceptance are used, with no current grant, policy, source or
-/// wall-clock eligibility reapplied.
+/// wall-clock eligibility reapplied. The retained receiver join must name this
+/// node, and the activation receipt it names must be this node's signed
+/// record of the same activation program and consumer the origin qualified.
 pub(crate) fn verify_retained_remote_content_testimony_guarded(
     state: &AppState,
     authority: &PinnedStateAuthority,
@@ -1141,6 +1143,36 @@ pub(crate) fn verify_retained_remote_content_testimony_guarded(
                 == Some(retained.activation_ref.as_str())
             && loaded.verified.testimony.issuer == retained.evidence.purpose.owner_fingerprint,
         "retained remote content testimony differs from its authenticated acceptance"
+    );
+    let join = retained
+        .receiver_join
+        .as_ref()
+        .context("retained remote runtime content has no receiver join")?;
+    ensure!(
+        join.target_node_fingerprint == state.identity.fingerprint(),
+        "retained remote runtime content was activated on another node"
+    );
+    let QualificationSubject::ActivatedContent { content } = &retained.evidence.purpose.subject
+    else {
+        bail!("retained remote content qualification has no activated content subject");
+    };
+    let value = load_exact_cas_object_with_cas(
+        &authority.cas_store()?,
+        &join.activation_receipt_hash,
+        limits.max_object_bytes,
+    )?;
+    let receipt = ryeos_state::objects::ExternalContentActivationReceipt::from_value(&value)?;
+    ensure!(
+        receipt.node_fingerprint == state.identity.fingerprint()
+            && receipt.activation_ref == retained.activation_ref
+            && receipt.activation_program_digest == content.activation_program_digest
+            && receipt.consumer_ref == content.consumer_ref
+            && receipt
+                .components
+                .iter()
+                .any(|component| component.id == content.declaration_id
+                    && component.binding_hash == join.binding_hash),
+        "retained receiver activation differs from the remote content it ran"
     );
     Ok(())
 }
