@@ -280,6 +280,10 @@ fn plain_reason(reason: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "lease_admission_adapter_tests.rs"]
+mod adapter_judged_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
