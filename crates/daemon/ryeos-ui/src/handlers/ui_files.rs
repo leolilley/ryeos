@@ -664,7 +664,7 @@ mod tests {
     fn tree_applies_ignore_policy_on_the_policy_relative_path() {
         let temporary = tempfile::tempdir().expect("temporary root");
         std::fs::create_dir_all(temporary.path().join("target/debug")).expect("create target");
-        std::fs::create_dir(temporary.path().join("remotes")).expect("create remotes");
+        std::fs::create_dir(temporary.path().join("cache")).expect("create cache");
         std::fs::write(temporary.path().join("kept"), b"").expect("write kept");
 
         // The walk root is the project's `.ai/config` directory.
@@ -675,7 +675,7 @@ mod tests {
             4,
             1,
             1_000,
-            &ignore_matcher(&["target/", "/.ai/node/remotes/"]),
+            &ignore_matcher(&["target/", "/.ai/config/cache/"]),
         )
         .expect("tree");
 
