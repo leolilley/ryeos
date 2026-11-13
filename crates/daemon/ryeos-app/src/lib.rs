@@ -36,6 +36,7 @@ pub mod execution_realization;
 pub mod execution_resources;
 pub mod extension_state;
 pub mod external_artifacts;
+pub mod external_execution_status;
 pub mod external_candidate_import;
 pub mod external_connector;
 pub mod external_content_admission;

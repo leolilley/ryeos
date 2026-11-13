@@ -793,3 +793,18 @@ impl StateStore {
             .external_execution_revoked(placement)
     }
 }
+
+impl StateStore {
+    /// The journal rows behind the operator's external-execution status,
+    /// read under one store lock so they agree with each other.
+    pub(crate) fn external_execution_status_rows(
+        &self,
+    ) -> Result<crate::external_execution_status::StatusRows> {
+        let g = self.lock()?;
+        Ok(crate::external_execution_status::StatusRows {
+            allocations: g.runtime_db.unsettled_external_allocations()?,
+            local_starts: g.runtime_db.open_qualification_local_starts()?,
+            profiles: g.runtime_db.held_credential_profiles()?,
+        })
+    }
+}

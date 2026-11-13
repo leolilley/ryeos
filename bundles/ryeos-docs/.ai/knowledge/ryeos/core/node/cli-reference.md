@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:27:14Z:d1abb2d2244de7dd963a0d92d218bb6ec96b437f7246f0161101ab0450ba4516:vnIZa5StHQTV99nXi81v33aJYCLBuisc7eqOZLidYVvTb2QTtnbp63rTWfjvLuzILv9GTQxHlIDnIkJtZWVlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:44:35Z:36769f38abff67b623a4625bb664949e47c94469b2792b4ebdce8415d21d1e6d:7LxHjbmKOws77k28FSdzlF3B1GMGGLjkdBgqU5hUOEEvKV3GzTMfjmdb9bUkW9798v5cSAeJD/LklrzDBllQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -208,6 +208,23 @@ schema and protocol seen and those admitted. At run time, an operation through
 a production binding whose pinned adapter generation is not installed is
 refused with HTTP 409 `binding_artifact_not_installed`, naming the same pin.
 
+The `external_capacity` and `credential_profiles` rows ask the running daemon
+(`service:external-execution/status`, a 10 s deadline) what still holds
+external capacity or a credential-profile lock. With the node stopped both are
+`n/a` with `state: not_checked`; a daemon that does not answer makes them warn
+`not_checked` with the error. `external_capacity` covers unsettled
+allocations and open Q local starts, `credential_profiles` every held profile
+lock with the session, Q start or continuation reservation that holds it.
+Every listed row carries an `attention` and a `fix`:
+
+| Attention | Meaning | Row status |
+|---|---|---|
+| `in_use` | a live owner of this daemon generation holds it and releases it when its work ends | ok |
+| `settling` | the daemon's own recovery owns it and retries it (a row a previous daemon generation left) | warning |
+| `operator` | nothing on the node releases it without the operator: an unknown provider outcome, a Q start whose cleanup is unproved, a session whose outcome is unknown after a restart, a lock no owner names | fail |
+
+`ryeos external-execution status` prints the same view as JSON.
+
 ### `ryeos node reset execution-history`
 
 ```bash
@@ -338,6 +355,10 @@ physical vault key.
 
 ## Core daemon-backed verbs
 
+- `ryeos external-execution status` — list unsettled external allocations, open
+  Q local starts and held credential-profile locks, each with its owner,
+  attention and fix. Local configured operator only; the doctor's
+  `external_capacity` and `credential_profiles` rows read it.
 - `ryeos execute <ref> [params...]` — execute an item by canonical ref.
 - `ryeos content pin <ref> --id <declaration>` — atomically complete a signed
   external-content pin through the daemon-owned, local-operator authoring path.

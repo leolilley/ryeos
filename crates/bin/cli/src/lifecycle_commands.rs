@@ -2608,6 +2608,17 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         checks.push(check("sockets", status, serde_json::Value::Object(detail)));
     }
 
+    // Held external capacity and credential-profile locks, as the running
+    // daemon sees them.
+    if daemon_running {
+        checks.extend(crate::doctor_external_status::checks(&config.app_root).await);
+    } else {
+        checks.extend(crate::doctor_external_status::not_checked(
+            "these rows ask the running daemon, and the node is not running",
+            initialized.then_some("start the node: ryeos start"),
+        ));
+    }
+
     // 5. Verified node config + per-bundle doctor. Requires init; degrades to
     //    n/a rather than piling failures onto an uninitialized node.
     if initialized {
