@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:36e51b6a186c1bcdae22ccee3870b5e01e4fc4d2bb4236b90c1594ada345f0ab:0yVEreO7Rjn7m7XJtBxaDMw6okI5v2IdFbvTzwVskgN21IqKLoXHX44Qs3a+L+6pAaTxIzr50YAx6NFMoGgEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:46:03Z:fd9d81eefaa2d78a14a4a1d8666e0f3e4dc2f855a22000a9f9abe3b8ac3c6394:BC9FK23Unh/KBVlasBfve0U3+Mn+fZTqwrHl7OMZj687qt03JwM6Vz+5al/gAK6sBC/8ix2jSo3bF8bu3y0KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -87,6 +87,17 @@ are never reinterpreted. Each channel has one exact child descriptor and hidden
 environment binding in both disabled and enforced modes; fd 0 is a deliberate
 full-duplex primary channel, not a sentinel. Parent protocol code retains a
 typed Lillux byte-stream endpoint and never recovers a raw Unix socket.
+
+The adapter does not know the project's ignore policy, so it never refuses an
+upper-layer entry for being unrepresentable: an absolute or otherwise
+unportable symlink target, a socket, FIFO or device, or a name that is not
+UTF-8 is reported as a typed `unrepresentable` mutation naming its path (a
+non-UTF-8 name with each invalid byte as U+FFFD, never descended into) and its
+reason. At seal, RyeOS skips such an entry when the snapshot policy ignores its
+path, exactly as copy-based capture skips it, and refuses the seal naming the
+path and reason when the path is included. Relative symlinks, regular files
+and directories in ignored paths are skipped the same way. This is part of the
+v15 adapter contract; an older adapter is refused by the protocol version.
 
 Argument entries and environment values are exact process data: an empty
 string remains present and empty through plan validation, serialization and

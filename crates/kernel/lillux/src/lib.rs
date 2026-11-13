@@ -172,7 +172,8 @@ pub use secure_fs::{
 
 pub use sandbox::{
     LinuxOverlayMutation, LinuxOverlayMutationKind, LinuxOverlayTemplate,
-    LinuxOverlayWorkspaceObservation, LinuxOverlayWorkspaceOperation, LinuxSandboxAggregateLimits,
+    LinuxOverlayUnrepresentableReason, LinuxOverlayWorkspaceObservation,
+    LinuxOverlayWorkspaceOperation, LinuxSandboxAggregateLimits,
     LinuxSandboxAppliedLaunchCommitments, LinuxSandboxAppliedLaunchReceipt,
     LinuxSandboxAppliedLaunchTarget, LinuxSandboxCharacterDevice, LinuxSandboxExit,
     LinuxSandboxFixedParentView, LinuxSandboxInspection, LinuxSandboxLifecycle, LinuxSandboxMount,
