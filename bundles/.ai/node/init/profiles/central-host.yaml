@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:24:59Z:a735fbf0546be21572dacb2f12d283dd6eedcdc00a6a9e5d4b729635516f72d0:s448huhAi6P5Cm/4l2pvezX6hO4P6mNCalhbAgNL1zbtsQxkEQq8XpZBz9gxZ/UZYpE3a59nQ4j13mngsFCsCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T04:34:21Z:57ca4ac32ea9bf5825770cb86ecafc521dc3417a83b5972a9bd082fa72a76233:6ewnQQdHqnhRuRmIkd4eB7ai8LajkYNT0z5DPuRPy8QtacxuzPcg1udOoCf2VeWkJdTrsaR4y+MJY/ecUd3aAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -377,6 +377,15 @@ policies:
       - ryeos.execute.service.worker-executions/resolve-approval
       - ryeos.execute.directive.*
       - ryeos.execute.graph.*
+      - ryeos.execute.tool.ryeos/core/fetch
+      - ryeos.execute.tool.ryeos/core/verify
+      - ryeos.execute.tool.ryeos/core/node/doctor
+      - ryeos.execute.tool.ryeos/knowledge/compose
+      - ryeos.execute.knowledge.*
+      - ryeos.execute.tool.core/snapshot-status
+      - ryeos.execute.tool.core/snapshot-show
+      - ryeos.execute.tool.core/snapshot-log
+      - ryeos.read.project.live
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16

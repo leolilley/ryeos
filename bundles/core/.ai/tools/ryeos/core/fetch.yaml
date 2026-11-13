@@ -1,9 +1,8 @@
-# ryeos:signed:2026-09-05T00:45:20Z:35a0560d27243ae88a4bb369fe264d521ac3c411cf2fd2f6a800f9ce07249c5a:htysFp16q/iq2ECS2Vpp96Auw2eMq4is3SOLc1jfZQUwm1QhceGrdpFf1fRVHRqaX+wHOzoMjoE8ftGfdmTkDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T04:34:21Z:1f89983e685d0f8d1fe63e5b450b04d682be874245d9edecf4c1b10ea3ceb79c:8kGAK/axUbxGTKd+Jz5/kQs6OJ+8kWqeLVvyThixQzT+kb/326BiZtitRub5/YBJivZ4SmbciD7beitADc+YDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core"
 name: "fetch"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
-required_caps: ["bundle.read"]
 description: "Resolve, optionally verify, and read an item via the engine"
 
 config:
