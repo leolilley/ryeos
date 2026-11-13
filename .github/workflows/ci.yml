@@ -145,6 +145,9 @@ jobs:
       - name: Check workspace version gate
         run: python3 -B scripts/release/test-check-workspace-versions.py
 
+      - name: Check gate package selection
+        run: python3 -B scripts/test-gate-package-selection.py
+
       - name: Check development registry bootstrap entry
         run: python3 -B scripts/release/test-development-registry.py
 
