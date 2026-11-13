@@ -2909,6 +2909,12 @@ impl StructuredWorkload {
                 )),
             );
         }
+        let acknowledged_through = self
+            .events
+            .lock()
+            .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+            .acknowledged_through;
+        prune_expired_server_requests(&mut self.expired_server_requests, acknowledged_through)?;
         let pending = match self.server_requests.get(&key) {
             Some(pending) if pending.request_digest == expected_request_digest => {
                 self.server_requests
@@ -2928,7 +2934,17 @@ impl StructuredWorkload {
                     "request_digest":expected_request_digest,
                 }));
             }
-            None => bail!("approval is absent, stale, or already resolved"),
+            // Typed so RyeOS can tell this from a delivery failure: nothing
+            // was delivered. It explains the absence only from its own
+            // acknowledged expiry of this exact request.
+            None => {
+                return Ok(json!({
+                    "resolved":false,
+                    "outcome":"absent",
+                    "request_id":request_id,
+                    "request_digest":expected_request_digest,
+                }));
+            }
         };
         let method = pending
             .get("method")
@@ -3710,22 +3726,19 @@ fn invocation_identity_matches(required: &BTreeMap<String, Value>, context: &Val
         .all(|(pointer, expected)| context.pointer(pointer).unwrap_or(&Value::Null) == expected)
 }
 
-/// Forget an expired approval only after RyeOS has acknowledged the
-/// observation batch carrying its expiry event. Until then the daemon may
-/// still hold the approval as pending and deliver a late decision, which must
-/// get the typed `expired` outcome rather than an unknown-delivery error.
-///
-/// Acknowledged entries are evicted oldest first, and only beyond
-/// `MAX_PENDING_SERVER_REQUESTS`: a decision the daemon reserved before it
-/// projected the expiry can still be in flight after the acknowledgement.
+/// Forget an expired approval as soon as RyeOS has acknowledged the
+/// observation batch carrying its expiry event, and never before. Until then
+/// the daemon may still hold the approval as pending and deliver a late
+/// decision, which gets the typed `expired` outcome. After it, RyeOS has
+/// recorded the expiry: a decision it reserved earlier that arrives now gets
+/// the typed `absent` outcome, which RyeOS explains from that recorded expiry.
 fn prune_expired_server_requests(
     expired: &mut VecDeque<ExpiredServerRequest>,
     acknowledged_through: u64,
 ) -> Result<()> {
-    while expired.len() > MAX_PENDING_SERVER_REQUESTS
-        && expired
-            .front()
-            .is_some_and(|entry| entry.event_sequence <= acknowledged_through)
+    while expired
+        .front()
+        .is_some_and(|entry| entry.event_sequence <= acknowledged_through)
     {
         expired.pop_front();
     }
@@ -5288,25 +5301,22 @@ mod tests {
         assert_eq!(expired.len(), 200);
         assert_eq!(expired.front().unwrap().event_sequence, 1);
 
-        // Only acknowledged entries are evictable: with expiries through 100
+        // Only acknowledged entries are dropped: with expiries through 100
         // acknowledged, the unacknowledged 101..=200 all stay.
         prune_expired_server_requests(&mut expired, 100).unwrap();
-        assert_eq!(expired.len(), MAX_PENDING_SERVER_REQUESTS);
-        assert_eq!(expired.front().unwrap().event_sequence, 73);
-        let mut unacknowledged = expired_requests(1..=200);
-        prune_expired_server_requests(&mut unacknowledged, 20).unwrap();
-        assert_eq!(unacknowledged.front().unwrap().event_sequence, 21);
-        assert_eq!(unacknowledged.len(), 180);
+        assert_eq!(expired.len(), 100);
+        assert_eq!(expired.front().unwrap().event_sequence, 101);
     }
 
     #[test]
     fn expired_approval_pruned_after_ack() {
+        // No retention cushion: every acknowledged expiry is dropped at once.
         let mut expired = expired_requests(1..=200);
+        prune_expired_server_requests(&mut expired, 199).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired.front().unwrap().id, "approval-200");
         prune_expired_server_requests(&mut expired, 200).unwrap();
-        assert_eq!(expired.len(), MAX_PENDING_SERVER_REQUESTS);
-        assert_eq!(expired.front().unwrap().event_sequence, 73);
-        assert!(!expired.iter().any(|entry| entry.id == "approval-1"));
-        assert!(expired.iter().any(|entry| entry.id == "approval-200"));
+        assert!(expired.is_empty());
     }
 
     #[test]
@@ -5958,13 +5968,15 @@ mod tests {
         assert!(!schema_error.contains(sentinel));
         assert!(schema_error.contains("instance digest"));
 
-        // More expiries than the acknowledged-retention floor, none of them
-        // acknowledged yet: the first is still remembered as expired.
+        // More expiries than the old 128-entry ring, none of them acknowledged
+        // yet: the first is still remembered as expired.
         let expired_digest = "a".repeat(64);
+        let mut expiry_sequences = Vec::new();
         for index in 0..200 {
             let event_sequence = workload
                 .push_sequenced_event(json!({"event_type":"approval.expired","payload":{}}))
                 .unwrap();
+            expiry_sequences.push(event_sequence);
             workload
                 .expired_server_requests
                 .push_back(ExpiredServerRequest {
@@ -5999,8 +6011,33 @@ mod tests {
                 "request_digest":expired_digest,
             })
         );
-        // Once RyeOS acknowledges every expiry event, only the newest
-        // retention floor is kept; the oldest is absent.
+        // As soon as RyeOS acknowledges an expiry event, that entry is
+        // forgotten: a late decision for it gets the typed `absent` answer,
+        // while expiries not yet acknowledged still answer `expired`.
+        workload
+            .events
+            .lock()
+            .unwrap()
+            .acknowledge_observations(expiry_sequences[99])
+            .unwrap();
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
+                .unwrap(),
+            json!({
+                "resolved":false,
+                "outcome":"absent",
+                "request_id":"approval-expired-0",
+                "request_digest":expired_digest,
+            })
+        );
+        assert_eq!(workload.expired_server_requests.len(), 100);
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(100).as_object().unwrap(), &expired_digest)
+                .unwrap()["outcome"],
+            "expired"
+        );
         let pushed_through = workload.events.lock().unwrap().pushed_through;
         workload
             .events
@@ -6008,25 +6045,13 @@ mod tests {
             .unwrap()
             .acknowledge_observations(pushed_through)
             .unwrap();
-        prune_expired_server_requests(&mut workload.expired_server_requests, pushed_through)
-            .unwrap();
-        assert_eq!(
-            workload.expired_server_requests.len(),
-            MAX_PENDING_SERVER_REQUESTS
-        );
-        assert!(
-            workload
-                .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
-                .unwrap_err()
-                .to_string()
-                .contains("absent, stale, or already resolved")
-        );
         assert_eq!(
             workload
                 .handle_approval(late_decision(199).as_object().unwrap(), &expired_digest)
                 .unwrap()["outcome"],
-            "expired"
+            "absent"
         );
+        assert!(workload.expired_server_requests.is_empty());
 
         let reused_key = canonical_id(&json!("approval-reused")).unwrap();
         let old_digest = "b".repeat(64);
