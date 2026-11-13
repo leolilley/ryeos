@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:48:24Z:f2c9df48763e113949228bc0723288d4cf4aca314f58ac4d44746f0c1e4ca62c:mEUBVB7WhSW07ZrXtpc/IjFQ/lGBcWzQhOkYhMdGc5TAI61EVts0rW3XR0Evobmwq54/9OWVge0SduzR5rQEDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:48:57Z:85c51151b7cbb7fec9fdf60bde7be1b7574e55c3d1df85a18238fac25c7b834c:ujvGG5tXDNq13+mAAPtV2KUWELKI9moj4ZEPtMbKaFB0U1YGPy6d4cEKhqxSthhr55ZU2g0BWJGMEj4jO1KgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -70,6 +70,33 @@ source-node signature proves transit. Together they keep the principal as the
 operator and make verified remote origin visible to destination policy. A
 delegated caller cannot turn the node into an operator-key signing oracle or
 choose its authenticated origin.
+
+### Attribution: remote runs act as the node, not the user
+
+`remote execute`, `remote push` (default mode) and target-site forwarding
+from `/execute` sign every request to the remote with the caller's **node
+key**. The remote therefore sees, authorizes and records one principal, the
+caller node, whichever local user started the run:
+
+- the remote's authorized-key scopes are granted to the node, so every local
+  user allowed to start remote work (for example `remote/admin` for
+  `remote execute`, `remote/push` for `remote push`) acts with the node's full
+  grant on that remote;
+- the remote stores pushed project HEADs and thread ownership under the node
+  key's fingerprint, so all of a node's users share one namespace there;
+- remote threads, results and audit records name the node, not the user. The
+  caller's own sync job (`service:sync/jobs/inspect`) is the only record of
+  which local principal (`acting_principal`) asked for the run.
+
+Grant remote rights to local users on that basis: giving a user remote
+capabilities lends them the node's identity on every configured remote. The configured
+operator continuity mode above is the one exception, and it is reserved for
+the exact configured operator.
+
+Per-user outbound keys, where each local principal holds its own key admitted
+and capped separately on the remote, are not available yet. They come with the
+keys work (per-user key custody on the caller and per-signer admission on the
+remote); until then, attribute and cap remote work per node.
 
 ## Prerequisites
 
