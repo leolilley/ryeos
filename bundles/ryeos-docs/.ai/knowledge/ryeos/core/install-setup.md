@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T02:46:08Z:90a251eaa2426c26d2a0fc8b17707a77e874e23000cb584eb83feb8281e466bc:lGshc9dxMXvNfrs65ZIALsG4Vg+K3PpqxSdBgdeo1z+9c1A4M5YhMbQEJueMBTXgfdg/mdkPJtiOIzPR5fLJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T14:10:31Z:d7c834642356c6fff841415e87e5b38693fab3dc7185a86b2ce76a51aa441eff:qNbkQqAvlTgNg9rEEEl7PZypTC6edeTjy9AiXgV9dXPY1vQd3cQiEm1UpmXwCyiciVqhFwkqZ+0OK/WbC58WDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -37,7 +37,7 @@ are local-node operations and ignore `RYEOSD_URL`.
 ## What `ryeos init` does
 
 `ryeos init` is implemented by `ryeos-node` and is authoritative for
-operator-owned setup. It creates layout, user key, node key, self-trust,
+operator-owned setup. It creates layout, user key, node key, operator signer record,
 official/additional publisher trust, discovers and plans bundles,
 installs and registers bundles, creates vault key material, materializes the
 selected complete policy generation, writes its read-only derived sync view,
@@ -113,7 +113,8 @@ scripts/pkg/install-local-direct.sh --prefix /opt/ryeos-dev \
 
 ```text
 <system-space>/.ai/config/keys/signing/private_key.pem
-<system-space>/.ai/config/keys/trusted/<fp>.toml
+<system-space>/.ai/node/trust/signers/<fp>.yaml     # node-signed signer records
+<system-space>/.ai/node/trust/events/               # node-signed hash-chained key events
 
 <system-space>/.ai/bundles/<name>/.ai/
 <system-space>/.ai/node/identity/private_key.pem

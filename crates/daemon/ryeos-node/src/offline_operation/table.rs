@@ -19,7 +19,7 @@ use super::contract::RequestBody;
 use super::facts::{
     FACT_AUTHORIZED_KEYS, FACT_BUNDLE_REGISTRATIONS, FACT_CAPACITY_ACCOUNT,
     FACT_EXTERNAL_EXECUTION, FACT_POLICY_GENERATION, FACT_REMOTES, FACT_RESTART_INHIBITION,
-    FACT_RUNTIME_SNAPSHOTS,
+    FACT_RUNTIME_SNAPSHOTS, FACT_TRUST_REGISTRY,
 };
 use super::handlers;
 use super::host::OfflineHost;
@@ -592,6 +592,115 @@ static OPERATIONS: &[OperationSpec] = &[
             why: "the swap installs one local-operator grant over whatever is there, so a swap already made is made again to the same effect; the intent record says the receipt exists",
         },
     },
+    OperationSpec {
+        id: "node.trust.pin",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: &[InputSlot {
+            name: "signer",
+            max_bytes: 16 * KIB,
+            required: true,
+        }],
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::TrustPinArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::trust_pin),
+        recovery: Recovery {
+            record: "the key event whose request digest is the request's",
+            rerun: Rerun::RecognisesRecordedDigest,
+            why: "an event carrying this request's digest means the pin was made; a rerun writes only a record that event names but the volume lacks",
+        },
+    },
+    OperationSpec {
+        id: "node.trust.scope",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::TrustScopeArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::trust_scope_change),
+        recovery: Recovery {
+            record: "the key event whose request digest is the request's",
+            rerun: Rerun::RecognisesRecordedDigest,
+            why: "an event carrying this request's digest means the scope was changed; a rerun writes only a record that event names but the volume lacks",
+        },
+    },
+    OperationSpec {
+        id: "node.trust.retire",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::TrustFingerprintArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::trust_retire),
+        recovery: Recovery {
+            record: "the key event whose request digest is the request's",
+            rerun: Rerun::RecognisesRecordedDigest,
+            why: "an event carrying this request's digest means the signer was retired; a rerun writes only a record that event names but the volume lacks",
+        },
+    },
+    OperationSpec {
+        id: "node.trust.revoke",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::TrustFingerprintArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::trust_revoke),
+        recovery: Recovery {
+            record: "the key event whose request digest is the request's",
+            rerun: Rerun::RecognisesRecordedDigest,
+            why: "an event carrying this request's digest means the signer was revoked; a rerun writes only a record that event names but the volume lacks",
+        },
+    },
+    OperationSpec {
+        id: "node.trust.succeed",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: &[InputSlot {
+            name: "succession",
+            max_bytes: 16 * KIB,
+            required: true,
+        }],
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: arguments_of::<handlers::TrustSucceedArguments>,
+        handler: Handler::EffectThenReceipt(handlers::trust_succeed),
+        recovery: Recovery {
+            record: "the key events whose request digest is the request's, one per record the succession changes",
+            rerun: Rerun::RecognisesRecordedDigest,
+            why: "events carrying this request's digest mean those records were changed; a rerun writes only records that events name but the volume lacks and the events still missing",
+        },
+    },
 ];
 
 /// Every operation this binary can apply.
@@ -681,10 +790,15 @@ mod tests {
             "node.remote.pin",
             "node.bundle.replace",
             "node.reset.authorization",
+            "node.trust.pin",
+            "node.trust.scope",
+            "node.trust.retire",
+            "node.trust.revoke",
+            "node.trust.succeed",
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 18);
+        assert_eq!(operations().len(), 23);
     }
 
     #[test]
@@ -723,15 +837,35 @@ mod tests {
                 "node.remote.pin",
                 "node.bundle.replace",
                 "node.reset.authorization",
+                "node.trust.pin",
+                "node.trust.scope",
+                "node.trust.retire",
+                "node.trust.revoke",
+                "node.trust.succeed",
             ]
         );
+    }
+
+    #[test]
+    fn trust_operations_are_local_signer_only_and_authority_bearing() {
+        for id in [
+            "node.trust.pin",
+            "node.trust.scope",
+            "node.trust.retire",
+            "node.trust.revoke",
+            "node.trust.succeed",
+        ] {
+            let spec = lookup(id).unwrap();
+            assert!(spec.local_signer_only && spec.authority_bearing, "{id}");
+            assert!(spec.preconditions.contains(&FACT_TRUST_REGISTRY), "{id}");
+        }
     }
 
     #[test]
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 1);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 6);
     }
 
     #[test]

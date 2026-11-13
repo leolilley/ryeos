@@ -291,15 +291,19 @@ pub fn capture_signed_bundle_source_manifest(
                 manifest_path.display()
             ))
         })?;
-    let (trust_class, _) =
-        crate::trust::verify_item_signature(raw, &signature, &envelope, node_trust_store).map_err(
-            |error| {
-                EngineError::Internal(format!(
-                    "verify runtime source-bundle manifest {}: {error}",
-                    manifest_path.display()
-                ))
-            },
-        )?;
+    let (trust_class, _) = crate::trust::verify_item_signature(
+        raw,
+        &signature,
+        &envelope,
+        node_trust_store,
+        &crate::trust::SignerContext::bundle("runtime_source_bundle_manifest"),
+    )
+    .map_err(|error| {
+        EngineError::Internal(format!(
+            "verify runtime source-bundle manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
     if trust_class != ContractTrustClass::Trusted {
         return Err(EngineError::Internal(format!(
             "runtime source-bundle manifest signer {} is not node-trusted",
@@ -682,6 +686,13 @@ fn resolve_executor_chain(
                     header,
                     &source_format.signature,
                     trust_store,
+                    &crate::trust::SignerContext::new(
+                        source_space,
+                        &ref_.kind,
+                        project_authority
+                            .map(|(root, _)| root)
+                            .or_else(|| roots.project_root()),
+                    ),
                 )
                 .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
                 (trust_class, signer.map(|signer| signer.0))

@@ -162,7 +162,6 @@ pub(crate) fn resolve_subject_digests(
         &config,
         &bundle_roots,
         Some(project.as_path()),
-        None,
         std::sync::Arc::clone(&isolation),
         node_policy.require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()?,
     )?;

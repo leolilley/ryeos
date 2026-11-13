@@ -233,6 +233,31 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["trust", "pin"],
+        summary: "Pin a signer key from a PUBLISHER_TRUST.toml on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "scope"],
+        summary: "Narrow or widen a pinned signer's scope on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "retire"],
+        summary: "Retire a pinned signer on a stopped node; it still verifies existing items",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "revoke"],
+        summary: "Revoke a pinned signer on a stopped node; it verifies nothing",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "succeed"],
+        summary: "Replace a pinned signer by the key a signed succession statement names",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "bundle-set", "update"],
         summary: "Install an exact published bundle set while the node is stopped",
         category: "maintenance",
@@ -431,6 +456,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
             run_node_policy_generation_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
+            crate::lifecycle_trust::run(verb, &argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("policy-apply")) => {
@@ -3341,7 +3370,7 @@ fn inspect_schedule_grant_generations(
 ) -> anyhow::Result<Vec<ryeos_scheduler_service::SupersededScheduleGrant>> {
     let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
     let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .map_err(|error| anyhow::anyhow!("load trust store: {error}"))?;
     ryeos_scheduler_service::superseded_schedule_grants(
         app_root,
@@ -3430,10 +3459,7 @@ fn inspect_host_access(app_root: &std::path::Path) -> Result<HostAccessInspectio
     let lane = snapshot
         .require::<ryeos_engine::isolation::IsolationPolicy>()?
         .clone();
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
     let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
     Ok((policy, lane, trust_store, node_key))
 }

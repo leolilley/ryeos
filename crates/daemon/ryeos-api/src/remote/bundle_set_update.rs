@@ -77,10 +77,7 @@ impl RemoteAuthority {
         if identity.fingerprint() != completion.operator_fingerprint {
             bail!("explicit update signer is not the init-completion operator");
         }
-        let trust = ryeos_engine::trust::TrustStore::load(
-            None,
-            &app_root.join(ryeos_engine::AI_DIR).join("config"),
-        )?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
             app_root, &trust, &table,

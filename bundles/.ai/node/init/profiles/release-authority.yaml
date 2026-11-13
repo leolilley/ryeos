@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:26cb7d7cc2709b781d3278f011d11f337a1230f7abd940bd293fb4c1bcca6468:KQNuHluUILb1pE/SVbX4qcjoqiNAQCpx0wvPglQblIu7rNwhBwgr8XpNi+IHQi7grSlMnHOMwzmbXa6PXY4LDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:10:31Z:2d02158bbac149300043690da6df5ffd44c0f40dcddaa26298067d6248990a11:+5h6ooRAtrCoZ0otvzB5ozrBv634CKi4+5OhcJStw7zPoQr5wfNZyanw0dzLCXndkkT9lbAj3eeyrlr4CJ75Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -338,7 +338,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"

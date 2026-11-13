@@ -170,7 +170,6 @@ pub fn install(req: &Request, authority: &InstallAuthority<'_>) -> Result<Value>
 
     // Trust comes only from the node's persistent trust store. Admission runs
     // against the completed staging tree below, never the mutable source tree.
-    let node_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
 
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
@@ -181,7 +180,6 @@ pub fn install(req: &Request, authority: &InstallAuthority<'_>) -> Result<Value>
             &req.name,
             staging,
             replace,
-            &node_config_root,
             authority.node_trust_store,
             authority.prospective_validator,
             Arc::clone(&authority.isolation),
@@ -437,7 +435,7 @@ pub(crate) fn build_prospective_bundle_plan(
 pub(crate) fn verify_planned_candidate(
     plan: &BundlePlan,
     bundle_name: &str,
-    node_config_root: &Path,
+    app_root: &Path,
     completed_staging: bool,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
@@ -460,7 +458,7 @@ pub(crate) fn verify_planned_candidate(
             &job.subject_root,
             bundle_name,
             &job.dependency_roots,
-            node_config_root,
+            app_root,
             isolation,
         )
     } else {
@@ -468,7 +466,7 @@ pub(crate) fn verify_planned_candidate(
             &job.subject_root,
             bundle_name,
             &job.dependency_roots,
-            node_config_root,
+            app_root,
             isolation,
         )
     }
@@ -482,19 +480,12 @@ pub(crate) fn admit_completed_staging(
     bundle_name: &str,
     staging: &Path,
     replace: bool,
-    node_config_root: &Path,
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
-    verify_planned_candidate(
-        &plan,
-        bundle_name,
-        node_config_root,
-        true,
-        Arc::clone(&isolation),
-    )?;
+    verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
     // Exercise the second boot phase too: bundle-contributed node config is
     // scanned from the prospective roots and policy-directory collisions are
     // rejected before activation. Command grants come only from the exact

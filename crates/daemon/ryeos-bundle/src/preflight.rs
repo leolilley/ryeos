@@ -132,25 +132,19 @@ pub fn preflight_verify_bundle(
             .into_iter()
             .map(|record| record.bundle_root)
             .collect();
-    let node_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
-    preflight_verify_bundle_in_context(
-        source_path,
-        &installed_bundle_roots,
-        &node_config_root,
-        isolation,
-    )
+    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, app_root, isolation)
 }
 
 pub fn preflight_verify_bundle_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_report_in_context(
         source_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         isolation,
     )?;
     Ok(())
@@ -166,14 +160,14 @@ pub fn preflight_verify_named_bundle_in_context(
     source_path: &Path,
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_named_bundle_report_in_context(
         source_path,
         expected_bundle_name,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         isolation,
     )?;
     Ok(())
@@ -187,13 +181,13 @@ pub fn preflight_verify_named_bundle_report_in_context(
     source_path: &Path,
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<PreflightReport> {
     preflight_verify_bundle_in_context_inner(
         source_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         Some(expected_bundle_name),
         true,
         isolation,
@@ -209,13 +203,13 @@ pub fn preflight_verify_bundle_staging_in_context(
     staging_path: &Path,
     expected_bundle_name: &str,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let _report = preflight_verify_bundle_in_context_inner(
         staging_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         Some(expected_bundle_name),
         false,
         isolation,
@@ -231,7 +225,7 @@ pub fn preflight_verify_bundle_staging_in_context(
 pub fn preflight_verify_bundle_report_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<PreflightReport> {
     // The core logic below populates `failures` (blocking) and
@@ -240,7 +234,7 @@ pub fn preflight_verify_bundle_report_in_context(
     preflight_verify_bundle_in_context_inner(
         source_path,
         dependency_bundle_roots,
-        node_config_root,
+        app_root,
         None,
         true,
         isolation,
@@ -251,7 +245,7 @@ pub fn preflight_verify_bundle_report_in_context(
 fn preflight_verify_bundle_in_context_inner(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    node_config_root: &Path,
+    app_root: &Path,
     expected_bundle_name: Option<&str>,
     check_source_mtime: bool,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
@@ -286,12 +280,11 @@ fn preflight_verify_bundle_in_context_inner(
         // item namespace still requires an explicit kind dependency and is
         // refused here rather than being silently ignored.
         let trust_store =
-            TrustStore::load(None, node_config_root).context("preflight: load node trust store")?;
+            TrustStore::load_node_registry(app_root).context("preflight: load node trust store")?;
         if trust_store.is_empty() {
             bail!(
-                "preflight: node trust store is empty — run `ryeos init` to \
-                 pin the platform author key, or `ryeos trust pin <fingerprint>` \
-                 to pin a third-party publisher"
+                "preflight: node trust registry is empty — run `ryeos init` to \
+                 establish the node trust registry"
             );
         }
         ryeos_engine::binary_resolver::verify_bundle_executor_manifest(source_path, &trust_store)
@@ -313,12 +306,11 @@ fn preflight_verify_bundle_in_context_inner(
     }
 
     let trust_store =
-        TrustStore::load(None, node_config_root).context("preflight: load node trust store")?;
+        TrustStore::load_node_registry(app_root).context("preflight: load node trust store")?;
     if trust_store.is_empty() {
         bail!(
-            "preflight: node trust store is empty — run `ryeos init` to \
-             pin the platform author key, or `ryeos trust pin <fingerprint>` \
-             to pin a third-party publisher"
+            "preflight: node trust registry is empty — run `ryeos init` to \
+             establish the node trust registry"
         );
     }
 
@@ -360,17 +352,6 @@ fn preflight_verify_bundle_in_context_inner(
         &mut seen_roots,
     );
 
-    let old_trust = source_path
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/trusted");
-    if old_trust.is_dir() {
-        tracing::warn!(
-            path = %old_trust.display(),
-            "bundle ships a old `.ai/config/keys/trusted/` dir which is \
-             ignored — pin the publisher key with `ryeos trust pin <fingerprint>` \
-             instead"
-        );
-    }
     let (parser_tools, _dups) = ParserRegistry::load_base(
         &parser_search_roots
             .iter()
@@ -474,11 +455,9 @@ fn preflight_verify_bundle_in_context_inner(
                 Some(header) => {
                     if !trust_store.is_trusted(&header.signer_fingerprint) {
                         failures.push(format!(
-                            "{}: signer {} not in node trust store \
-                             (run `ryeos trust pin {}` to trust this publisher)",
+                            "{}: signer {} not in node trust store",
                             rel.display(),
                             header.signer_fingerprint,
-                            header.signer_fingerprint
                         ));
                         continue;
                     }
@@ -487,6 +466,7 @@ fn preflight_verify_bundle_in_context_inner(
                         &header,
                         &source_format.signature,
                         &trust_store,
+                        &ryeos_engine::trust::SignerContext::bundle(kind_name),
                     ) {
                         failures.push(format!(
                             "{}: signature verification failed: {e}",
@@ -693,10 +673,8 @@ fn verify_manifest_signature_inner(
 
     if !trust_store.is_trusted(&sig_header.signer_fingerprint) {
         bail!(
-            "manifest.yaml: signer {} not in node trust store \
-             (run `ryeos trust pin {}` to trust this publisher)",
+            "manifest.yaml: signer {} not in node trust store",
             sig_header.signer_fingerprint,
-            sig_header.signer_fingerprint
         );
     }
     let publisher_trust_path = source_path.join("PUBLISHER_TRUST.toml");
@@ -726,8 +704,14 @@ fn verify_manifest_signature_inner(
         }
     }
 
-    ryeos_engine::trust::verify_item_signature(&raw, &sig_header, &envelope, trust_store)
-        .map_err(|e| anyhow::anyhow!("manifest.yaml signature verification failed: {e}"))?;
+    ryeos_engine::trust::verify_item_signature(
+        &raw,
+        &sig_header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::bundle("bundle_manifest"),
+    )
+    .map_err(|e| anyhow::anyhow!("manifest.yaml signature verification failed: {e}"))?;
 
     let body = lillux::signature::strip_signature_lines(&raw);
     let manifest = parse_current_manifest_body(&body, &manifest_path)?;
@@ -1264,8 +1248,14 @@ fn validate_node_config_item(
             header.signer_fingerprint
         );
     }
-    ryeos_engine::trust::verify_item_signature(&content, &header, &envelope, trust_store)
-        .context("signature verification failed")?;
+    ryeos_engine::trust::verify_item_signature(
+        &content,
+        &header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::bundle("node_config"),
+    )
+    .context("signature verification failed")?;
 
     if !file_path.starts_with(section_root) {
         bail!("not under expected node config section directory");
@@ -1605,7 +1595,7 @@ mod tests {
         source: PathBuf,
         ai_dir: PathBuf,
         signing_key: SigningKey,
-        node_config_root: PathBuf,
+        app_root: PathBuf,
     }
 
     impl BundleLayout {
@@ -1617,29 +1607,27 @@ mod tests {
             let signing_key = SigningKey::generate(&mut OsRng);
 
             let app_root = tmp.path().join("app");
-            let node_config_root = app_root.join(".ai/config");
-            let trust_dir = node_config_root.join("keys/trusted");
-            fs::create_dir_all(&trust_dir).unwrap();
+            fs::create_dir_all(&app_root).unwrap();
 
-            ryeos_engine::trust::pin_key(
+            ryeos_engine::test_support::pin_signer(
+                &app_root,
                 &signing_key.verifying_key(),
                 "test-publisher",
-                &trust_dir,
-                None,
-            )
-            .unwrap();
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::publisher_default(),
+            );
 
             Self {
                 _tmp: tmp,
                 source,
                 ai_dir,
                 signing_key,
-                node_config_root,
+                app_root,
             }
         }
 
         fn trust_store(&self) -> TrustStore {
-            TrustStore::load(None, &self.node_config_root).unwrap()
+            TrustStore::load_node_registry(&self.app_root).unwrap()
         }
 
         fn add_kind_schema(&self, kind_name: &str) {
@@ -2005,7 +1993,7 @@ description: "fixed parser handler for preflight tests"
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("a signed manifest-only bundle needs no synthetic kind dependency");
@@ -2025,7 +2013,7 @@ description: "fixed parser handler for preflight tests"
         let error = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect_err("an undeclared item namespace must not be silently ignored");
@@ -2403,7 +2391,7 @@ optional: {}
         let err = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .unwrap_err();
@@ -2436,7 +2424,7 @@ optional: {}
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("non-identity composer should skip pre-composition contract validation");
@@ -2464,7 +2452,7 @@ strict_fields: warn
         let report = preflight_verify_bundle_report_in_context(
             &layout.source,
             &[],
-            &layout.node_config_root,
+            &layout.app_root,
             Arc::new(ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring()),
         )
         .expect("warnings should not fail preflight");
@@ -2749,9 +2737,13 @@ strict_fields: warn
         .unwrap();
         let key = trust_document.decode_verifying_key().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let trusted = config.path().join("keys/trusted");
-        std::fs::create_dir_all(&trusted).unwrap();
-        ryeos_engine::trust::pin_key(&key, "development-publisher", &trusted, None).unwrap();
+        ryeos_engine::test_support::pin_signer(
+            config.path(),
+            &key,
+            "development-publisher",
+            ryeos_engine::trust::SignerRole::Publisher,
+            ryeos_engine::trust::SignerScope::publisher_default(),
+        );
         let report = preflight_verify_bundle_report_in_context(
             &core,
             &[],

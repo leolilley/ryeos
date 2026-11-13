@@ -13,7 +13,7 @@ description: >
 The `ryeos` CLI has two execution paths:
 
 1. Local verbs that run without daemon dispatch: `init`, `start`, `stop`,
-   `node status`, `node doctor`, the `node reset ...` family, `trust pin`,
+   `node status`, `node doctor`, the `node reset ...` family, the `trust ...` verbs,
    `authorize-key`, `publish`, and local vault maintenance verbs.
 2. Daemon-backed verbs declared by signed bundle YAML and dispatched over
    HTTP to a running daemon.
@@ -533,11 +533,34 @@ until the external snapshot driver is retired.
 
 ## Other local operator verbs
 
-- `ryeos trust pin --from <PUBLISHER_TRUST.toml>` — pin publisher trust.
+- `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
 - `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's remote descriptor trust pin.
 - `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
+
+## Trust verbs
+
+The signer registry lives in `<app_root>/.ai/node/trust/`. See
+[Signing and Trust](../signing.md) for roles, scopes and statuses.
+
+| Verb | Effect |
+|---|---|
+| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
+| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope |
+| `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
+| `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
+| `ryeos trust succeed --from <succession.toml>` | Apply a signed succession statement |
+| `ryeos trust list` | List signer records (read-only) |
+| `ryeos trust show <fp>` | Show one signer record and its key events (read-only) |
+
+`list` and `show` work on a running or stopped node. The five mutating
+verbs are signed offline operations (`node.trust.pin`, `node.trust.scope`,
+`node.trust.retire`, `node.trust.revoke`, `node.trust.succeed`; local signer
+only). On a running node they refuse with `node_running_trust_change`; cure
+by stopping the node, or by `ryeos node offline-operation submit --stop`.
+Each change appends a node-signed, hash-chained key event under
+`<app_root>/.ai/node/trust/events/`.
 
 ## Core daemon-backed verbs
 

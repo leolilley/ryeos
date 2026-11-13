@@ -1,11 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use lillux::crypto::VerifyingKey;
+use ryeos_engine::contracts::{SignatureHeader, TrustClass};
 use ryeos_engine::trust::{
-    MAX_TRUST_DIRECTORY_BYTES, MAX_TRUST_DOCUMENT_BYTES, MAX_TRUST_DOCUMENTS,
+    SignerContext, TrustStore, TrustedSignerEntry, trusted_signers_digest,
+    verify_item_signature_with_hash,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -67,188 +68,15 @@ pub enum LoadStrictness {
     Required,
 }
 
-#[derive(Debug, Clone)]
-pub struct TrustedKey {
-    pub fingerprint: String,
-    pub verifying_key: VerifyingKey,
-    pub owner: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TrustStore {
-    keys: HashMap<String, TrustedKey>,
-    project_sources: Vec<TrustSourceDependency>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct TrustSourceDependency {
-    logical_path: PathBuf,
-    source_hash: String,
-}
-
-impl TrustStore {
-    /// Load trust from the project's trusted-keys dir plus the
-    /// node's trusted-keys dir (`<app_root>/.ai/config/keys/trusted`,
-    /// passed explicitly by the caller — the daemon for preflight, the
-    /// launch envelope for runtimes). Bundle roots are NOT a trust
-    /// authority: a bundle cannot ship keys that vouch for itself.
-    pub fn load(project_root: &Path, node_trusted_keys_dir: &Path) -> Result<Self> {
-        Self::load_with_optional_project(Some(project_root), node_trusted_keys_dir)
-    }
-
-    fn load_with_optional_project(
-        project_root: Option<&Path>,
-        node_trusted_keys_dir: &Path,
-    ) -> Result<Self> {
-        let node = ryeos_engine::trust::TrustStore::load_from_dir(node_trusted_keys_dir)
-            .with_context(|| {
-                format!("load trusted keys from {}", node_trusted_keys_dir.display())
-            })?;
-        let Some(project_root) = project_root else {
-            return Ok(Self::from_engine(&node, Vec::new()));
-        };
-        let project_trusted_dir = project_root.join(".ai/config/keys/trusted");
-        let files = ryeos_engine::trust::TrustStore::read_trust_dir_files(&project_trusted_dir)
-            .with_context(|| format!("load trusted keys from {}", project_trusted_dir.display()))?
-            .unwrap_or_default();
-        let project_sources = files
-            .iter()
-            .map(|(path, bytes)| TrustSourceDependency {
-                logical_path: path
-                    .strip_prefix(&project_trusted_dir)
-                    .unwrap_or(path)
-                    .to_path_buf(),
-                source_hash: lillux::sha256_hex(bytes),
-            })
-            .collect();
-        let effective = node
-            .with_project_key_files(files)
-            .with_context(|| format!("load trusted keys from {}", project_trusted_dir.display()))?;
-        Ok(Self::from_engine(&effective, project_sources))
-    }
-
-    fn load_with_project_content(
-        project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
-        node_trusted_keys_dir: &Path,
-    ) -> Result<Self> {
-        let node = ryeos_engine::trust::TrustStore::load_from_dir(node_trusted_keys_dir)
-            .with_context(|| {
-                format!("load trusted keys from {}", node_trusted_keys_dir.display())
-            })?;
-        let prefix = Path::new(".ai/config/keys/trusted");
-        let entries = project_content.list_files(prefix, false, MAX_TRUST_DOCUMENTS)?;
-        let mut total_bytes = 0_u64;
-        let mut project_sources = Vec::new();
-        let mut files = Vec::new();
-        for entry in entries
-            .into_iter()
-            .filter(|entry| ryeos_engine::trust::is_project_trust_document(&entry.relative_path))
-        {
-            if entry.size > MAX_TRUST_DOCUMENT_BYTES {
-                bail!(
-                    "project trust document {} exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes",
-                    entry.relative_path.display()
-                );
-            }
-            total_bytes = total_bytes
-                .checked_add(entry.size)
-                .ok_or_else(|| anyhow::anyhow!("project trust byte count overflow"))?;
-            if total_bytes > MAX_TRUST_DIRECTORY_BYTES {
-                bail!(
-                    "project trust directory exceeds {MAX_TRUST_DIRECTORY_BYTES} aggregate bytes"
-                );
-            }
-            let logical_path = prefix.join(&entry.relative_path);
-            let bytes = project_content
-                .read_file(&logical_path, MAX_TRUST_DOCUMENT_BYTES)?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "admitted project trust document disappeared: {}",
-                        logical_path.display()
-                    )
-                })?;
-            project_sources.push(TrustSourceDependency {
-                logical_path: entry.relative_path,
-                source_hash: lillux::sha256_hex(&bytes),
-            });
-            files.push((logical_path, bytes));
-        }
-        let effective = node.with_project_key_files(files)?;
-        Ok(Self::from_engine(&effective, project_sources))
-    }
-
-    /// Adopt signers the engine's trust store already parsed and verified.
-    /// The runtime never parses trust documents itself.
-    fn from_engine(
-        store: &ryeos_engine::trust::TrustStore,
-        mut project_sources: Vec<TrustSourceDependency>,
-    ) -> Self {
-        let keys: HashMap<String, TrustedKey> = store
-            .signers()
-            .map(|signer| {
-                (
-                    signer.fingerprint.clone(),
-                    TrustedKey {
-                        fingerprint: signer.fingerprint.clone(),
-                        verifying_key: signer.verifying_key,
-                        owner: signer.label.clone().unwrap_or_default(),
-                    },
-                )
-            })
-            .collect();
-        if !keys.is_empty() {
-            tracing::info!(count = keys.len(), "trust store loaded");
-        }
-        project_sources.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        Self {
-            keys,
-            project_sources,
-        }
-    }
-
-    pub fn get(&self, fingerprint: &str) -> Option<&TrustedKey> {
-        self.keys.get(fingerprint)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.keys.len()
-    }
-
-    /// Stable identity of the exact trusted signer set used for verification.
-    /// Include the decoded public key and owner as well as the declared
-    /// fingerprint so malformed trust documents cannot alias an earlier
-    /// generation by reusing a map key.
-    pub fn identity(&self) -> String {
-        let mut keys = self.keys.values().collect::<Vec<_>>();
-        keys.sort_by(|left, right| left.fingerprint.cmp(&right.fingerprint));
-        let mut identity = Vec::new();
-        for key in keys {
-            append_identity_field(&mut identity, key.fingerprint.as_bytes());
-            append_identity_field(&mut identity, key.verifying_key.as_bytes());
-            append_identity_field(&mut identity, key.owner.as_bytes());
-        }
-        lillux::sha256_hex(&identity)
-    }
-}
-
-fn append_identity_field(identity: &mut Vec<u8>, field: &[u8]) {
-    identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
-    identity.extend_from_slice(field);
-}
-
 pub struct VerifiedLoader {
     project_root: PathBuf,
     project_config_enabled: bool,
     node_config_root: Option<PathBuf>,
     bundle_roots: Vec<PathBuf>,
-    node_trusted_keys_dir: PathBuf,
-    effective_trust_store: TrustStore,
-    node_trust_store: TrustStore,
+    /// Trust built from the signer list the daemon handed over; the only
+    /// trust source the loader has.
+    trust_store: TrustStore,
+    trusted_signers_digest: String,
 }
 
 #[derive(Debug)]
@@ -296,9 +124,7 @@ struct ConfigCandidateDependency {
 #[derive(Debug, Clone)]
 pub struct ConfigDependencyProof {
     config_id: String,
-    effective_trust_identity: String,
-    node_trust_identity: String,
-    project_trust_sources: Vec<TrustSourceDependency>,
+    trusted_signers_digest: String,
     candidates: Vec<ConfigCandidateDependency>,
 }
 
@@ -310,15 +136,10 @@ pub enum ConfigDependencyProofStatus {
 }
 
 impl ConfigDependencyProof {
-    pub fn trust_identities_match(
-        &self,
-        effective_identity: Option<&str>,
-        node_identity: &str,
-    ) -> bool {
-        self.node_trust_identity == node_identity
-            && effective_identity
-                .map(|identity| self.effective_trust_identity == identity)
-                .unwrap_or(true)
+    /// Whether the signer list this proof was captured under hashes to
+    /// `trusted_signers_digest`.
+    pub fn trusted_signers_match(&self, trusted_signers_digest: &str) -> bool {
+        self.trusted_signers_digest == trusted_signers_digest
     }
 
     pub fn identity_digest(&self) -> Result<String> {
@@ -333,17 +154,13 @@ impl ConfigDependencyProof {
         struct StableProof<'a> {
             schema_version: u32,
             config_id: &'a str,
-            effective_trust_identity: &'a str,
-            node_trust_identity: &'a str,
-            project_trust_sources: &'a [TrustSourceDependency],
+            trusted_signers_digest: &'a str,
             candidates: Vec<StableCandidate<'a>>,
         }
         let value = serde_json::to_value(StableProof {
-            schema_version: 1,
+            schema_version: 2,
             config_id: &self.config_id,
-            effective_trust_identity: &self.effective_trust_identity,
-            node_trust_identity: &self.node_trust_identity,
-            project_trust_sources: &self.project_trust_sources,
+            trusted_signers_digest: &self.trusted_signers_digest,
             candidates: self
                 .candidates
                 .iter()
@@ -415,10 +232,11 @@ impl ConfigDependencyProof {
     }
 
     /// Revalidate project inputs against the exact admitted project-content
-    /// closure. The verified loader owns config/trust discovery policy; this
+    /// closure. The verified loader owns config discovery policy; this
     /// method only asks the generic authority to prove the resulting positive
-    /// and negative dependencies. Node config and node trust remain mutable
-    /// node-local authority and are checked separately by the caller.
+    /// and negative dependencies. Node config remains mutable node-local
+    /// authority; the trusted signer list is compared by the caller through
+    /// [`ConfigDependencyProof::trusted_signers_match`].
     pub fn revalidate_under_project_authority(
         &self,
         project_root: Option<&Path>,
@@ -441,30 +259,6 @@ impl ConfigDependencyProof {
         node_config_root: Option<&Path>,
         project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
     ) -> ConfigDependencyProofStatus {
-        let trust_prefix = Path::new(".ai/config/keys/trusted");
-        let trust_matches = match project_content {
-            Some(content) => content
-                .list_files(trust_prefix, false, MAX_TRUST_DOCUMENTS)
-                .map(|entries| {
-                    let mut observed = entries
-                        .into_iter()
-                        .filter(|entry| {
-                            ryeos_engine::trust::is_project_trust_document(&entry.relative_path)
-                        })
-                        .map(|entry| TrustSourceDependency {
-                            logical_path: entry.relative_path,
-                            source_hash: entry.content_hash,
-                        })
-                        .collect::<Vec<_>>();
-                    observed.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-                    observed == self.project_trust_sources
-                })
-                .unwrap_or(false),
-            None => self.project_trust_sources.is_empty(),
-        };
-        if !trust_matches {
-            return ConfigDependencyProofStatus::ImmutableAuthorityMismatch;
-        }
         let mut status = ConfigDependencyProofStatus::Current;
         for candidate in &self.candidates {
             let candidate_status = match candidate.root_class {
@@ -536,19 +330,7 @@ impl ConfigDependencyProof {
     pub fn estimated_bytes(&self) -> usize {
         self.config_id
             .capacity()
-            .saturating_add(self.effective_trust_identity.capacity())
-            .saturating_add(self.node_trust_identity.capacity())
-            .saturating_add(
-                self.project_trust_sources
-                    .iter()
-                    .fold(0usize, |total, dependency| {
-                        total
-                            .saturating_add(
-                                dependency.logical_path.as_os_str().as_encoded_bytes().len(),
-                            )
-                            .saturating_add(dependency.source_hash.capacity())
-                    }),
-            )
+            .saturating_add(self.trusted_signers_digest.capacity())
             .saturating_add(
                 self.candidates
                     .capacity()
@@ -616,88 +398,89 @@ pub struct ScannedItem {
 }
 
 impl VerifiedLoader {
-    fn trust_store_for_config_root(&self, root_class: ConfigCandidateRootClass) -> &TrustStore {
-        match root_class {
-            ConfigCandidateRootClass::Project => &self.effective_trust_store,
-            ConfigCandidateRootClass::Node | ConfigCandidateRootClass::Bundle => {
-                &self.node_trust_store
-            }
+    fn root_class_for_path(&self, path: &Path) -> ConfigCandidateRootClass {
+        if self.bundle_roots.iter().any(|root| path.starts_with(root)) {
+            ConfigCandidateRootClass::Bundle
+        } else if self
+            .node_config_root
+            .as_deref()
+            .is_some_and(|root| path.starts_with(root))
+        {
+            ConfigCandidateRootClass::Node
+        } else if self.project_config_enabled && path.starts_with(&self.project_root) {
+            ConfigCandidateRootClass::Project
+        } else {
+            ConfigCandidateRootClass::Node
         }
     }
 
+    fn signer_context<'a>(
+        &'a self,
+        kind: &'a str,
+        root_class: ConfigCandidateRootClass,
+    ) -> SignerContext<'a> {
+        match root_class {
+            ConfigCandidateRootClass::Project => {
+                SignerContext::project(kind, Some(self.project_root.as_path()))
+            }
+            ConfigCandidateRootClass::Node => SignerContext::node(kind),
+            ConfigCandidateRootClass::Bundle => SignerContext::bundle(kind),
+        }
+    }
+
+    fn build_trust(trusted_signers: &[TrustedSignerEntry]) -> Result<(TrustStore, String)> {
+        let trust_store = TrustStore::from_signer_entries(trusted_signers)
+            .context("build runtime trust from launch envelope signers")?;
+        Ok((trust_store, trusted_signers_digest(trusted_signers)))
+    }
+
     /// `bundle_roots` are CONFIG search roots only (configs ship in
-    /// bundles); trust comes exclusively from the project root and the
-    /// explicit node trusted-keys dir. No hidden env reads here —
-    /// the caller owns the trust context.
+    /// bundles); trust comes exclusively from `trusted_signers`, the scoped
+    /// signer list the daemon carries in the launch envelope. No directory
+    /// is read for trust and no hidden env reads happen here.
     pub fn new(
         project_root: PathBuf,
         bundle_roots: Vec<PathBuf>,
-        node_trusted_keys_dir: &Path,
+        trusted_signers: &[TrustedSignerEntry],
     ) -> Result<Self> {
-        Self::new_with_node_config(project_root, None, bundle_roots, node_trusted_keys_dir)
+        Self::new_with_node_config(project_root, None, bundle_roots, trusted_signers)
     }
 
     /// Construct with an explicit node-local config layer. Config merges in
-    /// bundle → node → project order, while signer trust remains sourced only
-    /// from the project and node trusted-key directories.
+    /// bundle -> node -> project order; signer trust is the one signer list,
+    /// judged per root by each signer's scope.
     pub fn new_with_node_config(
         project_root: PathBuf,
         node_config_root: Option<PathBuf>,
         bundle_roots: Vec<PathBuf>,
-        node_trusted_keys_dir: &Path,
+        trusted_signers: &[TrustedSignerEntry],
     ) -> Result<Self> {
-        let effective_trust_store = TrustStore::load(&project_root, node_trusted_keys_dir)?;
-        let node_trust_store = TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?;
+        let (trust_store, trusted_signers_digest) = Self::build_trust(trusted_signers)?;
         Ok(Self {
             project_root,
             project_config_enabled: true,
             node_config_root,
             bundle_roots,
-            node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
-            effective_trust_store,
-            node_trust_store,
-        })
-    }
-
-    pub fn new_with_node_config_under_project_authority(
-        project_root: PathBuf,
-        project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
-        node_config_root: Option<PathBuf>,
-        bundle_roots: Vec<PathBuf>,
-        node_trusted_keys_dir: &Path,
-    ) -> Result<Self> {
-        let effective_trust_store =
-            TrustStore::load_with_project_content(project_content, node_trusted_keys_dir)?;
-        let node_trust_store = TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?;
-        Ok(Self {
-            project_root,
-            project_config_enabled: true,
-            node_config_root,
-            bundle_roots,
-            node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
-            effective_trust_store,
-            node_trust_store,
+            trust_store,
+            trusted_signers_digest,
         })
     }
 
     /// Construct for a projectless execution. Its scratch cwd is deliberately
-    /// excluded from both config and trust resolution.
+    /// excluded from config resolution.
     pub fn new_projectless_with_node_config(
         node_config_root: Option<PathBuf>,
         bundle_roots: Vec<PathBuf>,
-        node_trusted_keys_dir: &Path,
+        trusted_signers: &[TrustedSignerEntry],
     ) -> Result<Self> {
-        let node_trust_store = TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?;
+        let (trust_store, trusted_signers_digest) = Self::build_trust(trusted_signers)?;
         Ok(Self {
-            project_root: node_config_root
-                .clone()
-                .unwrap_or_else(|| node_trusted_keys_dir.to_path_buf()),
+            project_root: node_config_root.clone().unwrap_or_default(),
             project_config_enabled: false,
             node_config_root,
             bundle_roots,
-            node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
-            effective_trust_store: node_trust_store.clone(),
-            node_trust_store,
+            trust_store,
+            trusted_signers_digest,
         })
     }
 
@@ -705,37 +488,14 @@ impl VerifiedLoader {
         &self.project_root
     }
 
-    pub fn node_trusted_keys_dir(&self) -> &Path {
-        &self.node_trusted_keys_dir
-    }
-
     pub fn trust_store(&self) -> &TrustStore {
-        &self.effective_trust_store
+        &self.trust_store
     }
 
-    /// Identity of both source-specific trust domains used by merged config:
-    /// effective project trust for project candidates, and node trust for
-    /// node/bundle candidates.
-    pub fn config_trust_identity(&self) -> String {
-        let mut identity = Vec::new();
-        append_identity_field(
-            &mut identity,
-            self.effective_trust_store.identity().as_bytes(),
-        );
-        append_identity_field(&mut identity, self.node_trust_store.identity().as_bytes());
-        lillux::sha256_hex(&identity)
-    }
-
-    pub fn effective_trust_identity(&self) -> String {
-        self.effective_trust_store.identity()
-    }
-
-    pub fn node_trust_identity(&self) -> String {
-        self.node_trust_store.identity()
-    }
-
-    pub fn node_trust_identity_from(node_trusted_keys_dir: &Path) -> Result<String> {
-        Ok(TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?.identity())
+    /// Digest of the signer list this loader verifies against. Dependency
+    /// proofs captured by this loader carry it.
+    pub fn trusted_signers_digest(&self) -> &str {
+        &self.trusted_signers_digest
     }
 
     fn kind_subdir(kind: &str) -> &'static str {
@@ -760,31 +520,31 @@ impl VerifiedLoader {
         path: &Path,
         strictness: LoadStrictness,
     ) -> Result<VerifiedContent> {
-        self.load_verified_with_trust_store(kind, path, strictness, &self.effective_trust_store)
+        self.load_verified_from_root(kind, path, strictness, self.root_class_for_path(path))
     }
 
-    fn load_verified_with_trust_store(
+    fn load_verified_from_root(
         &self,
         kind: &str,
         path: &Path,
         strictness: LoadStrictness,
-        trust_store: &TrustStore,
+        root_class: ConfigCandidateRootClass,
     ) -> Result<VerifiedContent> {
         let raw = String::from_utf8(
             lillux::read_regular_file_bounded_no_follow(path, MAX_CONFIG_SOURCE_BYTES)
                 .with_context(|| format!("securely reading {}", path.display()))?,
         )
         .with_context(|| format!("securely reading {}", path.display()))?;
-        self.load_verified_content_with_trust_store(kind, path, raw, strictness, trust_store)
+        self.load_verified_content_from_root(kind, path, raw, strictness, root_class)
     }
 
-    fn load_verified_content_with_trust_store(
+    fn load_verified_content_from_root(
         &self,
         kind: &str,
         path: &Path,
         raw: String,
         strictness: LoadStrictness,
-        trust_store: &TrustStore,
+        root_class: ConfigCandidateRootClass,
     ) -> Result<VerifiedContent> {
         let source_hash = lillux::sha256_hex(raw.as_bytes());
 
@@ -804,18 +564,23 @@ impl VerifiedLoader {
                 );
             }
 
-            if let Some(trusted_key) = trust_store.get(&sig_header.signer_fingerprint) {
-                if !lillux::signature::verify_signature(
-                    &sig_header.content_hash,
-                    &sig_header.signature_b64,
-                    &trusted_key.verifying_key,
-                ) {
-                    bail!(
-                        "signature verification failed for {} (signer: {})",
-                        path.display(),
-                        sig_header.signer_fingerprint
-                    );
-                }
+            let header = SignatureHeader {
+                timestamp: sig_header.timestamp.clone(),
+                content_hash: sig_header.content_hash.clone(),
+                signature_b64: sig_header.signature_b64.clone(),
+                signer_fingerprint: sig_header.signer_fingerprint.clone(),
+            };
+            let context = self.signer_context(kind, root_class);
+            let (trust_class, _) =
+                verify_item_signature_with_hash(&hash, &header, &self.trust_store, &context)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "signature verification failed for {} (signer: {}): {e}",
+                            path.display(),
+                            sig_header.signer_fingerprint
+                        )
+                    })?;
+            if trust_class == TrustClass::Trusted {
                 VerifiedContent {
                     content,
                     hash,
@@ -827,7 +592,7 @@ impl VerifiedLoader {
                 match strictness {
                     LoadStrictness::Permissive => {
                         tracing::warn!(
-                            "signed by unknown signer {} — not in trust store: {}",
+                            "signed by unknown signer {} - not trusted for this root: {}",
                             sig_header.signer_fingerprint,
                             path.display()
                         );
@@ -842,8 +607,9 @@ impl VerifiedLoader {
                     LoadStrictness::Required => {
                         bail!(
                             "REJECTED: {} is signed by unknown signer {} \
-                             (not in trust store). Strict mode requires a \
-                             trusted publisher signature for this config kind.",
+                             (not in the trusted signer list, or outside its scope). \
+                             Strict mode requires a trusted publisher signature for \
+                             this config kind.",
                             path.display(),
                             sig_header.signer_fingerprint
                         );
@@ -950,12 +716,7 @@ impl VerifiedLoader {
         if candidate_paths.len() == 1 {
             let (path, root_class) = &candidate_paths[0];
             let verified = self
-                .load_verified_with_trust_store(
-                    "config",
-                    path,
-                    LoadStrictness::Permissive,
-                    self.trust_store_for_config_root(*root_class),
-                )
+                .load_verified_from_root("config", path, LoadStrictness::Permissive, *root_class)
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -983,12 +744,7 @@ impl VerifiedLoader {
         let mut merged = serde_yaml::Value::Null;
         for (path, root_class) in &candidate_paths {
             let verified = self
-                .load_verified_with_trust_store(
-                    "config",
-                    path,
-                    LoadStrictness::Permissive,
-                    self.trust_store_for_config_root(*root_class),
-                )
+                .load_verified_from_root("config", path, LoadStrictness::Permissive, *root_class)
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -1181,9 +937,7 @@ impl VerifiedLoader {
 
         let dependency_proof = ConfigDependencyProof {
             config_id: config_id.to_string(),
-            effective_trust_identity: self.effective_trust_identity(),
-            node_trust_identity: self.node_trust_identity(),
-            project_trust_sources: self.effective_trust_store.project_sources.clone(),
+            trusted_signers_digest: self.trusted_signers_digest.clone(),
             candidates,
         };
         if !self.config_dependency_proof_is_current(&dependency_proof, project_content) {
@@ -1271,12 +1025,12 @@ impl VerifiedLoader {
                         source: anyhow::anyhow!(source),
                     })?;
                 let verified = self
-                    .load_verified_content_with_trust_store(
+                    .load_verified_content_from_root(
                         "config",
                         &path,
                         raw,
                         LoadStrictness::Required,
-                        &self.effective_trust_store,
+                        ConfigCandidateRootClass::Project,
                     )
                     .map_err(|source| ConfigLoadError::VerifyFailed {
                         path: path.clone(),
@@ -1318,12 +1072,7 @@ impl VerifiedLoader {
         match lillux::inspect_optional_entry_no_follow(&path) {
             Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => {
                 let verified = self
-                    .load_verified_with_trust_store(
-                        "config",
-                        &path,
-                        LoadStrictness::Required,
-                        self.trust_store_for_config_root(root_class),
-                    )
+                    .load_verified_from_root("config", &path, LoadStrictness::Required, root_class)
                     .map_err(|source| ConfigLoadError::VerifyFailed {
                         path: path.clone(),
                         source,
@@ -1446,12 +1195,7 @@ impl VerifiedLoader {
         if candidate_paths.len() == 1 {
             let (path, _, root_class) = &candidate_paths[0];
             let verified = self
-                .load_verified_with_trust_store(
-                    "config",
-                    path,
-                    strictness,
-                    self.trust_store_for_config_root(*root_class),
-                )
+                .load_verified_from_root("config", path, strictness, *root_class)
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -1477,12 +1221,7 @@ impl VerifiedLoader {
         let mut merged = serde_yaml::Value::Null;
         for (path, _, root_class) in &candidate_paths {
             let verified = self
-                .load_verified_with_trust_store(
-                    "config",
-                    path,
-                    strictness,
-                    self.trust_store_for_config_root(*root_class),
-                )
+                .load_verified_from_root("config", path, strictness, *root_class)
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -1524,6 +1263,9 @@ impl VerifiedLoader {
         };
 
         for (root, _space) in &roots_to_scan {
+            if root.as_os_str().is_empty() {
+                continue;
+            }
             let dir = root.join(subdir);
             if !dir.is_dir() {
                 continue;
@@ -1579,9 +1321,10 @@ fn deep_merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
+    use base64::Engine;
     use lillux::crypto::SigningKey;
     use ryeos_engine::project_content::{AuthoritativeProjectContent, ProjectContentEntry};
+    use ryeos_engine::trust::{SignerScope, SignerSpace};
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -1670,59 +1413,27 @@ mod tests {
         p
     }
 
-    /// Node trusted-keys dir for tests that don't exercise operator
-    /// trust. Nonexistent path — `TrustStore::load` skips non-dirs.
-    fn no_operator_trust() -> PathBuf {
-        PathBuf::from("/nonexistent-operator-trust")
+    /// Signer list for tests that trust nobody.
+    fn no_signers() -> Vec<TrustedSignerEntry> {
+        Vec::new()
     }
 
-    fn trust_document(signing_key: &SigningKey) -> String {
-        let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
-        let vk_bytes = signing_key.verifying_key().to_bytes();
-        let pem_b64 = base64::engine::general_purpose::STANDARD.encode(
-            [
-                0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-            ]
-            .as_slice()
-            .iter()
-            .chain(vk_bytes.iter())
-            .copied()
-            .collect::<Vec<u8>>(),
-        );
-        format!(
-            r#"version = "1.0.0"
-fingerprint = "{fingerprint}"
-owner = "test"
-
-[public_key]
-pem = """
------BEGIN PUBLIC KEY-----
-{pem_b64}
------END PUBLIC KEY-----
-"""
-"#,
-        )
+    fn signer_entry(signing_key: &SigningKey, scope: SignerScope) -> TrustedSignerEntry {
+        let verifying_key = signing_key.verifying_key();
+        TrustedSignerEntry {
+            fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+            public_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes())
+            ),
+            label: "test".to_string(),
+            scope,
+        }
     }
 
-    /// Write `signing_key`'s trust document under `dir`, self-signed. A
-    /// project copy counts only when the node trust store holds that key.
-    fn create_trust_store(dir: &Path, signing_key: &SigningKey) {
-        create_trust_store_signed_by(dir, signing_key, signing_key);
-    }
-
-    /// Write `key`'s trust document under `dir`, signed by `signer`.
-    fn create_trust_store_signed_by(dir: &Path, key: &SigningKey, signer: &SigningKey) {
-        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
-        let toml_content = lillux::signature::sign_content(&trust_document(key), signer, "#", None);
-        create_file(
-            dir,
-            &format!(".ai/config/keys/trusted/{fingerprint}.toml"),
-            &toml_content,
-        );
-    }
-
-    fn trusted_dir(root: &Path) -> PathBuf {
-        root.join(".ai/config/keys/trusted")
+    /// One signer trusted in every space for every kind.
+    fn trusted_everywhere(signing_key: &SigningKey) -> Vec<TrustedSignerEntry> {
+        vec![signer_entry(signing_key, SignerScope::everywhere())]
     }
 
     fn sign_md(body: &str, signing_key: &SigningKey) -> String {
@@ -1738,7 +1449,7 @@ pem = """
         create_file(&bundle, ".ai/config/test.yaml", "name: bundle\n");
         create_file(&project, ".ai/config/test.yaml", "name: project\n");
 
-        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_signers()).unwrap();
         let config: serde_yaml::Value = loader.load_config_strict("test").unwrap().unwrap();
 
         assert_eq!(config["name"], "project");
@@ -1749,7 +1460,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(project, vec![], &no_signers()).unwrap();
         let config = loader
             .load_config_strict::<serde_yaml::Value>("nonexistent")
             .unwrap();
@@ -1764,7 +1475,7 @@ pem = """
 
         create_file(&project, ".ai/config/bad.yaml", "not valid yaml: [");
 
-        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(project, vec![], &no_signers()).unwrap();
         let result = loader.load_config_strict::<serde_yaml::Value>("bad");
 
         assert!(
@@ -1781,7 +1492,7 @@ pem = """
 
         create_file(&bundle, ".ai/config/defaults.yaml", "key: from_bundle\n");
 
-        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_signers()).unwrap();
         let config: serde_yaml::Value = loader.load_config_strict("defaults").unwrap().unwrap();
 
         assert_eq!(config["key"], "from_bundle");
@@ -1793,7 +1504,6 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         let bundle = tmp.path().join("bundle");
-        create_trust_store(&project, &signing_key);
         let bundle_body = "name: bundle\n";
         create_file(
             &bundle,
@@ -1803,7 +1513,7 @@ pem = """
         let loader = VerifiedLoader::new(
             project.clone(),
             vec![bundle],
-            &project.join(".ai/config/keys/trusted"),
+            &trusted_everywhere(&signing_key),
         )
         .unwrap();
         let first = loader
@@ -1830,17 +1540,11 @@ pem = """
     }
 
     #[test]
-    fn signed_config_proof_revalidates_project_trust_from_admitted_content() {
+    fn signed_config_proof_revalidates_project_config_from_admitted_content() {
         let config_bytes = b"# signed fixture\nname: project\n";
-        let trust_bytes = b"version = \"1.0.0\"\n";
         let proof = ConfigDependencyProof {
             config_id: "test".to_string(),
-            effective_trust_identity: "effective".to_string(),
-            node_trust_identity: "node".to_string(),
-            project_trust_sources: vec![TrustSourceDependency {
-                logical_path: PathBuf::from("publisher.toml"),
-                source_hash: lillux::sha256_hex(trust_bytes),
-            }],
+            trusted_signers_digest: "signers".to_string(),
             candidates: vec![ConfigCandidateDependency {
                 root_class: ConfigCandidateRootClass::Project,
                 root_index: 0,
@@ -1854,37 +1558,42 @@ pem = """
             }],
         };
         let project_root = PathBuf::from("/not-opened/project");
-        let exact = TestProjectContent::default()
-            .with_file(".ai/config/test.yaml", config_bytes)
-            .with_file(".ai/config/keys/trusted/publisher.toml", trust_bytes);
-        assert!(proof.revalidate_under_project_authority(Some(&project_root), None, Some(&exact),));
+        let exact = TestProjectContent::default().with_file(".ai/config/test.yaml", config_bytes);
+        assert!(proof.revalidate_under_project_authority(Some(&project_root), None, Some(&exact)));
 
-        let revoked = TestProjectContent::default().with_file(".ai/config/test.yaml", config_bytes);
+        let removed = TestProjectContent::default();
         assert!(!proof.revalidate_under_project_authority(
             Some(&project_root),
             None,
-            Some(&revoked),
+            Some(&removed),
         ));
         assert_eq!(
             proof.revalidate_under_project_authority_status(
                 Some(&project_root),
                 None,
-                Some(&revoked),
+                Some(&removed),
             ),
             ConfigDependencyProofStatus::ImmutableAuthorityMismatch
         );
 
-        let replaced = TestProjectContent::default()
-            .with_file(".ai/config/test.yaml", config_bytes)
-            .with_file(
-                ".ai/config/keys/trusted/publisher.toml",
-                b"version = \"changed\"\n",
-            );
+        let replaced =
+            TestProjectContent::default().with_file(".ai/config/test.yaml", b"# changed\n");
         assert!(!proof.revalidate_under_project_authority(
             Some(&project_root),
             None,
             Some(&replaced),
         ));
+    }
+
+    #[test]
+    fn signed_config_proof_matches_only_its_signer_digest() {
+        let proof = ConfigDependencyProof {
+            config_id: "test".to_string(),
+            trusted_signers_digest: "signers".to_string(),
+            candidates: Vec::new(),
+        };
+        assert!(proof.trusted_signers_match("signers"));
+        assert!(!proof.trusted_signers_match("other"));
     }
 
     #[test]
@@ -1895,9 +1604,7 @@ pem = """
         let original = b"name: original\n";
         let proof = ConfigDependencyProof {
             config_id: "test".to_string(),
-            effective_trust_identity: "effective".to_string(),
-            node_trust_identity: "node".to_string(),
-            project_trust_sources: Vec::new(),
+            trusted_signers_digest: "signers".to_string(),
             candidates: vec![ConfigCandidateDependency {
                 root_class: ConfigCandidateRootClass::Node,
                 root_index: 0,
@@ -1922,33 +1629,36 @@ pem = """
     }
 
     #[test]
-    fn project_trust_cannot_admit_bundle_or_node_config() {
+    fn project_scoped_signer_cannot_admit_bundle_or_node_config() {
         let project_key = SigningKey::from_bytes(&[51u8; 32]);
-        let operator_key = SigningKey::from_bytes(&[50u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         let node_config = tmp.path().join("node-config");
-        let node_root = tmp.path().join("node-root");
-        let node_trust = trusted_dir(&node_root);
         let bundle = tmp.path().join("bundle");
-        create_trust_store(&node_root, &operator_key);
-        create_trust_store_signed_by(&project, &project_key, &operator_key);
         create_file(
             &bundle,
             ".ai/config/test.yaml",
             &lillux::signature::sign_content("name: bundle\n", &project_key, "#", None),
         );
+        let signers = vec![signer_entry(
+            &project_key,
+            SignerScope {
+                spaces: vec![SignerSpace::Project],
+                kinds: vec!["*".to_string()],
+                projects: Vec::new(),
+            },
+        )];
         let loader = VerifiedLoader::new_with_node_config(
             project.clone(),
             Some(node_config.clone()),
             vec![bundle],
-            &node_trust,
+            &signers,
         )
         .unwrap();
         let error = loader
             .load_config_strict_signed_with_proof::<serde_yaml::Value>("test")
             .unwrap_err();
-        assert!(error.to_string().contains("unknown signer"));
+        assert!(error.to_string().contains("signer_out_of_scope"));
 
         create_file(
             &node_config,
@@ -1958,7 +1668,7 @@ pem = """
         let error = loader
             .load_config_strict_signed_with_proof::<serde_yaml::Value>("node-only")
             .unwrap_err();
-        assert!(error.to_string().contains("unknown signer"));
+        assert!(error.to_string().contains("signer_out_of_scope"));
 
         create_file(
             &project,
@@ -1973,30 +1683,92 @@ pem = """
     }
 
     #[test]
-    fn trust_document_fingerprint_must_match_decoded_key() {
+    fn signer_entry_fingerprint_must_match_its_key() {
         let signing_key = SigningKey::from_bytes(&[52u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        create_trust_store(tmp.path(), &signing_key);
-        let trust_dir = tmp.path().join(".ai/config/keys/trusted");
-        let entry = fs::read_dir(&trust_dir)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let declared = lillux::crypto::fingerprint(&signing_key.verifying_key());
-        let content = fs::read_to_string(&entry).unwrap();
-        fs::write(&entry, content.replace(&declared, &"f".repeat(64))).unwrap();
+        let mut entry = signer_entry(&signing_key, SignerScope::everywhere());
+        entry.fingerprint = "f".repeat(64);
 
-        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(format!("{error:#}").contains("fingerprint mismatch"));
+        let error = VerifiedLoader::new(PathBuf::from("/project"), vec![], &[entry])
+            .err()
+            .expect("a mismatched fingerprint must be refused");
+        assert!(format!("{error:#}").contains("fingerprint"));
+    }
+
+    #[test]
+    fn runtime_trust_comes_from_envelope_signers() {
+        let signing_key = SigningKey::from_bytes(&[99u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let system = tmp.path().join("system");
+        let config_id = "ryeos-runtime/model-providers/test";
+        create_file(
+            &system,
+            &format!(".ai/config/{config_id}.yaml"),
+            &lillux::signature::sign_content(
+                "base_url: https://example.com/v1\n",
+                &signing_key,
+                "#",
+                None,
+            ),
+        );
+
+        let nobody =
+            VerifiedLoader::new(project.clone(), vec![system.clone()], &no_signers()).unwrap();
+        assert!(nobody.trust_store().is_empty());
+        assert!(
+            nobody
+                .load_config_strict_signed::<serde_yaml::Value>(config_id)
+                .is_err()
+        );
+
+        let signers = trusted_everywhere(&signing_key);
+        let trusting = VerifiedLoader::new(project, vec![system], &signers).unwrap();
+        assert_eq!(
+            trusting.trusted_signers_digest(),
+            trusted_signers_digest(&signers)
+        );
+        assert_eq!(trusting.trust_store().len(), 1);
+        let value = trusting
+            .load_config_strict_signed::<serde_yaml::Value>(config_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(value["base_url"].as_str(), Some("https://example.com/v1"));
+    }
+
+    #[test]
+    fn runtime_never_reads_trust_directories() {
+        let signing_key = SigningKey::from_bytes(&[98u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
+        let planted = format!(
+            "fingerprint = \"{fingerprint}\"\npem = \"ed25519:{}\"\nowner = \"planted\"\n",
+            base64::engine::general_purpose::STANDARD
+                .encode(signing_key.verifying_key().to_bytes())
+        );
+        create_file(&project, ".ai/config/keys/trusted/x.toml", &planted);
+        create_file(
+            &project,
+            ".ai/config/test.yaml",
+            &lillux::signature::sign_content("name: project\n", &signing_key, "#", None),
+        );
+
+        let loader = VerifiedLoader::new(project, vec![], &no_signers()).unwrap();
+        assert!(loader.trust_store().is_empty());
+        assert_eq!(
+            loader.trusted_signers_digest(),
+            trusted_signers_digest(&no_signers())
+        );
+        let error = loader
+            .load_config_strict_signed::<serde_yaml::Value>("test")
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown signer"));
     }
 
     #[test]
     fn load_verified_strips_signature_and_hashes() {
         let sk = SigningKey::from_bytes(&[42u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
-        create_trust_store(tmp.path(), &sk);
 
         let body = "# Hello\n\nBody text.\n";
         let signed = sign_md(body, &sk);
@@ -2004,7 +1776,7 @@ pem = """
         fs::write(&path, &signed).unwrap();
 
         let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_dir(tmp.path()))
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_everywhere(&sk))
                 .unwrap();
         let verified = loader.load_verified("directive", &path).unwrap();
 
@@ -2020,8 +1792,7 @@ pem = """
         let content = "# Plain Directive\n\nSome content here.\n";
         fs::write(&path, content).unwrap();
 
-        let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_signers()).unwrap();
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert_eq!(verified.content, content);
@@ -2032,7 +1803,6 @@ pem = """
     fn load_verified_rejects_tampered_content() {
         let sk = SigningKey::from_bytes(&[42u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
-        create_trust_store(tmp.path(), &sk);
 
         let body = "# Original\n";
         let signed = sign_md(body, &sk);
@@ -2041,7 +1811,7 @@ pem = """
         fs::write(&path, &tampered).unwrap();
 
         let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_dir(tmp.path()))
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_everywhere(&sk))
                 .unwrap();
         let result = loader.load_verified("directive", &path);
 
@@ -2059,7 +1829,6 @@ pem = """
         let sk = SigningKey::from_bytes(&[42u8; 32]);
         let other_sk = SigningKey::from_bytes(&[99u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
-        create_trust_store(tmp.path(), &other_sk);
 
         let body = "# Test\n";
         let signed = sign_md(body, &sk);
@@ -2069,9 +1838,12 @@ pem = """
         let path = tmp.path().join("bad_sig.md");
         fs::write(&path, &forged).unwrap();
 
-        let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_dir(tmp.path()))
-                .unwrap();
+        let loader = VerifiedLoader::new(
+            tmp.path().to_path_buf(),
+            vec![],
+            &trusted_everywhere(&other_sk),
+        )
+        .unwrap();
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -2092,244 +1864,10 @@ pem = """
         let path = tmp.path().join("unknown_signer.md");
         fs::write(&path, &signed).unwrap();
 
-        let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_signers()).unwrap();
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(verified.content.contains("# Test"));
-    }
-
-    /// The runtime used to skip every `#` line of a trust document, so a
-    /// tampered or forged signature line went unnoticed. It now verifies
-    /// documents through the engine's trust store, exactly as the daemon does.
-    #[test]
-    fn runtime_trust_refuses_tampered_signed_document() {
-        let signing_key = SigningKey::from_bytes(&[64u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let trust_dir = tmp.path().join("trusted");
-        fs::create_dir_all(&trust_dir).unwrap();
-        let signed =
-            lillux::signature::sign_content(&trust_document(&signing_key), &signing_key, "#", None);
-        let path = trust_dir.join("signer.toml");
-        fs::write(&path, &signed).unwrap();
-        assert_eq!(
-            TrustStore::load(Path::new("/missing-project"), &trust_dir)
-                .unwrap()
-                .len(),
-            1
-        );
-
-        fs::write(
-            &path,
-            signed.replace("owner = \"test\"", "owner = \"forged\""),
-        )
-        .unwrap();
-        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("content tampered"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    #[test]
-    fn runtime_trust_refuses_signature_by_unknown_key() {
-        let pinned = SigningKey::from_bytes(&[65u8; 32]);
-        let stranger = SigningKey::from_bytes(&[66u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let trust_dir = tmp.path().join("trusted");
-        fs::create_dir_all(&trust_dir).unwrap();
-        fs::write(
-            trust_dir.join("signer.toml"),
-            lillux::signature::sign_content(&trust_document(&pinned), &stranger, "#", None),
-        )
-        .unwrap();
-        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(
-            format!("{error:#}").contains("not found in trust store"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    /// Gap C in a runtime: a project trust document must be signed by a key
-    /// the node trust store holds, exactly as in the daemon.
-    #[test]
-    fn runtime_refuses_project_trust_documents_the_node_did_not_sign() {
-        let operator = SigningKey::from_bytes(&[67u8; 32]);
-        let planted = SigningKey::from_bytes(&[68u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let node_root = tmp.path().join("app-root");
-        create_trust_store(&node_root, &operator);
-        let fingerprint = lillux::signature::compute_fingerprint(&planted.verifying_key());
-
-        for (name, document, code) in [
-            (
-                "unsigned",
-                trust_document(&planted),
-                ryeos_engine::trust::PROJECT_TRUST_UNSIGNED,
-            ),
-            (
-                "self-signed",
-                lillux::signature::sign_content(&trust_document(&planted), &planted, "#", None),
-                ryeos_engine::trust::PROJECT_TRUST_SELF_SIGNED,
-            ),
-        ] {
-            let project = tmp.path().join(name);
-            create_file(
-                &project,
-                &format!(".ai/config/keys/trusted/{fingerprint}.toml"),
-                &document,
-            );
-            let error = TrustStore::load(&project, &trusted_dir(&node_root)).unwrap_err();
-            assert!(
-                format!("{error:#}").contains(code),
-                "{name}: unexpected error: {error:#}"
-            );
-        }
-
-        let vouched = tmp.path().join("vouched");
-        create_trust_store_signed_by(&vouched, &planted, &operator);
-        let store = TrustStore::load(&vouched, &trusted_dir(&node_root)).unwrap();
-        assert!(store.get(&fingerprint).is_some());
-    }
-
-    #[test]
-    fn trust_store_loads_operator_and_project_dirs() {
-        let op_sk = SigningKey::from_bytes(&[42u8; 32]);
-        let proj_sk = SigningKey::from_bytes(&[43u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let operator_root = tmp.path().join("app-root");
-        let project = tmp.path().join("project");
-        create_trust_store(&operator_root, &op_sk);
-        create_trust_store_signed_by(&project, &proj_sk, &op_sk);
-
-        let store =
-            TrustStore::load(&project, &operator_root.join(".ai/config/keys/trusted")).unwrap();
-
-        assert_eq!(store.len(), 2);
-        let op_fp = lillux::signature::compute_fingerprint(&op_sk.verifying_key());
-        let proj_fp = lillux::signature::compute_fingerprint(&proj_sk.verifying_key());
-        assert!(store.get(&op_fp).is_some());
-        assert!(store.get(&proj_fp).is_some());
-    }
-
-    fn padded_trust_document(signing_key: &SigningKey, target_bytes: usize) -> Vec<u8> {
-        let mut document = trust_document(signing_key).into_bytes();
-        assert!(document.len().saturating_add(2) <= target_bytes);
-        document.push(b'#');
-        document.resize(target_bytes.saturating_sub(1), b'x');
-        document.push(b'\n');
-        assert_eq!(document.len(), target_bytes);
-        document
-    }
-
-    #[test]
-    fn trust_store_enforces_exact_document_count_boundary() {
-        let signing_key = SigningKey::from_bytes(&[61u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let trust_dir = tmp.path().join("trusted");
-        fs::create_dir_all(&trust_dir).unwrap();
-        let document = trust_document(&signing_key);
-        for index in 0..MAX_TRUST_DOCUMENTS {
-            fs::write(trust_dir.join(format!("{index:04}.toml")), &document).unwrap();
-        }
-        let exact = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap();
-        assert_eq!(exact.len(), 1);
-
-        fs::write(
-            trust_dir.join(format!("{:04}.toml", MAX_TRUST_DOCUMENTS)),
-            &document,
-        )
-        .unwrap();
-        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(
-            format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENTS} regular files"))
-        );
-    }
-
-    #[test]
-    fn trust_store_enforces_exact_document_size_boundary() {
-        let signing_key = SigningKey::from_bytes(&[62u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let trust_dir = tmp.path().join("trusted");
-        fs::create_dir_all(&trust_dir).unwrap();
-        let exact = padded_trust_document(
-            &signing_key,
-            usize::try_from(MAX_TRUST_DOCUMENT_BYTES).unwrap(),
-        );
-        let path = trust_dir.join("exact.toml");
-        fs::write(&path, &exact).unwrap();
-        assert_eq!(
-            TrustStore::load(Path::new("/missing-project"), &trust_dir)
-                .unwrap()
-                .len(),
-            1
-        );
-
-        let mut oversized = exact;
-        oversized.push(b'\n');
-        fs::write(path, oversized).unwrap();
-        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(
-            format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes"))
-        );
-    }
-
-    #[test]
-    fn trust_store_enforces_exact_aggregate_size_boundary() {
-        let signing_key = SigningKey::from_bytes(&[63u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let trust_dir = tmp.path().join("trusted");
-        fs::create_dir_all(&trust_dir).unwrap();
-        let document = padded_trust_document(
-            &signing_key,
-            usize::try_from(MAX_TRUST_DOCUMENT_BYTES).unwrap(),
-        );
-        let exact_count =
-            usize::try_from(MAX_TRUST_DIRECTORY_BYTES / MAX_TRUST_DOCUMENT_BYTES).unwrap();
-        for index in 0..exact_count {
-            fs::write(trust_dir.join(format!("{index:02}.toml")), &document).unwrap();
-        }
-        assert_eq!(
-            TrustStore::load(Path::new("/missing-project"), &trust_dir)
-                .unwrap()
-                .len(),
-            1
-        );
-
-        fs::write(trust_dir.join("overflow.toml"), &document).unwrap();
-        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(format!("{error:#}").contains(&format!(
-            "exceeds {MAX_TRUST_DIRECTORY_BYTES} aggregate bytes"
-        )));
-    }
-
-    #[test]
-    fn trust_store_ignores_bundle_roots() {
-        // A bundle shipping its own trusted-keys dir must NOT become a
-        // trust authority — only project + operator dirs are consulted.
-        let sk = SigningKey::from_bytes(&[42u8; 32]);
-        let tmp = tempfile::tempdir().unwrap();
-        let bundle = tmp.path().join("bundle");
-        create_trust_store(&bundle, &sk);
-
-        let loader = VerifiedLoader::new(
-            tmp.path().join("project"),
-            vec![bundle],
-            &no_operator_trust(),
-        )
-        .unwrap();
-
-        assert!(
-            loader.trust_store().is_empty(),
-            "bundle-shipped trust dirs must be ignored"
-        );
-    }
-
-    #[test]
-    fn trust_store_empty_when_no_dirs() {
-        let store =
-            TrustStore::load(Path::new("/nonexistent"), Path::new("/also-nonexistent")).unwrap();
-        assert!(store.is_empty());
     }
 
     #[test]
@@ -2339,8 +1877,7 @@ pem = """
         let content = "deterministic content";
         fs::write(&path, content).unwrap();
 
-        let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_signers()).unwrap();
         let v1 = loader.load_verified("directive", &path).unwrap();
         let v2 = loader.load_verified("directive", &path).unwrap();
 
@@ -2359,7 +1896,7 @@ pem = """
         create_file(&project, ".ai/tools/shared.md", "# Project Shared\n");
 
         let project_clone = project.clone();
-        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_signers()).unwrap();
         let items = loader.scan_kind("tool").unwrap();
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
 
@@ -2378,7 +1915,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust()).unwrap();
+        let loader = VerifiedLoader::new(project, vec![], &no_signers()).unwrap();
         let items = loader.scan_kind("directive").unwrap();
 
         assert!(items.is_empty());
@@ -2386,25 +1923,20 @@ pem = """
 
     // ── Strict mode tests ──────────────────────────────────────────────
 
-    /// Helper: sign YAML with a test key and pin it into `trust_dir`
-    /// (a trusted-keys dir, written as-is) so strict mode accepts it.
-    fn sign_and_pin(yaml_body: &str, trust_dir: &Path) -> String {
-        use base64::Engine;
-        use ed25519_dalek::SigningKey;
-        use lillux::signature::{compute_fingerprint, sign_content_at};
+    /// Signing key used by the strict-mode tests.
+    fn strict_test_key() -> SigningKey {
+        SigningKey::from_bytes(&[99u8; 32])
+    }
 
-        let sk = SigningKey::from_bytes(&[99u8; 32]);
-        let vk = sk.verifying_key();
-        let fp = compute_fingerprint(&vk);
-        let signed = sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
-
-        std::fs::create_dir_all(trust_dir).unwrap();
-        let vk_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-        let toml = format!(
-            "fingerprint = \"{fp}\"\nowner = \"test\"\n\n[public_key]\npem = \"ed25519:{vk_b64}\"\n"
-        );
-        std::fs::write(trust_dir.join("test.toml"), toml).unwrap();
-        signed
+    /// Helper: sign YAML with the strict-mode test key.
+    fn sign_with_test_key(yaml_body: &str) -> String {
+        lillux::signature::sign_content_at(
+            yaml_body,
+            &strict_test_key(),
+            "#",
+            None,
+            "2026-01-01T00:00:00Z",
+        )
     }
 
     #[test]
@@ -2420,12 +1952,8 @@ pem = """
         )
         .unwrap();
 
-        let loader = VerifiedLoader::new(
-            tmp.path().join("project"),
-            vec![system],
-            &no_operator_trust(),
-        )
-        .unwrap();
+        let loader =
+            VerifiedLoader::new(tmp.path().join("project"), vec![system], &no_signers()).unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unsigned config");
@@ -2450,12 +1978,8 @@ pem = """
             lillux::signature::sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(
-            tmp.path().join("project"),
-            vec![system],
-            &no_operator_trust(),
-        )
-        .unwrap();
+        let loader =
+            VerifiedLoader::new(tmp.path().join("project"), vec![system], &no_signers()).unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unknown signer");
@@ -2467,49 +1991,52 @@ pem = """
     }
 
     #[test]
-    fn strict_load_accepts_operator_trusted_signed_config() {
+    fn strict_load_accepts_envelope_trusted_signed_config() {
         let tmp = tempfile::tempdir().unwrap();
         let system = tmp.path().join("system");
-        let operator_keys = tmp.path().join("app-root/.ai/config/keys/trusted");
         let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
         std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
 
         let yaml_body = "base_url: https://example.com/v1\n";
-        let signed = sign_and_pin(yaml_body, &operator_keys);
+        let signed = sign_with_test_key(yaml_body);
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader =
-            VerifiedLoader::new(tmp.path().join("project"), vec![system], &operator_keys).unwrap();
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            vec![system],
+            &trusted_everywhere(&strict_test_key()),
+        )
+        .unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(
             res.is_ok(),
-            "strict mode must accept config signed by an operator-trusted key"
+            "strict mode must accept config signed by an envelope-trusted key"
         );
         let val = res.unwrap().expect("should have a value");
         assert_eq!(val["base_url"].as_str(), Some("https://example.com/v1"));
     }
 
     #[test]
-    fn strict_load_rejects_bundle_pinned_signer() {
-        // The signer is pinned ONLY inside the bundle's own
-        // `.ai/config/keys/trusted` — the removed self-vouching path.
-        // Strict verification must treat it as an unknown signer.
+    fn strict_load_rejects_bundle_planted_key_document() {
+        // A key document planted inside the bundle vouches for nothing.
+        // Strict verification must treat the signer as unknown.
         let tmp = tempfile::tempdir().unwrap();
         let system = tmp.path().join("system");
         let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
         std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
 
         let yaml_body = "base_url: https://example.com/v1\n";
-        let signed = sign_and_pin(yaml_body, &system.join(".ai/config/keys/trusted"));
+        let signed = sign_with_test_key(yaml_body);
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
+        create_file(
+            &system,
+            ".ai/config/keys/trusted/test.toml",
+            "owner = \"planted\"\n",
+        );
 
-        let loader = VerifiedLoader::new(
-            tmp.path().join("project"),
-            vec![system],
-            &no_operator_trust(),
-        )
-        .unwrap();
+        let loader =
+            VerifiedLoader::new(tmp.path().join("project"), vec![system], &no_signers()).unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(

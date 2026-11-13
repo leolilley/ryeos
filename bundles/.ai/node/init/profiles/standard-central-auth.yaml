@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T13:04:03Z:7fe14b116609eec51547173282ee794b70c57704fab44805b88a9b23174addf4:GqnCOCEU6GKevFFTocjsn7dk1vMNQTl2+Fv62q6GuirNHOlCenW6bknVm6287/M16dyoxMzZys8MS2Zy9U8eDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:10:31Z:7d851192700bb288bf45634629129b88cd5822dd7cbb757371f2a38904a57fb1:YHxe+bTyJOeTcjQFIsiRwJDQrZQV3E3Ar2wEBbVAgRjhW5bryG/YLi1UCTlm1mq4XkfvWE9K4Hu+mGF08+HcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -311,7 +311,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"

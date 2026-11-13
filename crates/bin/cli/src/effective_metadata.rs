@@ -40,7 +40,6 @@ pub fn build_effective_item_engine(
         &config,
         bundle_roots,
         project_path,
-        None,
         isolation,
         execution_policy,
     )

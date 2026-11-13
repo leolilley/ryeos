@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T13:04:03Z:eb75f6f4eb48b58ac3ab2b6290ebd2247128127f3d90b4cf1bf9d615776071ec:OdOaLqYMFEaXL6op0e7kKCUFuadWe3cynT4WVMdLelMmfGyFiIuY6PfZgLTklkDAdIzlyeQgVKcgFhRx/bY4Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:10:31Z:73b02142223db2b918f2424e178ab853049b8fcf27c90bc9cf48d41beae09dfa:0EdXMwYsFTcCzY+SGU2v6J3Ib2V41Ujj0X19uPOxL/j5iP3qBzcA8XPboBRs7AeTBp1Ktu0h7kXIrIBjbdxnAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -312,7 +312,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"

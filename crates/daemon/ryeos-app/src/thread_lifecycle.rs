@@ -2474,11 +2474,7 @@ impl RootExecutionAdmission {
         })
         .transpose()?;
         self.request_engine()
-            .effective_trust_store_for_current_policy(
-                project_root,
-                subject_authority,
-                resolution_binding.pinned_materialization_proof(),
-            )
+            .effective_trust_store_for_current_policy(project_root, subject_authority)
             .map_err(anyhow::Error::new)
     }
 

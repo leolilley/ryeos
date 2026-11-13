@@ -388,7 +388,6 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         daemon_socket_path: isolation_daemon_socket_path,
         captured_callback_socket: false,
         bundle_roots: &envelope.roots.bundle_roots,
-        node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
         verified_code: &[],
         verified_command: Some(verified_command),
         external_read_only_mounts: &admitted_mounts,

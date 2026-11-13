@@ -108,11 +108,8 @@ pub fn scheduler_selected_for_app_root(
     use ryeos_node_runtime::node_policy::sections::command_registration::CommandRegistrationAuthority;
     use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy;
 
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .context("load trust store for scheduler selection")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("load trust store for scheduler selection")?;
     let policy_table = NodePolicyTable::new();
     let policy =
         ryeos_node_runtime::node_policy::load_snapshot(app_root, &trust_store, &policy_table)
@@ -152,7 +149,6 @@ pub fn scheduler_selected_for_app_root(
     let engine = ryeos_node_runtime::engine_init::build_registered_engine_for_roots(
         &config,
         &bundle_roots,
-        None,
         None,
         isolation,
         policy.require::<NodeExecutionAdmissionPolicy>()?,

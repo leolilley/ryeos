@@ -718,7 +718,6 @@ fn resolve_policy_source(
         &config,
         &roots,
         None,
-        None,
         Arc::clone(&isolation),
         execution,
     )

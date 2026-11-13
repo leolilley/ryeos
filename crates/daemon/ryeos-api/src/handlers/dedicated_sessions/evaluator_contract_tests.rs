@@ -71,14 +71,24 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
         let mut roots = vec![core.clone()];
         roots.extend(workflow.iter().cloned());
         roots.push(bundle);
-        let mut trust = ryeos_engine::test_support::live_trust_store();
-        trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+        let trusted_signer = |verifying_key: lillux::crypto::VerifyingKey, label: &str| {
             ryeos_engine::trust::TrustedSigner {
-                fingerprint: lillux::signature::compute_fingerprint(&key.verifying_key()),
-                verifying_key: key.verifying_key(),
-                label: Some("evaluator fixture".into()),
-            },
-        ]));
+                fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+                verifying_key,
+                label: Some(label.into()),
+            }
+        };
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            trusted_signer(
+                ryeos_engine::test_support::platform_author_verifying_key(),
+                "platform author",
+            ),
+            trusted_signer(
+                ryeos_engine::test_support::dev_publisher_verifying_key(),
+                "dev publisher",
+            ),
+            trusted_signer(key.verifying_key(), "evaluator fixture"),
+        ]);
         let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
         kind_roots.extend(
             workflow

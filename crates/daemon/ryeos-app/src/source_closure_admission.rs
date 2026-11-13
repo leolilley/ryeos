@@ -794,6 +794,8 @@ fn capture_source_closure(
                 kind_schema,
                 resolution,
                 &engine.trust_store,
+                kind,
+                matches!(resolution.root.source_space, ItemSpace::Project).then_some(content_root),
             )?
         }
         ryeos_engine::kind_registry::SourceClosureTestimonyDecl::OwnerSignedDigest => {
@@ -1105,6 +1107,8 @@ fn verify_owner_signed_files(
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     trust_store: &ryeos_engine::trust::TrustStore,
+    kind: &str,
+    project_root: Option<&Path>,
 ) -> anyhow::Result<ryeos_state::objects::SourceTestimonyProof> {
     let owner = resolution
         .root
@@ -1154,6 +1158,11 @@ fn verify_owner_signed_files(
             &header,
             &format.signature,
             trust_store,
+            &ryeos_engine::trust::SignerContext::new(
+                resolution.root.source_space,
+                kind,
+                project_root,
+            ),
         )?;
         if trust != ryeos_engine::contracts::TrustClass::Trusted
             || signer.as_ref().map(|signer| signer.0.as_str()) != Some(owner)

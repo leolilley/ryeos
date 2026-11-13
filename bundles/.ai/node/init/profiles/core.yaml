@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:d1c1c597715a8d06f5e452e3fb4c634771eb3e0b59a949a5179ed89c4fa55b6c:Oe6fJo/yw6rFFJ0Muro3/YwoBfJHl9eu5Z8kI7W31PL98ECbWEc0vD2JdxvmPK/sylu4ei+ByOhHywCmooy9Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:10:31Z:bb3a6ac69d879607bc4a882ac35b03d966599293ff941a8a2763113a3273f741:d/Urh9UI6WfRsqj/scSgfXf6dlfYbZ4Vy/a20DFjVI6wSOBFBbEbpWsQg9iVMu7aHRXvlzqPBe46zKhbbihoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -279,7 +279,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"

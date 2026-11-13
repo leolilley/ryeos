@@ -25,5 +25,4 @@ pub mod sign;
 pub mod sign_bundle;
 pub mod snapshot;
 mod source_unit_sign;
-pub mod trust;
 pub mod vault;

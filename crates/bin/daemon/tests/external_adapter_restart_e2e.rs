@@ -480,7 +480,7 @@ async fn prepare_public_ordinary_fixture(recorded: bool) -> anyhow::Result<Ordin
         })?;
         // Reuse normal signed node-config admission before the existing
         // test-only vault provisioner; no raw reserved vault key is authored.
-        let trust = ryeos_engine::trust::TrustStore::load(None, &state.join(".ai/config"))?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(state)?;
         let loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader { app_root: state, trust_store: &trust };
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let policy = ryeos_node_runtime::node_policy::load_snapshot(state, &trust, &table)?;

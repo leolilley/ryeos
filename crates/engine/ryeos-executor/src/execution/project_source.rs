@@ -865,7 +865,6 @@ fn resolve_pinned_snapshot_context_admitted(
         snapshot_hash: snapshot_hash.to_string(),
     };
 
-    let immutable_project_root = materialization_cache.cache_dir(snapshot_hash);
     tracing::debug!(
         checkout_id,
         recovery_stage = "request-engine-reconstruction",
@@ -875,19 +874,12 @@ fn resolve_pinned_snapshot_context_admitted(
         cache_key,
         || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
             // Installed executor registries are admitted once at the daemon
-            // generation boundary. Derive only the project trust view here;
-            // rebuilding the node engine would duplicate admission and could
-            // observe a different ambient registry generation.
-            let built = state
-                .engine
-                .for_project_root(immutable_project_root.as_path(), None)
-                .map_err(|e| {
-                    ProjectSourceError::CheckoutFailed(format!(
-                        "per-request project trust derivation failed: {e}"
-                    ))
-                })?;
-
-            Ok((Arc::new(built), None))
+            // generation boundary, and trust is node state that does not
+            // depend on the project. The request engine is the admitted
+            // generation itself; rebuilding the node engine would duplicate
+            // admission and could observe a different ambient registry
+            // generation.
+            Ok((Arc::clone(&state.engine), None))
         },
     )?;
     tracing::debug!(

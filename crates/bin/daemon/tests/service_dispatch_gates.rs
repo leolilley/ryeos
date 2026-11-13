@@ -16,7 +16,6 @@ use ryeos_api::{ServiceDescriptor, handlers as service_handlers};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
 
 /// Iterate the canonical descriptor table.
 fn descriptors() -> &'static [ServiceDescriptor] {
@@ -64,10 +63,6 @@ fn service_refs(engine: &ryeos_engine::engine::Engine) -> Vec<CanonicalRef> {
         .collect()
 }
 
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn workspace_root() -> PathBuf {
     ryeos_engine::test_support::workspace_root()
 }
@@ -77,8 +72,7 @@ fn workspace_root() -> PathBuf {
 /// instead of the daemon's three-tier loader. Loads core and the workflow
 /// bundles so all services in the descriptor table can resolve.
 fn build_test_engine() -> ryeos_engine::engine::Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let workspace = workspace_root();
     let core_bundle = workspace.join("bundles/core");
@@ -363,8 +357,7 @@ fn gate_cap_enforcement_logic() {
 /// in-process registry. The concrete kind name is deliberately irrelevant.
 #[test]
 fn gate_services_registry_has_an_admitted_kind() {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let kinds_dir = workspace_root().join("bundles/core/.ai/node/engine/kinds");
     let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("load kinds");

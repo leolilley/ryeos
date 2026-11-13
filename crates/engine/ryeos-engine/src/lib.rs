@@ -59,8 +59,5 @@ pub mod test_support;
 /// Every space follows: `base_path / AI_DIR / {kind_directory} / {item_id}`
 pub const AI_DIR: &str = ".ai";
 
-/// Path under `AI_DIR` where trusted key documents live.
-pub const TRUST_KEYS_DIR: &str = "config/keys/trusted";
-
 /// Path under `AI_DIR` where kind schema YAML files live.
 pub const KIND_SCHEMAS_DIR: &str = "node/engine/kinds";

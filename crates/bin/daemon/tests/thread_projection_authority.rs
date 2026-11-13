@@ -22,7 +22,6 @@ use ryeos_app::state_store::NodeIdentitySigner;
 use ryeos_app::test_support::TestStateStore;
 use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
 use ryeos_node_runtime::identity::NodeIdentity;
 use tempfile::TempDir;
 
@@ -54,9 +53,7 @@ fn workspace_root() -> PathBuf {
 fn lifecycle_with_real_kinds() -> (TempDir, TestStateStore, Arc<ThreadLifecycleService>) {
     let tmp = TempDir::new().unwrap();
 
-    let trust_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trust_dir).expect("load fixture trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let root = workspace_root();
     let kinds = KindRegistry::load_base(

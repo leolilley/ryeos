@@ -97,14 +97,10 @@ pub fn mint_runtime_capability_caps(
                 })?;
             let ai_dir =
                 authoritative_project_runtime_authority_ai_dir(resolved_item, project_root)?;
-            let project_trust = engine
-                .trust_store
-                .with_project_keys(project_root)
-                .map_err(|err| err.to_string())?;
             ryeos_bundle::manifest::load_verified_manifest(
                 &ai_dir,
                 &effective_bundle_id,
-                project_trust.as_ref(),
+                &engine.trust_store,
             )
             .map_err(|err| format!("{err:#}"))?
             .manifest
@@ -300,6 +296,11 @@ fn authoritative_runtime_authority_ai_dir(
         signature_header,
         &resolved_item.source_format.signature,
         node_trust_store,
+        &ryeos_engine::trust::SignerContext::new(
+            resolved_item.source_space,
+            &resolved_item.kind,
+            resolved_item.materialized_project_root.as_deref(),
+        ),
     )
     .map_err(|err| {
         format!(

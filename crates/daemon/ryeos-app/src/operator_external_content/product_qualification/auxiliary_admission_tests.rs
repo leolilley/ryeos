@@ -5,7 +5,7 @@ use super::*;
 use anyhow::Result;
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
-use ryeos_engine::trust::{TrustStore, TrustedSigner};
+use ryeos_engine::trust::TrustedSigner;
 use ryeos_state::external_content::products::composition;
 use ryeos_state::objects::*;
 use serde_json::json;
@@ -836,12 +836,11 @@ product_qualification_policy:
     let mut roots = vec![core.clone()];
     roots.extend(workflow.iter().cloned());
     roots.push(bundle);
-    let mut trust = ryeos_engine::test_support::live_trust_store();
-    trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
+    let trust = crate::state::test_support::live_trust_store_with(vec![TrustedSigner {
         fingerprint: lillux::signature::compute_fingerprint(&signer.verifying_key()),
         verifying_key: signer.verifying_key(),
         label: Some("qualification fixture".into()),
-    }]));
+    }]);
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
     kind_roots.extend(
         workflow

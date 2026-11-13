@@ -154,7 +154,15 @@ fn read_signed_project_yaml(
     };
     let header = parse_signature_header(&raw, &envelope)
         .ok_or_else(|| invalid("project source has no valid signature envelope".into()))?;
-    let (trust_class, _) = verify_item_signature(&raw, &header, &envelope, trust)?;
+    // A project tree can carry a publisher's signed bundle source; the
+    // signature is judged as the bundle-space authority it claims to be.
+    let (trust_class, _) = verify_item_signature(
+        &raw,
+        &header,
+        &envelope,
+        trust,
+        &crate::trust::SignerContext::bundle("config"),
+    )?;
     if trust_class != TrustClass::Trusted {
         return Err(invalid("project source signer is not node-trusted".into()));
     }
@@ -299,6 +307,30 @@ pub fn load_and_verify_config_file_with_hash(
     load_and_verify_config_file_with_policy(path, ctx, false)
 }
 
+/// Where a config layer lives, for judging its signer's scope.
+fn config_signer_context<'a>(
+    path: &Path,
+    ctx: &ConfigLoadContext<'a>,
+) -> crate::trust::SignerContext<'a> {
+    let space = ctx
+        .roots
+        .ordered
+        .iter()
+        .find(|root| path.starts_with(&root.ai_root))
+        .map(|root| root.space)
+        .or_else(|| {
+            ctx.project_authority
+                .filter(|(project_root, _)| path.starts_with(project_root))
+                .map(|_| crate::contracts::ItemSpace::Project)
+        })
+        .unwrap_or(crate::contracts::ItemSpace::Node);
+    let project_root = ctx
+        .project_authority
+        .map(|(root, _)| root)
+        .or_else(|| ctx.roots.project_root());
+    crate::trust::SignerContext::new(space, "config", project_root)
+}
+
 fn load_and_verify_config_file_with_policy(
     path: &Path,
     ctx: &ConfigLoadContext<'_>,
@@ -380,7 +412,13 @@ fn load_and_verify_config_file_with_policy(
             // Hash compare happens inside the verify call; a mismatch
             // surfaces as the hard ContentHashMismatch arm below while
             // other trust failures only warn (allow_unsigned policy).
-            match verify_item_signature_with_hash(&recomputed, &header, ctx.trust_store) {
+            let signer_context = config_signer_context(path, ctx);
+            match verify_item_signature_with_hash(
+                &recomputed,
+                &header,
+                ctx.trust_store,
+                &signer_context,
+            ) {
                 Ok((crate::contracts::TrustClass::Trusted, _fp)) => tracing::debug!(
                     config_path = %path.display(),
                     "config file signature verified"

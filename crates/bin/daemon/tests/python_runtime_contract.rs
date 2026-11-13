@@ -28,7 +28,6 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::item_resolution::RegisteredBundleRoot;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-use ryeos_engine::trust::TrustStore;
 use serde_json::Value;
 
 fn isolation_app_root() -> PathBuf {
@@ -50,17 +49,12 @@ fn isolation_app_root() -> PathBuf {
     root
 }
 
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn workspace_root() -> PathBuf {
     ryeos_engine::test_support::workspace_root()
 }
 
 fn build_engine_against_bundle() -> Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -195,7 +189,6 @@ fn run_tool_with_hints(
         isolation_daemon_socket_path: None,
         isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),

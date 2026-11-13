@@ -21,6 +21,7 @@ pub mod start;
 pub mod status;
 pub mod stop;
 pub mod supervision;
+pub mod trust_registry;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

@@ -5529,7 +5529,6 @@ pub async fn run_and_wait(
     } else {
         None
     };
-    let wait_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let wait_isolation_workspace =
         process_isolation_workspace(process_project_class(&params.provenance), &effective_path);
     let wait_selected_resources = state
@@ -5627,7 +5626,6 @@ pub async fn run_and_wait(
             isolation_live_access_authority: wait_isolation_live_access_authority,
             isolation_external_read_only_mounts: wait_external_mounts,
             isolation_target_channels: wait_scoped_relay_channels,
-            isolation_node_trusted_keys_dir: wait_node_trusted_keys_dir,
             isolation_workspace: wait_isolation_workspace,
             inherited_fds: Vec::new(),
             external_realizations_env: wait_external_sealed_env,
@@ -6907,7 +6905,6 @@ async fn dispatch_detached_bg_task(
         }
     }
 
-    let bg_node_trusted_keys_dir = bg_state.config.runtime_root().trusted_keys_dir();
     let bg_spawn_state = bg_state.clone();
     let bg_accounting_scope = admitted_launch_metadata.accounting_scope.clone();
     let bg_spawn_launch_owner = launch_owner.clone();
@@ -7069,7 +7066,6 @@ async fn dispatch_detached_bg_task(
             isolation_live_access_authority: bg_isolation_live_access_authority,
             isolation_external_read_only_mounts: bg_external_mounts,
             isolation_target_channels: bg_scoped_relay_channels,
-            isolation_node_trusted_keys_dir: bg_node_trusted_keys_dir,
             isolation_workspace: bg_isolation_workspace,
             inherited_fds: Vec::new(),
             external_realizations_env: bg_external_sealed_env,

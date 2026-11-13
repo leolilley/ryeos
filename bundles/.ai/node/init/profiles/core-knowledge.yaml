@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:e8a3224dff636499af044ae4fee8040a868c2bb892b183c9a8e6330ed256f322:VTGXNz0bnQXV7ZbLx+N306QnVF7o5YevbgZ+IWUv/NnhnTQzaThN/if8VWWNudztjPV1NlVxVAOqcLTe33WiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:10:31Z:b0ecc2a3474604e8c93ca34578422c1072edee1283d127319993eddaa79f6ebb:4J99jg0SNU0WYPQg9P8Dz78f6LFH1uVdRZTQbqF0xCZPRzemvUyE6YB3cza14E6gB36O1rKZGtI9kTK2HMpnAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -281,7 +281,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"

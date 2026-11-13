@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T04:44:36Z:143738cd3954c9f07486142bb8ed966d4dc96382a370045b4c094040f613450c:4lwVcJWdelOu5Xa12DvkYvfpwpdQjIpF1Ag6RS2NNsAcDe99i2giJYThzca8SXn/R/7HXW8/Fkm55OyPtL+7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:30:23Z:d0d08cb41f293f3649b3951bf4731a178b21df096652e59200247c9bb85d2a42:Uw1fvFrByG8SQSLLc6PNb9DoQc2s8LwIzj31gMkQLspHHTisCeu7nSh+3S4gWEvLjn9fYPRUpALHq1vvzu1UCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -44,12 +44,11 @@ overridable via `RYEOS_APP_ROOT`. Created by `ryeos init`.
 ```
 <system_space_dir>/.ai/
 ├── config/keys/
-│   ├── signing/private_key.pem      ← operator's Ed25519 identity
-│   └── trusted/
-│       ├── <publisher-fp>.toml      ← trusted publisher keys
-│       ├── <operator-fp>.toml       ← operator self-trust
-│       └── <node-fp>.toml           ← daemon trust
+│   └── signing/private_key.pem      ← operator's Ed25519 identity
 ├── node/
+│   ├── trust/
+│   │   ├── signers/<fp>.yaml        ← node-signed signer records
+│   │   └── events/                  ← node-signed hash-chained key events
 │   ├── identity/private_key.pem     ← daemon's Ed25519 signing key
 │   ├── vault/{private_key,public_key}.pem  ← X25519 sealed secrets
 │   ├── config.yaml                  ← daemon config

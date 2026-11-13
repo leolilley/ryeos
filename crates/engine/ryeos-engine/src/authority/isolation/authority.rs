@@ -845,7 +845,6 @@ pub struct IsolationLaunchContext<'a> {
     /// without it a captured launch carrying a socket is refused.
     pub captured_callback_socket: bool,
     pub bundle_roots: &'a [PathBuf],
-    pub node_trusted_keys_dir: Option<&'a Path>,
     pub verified_code: &'a [IsolationVerifiedCode],
     /// The one verified-code entry that must supply the process executable.
     /// Other entries may be imported tool/runtime files and cannot silently

@@ -22,7 +22,6 @@ use ryeos_engine::engine::Engine;
 use ryeos_engine::item_resolution::RegisteredBundleRoot;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-use ryeos_engine::trust::TrustStore;
 
 fn isolation_app_root() -> PathBuf {
     let root = tempfile::tempdir().unwrap().keep();
@@ -50,10 +49,6 @@ fn isolation_context() -> (PathBuf, Arc<ryeos_engine::isolation::IsolationRuntim
             .expect("load disabled isolation fixture"),
     );
     (app_root, isolation)
-}
-
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn workspace_root() -> PathBuf {
@@ -190,8 +185,7 @@ def execute(params, project_path):
 }
 
 fn build_engine_against_bundle() -> Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
@@ -308,7 +302,6 @@ fn daemon_executes_python_hello_world_end_to_end() {
         isolation_daemon_socket_path: None,
         isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -449,7 +442,6 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         isolation_daemon_socket_path: None,
         isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
@@ -580,7 +572,6 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         isolation_daemon_socket_path: None,
         isolation_captured_callback_socket: false,
         isolation_bundle_roots: Vec::new(),
-        isolation_node_trusted_keys_dir: None,
         isolation_verified_code: vec![ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),

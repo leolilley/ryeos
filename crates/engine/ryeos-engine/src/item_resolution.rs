@@ -219,6 +219,15 @@ pub struct ResolutionRoots {
 }
 
 impl ResolutionRoots {
+    /// Root directory of the project (the parent of its `.ai` root), when a
+    /// project root participates in this resolution.
+    pub fn project_root(&self) -> Option<&Path> {
+        self.ordered
+            .iter()
+            .find(|root| root.space == ItemSpace::Project)
+            .and_then(|root| root.ai_root.parent())
+    }
+
     /// Build from already-normalized `.ai` roots.
     /// The project `.ai` root is ordered first, then bundle `.ai` roots.
     pub fn from_flat(project_ai_root: Option<PathBuf>, bundle_ai_roots: Vec<PathBuf>) -> Self {

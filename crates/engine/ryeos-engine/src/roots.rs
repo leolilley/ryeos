@@ -123,8 +123,19 @@ impl RuntimeRoot {
             .join("private_key.pem")
     }
 
-    pub fn trusted_keys_dir(&self) -> PathBuf {
-        self.config().join("keys").join("trusted")
+    /// Node-owned signer registry root (`.ai/node/trust`).
+    pub fn trust_dir(&self) -> PathBuf {
+        self.ai().join(crate::trust::NODE_TRUST_DIR)
+    }
+
+    /// Node-signed signer records, one `<fingerprint>.yaml` per signer.
+    pub fn trust_signers_dir(&self) -> PathBuf {
+        crate::trust::signers_dir(self.as_path())
+    }
+
+    /// Hash-chained, node-signed key events.
+    pub fn trust_events_dir(&self) -> PathBuf {
+        crate::trust::events_dir(self.as_path())
     }
 
     pub fn node_signing_key_path(&self) -> PathBuf {

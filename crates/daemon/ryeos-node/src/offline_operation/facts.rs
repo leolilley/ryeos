@@ -39,6 +39,9 @@ pub const FACT_REMOTES: &str = "remotes";
 /// runs.
 pub const FACT_BUNDLE_REGISTRATIONS: &str = "bundle_registrations";
 
+/// Digest of the node's signer registry: records and key events.
+pub const FACT_TRUST_REGISTRY: &str = "trust_registry";
+
 /// Every fact the node can report, in report order.
 pub const ALL_FACTS: &[&str] = &[
     FACT_INIT_COMPLETION,
@@ -51,6 +54,7 @@ pub const ALL_FACTS: &[&str] = &[
     FACT_RUNTIME_SNAPSHOTS,
     FACT_REMOTES,
     FACT_BUNDLE_REGISTRATIONS,
+    FACT_TRUST_REGISTRY,
 ];
 
 /// Facts every request pins, whatever its operation.
@@ -121,6 +125,10 @@ pub fn measure(app_root: &Path, ledger_head: &str) -> NodeFacts {
     facts.insert(
         FACT_BUNDLE_REGISTRATIONS.to_owned(),
         tree_digest(&node.join("bundles")),
+    );
+    facts.insert(
+        FACT_TRUST_REGISTRY.to_owned(),
+        tree_digest(&node.join("trust")),
     );
     facts
 }

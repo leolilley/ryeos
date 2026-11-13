@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:f78e6873b51db2a1e5119bd84010885e15220b5e1914aaf343e2fe3303fd38d5:FzHjLNJlq09wuqIjVGVUloHxq3t2zZvZUL6ZfCQqhNLmBMyFUucA496JpXhiDHboRJVugNtdwnWxLOGW7kSYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:10:31Z:18ec4823f56b9faec07f85ee05c661426b470340709f8abf195e927f15562e8f:IqYP3+8A7sUvd8i6bWVRkS6VE16CvZD9LxHi6ja6Eg2x1y7yAoQ2H+4/NL6vXG9PkRb8/pJUQVTtbdtnlJ0kDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -282,7 +282,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"

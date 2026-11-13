@@ -115,6 +115,7 @@ pub fn verify_schedule_source_content(
         &header,
         &envelope,
         &trust_store.restricted_to(node_fingerprint),
+        &ryeos_engine::trust::SignerContext::node("schedule"),
     )
     .with_context(|| format!("verify schedule source {}", path.display()))?;
     if trust_class != ryeos_engine::contracts::TrustClass::Trusted {

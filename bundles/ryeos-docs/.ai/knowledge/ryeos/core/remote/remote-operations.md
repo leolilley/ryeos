@@ -448,14 +448,15 @@ keys must enumerate their capabilities explicitly.
 When a node's signing key is compromised or needs rotation, treat it as a
 break-glass operation. The daemon no longer has an `--init-only` path and
 will not auto-regenerate the node key, because doing so would invalidate
-the node trust doc pinned in the node trust store.
+the signer records, which the node key signs.
 
 Safe rotation requires explicit operator action:
 
 1. Stop the daemon.
 2. Replace/regenerate the node signing key under
    `<system>/.ai/node/identity/private_key.pem`.
-3. Recreate and pin the matching node trust doc in the node trust store.
+3. Re-pin every signer with `ryeos trust pin` so each signer record is
+   signed by the new node key.
 4. Re-sign or recreate node-signed local config items as needed.
 5. Reissue every remotely granted authorized key.
 

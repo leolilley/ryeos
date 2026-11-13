@@ -349,12 +349,12 @@ retains the node's exclusive daemon state lock through publication; a live
 daemon therefore causes a mechanical refusal.
 
 Remote request authorization does not itself make project content trusted. If
-a pushed project contains executable project-authored items, the project
-snapshot must carry the source author's public trust document in its existing
-`.ai/config/keys/trusted/<fingerprint>.toml` tier (or the target operator must
-have made a separate explicit node-trust decision). This is public verification
-material only. Never copy the source private key, and never infer content trust
-from a `remote_operator` grant.
+a pushed project contains executable project-authored items, the target
+operator must have pinned the author's key on the target node with
+`ryeos trust pin --from <PUBLISHER_TRUST.toml> --role project_author --project <root>`
+(a node-signed signer record scoped to that project). A trust document carried
+inside the pushed snapshot grants nothing. Never copy the source private key,
+and never infer content trust from a `remote_operator` grant.
 
 ## `ryeos remote push`
 

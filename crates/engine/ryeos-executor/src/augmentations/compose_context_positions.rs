@@ -843,7 +843,6 @@ pub async fn run(
                     daemon_socket_path: callback_ipc_requested
                         .then_some(runtime_socket.as_path()),
                     bundle_roots: &bundle_roots,
-                    node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
@@ -1536,7 +1535,8 @@ async fn load_runtime_config_snapshot_cached(
     let engine_roots = engine_roots.clone();
     let node_config_root = engine.node_config_root();
     let key_has_node_config_layer = node_config_root.is_some();
-    let trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let trusted_signers =
+        ryeos_engine::launch_envelope_types::trusted_signer_entries(&state.engine.node_trust_store);
     let generation = engine.registered_bundle_generation_fingerprint();
     let generation_epoch = engine.registered_bundle_generation_epoch();
     let key_subject_authority = subject_authority.clone();
@@ -1544,9 +1544,7 @@ async fn load_runtime_config_snapshot_cached(
         request_snapshot.request_engine_generation_identity.clone();
     let registry_fingerprint = request_snapshot.registry_fingerprint.clone();
     let effective_trust_identity = request_snapshot.effective_trust_identity.clone();
-    let node_trust_identity =
-        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(&trusted_keys_dir)
-            .map_err(crate::dispatch_error::DispatchError::Internal)?;
+    let signers_digest = ryeos_engine::trust::trusted_signers_digest(&trusted_signers);
     let key_kind = kind.clone();
     let key_requirements = requirements.clone();
     let key_roots = engine_roots.clone();
@@ -1564,14 +1562,14 @@ async fn load_runtime_config_snapshot_cached(
             })
             .collect::<Vec<_>>();
         let value = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": &key_kind,
             "requirements": &key_requirements,
             "subject_authority": &key_subject_authority,
             "request_engine_generation_identity": &request_engine_generation_identity,
             "registry_fingerprint": &registry_fingerprint,
             "effective_trust_identity": &effective_trust_identity,
-            "node_trust_identity": &node_trust_identity,
+            "trusted_signers_digest": &signers_digest,
             "node_config_layer": key_has_node_config_layer,
             "roots": roots,
         });
@@ -1600,7 +1598,7 @@ async fn load_runtime_config_snapshot_cached(
                     &value,
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await?
@@ -1651,7 +1649,7 @@ async fn load_runtime_config_snapshot_cached(
                     &value,
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await?
@@ -1680,7 +1678,7 @@ async fn load_runtime_config_snapshot_cached(
                 let load_requirements = requirements.clone();
                 let load_roots = engine_roots.clone();
                 let load_node_config_root = node_config_root.clone();
-                let load_trusted_keys_dir = trusted_keys_dir.clone();
+                let load_trusted_signers = trusted_signers.clone();
                 let load_materialization = materialization.clone();
                 let loaded = tokio::task::spawn_blocking(move || {
                     let snapshot = method_runtime_config_snapshot_under_current_authority(
@@ -1688,7 +1686,7 @@ async fn load_runtime_config_snapshot_cached(
                         &load_requirements,
                         &load_roots,
                         load_node_config_root.as_deref(),
-                        &load_trusted_keys_dir,
+                        &load_trusted_signers,
                         &load_materialization,
                     )?;
                     let estimated_bytes = snapshot.estimated_bytes();
@@ -1719,7 +1717,7 @@ async fn load_runtime_config_snapshot_cached(
                     &Arc::new(snapshot.clone()),
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await
@@ -1763,7 +1761,7 @@ async fn load_runtime_config_snapshot_cached(
                 let load_requirements = requirements.clone();
                 let load_roots = engine_roots.clone();
                 let load_node_config_root = node_config_root.clone();
-                let load_trusted_keys_dir = trusted_keys_dir.clone();
+                let load_trusted_signers = trusted_signers.clone();
                 let load_materialization = materialization.clone();
                 let snapshot = tokio::task::spawn_blocking(move || {
                     method_runtime_config_snapshot_under_current_authority(
@@ -1771,7 +1769,7 @@ async fn load_runtime_config_snapshot_cached(
                         &load_requirements,
                         &load_roots,
                         load_node_config_root.as_deref(),
-                        &load_trusted_keys_dir,
+                        &load_trusted_signers,
                         &load_materialization,
                     )
                 })
@@ -1786,7 +1784,7 @@ async fn load_runtime_config_snapshot_cached(
                     &snapshot,
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     Some(&materialization),
                 )
                 .await?
@@ -1815,7 +1813,7 @@ fn method_runtime_config_snapshot_under_current_authority(
     requirements: &BTreeMap<String, ryeos_engine::kind_registry::MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     materialization: &ryeos_app::resolution_cache::ResolutionMaterializationBinding,
 ) -> Result<crate::dispatch::MethodRuntimeConfigSnapshot, crate::dispatch_error::DispatchError> {
     match materialization
@@ -1831,7 +1829,7 @@ fn method_runtime_config_snapshot_under_current_authority(
                 requirements,
                 engine_roots,
                 node_config_root,
-                node_trusted_keys_dir,
+                trusted_signers,
                 None,
                 project_root,
                 content,
@@ -1842,7 +1840,7 @@ fn method_runtime_config_snapshot_under_current_authority(
             requirements,
             engine_roots,
             node_config_root,
-            node_trusted_keys_dir,
+            trusted_signers,
             None,
         ),
     }
@@ -1852,19 +1850,19 @@ async fn cached_method_config_is_valid(
     snapshot: &Arc<crate::dispatch::MethodRuntimeConfigSnapshot>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
 ) -> Result<bool, crate::dispatch_error::DispatchError> {
     let snapshot = snapshot.clone();
     let roots = engine_roots.clone();
     let node_config_root = node_config_root.map(Path::to_path_buf);
-    let trusted_keys_dir = trusted_keys_dir.to_path_buf();
+    let trusted_signers = trusted_signers.to_vec();
     let materialization = materialization.cloned();
     tokio::task::spawn_blocking(move || {
         snapshot.revalidate_against_status(
             &roots,
             node_config_root.as_deref(),
-            &trusted_keys_dir,
+            &trusted_signers,
             materialization.as_ref(),
         )
     })
@@ -1901,7 +1899,9 @@ async fn runtime_config_snapshot_is_valid(
         snapshot,
         engine_roots,
         node_config_root,
-        &state.config.runtime_root().trusted_keys_dir(),
+        &ryeos_engine::launch_envelope_types::trusted_signer_entries(
+            &state.engine.node_trust_store,
+        ),
         Some(materialization),
     )
     .await

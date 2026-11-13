@@ -310,24 +310,14 @@ mod tests {
     use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
     struct HostedPolicyFixture {
-        _user: std::path::PathBuf,
         _bootstrap_key: lillux::crypto::SigningKey,
     }
 
     impl HostedPolicyFixture {
         fn new(root: &std::path::Path) -> Self {
-            let user = root.join("user");
-            let trust_dir = user
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("trusted");
-            std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            write_node_bootstrap(root, &trust_dir, &key);
+            write_node_bootstrap(root, &key);
             Self {
-                _user: user,
                 _bootstrap_key: key,
             }
         }
@@ -367,16 +357,7 @@ admission_enabled: {admission_enabled}
         write_hosted_policy_with_choices(app_root, true, true);
     }
 
-    fn write_node_bootstrap(
-        app_root: &std::path::Path,
-        trust_dir: &std::path::Path,
-        fallback_key: &lillux::crypto::SigningKey,
-    ) {
-        let app_trust_dir = app_root.join(".ai/config/keys/trusted");
-        std::fs::create_dir_all(&app_trust_dir).unwrap();
-        ryeos_engine::trust::pin_key(&fallback_key.verifying_key(), "test", &app_trust_dir, None)
-            .unwrap();
-
+    fn write_node_bootstrap(app_root: &std::path::Path, fallback_key: &lillux::crypto::SigningKey) {
         let identity_dir = app_root.join(".ai/node/identity");
         std::fs::create_dir_all(&identity_dir).unwrap();
         let identity_path = identity_dir.join("private_key.pem");
@@ -393,9 +374,8 @@ admission_enabled: {admission_enabled}
             .unwrap();
             ryeos_node_runtime::identity::NodeIdentity::load(&identity_path).unwrap()
         };
-        ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", trust_dir, None)
-            .unwrap();
-        ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", &app_trust_dir, None)
+        node_identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(app_root))
             .unwrap();
 
         crate::actions::hosted_policy::write_required_non_hosted_test_policies(

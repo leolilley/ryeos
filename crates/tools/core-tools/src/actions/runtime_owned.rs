@@ -93,7 +93,6 @@ mod tests {
             ".ai/tools/ryeos/core/sign.yaml",
             ".ai/graphs/app/flow.yaml",
             ".ai/knowledge/app/notes.md",
-            ".ai/config/keys/trusted/publisher.pem",
         ] {
             assert!(!is_runtime_owned_ai_path(p), "expected signable: {p}");
         }

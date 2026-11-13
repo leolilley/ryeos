@@ -212,7 +212,6 @@ pub struct EngineContext {
     /// callback; only that fact lets a captured launch carry it.
     pub isolation_captured_callback_socket: bool,
     pub isolation_bundle_roots: Vec<PathBuf>,
-    pub isolation_node_trusted_keys_dir: Option<PathBuf>,
     pub isolation_verified_code: Vec<crate::isolation::IsolationVerifiedCode>,
     /// Exact already-open command authority for an admitted direct plan.
     /// It is either standalone immutable bytes or one member paired with its

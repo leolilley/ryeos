@@ -4169,7 +4169,7 @@ async fn run(
     ));
 
     // Repair only daemon-local artifacts. Missing operator artifacts
-    // (user signing key, trust docs) fail with guidance to run
+    // (user signing key, signer record) fail with guidance to run
     // `ryeos init` — daemon never substitutes for operator init.
     bootstrap::repair_daemon_local(&config)?;
 

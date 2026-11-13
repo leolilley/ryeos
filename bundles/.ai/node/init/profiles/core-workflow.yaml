@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:1d7b90d46b8550fe7cbb277d7fc7cc423eafd01ead1d9b7cb35f9154fd1f4417:mYKJ7r2OWczFIrPp7Hs7IVpsINKcqPK3/b2pRHlPfAJNnypjOM+r384ffBu93lg5lond2ANy5UuRBNTC1YLKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:10:31Z:7f62d7ce6593a35e234c9ce1a0b362af34a0d7d427d9dfcb96561a3d11f9e78a:2B3LUZccJM72Gw4oC4CEqdX1JL/7aG2cggrUDc++9+eGiBNyt9QDP4WH4+gS9mq//qx2yffRpdLyRQEVui1CBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -282,7 +282,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"

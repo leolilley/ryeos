@@ -687,7 +687,7 @@ fn calibration_invocation_recipe(
     let (source, _) = source_generation.signed_recipe(&format!(
         "bundles/bundle-release/.ai/config/bundle-release/{filename}"
     ))?;
-    let source_body = verified_source_recipe_body(source_generation, &source, state)?;
+    let source_body = verified_source_recipe_body(&source, state)?;
     let body = calibration_invocation_recipe_body(
         &source_body,
         overlay_filename,
@@ -698,20 +698,14 @@ fn calibration_invocation_recipe(
     Ok((signed, sha256_bytes(body.as_bytes())))
 }
 
-fn verified_source_recipe_body(
-    source_generation: &ReleaseSourceGeneration,
-    source: &str,
-    state: &AppState,
-) -> anyhow::Result<String> {
+fn verified_source_recipe_body(source: &str, state: &AppState) -> anyhow::Result<String> {
     let (signature_line, source_body) = source
         .split_once('\n')
         .context("release source template has no signature envelope")?;
     let signature = lillux::signature::parse_signature_line(signature_line, "#", None)
         .context("invalid release source template signature envelope")?;
-    let trust = ryeos_runtime::verified_loader::TrustStore::load(
-        source_generation.root(),
-        &state.config.runtime_root().trusted_keys_dir(),
-    )?;
+    let trust =
+        ryeos_engine::trust::TrustStore::load_node_registry(state.config.runtime_root().as_path())?;
     let signer = trust
         .get(&signature.signer_fingerprint)
         .context("release source template signer is not trusted")?;
@@ -1147,11 +1141,15 @@ fn verified_calibration_environment(
         CalibrationEnvironmentUse, CalibrationTerminal as Terminal,
     };
     selected.validate()?;
+    let node_trust =
+        ryeos_engine::trust::TrustStore::load_node_registry(state.config.runtime_root().as_path())?;
+    let trusted_signers =
+        ryeos_engine::launch::launch_envelope_types::trusted_signer_entries(&node_trust);
     let loader = ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
         source_generation.root().to_path_buf(),
         state.engine.node_config_root(),
         calibration_source_bundle_roots(source_generation.root()),
-        &state.config.runtime_root().trusted_keys_dir(),
+        &trusted_signers,
     )?;
     let python_runtime = verified_calibration_product(
         &selected.python_runtime,
@@ -2786,7 +2784,7 @@ fn substrate_build_handler(
         let (signed_source_template, _) = source_generation.signed_recipe(
             "bundles/bundle-release/.ai/config/bundle-release/substrate-build-products.yaml",
         )?;
-        verified_source_recipe_body(&source_generation, &signed_source_template, &state)?;
+        verified_source_recipe_body(&signed_source_template, &state)?;
         let selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(
             portable_environment_selections(&environment),
         )?;
@@ -2905,7 +2903,7 @@ fn substrate_qualify_handler(
         let (signed_source_template, _) = source_generation.signed_recipe(
             "bundles/bundle-release/.ai/config/bundle-release/substrate-build-products.yaml",
         )?;
-        verified_source_recipe_body(&source_generation, &signed_source_template, &state)?;
+        verified_source_recipe_body(&signed_source_template, &state)?;
         let (signature_line, recipe_body) = request
             .substrate_build_recipe_signed_config
             .split_once('\n')

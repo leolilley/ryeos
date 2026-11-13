@@ -122,13 +122,7 @@ pub fn run_sign_batch(
         .registered_generation_node_trust()
         .context("retained isolation generation omitted node trust")?
         .clone();
-    let trust_store = match project_path {
-        Some(project_path) => node_trust_store
-            .with_project_keys(project_path)
-            .map(std::borrow::Cow::into_owned)
-            .with_context(|| "load project trust")?,
-        None => node_trust_store.clone(),
-    };
+    let trust_store = node_trust_store.clone();
 
     let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
     let parsers =
@@ -193,11 +187,7 @@ pub fn run_sign_online_batch(
     configured_ignore: &ryeos_state::ignore::IgnoreMatcher,
     signing_key: &SigningKey,
 ) -> Result<BatchReport> {
-    let trust_store = engine
-        .node_trust_store
-        .with_project_keys(project_path)
-        .map(std::borrow::Cow::into_owned)
-        .context("load project trust")?;
+    let trust_store = engine.node_trust_store.clone();
     ensure_operator_key_is_trusted(&trust_store, signing_key)?;
     let resolution_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
     run_sign_prepared_batch(
@@ -1449,8 +1439,29 @@ mod tests {
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
 
-    fn live_bundle_engine() -> ryeos_engine::engine::Engine {
-        let trust_store = ryeos_engine::test_support::live_trust_store();
+    fn live_bundle_engine(operator: &SigningKey) -> ryeos_engine::engine::Engine {
+        let operator_vk = operator.verifying_key();
+        let trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(
+                    &ryeos_engine::test_support::platform_author_verifying_key(),
+                ),
+                verifying_key: ryeos_engine::test_support::platform_author_verifying_key(),
+                label: Some("test-support: platform author".into()),
+            },
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(
+                    &ryeos_engine::test_support::dev_publisher_verifying_key(),
+                ),
+                verifying_key: ryeos_engine::test_support::dev_publisher_verifying_key(),
+                label: Some("test-support: dev publisher".into()),
+            },
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(&operator_vk),
+                verifying_key: operator_vk,
+                label: Some("source-unit-sign-test".into()),
+            },
+        ]);
         let core = ryeos_engine::test_support::core_bundle_root();
         let workflow = ryeos_engine::test_support::workflow_bundle_roots();
         let kind_roots: Vec<_> = std::iter::once(&core)
@@ -1484,35 +1495,6 @@ mod tests {
             .with_node_trust_store(trust_store)
             .with_composers(composers)
             .with_registered_bundle_roots(registered_roots)
-    }
-
-    fn write_project_trust(project: &Path, key: &SigningKey) {
-        let verifying_key = key.verifying_key();
-        let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
-        let doc = ryeos_engine::trust::TrustedKeyDoc {
-            fingerprint,
-            owner: "source-unit-sign-test".to_owned(),
-            version: "1".to_owned(),
-            attestation: None,
-            verifying_key,
-        };
-        let trust_dir = project
-            .join(ryeos_engine::AI_DIR)
-            .join(ryeos_engine::TRUST_KEYS_DIR);
-        std::fs::create_dir_all(&trust_dir).unwrap();
-        // A project trust document counts only when a node-trusted key signed
-        // it; the live node trust store holds the dev publisher.
-        use lillux::crypto::DecodePrivateKey as _;
-        let dev_pem = std::fs::read_to_string(
-            ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
-        )
-        .unwrap();
-        let dev_key = SigningKey::from_pkcs8_pem(&dev_pem).unwrap();
-        std::fs::write(
-            trust_dir.join("operator.toml"),
-            lillux::signature::sign_content(&doc.to_toml(), &dev_key, "#", None),
-        )
-        .unwrap();
     }
 
     #[test]
@@ -1759,8 +1741,7 @@ printf '%s\n' fixture
         )
         .unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        write_project_trust(project, &key);
-        let engine = live_bundle_engine();
+        let engine = live_bundle_engine(&key);
         let ignore =
             ryeos_state::ignore::IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
                 patterns: Vec::new(),

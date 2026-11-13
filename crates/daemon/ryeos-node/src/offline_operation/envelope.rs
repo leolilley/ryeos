@@ -86,8 +86,7 @@ fn delegated_remote_operations(app_root: &Path) -> anyhow::Result<BTreeSet<Strin
     {
         return Ok(BTreeSet::new());
     }
-    let root = RuntimeRoot::new(app_root.to_path_buf());
-    let trust = ryeos_engine::trust::TrustStore::load(None, &root.config())?;
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,
         &trust,

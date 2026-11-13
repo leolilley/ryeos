@@ -143,6 +143,7 @@ pub mod threads_tail;
 pub mod tool_env_check;
 pub mod trace_branch;
 pub mod trace_inspect;
+pub mod trust_list;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
@@ -278,6 +279,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
+    trust_list::LIST_DESCRIPTOR,
+    trust_list::SHOW_DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,
     bundle_catalog::UPLOAD,
