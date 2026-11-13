@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:48:57Z:85c51151b7cbb7fec9fdf60bde7be1b7574e55c3d1df85a18238fac25c7b834c:ujvGG5tXDNq13+mAAPtV2KUWELKI9moj4ZEPtMbKaFB0U1YGPy6d4cEKhqxSthhr55ZU2g0BWJGMEj4jO1KgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:50:49Z:b91e20a555d5a31651fb8b7c1af4687373aa076f9ace36051c91eed619d64164:Z56xOrmYV2+pGKf90n9Cm6GsNWQDyECuTVIkxbg0vcBaJ6hTo6jIfr5LEQdICxgRijkuFwQq+kPeUvmCqJP4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -30,7 +30,11 @@ v1 remote execution is for **operator-trusted remotes**, not mutually
 untrusted tenants.
 
 - CAS is shared/global within a node; capability checks protect access,
-  not storage partitioning.
+  not storage partitioning. `objects/get` serves any hash to any holder of
+  the grant: knowing a hash plus holding `ryeos.execute.service.objects/get`
+  fetches the object, whoever pushed it. Granting a caller node
+  `objects/get` gives it read access to every object on this node whose hash
+  it learns. See [Services: objects](../services/objects.md#authority-a-hash-plus-the-grant-fetches-the-object).
 - Vault is a single shared store in v1; capability checks protect
   mutation/listing, not per-principal isolation.
 - Remote requests are normally signed with the **caller's node Ed25519 key**;
