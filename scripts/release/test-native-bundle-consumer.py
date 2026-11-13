@@ -81,5 +81,21 @@ class ConsumerUpdateContract(unittest.TestCase):
         ):
             self.assertIn(marker, remote)
 
+    def test_catalog_high_water_refuses_rollback_unless_explicitly_allowed(self):
+        consumer = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/consumer.rs").read_text()
+        transaction = (ROOT / "crates/daemon/ryeos-app/src/bundle_set_transaction.rs").read_text()
+        remote = (ROOT / "crates/daemon/ryeos-api/src/remote/bundle_set_update.rs").read_text()
+        cli = (ROOT / "crates/bin/cli/src/bundle_set_update.rs").read_text()
+        doc = (ROOT / "bundles/ryeos-docs/.ai/knowledge/ryeos/standard/bundle-set-update.md").read_text()
+        for code in ("catalog_rollback_refused", "catalog_equivocation_refused"):
+            self.assertIn(code, consumer)
+            self.assertIn(code, doc)
+        self.assertIn("pub catalog_high_water: BTreeMap<String, CatalogPosition>", transaction)
+        self.assertIn("active_bundle_selection_schema_refused", transaction)
+        self.assertIn("old_catalog_high_water.get(&request.catalog_namespace)", remote)
+        self.assertIn("request.allow_catalog_rollback", remote)
+        self.assertIn("allow_catalog_rollback: bool", cli)
+        self.assertIn("--allow-catalog-rollback", doc)
+
 if __name__ == "__main__":
     unittest.main()
