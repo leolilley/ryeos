@@ -371,10 +371,8 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
         let transaction_id = lillux::sha256_hex(
             format!("{}:{}", offline.selection_hash, lillux::time::iso8601_now()).as_bytes(),
         );
-        let prep_root = app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("transactions/bundle-set-prepared")
-            .join(&transaction_id);
+        let prep_root =
+            ryeos_app::bundle_set_transaction::prepared_sources_root(app_root, &transaction_id);
         std::fs::create_dir_all(&prep_root)?;
         let config =
             ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
