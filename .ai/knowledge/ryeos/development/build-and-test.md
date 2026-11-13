@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T23:01:20Z:bb8e86ee14851697fa882b883067228ab50a95588fecc9403106071055b2d217:wQBtuOVtXEwAJTTT74kV2gp6rLROZVwgziZi+7+NqE1k4KyKQL8eEalCHMurZiXkn6hm1T5g6eZXYIOC+VxTCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:40:08Z:18748f6a5f39fad9e9e53e5fe3344d4bb022d4eb1c37227b81450f9d84f27cd4:v2gE6soHffbuuespT6VmMOZOoPKJCfqgPw9fKfn5X5UEfx/hixh1iDzL+mMy8p51+ALreeHY00UcphAA4K+9DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"

@@ -78,11 +78,11 @@ done
 mkdir -p "$app_root"
 printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 [[ -n "$node_profile" ]] || exit 2
-# The full profile is preflighted as a local host; the controller profile as
+# The full profile is preflighted as an unconfined local host; the controller profile as
 # the hosting provider's container class.
 case "$node_profile" in
     f5r-controller) [[ "$host_class" == hosted ]] ;;
-    *) [[ "$host_class" == local ]] ;;
+    *) [[ "$host_class" == local_unconfined ]] ;;
 esac
 if [[ -n "$node_profile" ]]; then
     profile="$source_dir/.ai/node/init/profiles/$node_profile.yaml"

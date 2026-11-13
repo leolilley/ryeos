@@ -1153,8 +1153,11 @@ mod tests {
             .typed_policy(&table, path)
             .unwrap();
         assert!(!local.required_process_scope_capabilities().is_empty());
-        // A profile without a hosted variant declares only its local class.
-        assert_eq!(authored_profile("full").host_classes().unwrap(), ["local"]);
+        // A profile without a hosted variant declares its local classes only.
+        assert_eq!(
+            authored_profile("full").host_classes().unwrap(),
+            ["local", "local_unconfined"]
+        );
         assert_eq!(
             authored_profile("hosted-node").host_classes().unwrap(),
             ["hosted"]
@@ -1180,7 +1183,7 @@ mod tests {
             .join("bundles/.ai/node/init/profiles/full.yaml");
         let profile: NodeInitProfile =
             serde_yaml::from_str(&std::fs::read_to_string(profile_path).unwrap()).unwrap();
-        let mut policies = profile.policies;
+        let mut policies = profile.for_host_class("local").unwrap().policies;
         let replacement = policies["isolation"].clone();
         policies.insert(
             "isolation".into(),

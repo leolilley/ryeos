@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:27:14Z:46e29a44d939376716ad1c6e0c116a9abb34e77f618afbe4c29d1e14a267a41e:vOun74ngMWEmiEeTQxoVP5Cs0fsU4B+HvZA9EBlS24v35RZzOA9zeiIXjywZtar6kkXuzlv0Y0saTctiumBlAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:40:08Z:f59c07d53b4bc187c1b70fb38159ac6d4e967e083b05f787351f8cc6a1a52f35:JE6AOdzc4T3EssaNjzhzMJZ5qL4RGZdB2wMHTL5e3zNOxEfnEkbdiKU6njQh1eKqNv/foAhZGlrKV94HWqVBBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]

@@ -1097,6 +1097,8 @@ mod tests {
                     ))
                     .unwrap();
                 let generation = profile
+                    .for_host_class("local")
+                    .unwrap()
                     .validated_generation(&policy_table, &profile_path)
                     .unwrap();
                 let external: ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord =

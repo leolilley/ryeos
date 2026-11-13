@@ -662,13 +662,16 @@ fn opt_in_trusted_portable_session(state_path: &Path, node: &SigningKey) -> Resu
         "fixture isolation policy is not signed by its exact node"
     );
     let mut policy: serde_json::Value = serde_yaml::from_str(&body)?;
+    let class = common::fast_fixture::FAST_FIXTURE_HOST_CLASS;
     anyhow::ensure!(
-        policy.pointer("/policy/host_classes/local/mode") == Some(&serde_json::json!("disabled"))
-            && policy.pointer("/policy/host_classes/local/trusted_process_group_sessions")
-                == Some(&serde_json::json!(false)),
+        policy.pointer(&format!("/policy/host_classes/{class}/mode"))
+            == Some(&serde_json::json!("disabled"))
+            && policy.pointer(&format!(
+                "/policy/host_classes/{class}/trusted_process_group_sessions"
+            )) == Some(&serde_json::json!(false)),
         "trusted lost-ACK fixture requires an unmodified disabled-isolation seed"
     );
-    policy["policy"]["host_classes"]["local"]["trusted_process_group_sessions"] =
+    policy["policy"]["host_classes"][class]["trusted_process_group_sessions"] =
         serde_json::json!(true);
     std::fs::write(
         &policy_path,
