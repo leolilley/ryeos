@@ -7750,6 +7750,7 @@ pub struct ExternalCandidateCleanupRecovery {
     pub proved: usize,
     pub pending: usize,
     pub failures: Vec<(String, String)>,
+    pub deferred: Vec<cleanup_backoff::DeferredCleanup>,
 }
 
 /// A replacement daemon cannot recreate the predecessor's connector/process
@@ -7772,9 +7773,11 @@ pub fn fence_external_candidates_after_controller_restart(state: &AppState) -> R
 
 /// Advance every already-quarantined occurrence once. Provider failures stay
 /// typed by placement and do not erase the retained obligation or prevent the
-/// daemon from serving observation/control paths needed for recovery.
+/// daemon from serving observation/control paths needed for recovery. A
+/// cleanup that `backoff` still defers is reported, not attempted.
 pub fn recover_external_candidate_cleanups(
     state: &AppState,
+    backoff: &mut cleanup_backoff::RetainedCleanupBackoff,
 ) -> Result<ExternalCandidateCleanupRecovery> {
     // A lease whose guest never reported ready is refused first, so the
     // cleanup below finds it quarantined and terminates it in this same pass.
@@ -7787,7 +7790,15 @@ pub fn recover_external_candidate_cleanups(
         failures: overdue_failures,
         ..Default::default()
     };
+    let mut lane = backoff.lane(
+        cleanup_backoff::CleanupLane::QuarantinedAllocation,
+        &placements,
+    );
     for placement in placements {
+        if let Some(deferred) = lane.defer(&placement) {
+            report.deferred.push(deferred);
+            continue;
+        }
         let result = (|| {
             if preserves_external_direct_settlement(state, &placement)? {
                 advance_external_direct_settlement(state, &placement)
@@ -7797,6 +7808,7 @@ pub fn recover_external_candidate_cleanups(
                 advance_external_candidate_cleanup(state, &placement)
             }
         })();
+        lane.record(&placement, &result);
         match result {
             Ok(ExternalCandidateCleanupProgress::Proved) => report.proved += 1,
             Ok(ExternalCandidateCleanupProgress::Pending) => report.pending += 1,
@@ -7807,15 +7819,21 @@ pub fn recover_external_candidate_cleanups(
     // not prove its guest-input scratch cleanup then. Now that the retained
     // owner above may have settled it, prove the cleanup through the original
     // custody; scratches whose allocation is still unsettled wait.
-    for placement in state
+    let scratches = state
         .state_store
-        .settled_unclosed_qualification_guest_scratch_placements()?
-    {
-        if let Err(error) =
+        .settled_unclosed_qualification_guest_scratch_placements()?;
+    let mut lane = backoff.lane(cleanup_backoff::CleanupLane::GuestScratch, &scratches);
+    for placement in scratches {
+        if let Some(deferred) = lane.defer(&placement) {
+            report.deferred.push(deferred);
+            continue;
+        }
+        let result =
             crate::external_qualification_guest_scratch::cleanup_original_qualification_guest_scratch(
                 state, &placement,
-            )
-        {
+            );
+        lane.record(&placement, &result);
+        if let Err(error) = result {
             report.failures.push((placement, format!("{error:#}")));
         }
     }
@@ -9326,6 +9344,7 @@ mod binding_artifact_tests {
     }
 }
 
+pub mod cleanup_backoff;
 mod controller_clock;
 mod lease_lifecycle;
 mod lease_ready_gate;
@@ -12034,6 +12053,8 @@ mod tests {
     fn replacement_controller_quarantines_ambiguous_contact_without_provider_io() {
         replacement_controller_fence_fixture(true);
     }
+
+    mod cleanup_backoff_recovery;
 
     #[test]
     fn reopened_reserved_allocation_refuses_impossible_package_before_contact() {
