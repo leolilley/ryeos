@@ -251,6 +251,20 @@ pub enum EnvironmentAuthority {
 }
 
 impl EnvironmentAuthority {
+    /// Whether delivery under this admitted authority reads the node
+    /// operator's vault: a project overlay that includes it, or the
+    /// `operator` vault namespace.
+    pub fn exposes_operator_vault(&self) -> bool {
+        match self {
+            Self::ProjectOverlay {
+                include_operator_vault,
+                ..
+            } => *include_operator_vault,
+            Self::Vault { namespace, .. } => namespace == "operator",
+            Self::None | Self::Delegated { .. } | Self::ProviderEnvironment { .. } => false,
+        }
+    }
+
     pub fn validate(&self, project_backed: bool) -> anyhow::Result<()> {
         match self {
             Self::None => Ok(()),

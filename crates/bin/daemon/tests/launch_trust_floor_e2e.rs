@@ -313,6 +313,9 @@ async fn a_narrow_caller_cannot_reach_another_handler_through_a_planted_service(
                 "ryeos.execute.service.health/status",
                 ryeos_app::execution_policy::LIVE_PROJECT_READ_CAPABILITY,
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
+                // `post_execute` sends the standard local-live policy, whose
+                // project overlay includes the operator vault.
+                ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY,
             ],
         )
     };

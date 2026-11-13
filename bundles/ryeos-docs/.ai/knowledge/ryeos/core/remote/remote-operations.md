@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:50:49Z:b91e20a555d5a31651fb8b7c1af4687373aa076f9ace36051c91eed619d64164:Z56xOrmYV2+pGKf90n9Cm6GsNWQDyECuTVIkxbg0vcBaJ6hTo6jIfr5LEQdICxgRijkuFwQq+kPeUvmCqJP4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:34:26Z:8c4a0d9102e03902e85d830f1849c8c965f03b479a1a178d446c6fd15378a31b:ok7VKfPZmsLCFFdhjt5I+ntDbhCJ1M+D15PLnBnwO3M2c6XcVGCajxqrxUh/rRW5QmZlloO9CBEnFolNouPUBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -219,12 +219,22 @@ forwarded `remote_operator` principal.
    | `remote push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` |
    | `remote reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` |
    | `remote pull` | `ryeos.execute.service.objects/get` |
-   | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires |
+   | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires; `ryeos.use.vault.operator` only if the policy exposes the target's operator vault (not by default, see below) |
    | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
    | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_operator` principal) |
+
+   `ryeos.use.vault.operator` lets an execution read the target's
+   operator vault (`include_operator_vault: true`, or the `operator` vault
+   namespace). `remote execute` and `remote run` send
+   `include_operator_vault: false` by default, so no remote scope list needs
+   it. Do not grant it to a remote caller node by default: that node could
+   then run any item it may execute on the target operator's secrets. Grant
+   it only to a principal that should hold operator-level secret access, and
+   prefer a target-side project `.env` or provider environment. The source
+   also requires its own caller to hold it before forwarding such a policy.
 
    Short-form scopes like `bundle.install` will never authorize a
    handler — the matcher does not auto-prefix and the daemon's auth
