@@ -44,6 +44,7 @@
 //! `fast_fixture::direct_host_isolation`). Per-scope containment is
 //! qualified only against an administrator-prepared host-backed node.
 
+pub mod callback_probe;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod dedicated_command_cut;
 pub mod fast_fixture;
