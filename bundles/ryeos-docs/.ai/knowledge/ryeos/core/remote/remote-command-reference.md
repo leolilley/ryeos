@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:48:28Z:35f52de5d9fe760ea1ec6bbab6047b55950d2f154abb21cd5369c8f5c3639bd9:w7pVpi42tsU7KCSCtxrhrt+vAcA/LTwpHPICDbFF0R+KMLX/SBX0qgVQkbCS5NL/IvopcozZLwae42JetImpCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:25:09Z:43424218b2728651347c75c955c580a182df124b152032afcdf845362c6d19ea:pCEB5eu60oUTk7H7jdO6JFsQ4knaXQzB4sv/4xNTpCz2FHLw90l4di3PBaRFnUyFAzni2O4KA78IoxUPAf15Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -52,7 +52,7 @@ to delegated callers.
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
-| `ryeos remote pull` | `ryeos.execute.service.objects/get` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
+| `ryeos remote pull` | `ryeos.execute.service.remote/pull` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
 | `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |

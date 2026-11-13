@@ -41,8 +41,12 @@ pub fn superseded_schedule_grants(
     }
     let mut superseded = Vec::new();
     for path in ryeos_scheduler::projection::canonical_schedule_source_paths(&schedules_dir)? {
-        let source = ryeos_scheduler::projection::load_verified_schedule_source(&path, trust_store)
-            .with_context(|| format!("verify schedule source {}", path.display()))?;
+        let source = ryeos_scheduler::projection::load_verified_schedule_source(
+            &path,
+            trust_store,
+            node_identity.fingerprint(),
+        )
+        .with_context(|| format!("verify schedule source {}", path.display()))?;
         let record = source.record;
         match ryeos_app::scheduled_execution_authority::pinned_schedule_grants(
             &record.execution,

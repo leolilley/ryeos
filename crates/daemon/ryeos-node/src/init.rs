@@ -4775,6 +4775,7 @@ typo_field: oops
             runtime_authority: Default::default(),
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],

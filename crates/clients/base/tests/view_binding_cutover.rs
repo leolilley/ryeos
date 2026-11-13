@@ -494,22 +494,27 @@ fn every_bundled_view_resolves_and_validates_under_the_named_source_contract() {
         None,
         &[
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "core".to_string(),
                 canonical_root: core_bundle,
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "knowledge".to_string(),
                 canonical_root: knowledge_bundle,
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "directive".to_string(),
                 canonical_root: directive_bundle,
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "graph".to_string(),
                 canonical_root: graph_bundle,
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "ryeos-ui".to_string(),
                 canonical_root: ui_bundle,
             },

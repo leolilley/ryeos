@@ -465,7 +465,9 @@ pub(crate) async fn execute_verified_command(
     if resolved.async_launch {
         let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());
         body["launch_id"] = Value::String(launch_id.clone());
-        let acknowledgement = match post_to_daemon(app_root, "/execute/launch", &body).await {
+        let acknowledgement = match post_to_daemon(app_root, "/execute/launch", &body, |_| Ok(()))
+            .await
+        {
             Ok(acknowledgement) => acknowledgement,
             Err(error) if accepted_launch_delivery_is_uncertain(&error) => {
                 return Err(CliError::Local {
@@ -485,7 +487,7 @@ pub(crate) async fn execute_verified_command(
         }
         return Ok(acknowledgement);
     }
-    let payload = post_to_daemon(app_root, "/execute", &body).await?;
+    let payload = post_to_daemon(app_root, "/execute", &body, |_| Ok(())).await?;
     if let Some(detail) = crate::tty::structured_result_failure(&payload) {
         return Err(CliError::Local { detail });
     }

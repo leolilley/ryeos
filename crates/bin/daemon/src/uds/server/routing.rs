@@ -258,4 +258,19 @@ mod tests {
             error.message
         );
     }
+
+    #[test]
+    fn authored_capability_refusal_keeps_its_typed_code() {
+        let error = anyhow::Error::from(
+            ryeos_app::runtime_item_author_service::AuthorItemRefusal::AuthoredCapabilityNotCovered {
+                capability: "ryeos.execute.tool.x".to_string(),
+                item_ref: "directive:a/b".to_string(),
+                thread_id: "T-1".to_string(),
+            },
+        )
+        .context("runtime.author_item");
+        let response = rpc_result(44, Err(error));
+        let error = response.error.expect("authored capability refusal");
+        assert_eq!(error.code, "authored_capability_not_covered");
+    }
 }

@@ -320,6 +320,7 @@ fn fixture_bundle_engine(
     .zip(roots.iter().cloned())
     .map(
         |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: name.to_owned(),
             canonical_root,
         },
@@ -1365,8 +1366,7 @@ async fn rebind_refuses_a_consumer_that_no_longer_declares_the_manifest() {
         &changed,
     )
     .await
-    .err()
-    .expect("a consumer that dropped the manifest is not the same consumer");
+    .expect_err("a consumer that dropped the manifest is not the same consumer");
     assert_eq!(
         error.downcast_ref::<RebindRefused>().unwrap().code,
         RebindRefused::CONSUMER_CHANGED
