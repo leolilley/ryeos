@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T12:07:15Z:2031f3e7178b733daf3e390fd9c977f46890f5952f2927fdb44c16378fbda866:+bO6HvnNmuNST60io+qjYbIRkF7lxNph5Szx/wjuwfGMl/QbzXImsY2ODqcCAMsK6ruM0cSDTXifMa9NfJqHCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T12:07:35Z:ec4c872898849b6a683093a26d255f4c813106ddb3f639435f9d92f52c48c5ae:dY2QkCqeh+OCBPoMyZ5fXRGU3zjPKqsov1yZUpbXvOOSioRECfAWd6HEyN6CCNJ87R38R9+3TrU0uzB/le/6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.5.3"
+version: "3.6.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -261,6 +261,23 @@ Every listed row carries an `attention` and a `fix`:
 | `operator` | nothing on the node releases it without the operator: an unknown provider outcome, a Q start whose cleanup is unproved, a session whose outcome is unknown after a restart, a lock no owner names | fail |
 
 `ryeos external-execution status` prints the same view as JSON.
+
+The `remote_content_testimonies` row reads this node's accepted remote
+qualification testimonies from its signed heads, offline and without
+resolving bundles. For each content-lane acceptance it checks whether this
+node holds an activation of exactly the content the origin qualified (same
+activation program digest, consumer and declaration). It is advisory: it
+warns but never fails the doctor, and is `n/a` when nothing is accepted.
+
+| Code | Meaning |
+|---|---|
+| `ok` | this node activated the qualified release; launch can use the testimony |
+| `no_local_activation` (warn) | this node has not activated it; the fix names `ryeos external-content activate` |
+| `local_activation_differs` (warn) | this node activated the same activation ref as another program; both digests are listed, and the fix is the origin's release or a re-qualification against this node's |
+| `acceptance_superseded` (warn) | an acceptance of either lane was recorded under an earlier acceptance evidence schema; export the testimony again from the origin |
+
+See [Retained products](../execution/retained-products.md) for the content
+testimony workflow.
 
 The host-wide `host_services` row reads the administrator-owned native service
 records without root. It warns when a RyeOS node service records an app root

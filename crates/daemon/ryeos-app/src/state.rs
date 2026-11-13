@@ -372,15 +372,25 @@ pub mod test_support {
     /// binds: the live platform signers plus this node's own identity, which
     /// is what the composed test Engine admits Bundles with.
     pub fn build_bound(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
+        build_bound_trusting(root, None)
+    }
+
+    /// [`build_bound`] that also admits Bundles signed by one fixed
+    /// `publisher`, as separate nodes do when they install the same signed
+    /// release from one publisher.
+    pub fn build_bound_trusting(
+        root: &std::path::Path,
+        publisher: Option<ryeos_engine::trust::TrustedSigner>,
+    ) -> Result<(TestStateStore, AppState)> {
         build_with_bundle_admission(root, |identity| {
             let mut node_trust = ryeos_engine::test_support::live_trust_store();
-            node_trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
-                ryeos_engine::trust::TrustedSigner {
-                    fingerprint: identity.fingerprint().to_owned(),
-                    verifying_key: *identity.verifying_key(),
-                    label: Some("test node identity".into()),
-                },
-            ]));
+            let mut signers = vec![ryeos_engine::trust::TrustedSigner {
+                fingerprint: identity.fingerprint().to_owned(),
+                verifying_key: *identity.verifying_key(),
+                label: Some("test node identity".into()),
+            }];
+            signers.extend(publisher);
+            node_trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(signers));
             BundleAdmissionTrust::bound(node_trust)
         })
     }

@@ -779,49 +779,12 @@ components:
         identity,
         &activation,
     );
-    let claims = sources
-        .required_claims
-        .iter()
-        .map(|claim| format!("        - {claim}\n"))
-        .collect::<String>();
-    let consumer = format!(
-        r#"category: fixtures
-name: runtime-consumer
-version: "1.0.0"
-description: Installed consumer of the activated synthetic session runtime
-executor_id: "@subprocess"
-execution_protocol: protocol:ryeos/core/opaque
-effects: live
-filesystem_authority: node_policy
-network_authority: isolated
-external_content:
-  - id: {CONTENT_DECLARATION_ID}
-    kind: tree
-    mode: pinned
-    digest: {runtime_manifest_hash}
-    metadata_hint: activated-synthetic-external-candidate-runtime
-    mount_root: execution_runtime
-    mount: runtime
-    qualification_allowance:
-      activation_ref: {CONTENT_ACTIVATION_REF}
-      policy_ref: {CONTENT_POLICY_REF}
-      required_claims:
-{claims}config:
-  command: /bin/true
-  args: []
-  env: {{}}
-  timeout_secs: 30
-config_schema:
-  type: object
-  additionalProperties: false
-"#,
-        runtime_manifest_hash = sources.runtime_manifest_hash,
-    );
-    write_signed(
+    write_activated_runtime_consumer(
         bundle_root,
-        "tools/fixtures/runtime-consumer.yaml",
         identity,
-        &consumer,
+        sources.runtime_manifest_hash,
+        sources.required_claims,
+        "runtime",
     );
     write_signed(
         bundle_root,
@@ -846,6 +809,61 @@ config_schema:
             CONTENT_RUNTIME_CLAIMS,
             sources.verifier_parameters,
         ),
+    );
+}
+
+/// Write the signed installed consumer of the activated runtime, which pins
+/// its manifest, names its mount and carries its qualification allowance.
+/// [`write_activated_runtime_sources`] writes it with the `runtime` mount; a
+/// fixture that needs the same content mounted elsewhere rewrites it alone.
+pub fn write_activated_runtime_consumer(
+    bundle_root: &Path,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+    runtime_manifest_hash: &str,
+    required_claims: &[&str],
+    mount: &str,
+) {
+    let claims = required_claims
+        .iter()
+        .map(|claim| format!("        - {claim}\n"))
+        .collect::<String>();
+    let consumer = format!(
+        r#"category: fixtures
+name: runtime-consumer
+version: "1.0.0"
+description: Installed consumer of the activated synthetic session runtime
+executor_id: "@subprocess"
+execution_protocol: protocol:ryeos/core/opaque
+effects: live
+filesystem_authority: node_policy
+network_authority: isolated
+external_content:
+  - id: {CONTENT_DECLARATION_ID}
+    kind: tree
+    mode: pinned
+    digest: {runtime_manifest_hash}
+    metadata_hint: activated-synthetic-external-candidate-runtime
+    mount_root: execution_runtime
+    mount: {mount}
+    qualification_allowance:
+      activation_ref: {CONTENT_ACTIVATION_REF}
+      policy_ref: {CONTENT_POLICY_REF}
+      required_claims:
+{claims}config:
+  command: /bin/true
+  args: []
+  env: {{}}
+  timeout_secs: 30
+config_schema:
+  type: object
+  additionalProperties: false
+"#,
+    );
+    write_signed(
+        bundle_root,
+        "tools/fixtures/runtime-consumer.yaml",
+        identity,
+        &consumer,
     );
 }
 

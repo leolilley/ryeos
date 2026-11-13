@@ -2093,6 +2093,10 @@ struct CurrentRuntimeContentQualification {
     attestation_hash: String,
     evidence: ryeos_state::external_content::qualification_evidence::ContentQualificationEvidence,
     remote_testimony: Option<ryeos_state::objects::RetainedRemoteQualificationTestimony>,
+    /// With a remote testimony: this node's own activation of the content,
+    /// as the launch check authenticated it.
+    receiver_join:
+        Option<ryeos_state::external_content::qualification_subject::ContentQualificationLocalJoin>,
 }
 
 impl CurrentRuntimeContentQualification {
@@ -2110,6 +2114,7 @@ impl CurrentRuntimeContentQualification {
             attestation_hash: self.attestation_hash,
             evidence: self.evidence,
             remote_testimony: self.remote_testimony,
+            receiver_join: self.receiver_join,
         }
     }
 }
@@ -2197,6 +2202,7 @@ fn require_current_runtime_content_qualification(
                 attestation_hash: published.attestation_hash,
                 evidence: published.evidence,
                 remote_testimony: None,
+                receiver_join: None,
             }
         }
         Some(_) => {
@@ -2216,6 +2222,7 @@ fn require_current_runtime_content_qualification(
                         acceptance: remote.acceptance,
                     },
                 ),
+                receiver_join: Some(remote.receiver_source.subject.local_join()),
             }
         }
     };

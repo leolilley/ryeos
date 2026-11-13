@@ -2881,6 +2881,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         .and_then(|runtime| runtime.registered_generation_node_trust()),
                     &snapshot,
                 ));
+                checks.push(remote_content_testimonies_check(&config.app_root));
                 if !args.no_bundles {
                     let operator_config_root =
                         ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
@@ -2970,6 +2971,23 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     crate::tty::Row::text(format!("{}: {}", c.name, c.detail))
                         .with_tone(crate::tty::Tone::Secondary),
                 );
+            }
+            if c.name == "remote_content_testimonies" {
+                for finding in c.detail["findings"].as_array().into_iter().flatten() {
+                    if finding["code"] == "ok" {
+                        continue;
+                    }
+                    section.rows.push(
+                        crate::tty::Row::text(format!(
+                            "{} {} {}: {}",
+                            finding["code"].as_str().unwrap_or_default(),
+                            finding["lane"].as_str().unwrap_or_default(),
+                            finding["coordinate_id"].as_str().unwrap_or_default(),
+                            finding["fix"].as_str().unwrap_or_default(),
+                        ))
+                        .with_tone(crate::tty::Tone::Secondary),
+                    );
+                }
             }
             if c.name == "external_bindings" {
                 for finding in c.detail["findings"].as_array().into_iter().flatten() {
@@ -3074,6 +3092,39 @@ fn external_bindings_check(
             serde_json::json!({
                 "error": format!("{error:#}"),
                 "note": "the installed bundles' artifacts could not be inventoried",
+            }),
+        ),
+    }
+}
+
+/// Doctor row for accepted remote content testimonies, read offline from
+/// this node's signed heads: for each content-lane acceptance, whether this
+/// node holds an activation of exactly the content the origin qualified. WARN
+/// names each testimony a launch or candidate-program emission would refuse
+/// (`no_local_activation`, `local_activation_differs`) and every acceptance of
+/// either lane recorded under a superseded schema (`acceptance_superseded`),
+/// each with its fix. Advisory only: it never fails the doctor.
+fn remote_content_testimonies_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+    match ryeos_app::operator_external_content::remote_testimony_inspection::inspect_remote_content_testimonies(app_root) {
+        Ok(report) if report.findings.is_empty() => check(
+            "remote_content_testimonies",
+            NA,
+            serde_json::json!({ "note": "no remote content testimony is accepted on this node" }),
+        ),
+        Ok(report) => check(
+            "remote_content_testimonies",
+            if report.has_warnings() { WARN } else { OK },
+            serde_json::json!({ "findings": report.findings }),
+        ),
+        Err(error) => check(
+            "remote_content_testimonies",
+            WARN,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "note": "accepted remote testimonies could not be inspected",
             }),
         ),
     }
@@ -4717,6 +4768,14 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn doctor_has_no_remote_content_testimony_row_finding_on_an_empty_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let check = remote_content_testimonies_check(directory.path());
+        assert_eq!(check.name, "remote_content_testimonies");
+        assert_eq!(check.status, ryeos_core_tools::actions::doctor::NA);
     }
 
     #[test]
