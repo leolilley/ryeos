@@ -417,6 +417,7 @@ mod tests {
                     || ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                         source_node_fingerprint: "66".repeat(32),
                         source_node_grant_hash: "77".repeat(32),
+                        delegation_digest: None,
                     },
                 ),
             },
@@ -485,6 +486,7 @@ mod tests {
                     ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                         source_node_fingerprint: "66".repeat(32),
                         source_node_grant_hash: "77".repeat(32),
+                        delegation_digest: None,
                     },
                 )
             };

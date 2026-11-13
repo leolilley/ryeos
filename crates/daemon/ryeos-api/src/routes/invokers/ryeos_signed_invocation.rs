@@ -55,10 +55,31 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
                     }),
                     thread_id: None,
                 },
+                crate::auth::RequestAuthError::Delegation(refusal) => {
+                    RouteDispatchError::Structured {
+                        code: refusal.code().to_owned(),
+                        status: 401,
+                        body: serde_json::json!({
+                            "error": refusal.to_string(),
+                            "error_code": refusal.code(),
+                        }),
+                        thread_id: None,
+                    }
+                }
                 crate::auth::RequestAuthError::Refused(_) => RouteDispatchError::Unauthorized,
             }
         })?;
 
+        let mut metadata = BTreeMap::from([(
+            crate::routes::invocation::SIGNED_REQUEST_DIGEST_METADATA_KEY.to_owned(),
+            principal.request_digest,
+        )]);
+        if let Some(site) = principal.delegated_via {
+            metadata.insert(
+                crate::routes::invocation::DELEGATED_VIA_METADATA_KEY.to_owned(),
+                site,
+            );
+        }
         Ok(RouteInvocationResult::Principal(RoutePrincipal {
             id: format!("fp:{}", principal.fingerprint),
             scopes: principal.scopes,
@@ -67,10 +88,7 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
             authorized_key_class: Some(principal.principal_class),
             authenticated_origin_site_id: principal.authenticated_site_id,
             authenticated_grant_authority: Some(principal.grant_authority),
-            metadata: BTreeMap::from([(
-                crate::routes::invocation::SIGNED_REQUEST_DIGEST_METADATA_KEY.to_owned(),
-                principal.request_digest,
-            )]),
+            metadata,
         }))
     }
 }
