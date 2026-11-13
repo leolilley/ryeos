@@ -1,9 +1,9 @@
-# ryeos:signed:2026-11-06T00:24:01Z:7b74d836cb4faf43d1714d388d5ac9e5c344ea8182e7264e4222662bb0ee65da:u0yGp33B1oGdYtoC6Umaa2dQVMlM/ppp65ile7+pKDvdjdYrgh5503ibSeXtISYgEz8RLnjVB3Ez25GJNK0LDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T10:01:45Z:752f6a6dfdba3c5c65bcf78d2666bd71152a4f183546c4cee1e17c4492d1aa36:y0wvRCaYukWnmHeLECs+/SXfUzq4hWj6RkGTPye2UaUR7D+0JjDSs6H7ujG+Ihco1oNhl/b7mlAojpvZdeyjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-execution.settle-unknown-allocation
 required_caps: ["ryeos.execute.service.external-execution/settle-unknown-allocation"]
 schema:
   placement_thread_id: string
   reason: string
-  evidence: string
-description: "State, as the operator, that one quarantined external allocation with no bound occurrence left nothing behind. Releases its capacity and records who said so, why, and on what evidence. Use only after checking the provider; the node cannot verify this statement."
+  inventory: string
+description: "State, as the operator, that one quarantined external allocation with no bound occurrence left nothing behind, citing a provider inventory receipt (from external-execution.provider-inventory) by digest. The node refuses (settle_inventory_refused, 409) unless the receipt is its own signed, complete listing of the allocation's provider account, taken after the allocation's last possible contact, and lists no unknown running sandbox created inside the contact window. Releases its capacity and records who said so, why, and the receipt."

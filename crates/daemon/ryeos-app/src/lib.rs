@@ -83,6 +83,7 @@ pub mod process_quarantine_report;
 pub mod projection_health;
 pub mod projection_repair;
 pub mod prospective_admission;
+pub mod provider_inventory;
 pub mod qualification_cold_settlement;
 pub mod qualification_consumer_input;
 mod qualification_consumer_observation;

@@ -44,6 +44,7 @@ pub use original_close::{
 pub mod process_resource_custody;
 pub mod process_resource_launch;
 pub mod process_resource_settlement;
+pub(crate) mod provider_inventory;
 pub mod restored_verifier_attempt;
 pub mod runtime_snapshot;
 pub mod runtime_snapshot_bootstrap;

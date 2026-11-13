@@ -6777,3 +6777,104 @@ fn exercise_activation_fault(fault: &str) {
     controller_stop.store(true, Ordering::Release);
     controller_blocker.join().unwrap();
 }
+
+/// The provider inventory crosses the real process boundary: the synthetic
+/// adapter, run with process creation denied, lists exactly the fixture its
+/// fake provider holds and nothing else.
+#[test]
+fn synthetic_adapter_lists_its_fixture_inventory() {
+    use ryeos_external_execution_contract::provider_inventory::{
+        PROVIDER_INVENTORY_PROTOCOL, ProviderInventoryAdapterRequest,
+        ProviderInventoryAdapterResponse, ProviderResource, ProviderResourceKind,
+    };
+    let adapter = executable(env!(
+        "CARGO_BIN_EXE_ryeos-synthetic-external-lifecycle-adapter"
+    ));
+    let (adapter_hash, _, _) = artifact(&adapter);
+    let provider_spec_bytes = br#"{"schema":1,"operations":[]}"#;
+    let provider_spec =
+        lillux::sealed_memfd(c"synthetic-provider-spec", provider_spec_bytes).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    lillux::PinnedDirectory::open(state.path())
+        .unwrap()
+        .unwrap()
+        .tighten_owner_private_directory()
+        .unwrap();
+    let fixture = vec![
+        ProviderResource {
+            kind: ProviderResourceKind::Sandbox,
+            provider_id: "occ-leaked".into(),
+            state: "running".into(),
+            created_at: Some("2026-11-13T00:00:00Z".into()),
+        },
+        ProviderResource {
+            kind: ProviderResourceKind::Snapshot,
+            provider_id: "snap-1".into(),
+            state: "ready".into(),
+            created_at: None,
+        },
+    ];
+    std::fs::write(
+        state.path().join("provider-inventory.json"),
+        serde_json::to_vec(&fixture).unwrap(),
+    )
+    .unwrap();
+    let credential = b"synthetic-secret";
+    let settings = lillux::canonical_json(&serde_json::json!({
+        "expected_credential_sha256": lillux::sha256_hex(credential),
+        "maximum_copy_depth": 8,
+        "maximum_copy_entries": 1000,
+        "schema": 1,
+        "startup_timeout_ms": 1000,
+        "state_root": state.path(),
+    }))
+    .unwrap()
+    .into_bytes();
+    let request = ProviderInventoryAdapterRequest {
+        protocol: PROVIDER_INVENTORY_PROTOCOL.into(),
+        provider_id: "synthetic-local".into(),
+        adapter_artifact_hash: adapter_hash,
+        settings_digest: lillux::sha256_hex(&settings),
+        provider_spec_digest: lillux::sha256_hex(provider_spec_bytes),
+    };
+    let request_handle = lillux::sealed_memfd(
+        c"synthetic-inventory-request",
+        &ryeos_external_execution_contract::canonical_json(&request).unwrap(),
+    )
+    .unwrap();
+    let settings_handle = lillux::sealed_memfd(c"synthetic-settings", &settings).unwrap();
+    let credential_handle = lillux::sealed_memfd(c"synthetic-credential", credential).unwrap();
+    let fd = |handle: &lillux::InheritedDescriptorAuthority| {
+        handle.inherited_descriptor().unwrap().to_string()
+    };
+    let output = run_lifecycle_adapter(
+        &adapter,
+        LifecycleAdapterInvocation::ListProviderResources,
+        &request_handle,
+        vec![
+            provider_spec.clone(),
+            settings_handle.clone(),
+            credential_handle.clone(),
+        ],
+        vec![
+            (
+                ryeos_external_execution_contract::LIFECYCLE_PROVIDER_SPEC_FD_ENV.into(),
+                fd(&provider_spec),
+            ),
+            (
+                ryeos_external_execution_contract::LIFECYCLE_PROVIDER_SPEC_SHA256_ENV.into(),
+                lillux::sha256_hex(provider_spec_bytes),
+            ),
+            (LIFECYCLE_SETTINGS_FD_ENV.into(), fd(&settings_handle)),
+            (LIFECYCLE_CREDENTIAL_FD_ENV.into(), fd(&credential_handle)),
+        ],
+        lillux::time::MonotonicDeadline::after(ADAPTER_OPERATION_CEILING),
+    )
+    .unwrap();
+    assert!(!output.deadline_exceeded);
+    let response: ProviderInventoryAdapterResponse =
+        from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES).unwrap();
+    response.validate_for(&request).unwrap();
+    assert!(response.complete);
+    assert_eq!(response.resources, fixture);
+}

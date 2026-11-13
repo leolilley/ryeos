@@ -405,7 +405,7 @@ impl StateStore {
 
     /// An operator's statement that one unknown allocation outcome left no
     /// occurrence. Returns the settled phase in its stored form.
-    pub fn settle_unknown_external_allocation(
+    pub(crate) fn settle_unknown_external_allocation(
         &self,
         placement: &str,
         principal: &str,

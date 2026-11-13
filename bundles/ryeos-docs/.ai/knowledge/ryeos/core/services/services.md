@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:a9bbc16afd48673f0dff702152c444768a32cb5c3d39b635011b5b40e8ed676e:TM/W3+tiu5OUxI5Bfn0w9WLTjUsUnftS9mSfKxTn6eKuZPMArPDPA8FIq2MOmFEkF/Hks1aj4HvbsakzkE94Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:10:01Z:d69b7b734f8bf87ec82405044c58a8dd2b2d0acaf1fa5db0cd6a1693c9f12afd:f8rvg0lV/XTTLineWaooyW9buwp560cZK9yVGiMdhMKKENHdj6XhPTIitHmKJPgVK1sF6xTAsmFG6tSGuyojDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -44,6 +44,7 @@ hashes through CAS.
 | `projection/verify` | `projection.verify` | `ryeos.execute.service.projection/verify` |
 | `projection/rebuild` | `projection.rebuild` | `ryeos.execute.service.projection/rebuild` |
 | `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
+| `external-execution/provider-inventory` | `external-execution.provider-inventory` | `ryeos.execute.service.external-execution/provider-inventory` |
 | `external-execution/settle-unknown-allocation` | `external-execution.settle-unknown-allocation` | `ryeos.execute.service.external-execution/settle-unknown-allocation` |
 | `external-execution/status` | `external-execution.status` | `ryeos.execute.service.external-execution/status` |
 | `health/status` | `health.status` | none |
@@ -53,6 +54,14 @@ hashes through CAS.
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
 | `system/push-head` | `system.push-head` | `ryeos.execute.service.system/push-head` |
+
+`external-execution/provider-inventory` lists, read only, what the provider
+holds for one binding's owner scope and stores a node-signed receipt (see the
+CLI reference). `external-execution/settle-unknown-allocation` takes
+`placement_thread_id`, a free-text `reason` and `inventory`, the digest of such
+a receipt; it refuses with `settle_inventory_refused` unless the receipt is
+fresh, complete, for the allocation's provider account and lists no unknown
+running sandbox created inside the allocation's contact window.
 
 `health/status`, `identity/public_key`, and `system/ingest-ignore` back
 unauthenticated discovery routes. Mutating routes such as

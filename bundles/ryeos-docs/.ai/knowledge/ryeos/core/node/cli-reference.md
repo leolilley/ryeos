@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:d363df0b637784a594f7b2d5dc396fb158ea1ecc68749db83d7085622400bf62:tG3szXvg0mo8jep9Finu7yt0u92xKP05dzSii+5f7Gga7ZN52OByj6jOz9J9TBc3qJroSRPo70IjHUbu4ZwgCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:10:01Z:71e9acb8d459abc6ba837c48686e93edd3ffd9cdd45886e18dc751f8b930a469:sqn2SWqvCdHkApbJhrs3641djgVtRKlkbv6e5nAjaWN4V9/KQ8qZ2d1FHVB6FToo/31RIDemdl84V7atmutYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -573,6 +573,29 @@ until the external snapshot driver is retired.
   consumer; local operator, refused with a typed code when the consumer changed.
 - `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
 - `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
+- `ryeos external-execution inventory <section>/<binding-id>` — list, read
+  only, the sandboxes and snapshots the provider holds for one installed
+  `external_execution` or `runtime_snapshot_production` binding's owner scope,
+  through its adapter and vault credential. Each row is joined with the node's
+  allocation, bootstrap-source, qualification-occurrence and snapshot journals
+  of the same backend and classed `known_live`, `leaked` (the node's record
+  ended, the provider still runs it), `unknown` (no node record: another node,
+  a hand-made resource, or a quarantined allocation's lost answer) or `gone`
+  (the node holds it open, the provider no longer runs it; only from a
+  complete listing, and a record of another account of the same backend can
+  show here). Nothing is deleted. The result is a node-signed CAS receipt;
+  the reply carries its digest, the rows and the counts. Listing is bounded
+  (256 rows); a cut listing is `complete: false`.
+- `ryeos external-execution settle-unknown-allocation <placement> <reason> <inventory-receipt>`
+  — release one quarantined allocation that never bound an occurrence, citing
+  an inventory receipt by digest. Refused with `settle_inventory_refused`
+  (409) unless the receipt is this node's signed, complete listing of the
+  allocation's provider backend and account, taken after the allocation's
+  last possible contact, with no `unknown` running sandbox created inside the
+  allocation's contact window (two minutes of clock skew either side). The
+  reason stays free text; the receipt digest is recorded with it. A receipt is
+  an unreferenced CAS object, so `ryeos maintenance gc` may collect it; take a
+  fresh inventory then.
 - `ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` — verify one or more items' signatures, trust, and path anchoring.
 
 When the daemon refuses a buffered request with the typed

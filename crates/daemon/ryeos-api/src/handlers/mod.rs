@@ -56,6 +56,7 @@ pub mod external_content_scrub;
 pub mod external_execution_candidate_program;
 pub mod external_execution_channel;
 pub mod external_execution_product_program;
+pub mod external_execution_provider_inventory;
 pub mod external_execution_settle_unknown_allocation;
 pub mod external_execution_status;
 pub mod federated_follow;
@@ -313,6 +314,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_release::STATUS,
     bundle_smoke::DESCRIPTOR,
     bundle_verify::DESCRIPTOR,
+    external_execution_provider_inventory::DESCRIPTOR,
     external_execution_settle_unknown_allocation::DESCRIPTOR,
     external_execution_status::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
