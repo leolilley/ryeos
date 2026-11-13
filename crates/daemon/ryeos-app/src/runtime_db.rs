@@ -7,6 +7,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod credential_ceremony;
+pub use credential_ceremony::CredentialCeremonyRefusal;
 pub mod external_execution;
 mod inspection_cleanup;
 pub use inspection_cleanup::MAX_INSPECTION_COPY_GROUP_PHYSICAL_REGISTRATIONS;
@@ -7758,6 +7760,14 @@ pub struct CredentialProfileRecord {
 
 pub const CREDENTIAL_PROFILE_LIST_MAX_LIMIT: usize = 200;
 
+/// The ceremony columns a refusal reports.
+struct CredentialCeremonyRow {
+    state: String,
+    login_epoch: u64,
+    login_expires_at_ms: Option<i64>,
+    lock_owner: Option<String>,
+}
+
 /// Discovery metadata only. Private homes, account documents, login ceremonies,
 /// and exact session/lease coordinates belong to the selected-profile surface.
 #[derive(Debug, Clone, Serialize)]
@@ -10854,15 +10864,19 @@ impl RuntimeDb {
                 bail!("credential enrollment expiry must be in the future");
             }
             let tx = conn.unchecked_transaction()?;
-            let epoch: i64 = tx
+            let epoch: Option<i64> = tx
                 .query_row(
                     "SELECT login_epoch FROM credential_profile
               WHERE profile_id=?1 AND lock_owner=?2 AND state='unauthenticated'",
                     params![profile_id, lock_owner],
                     |row| row.get(0),
                 )
-                .optional()?
-                .ok_or_else(|| anyhow!("credential profile cannot begin enrollment"))?;
+                .optional()?;
+            let Some(epoch) = epoch else {
+                return Err(Self::begin_enrollment_refusal(
+                    &tx, profile_id, lock_owner, now,
+                ));
+            };
             let next = epoch
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("credential login epoch overflow"))?;
@@ -10994,7 +11008,7 @@ impl RuntimeDb {
             }
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
-            let account_json: String = tx
+            let account_json: Option<String> = tx
                 .query_row(
                     "SELECT sanitized_account_json FROM credential_profile
                   WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
@@ -11008,8 +11022,16 @@ impl RuntimeDb {
                     ],
                     |row| row.get(0),
                 )
-                .optional()?
-                .ok_or_else(|| anyhow!("credential confirmation ceremony is absent or expired"))?;
+                .optional()?;
+            let Some(account_json) = account_json else {
+                return Err(Self::confirm_enrollment_refusal(
+                    &tx,
+                    profile_id,
+                    owner_principal,
+                    login_epoch,
+                    now,
+                ));
+            };
             let account: serde_json::Value = serde_json::from_str(&account_json)?;
             if ryeos_state::objects::canonical_value_digest(&account)? != expected_account_digest {
                 bail!("credential confirmation account digest changed");
@@ -11039,6 +11061,208 @@ impl RuntimeDb {
             tx.commit()?;
             u64::try_from(generation).context("negative credential generation")
         })
+    }
+
+    /// Clear an enrollment nobody can finish. The operator names the login
+    /// epoch; the node moves the profile back to `unauthenticated` only when
+    /// that login is `enrolling` or `confirming`, its window has closed and no
+    /// worker holds the profile. Returns the new authority revision.
+    pub fn abandon_credential_enrollment(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+    ) -> Result<u64> {
+        self.conn.with_sql(|conn| {
+            let now = lillux::time::timestamp_millis() as i64;
+            let epoch =
+                i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
+                "UPDATE credential_profile SET state='unauthenticated', active_login_id=NULL,
+                    login_expires_at_ms=NULL, sanitized_account_json=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
+                AND state IN ('enrolling','confirming') AND lock_owner IS NULL
+                AND (login_expires_at_ms IS NULL OR login_expires_at_ms<?4)",
+                params![profile_id, owner_principal, epoch, now],
+            )?;
+            if changed != 1 {
+                let row = Self::credential_ceremony_row(&tx, profile_id, owner_principal)?
+                    .ok_or_else(|| anyhow!("credential profile is absent or not owned"))?;
+                let reason = match row.state.as_str() {
+                    _ if row.login_epoch != login_epoch => format!(
+                        "name the current login epoch {}; the profile has moved on",
+                        row.login_epoch
+                    ),
+                    "enrolling" | "confirming" if row.lock_owner.is_some() => format!(
+                        "worker {} still holds the profile; end its login session first",
+                        row.lock_owner.as_deref().unwrap_or_default()
+                    ),
+                    "enrolling" | "confirming" => format!(
+                        "the login window is still open until {} ms; finish or cancel that login instead",
+                        row.login_expires_at_ms.unwrap_or_default()
+                    ),
+                    _ => "only an expired enrolling or confirming login can be abandoned".to_string(),
+                };
+                return Err(CredentialCeremonyRefusal::AbandonRefused {
+                    profile_id: profile_id.to_string(),
+                    state: row.state,
+                    current_login_epoch: row.login_epoch,
+                    requested_login_epoch: login_epoch,
+                    reason,
+                }
+                .into());
+            }
+            let revision: i64 = tx.query_row(
+                "SELECT authority_revision FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get(0),
+            )?;
+            tx.commit()?;
+            u64::try_from(revision).context("negative credential authority revision")
+        })
+    }
+
+    fn credential_ceremony_row(
+        conn: &Connection,
+        profile_id: &str,
+        owner_principal: &str,
+    ) -> Result<Option<CredentialCeremonyRow>> {
+        conn.query_row(
+            "SELECT state, login_epoch, login_expires_at_ms, lock_owner
+               FROM credential_profile WHERE profile_id=?1 AND owner_principal=?2",
+            params![profile_id, owner_principal],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(state, login_epoch, login_expires_at_ms, lock_owner)| {
+            Ok(CredentialCeremonyRow {
+                state,
+                login_epoch: u64::try_from(login_epoch)
+                    .context("negative credential login epoch")?,
+                login_expires_at_ms,
+                lock_owner,
+            })
+        })
+        .transpose()
+    }
+
+    fn begin_enrollment_refusal(
+        conn: &Connection,
+        profile_id: &str,
+        lock_owner: &str,
+        now: i64,
+    ) -> anyhow::Error {
+        let row = conn
+            .query_row(
+                "SELECT owner_principal FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(anyhow::Error::from)
+            .and_then(|owner| match owner {
+                Some(owner) => Self::credential_ceremony_row(conn, profile_id, &owner),
+                None => Ok(None),
+            });
+        let row = match row {
+            Ok(Some(row)) => row,
+            Ok(None) => return anyhow!("credential profile cannot begin enrollment: it is absent"),
+            Err(error) => return error.context("credential profile cannot begin enrollment"),
+        };
+        if row.lock_owner.as_deref() != Some(lock_owner) {
+            return anyhow!(
+                "credential profile cannot begin enrollment: the login worker does not hold it"
+            );
+        }
+        if !matches!(row.state.as_str(), "enrolling" | "confirming") {
+            return anyhow!(
+                "credential profile cannot begin enrollment from state {}",
+                row.state
+            );
+        }
+        match row.login_expires_at_ms {
+            Some(at) if at >= now => CredentialCeremonyRefusal::EnrollmentInProgress {
+                profile_id: profile_id.to_string(),
+                state: row.state,
+                login_epoch: row.login_epoch,
+                login_expires_at_ms: row.login_expires_at_ms,
+            }
+            .into(),
+            _ => CredentialCeremonyRefusal::EnrollmentAbandoned {
+                profile_id: profile_id.to_string(),
+                state: row.state,
+                login_epoch: row.login_epoch,
+            }
+            .into(),
+        }
+    }
+
+    fn confirm_enrollment_refusal(
+        conn: &Connection,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+        now: i64,
+    ) -> anyhow::Error {
+        let row = match Self::credential_ceremony_row(conn, profile_id, owner_principal) {
+            Ok(Some(row)) => row,
+            Ok(None) => return anyhow!("credential profile is absent or not owned"),
+            Err(error) => {
+                return error.context("credential confirmation could not read its profile");
+            }
+        };
+        if row.state != "confirming" || row.login_epoch != login_epoch {
+            return CredentialCeremonyRefusal::ConfirmWrongState {
+                profile_id: profile_id.to_string(),
+                state: row.state,
+                current_login_epoch: row.login_epoch,
+                requested_login_epoch: login_epoch,
+            }
+            .into();
+        }
+        let window_open = matches!(row.login_expires_at_ms, Some(at) if at >= now);
+        if !window_open {
+            return CredentialCeremonyRefusal::ConfirmExpired {
+                profile_id: profile_id.to_string(),
+                login_epoch,
+                lock_owner: row.lock_owner,
+            }
+            .into();
+        }
+        match row.lock_owner {
+            Some(lock_owner) => {
+                let holding_chain_root_id = conn
+                    .query_row(
+                        "SELECT chain_root_id FROM dedicated_session
+                      WHERE credential_profile_id=?1 AND worker_instance_id=?2
+                      ORDER BY updated_at_ms DESC LIMIT 1",
+                        params![profile_id, lock_owner],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                CredentialCeremonyRefusal::ConfirmLockHeld {
+                    profile_id: profile_id.to_string(),
+                    login_epoch,
+                    lock_owner,
+                    holding_chain_root_id,
+                }
+                .into()
+            }
+            None => anyhow!(
+                "credential confirmation lost a concurrent ceremony change; read the profile again"
+            ),
+        }
     }
 
     pub fn cancel_credential_enrollment(
@@ -33215,5 +33439,248 @@ mod tests {
             assert!(db.expired_seat_leases_slice(0, None, &max, limit).is_err());
             assert!(db.claimed_seat_leases_slice(None, &max, limit).is_err());
         }
+    }
+
+    fn ceremony_profile_in_confirming(
+        db: &RuntimeDb,
+        profile_id: &str,
+        lock_owner: &str,
+    ) -> (u64, String) {
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id,
+            owner_principal: "fp:operator",
+            home_id: "home-ceremony",
+        })
+        .unwrap();
+        db.acquire_credential_profile(profile_id, "fp:operator", lock_owner)
+            .unwrap();
+        let login_epoch = db
+            .begin_credential_enrollment(
+                profile_id,
+                lock_owner,
+                "login-ceremony",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap();
+        let account = serde_json::json!({"account_label": "fixture"});
+        let account_json = serde_json::to_string(&account).unwrap();
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE credential_profile SET state='confirming', sanitized_account_json=?2
+                      WHERE profile_id=?1",
+                    params![profile_id, account_json],
+                )?)
+            })
+            .unwrap();
+        (
+            login_epoch,
+            ryeos_state::objects::canonical_value_digest(&account).unwrap(),
+        )
+    }
+
+    fn expire_ceremony(db: &RuntimeDb, profile_id: &str) {
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE credential_profile SET login_expires_at_ms=1 WHERE profile_id=?1",
+                    [profile_id],
+                )?)
+            })
+            .unwrap();
+    }
+
+    fn ceremony_refusal(error: anyhow::Error) -> CredentialCeremonyRefusal {
+        error
+            .downcast_ref::<CredentialCeremonyRefusal>()
+            .cloned()
+            .unwrap_or_else(|| panic!("expected a typed ceremony refusal, got {error:#}"))
+    }
+
+    #[test]
+    fn confirm_refuses_with_lock_held_naming_owner() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, digest) = ceremony_profile_in_confirming(&db, "P-held", "login-owner");
+        let refusal = ceremony_refusal(
+            db.confirm_credential_enrollment("P-held", "fp:operator", epoch, &digest)
+                .unwrap_err(),
+        );
+        match &refusal {
+            CredentialCeremonyRefusal::ConfirmLockHeld {
+                lock_owner,
+                login_epoch,
+                ..
+            } => {
+                assert_eq!(lock_owner, "login-owner");
+                assert_eq!(*login_epoch, epoch);
+            }
+            other => panic!("expected lock-held refusal, got {other:?}"),
+        }
+        assert_eq!(refusal.code(), "credential_confirm_lock_held");
+        assert!(refusal.to_string().contains("worker session terminate"));
+
+        db.release_credential_profile("P-held", "login-owner")
+            .unwrap();
+        let generation = db
+            .confirm_credential_enrollment("P-held", "fp:operator", epoch, &digest)
+            .unwrap();
+        assert_eq!(generation, 2);
+        assert_eq!(
+            db.credential_profile("P-held").unwrap().unwrap().state,
+            "active"
+        );
+    }
+
+    #[test]
+    fn confirm_refuses_expired_naming_abandon() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, digest) = ceremony_profile_in_confirming(&db, "P-late", "login-owner");
+        db.release_credential_profile("P-late", "login-owner")
+            .unwrap();
+        expire_ceremony(&db, "P-late");
+        let refusal = ceremony_refusal(
+            db.confirm_credential_enrollment("P-late", "fp:operator", epoch, &digest)
+                .unwrap_err(),
+        );
+        assert_eq!(refusal.code(), "credential_confirm_expired");
+        assert!(
+            refusal
+                .to_string()
+                .contains(&format!("ryeos codex profile abandon-login P-late {epoch}"))
+        );
+
+        let wrong_epoch = ceremony_refusal(
+            db.confirm_credential_enrollment("P-late", "fp:operator", epoch + 1, &digest)
+                .unwrap_err(),
+        );
+        assert_eq!(wrong_epoch.code(), "credential_confirm_wrong_state");
+    }
+
+    #[test]
+    fn abandon_requires_expired_and_unlocked() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, _digest) = ceremony_profile_in_confirming(&db, "P-stuck", "login-owner");
+        let before = db.credential_profile("P-stuck").unwrap().unwrap();
+
+        let locked = ceremony_refusal(
+            db.abandon_credential_enrollment("P-stuck", "fp:operator", epoch)
+                .unwrap_err(),
+        );
+        assert_eq!(locked.code(), "credential_abandon_refused");
+        assert!(locked.to_string().contains("login-owner"));
+
+        db.release_credential_profile("P-stuck", "login-owner")
+            .unwrap();
+        let open = ceremony_refusal(
+            db.abandon_credential_enrollment("P-stuck", "fp:operator", epoch)
+                .unwrap_err(),
+        );
+        assert!(open.to_string().contains("still open"));
+
+        expire_ceremony(&db, "P-stuck");
+        let stale_epoch = ceremony_refusal(
+            db.abandon_credential_enrollment("P-stuck", "fp:operator", epoch + 1)
+                .unwrap_err(),
+        );
+        assert!(stale_epoch.to_string().contains("current login epoch"));
+        assert!(
+            db.abandon_credential_enrollment("P-stuck", "fp:other", epoch)
+                .is_err(),
+            "another principal cannot abandon the owner's login"
+        );
+
+        let revision = db
+            .abandon_credential_enrollment("P-stuck", "fp:operator", epoch)
+            .unwrap();
+        let after = db.credential_profile("P-stuck").unwrap().unwrap();
+        assert_eq!(after.state, "unauthenticated");
+        assert_eq!(after.authority_revision, revision);
+        assert!(revision > before.authority_revision);
+        assert_eq!(after.login_epoch, epoch);
+        assert_eq!(after.credential_generation, before.credential_generation);
+        assert!(after.active_login_id.is_none());
+        assert!(after.login_expires_at_ms.is_none());
+        assert!(after.sanitized_account.is_none());
+    }
+
+    #[test]
+    fn abandon_then_begin_succeeds() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, _digest) = ceremony_profile_in_confirming(&db, "P-again", "login-owner");
+        expire_ceremony(&db, "P-again");
+
+        let abandoned = ceremony_refusal(
+            db.begin_credential_enrollment(
+                "P-again",
+                "login-owner",
+                "login-two",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(abandoned.code(), "credential_enrollment_abandoned");
+
+        db.release_credential_profile("P-again", "login-owner")
+            .unwrap();
+        db.abandon_credential_enrollment("P-again", "fp:operator", epoch)
+            .unwrap();
+        db.acquire_credential_profile("P-again", "fp:operator", "login-owner-two")
+            .unwrap();
+        let next = db
+            .begin_credential_enrollment(
+                "P-again",
+                "login-owner-two",
+                "login-two",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap();
+        assert_eq!(next, epoch + 1);
+    }
+
+    #[test]
+    fn begin_refuses_an_open_login_as_in_progress() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, _digest) = ceremony_profile_in_confirming(&db, "P-busy", "login-owner");
+        let refusal = ceremony_refusal(
+            db.begin_credential_enrollment(
+                "P-busy",
+                "login-owner",
+                "login-two",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(
+            refusal,
+            CredentialCeremonyRefusal::EnrollmentInProgress {
+                profile_id: "P-busy".into(),
+                state: "confirming".into(),
+                login_epoch: epoch,
+                login_expires_at_ms: db
+                    .credential_profile("P-busy")
+                    .unwrap()
+                    .unwrap()
+                    .login_expires_at_ms,
+            }
+        );
+    }
+
+    #[test]
+    fn abandon_refuses_active_profile() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, digest) = ceremony_profile_in_confirming(&db, "P-live", "login-owner");
+        db.release_credential_profile("P-live", "login-owner")
+            .unwrap();
+        db.confirm_credential_enrollment("P-live", "fp:operator", epoch, &digest)
+            .unwrap();
+        let refusal = ceremony_refusal(
+            db.abandon_credential_enrollment("P-live", "fp:operator", epoch)
+                .unwrap_err(),
+        );
+        assert_eq!(refusal.code(), "credential_abandon_refused");
+        assert_eq!(
+            db.credential_profile("P-live").unwrap().unwrap().state,
+            "active"
+        );
     }
 }

@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T02:52:55Z:78c7cd78564abca9b7a046948910f84d91a8ea0d92325aa41754b67e3f0211c8:EIzFw0OjX50l6UuhRnkIEN2aaF6rzhhBXceTwG/STLWSPRrAP/1gGmul2hZwC8OcvOvT6WHfSR7+Y6gVKbQjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: credential-profiles.abandon-login
+required_caps: ["ryeos.execute.service.credential-profiles/abandon-login"]
+schema:
+  profile_id: string
+  login_epoch: integer
+description: "Return an owner-bound profile whose named login expired unfinished and unlocked to unauthenticated"

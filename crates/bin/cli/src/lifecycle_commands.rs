@@ -30,6 +30,11 @@
 //!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
 //!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
 //!
+//! One client composite is listed here for help but dispatched after the
+//! verified node config loads, because it sequences daemon commands:
+//!
+//!   - `ryeos codex login device` — the Codex device-login ceremony (see `codex_device_login.rs`)
+//!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
 //!
@@ -212,6 +217,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         tokens: &["node", "host", "setup"],
         summary: "Provision one administrator-owned local hosted-worker service",
         category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["codex", "login", "device"],
+        summary: "Log a Codex credential profile in with a device code, end to end",
+        category: "credentials",
     },
     LocalCommandDescriptor {
         tokens: &["help"],

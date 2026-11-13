@@ -853,6 +853,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
             "--confirm         confirm administrator-owned host-service provisioning\n--app-root <DIR>  existing initialized application root\n--bind <ADDR>      replace the stopped node's persisted TCP endpoint\n--uds-path <PATH>  replace the stopped node's persisted lifecycle endpoint",
         ),
+        "codex login device" => (
+            "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
+            "--create   create the profile first\n--trusted  open the login on an explicitly trusted process-group node\n--yes      confirm the observed account without asking\n--json     emit the final result as JSON",
+        ),
         "node doctor" => (
             "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",
             "--json            emit structured diagnostics\n--no-bundles      skip bundle diagnostics\n--app-root <DIR>  application root",
