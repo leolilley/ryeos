@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T00:50:49Z:b91e20a555d5a31651fb8b7c1af4687373aa076f9ace36051c91eed619d64164:Z56xOrmYV2+pGKf90n9Cm6GsNWQDyECuTVIkxbg0vcBaJ6hTo6jIfr5LEQdICxgRijkuFwQq+kPeUvmCqJP4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:47:38Z:88f2031bb3729a045cb4b85f624944d97a09082bf54bd2f607e07dd93b45cd3e:PO0Fl8lsQj8dD9J48sB5zKI+SO202n2LsX1at1RqKqPm2PPrA9RWLRWrRpl1coP5SX3GkDzT3qcpjl4p9ASbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.7.6"
+version: "3.7.7"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -44,6 +44,9 @@ untrusted tenants.
 - Granting the local `remote.admin` capability is operator-level access
   to high-impact remote orchestrators in v1. It does not replace
   target-node authorized-key scopes.
+- A remote's pinned identity (`signing_key`, `principal_id`,
+  `vault_fingerprint`) comes only from the node's own remotes file. A
+  project cannot supply or override it: see [Configuration](#configuration).
 
 ## Identity Requirements
 
@@ -729,3 +732,15 @@ remotes:
         - "target/"
         - "*.pyc"
 ```
+
+Only the node holds remotes. A project's own
+`<project>/.ai/config/remotes/remotes.yaml` can neither define a remote nor
+override one of the node's. If any entry in it names trust material
+(`signing_key`, `principal_id`, `fingerprint`, `vault_fingerprint` or
+`descriptor`), every remote operation that names that project is refused
+with `project_remote_trust_material` (HTTP 409). The refusal lists each
+entry and field it found, and names the cure: remove those entries from the
+project file and configure the remote on the node with
+`ryeos remote configure <name> --url <https-url> --expect-fingerprint <fingerprint>`
+(or `--descriptor <file>`). Other entries in a
+project remotes file are listed as invalid by `remote list` and never used.

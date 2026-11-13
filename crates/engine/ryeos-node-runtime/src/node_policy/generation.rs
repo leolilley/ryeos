@@ -723,10 +723,7 @@ fn validate_schema_cut_directory_occupant(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .context("existing node policy entry disappeared")?;
-        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
-        if verified.signer_fingerprint != node_fingerprint {
-            bail!("existing policy generation is not signed by the current node identity");
-        }
+        crate::node_document::verify_pinned_signed_yaml(&file, trust_store, &node_fingerprint)?;
         if names.insert(name.to_owned(), ()).is_some() {
             bail!("existing node policy generation contains duplicate section names");
         }
@@ -803,15 +800,8 @@ fn read_signed_policy_bodies(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .with_context(|| format!("node policy disappeared: {}", path.display()))?;
-        let verified = crate::node_document::verify_pinned_signed_yaml(&file, trust_store)?;
-        if verified.signer_fingerprint != node_fingerprint {
-            bail!(
-                "node policy {} is signed by {}, expected current node {}",
-                path.display(),
-                verified.signer_fingerprint,
-                node_fingerprint
-            );
-        }
+        let verified =
+            crate::node_document::verify_pinned_signed_yaml(&file, trust_store, &node_fingerprint)?;
         if is_operator_record {
             operator_sections = Some(
                 parse_operator_sections(&verified.body)

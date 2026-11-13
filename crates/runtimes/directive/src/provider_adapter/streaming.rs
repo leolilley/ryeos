@@ -5110,25 +5110,27 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             .join("bundles/directive")
     }
 
-    /// Dev publisher public key trust entry — the directive bundle's configs
-    /// are signed with this key, so tests that load real bundle configs need
-    /// it in the trust store.  This is public key material (not a secret).
-    const DEV_PUBLISHER_TRUST_TOML: &str = r#"
-public_key = "ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk="
-fingerprint = "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
+    /// Dev publisher public key trust entry, in the node trust-store document
+    /// format — the directive bundle's configs are signed with this key, so
+    /// tests that load real bundle configs need it in the trust store. This is
+    /// public key material (not a secret).
+    const DEV_PUBLISHER_TRUST_TOML: &str = r#"fingerprint = "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
 owner = "RyeOS Development"
+
+[public_key]
+pem = "ed25519:sDKyQ9rFxIduNjGtXq6aTrLlAg39177NzCT1+YYqpRk="
 "#;
 
-    /// Build a VerifiedLoader rooted at the bundled standard, with a temp
-    /// project root that holds only the dev-publisher trust entry (no
-    /// project config), so project-overlay attacks can't interfere while
-    /// the trust store still verifies the bundle's signed configs.
+    /// Build a VerifiedLoader rooted at the bundled standard, with an empty
+    /// temp project root (no project config, no project trust) and a node
+    /// trust dir that pins only the dev publisher, so project-overlay attacks
+    /// can't interfere while the trust store still verifies the bundle's
+    /// signed configs.
     fn loader_for_bundle() -> VerifiedLoader {
         let project_root = tempfile::tempdir().expect("create temp project root");
-        let trust_dir = project_root.path().join(".ai/config/keys/trusted");
-        let _ = std::fs::create_dir_all(&trust_dir);
+        let node_trust = tempfile::tempdir().expect("create temp node trust dir");
         std::fs::write(
-            trust_dir.join("dev-publisher.toml"),
+            node_trust.path().join("dev-publisher.toml"),
             DEV_PUBLISHER_TRUST_TOML,
         )
         .expect("write trust entry");
@@ -5136,7 +5138,7 @@ owner = "RyeOS Development"
         VerifiedLoader::new(
             project_root.path().to_path_buf(),
             vec![bundle_root()],
-            std::path::Path::new("/nonexistent-operator-trust"),
+            node_trust.path(),
         )
         .unwrap()
     }

@@ -70,7 +70,11 @@ pub async fn handle(
         .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error:#}")))?;
     let report =
         config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())
-            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+            .map_err(|e| {
+                config::typed_load_error_or(e, |e| {
+                    HandlerError::Internal(format!("load remotes: {e:#}"))
+                })
+            })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
     let binding = req

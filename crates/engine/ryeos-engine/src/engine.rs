@@ -4721,6 +4721,20 @@ mod tests {
         SigningKey::from_bytes(&[42u8; 32])
     }
 
+    /// A project trust document for `key`, cross-signed by the test node key
+    /// (`test_signing_key`), as project trust documents must be.
+    fn node_vouched_project_trust_doc(key: &lillux::crypto::VerifyingKey) -> String {
+        let body = crate::trust::TrustedKeyDoc {
+            fingerprint: crate::trust::compute_fingerprint(key),
+            owner: "project".to_owned(),
+            version: "1.0.0".to_owned(),
+            attestation: None,
+            verifying_key: *key,
+        }
+        .to_toml();
+        lillux::signature::sign_content(&body, &test_signing_key(), "#", None)
+    }
+
     fn test_trust_store() -> TrustStore {
         let sk = test_signing_key();
         let vk = sk.verifying_key();
@@ -5991,11 +6005,13 @@ formats:
         let signing_key = SigningKey::from_bytes(&[77u8; 32]);
         let verifying_key = signing_key.verifying_key();
         let fingerprint = crate::trust::compute_fingerprint(&verifying_key);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes());
-        let key_path = trusted_dir.join("project.pub");
-        fs::write(&key_path, encoded).unwrap();
+        let key_path = trusted_dir.join("project.toml");
+        fs::write(&key_path, node_vouched_project_trust_doc(&verifying_key)).unwrap();
 
-        let scoped = test_engine().for_project_root(&project_dir, None).unwrap();
+        let scoped = test_engine()
+            .with_node_trust_store(test_trust_store())
+            .for_project_root(&project_dir, None)
+            .unwrap();
         assert!(scoped.trust_store.is_trusted(&fingerprint));
         assert!(
             !scoped
@@ -6027,9 +6043,11 @@ formats:
         let project_fingerprint = crate::trust::compute_fingerprint(&project_verifying_key);
         let trusted_dir = project_root.join(AI_DIR).join(crate::TRUST_KEYS_DIR);
         fs::create_dir_all(&trusted_dir).unwrap();
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(project_verifying_key.as_bytes());
-        fs::write(trusted_dir.join("project.pub"), encoded).unwrap();
+        fs::write(
+            trusted_dir.join("project.toml"),
+            node_vouched_project_trust_doc(&project_verifying_key),
+        )
+        .unwrap();
 
         let source = "# ryeos-tool:\n#   note: project-only publisher\nprint('project trusted')\n";
         let signed_source =

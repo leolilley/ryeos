@@ -407,10 +407,10 @@ impl RemoteClient {
 
     /// Build a client from a named remote config + app state.
     ///
-    /// Looks up `remote_name` in the layered remotes config
-    /// (project overrides user). Pass `Some(project_path)` when
-    /// the caller is acting in the context of a local project so
-    /// project-level remote definitions are honored.
+    /// Looks up `remote_name` in the node's remotes config. Pass
+    /// `Some(project_path)` when the caller is acting in the context of a
+    /// local project; that project's remotes file is checked and refused
+    /// if it names remote trust material.
     pub fn from_named_remote(
         state: &AppState,
         remote_name: &str,

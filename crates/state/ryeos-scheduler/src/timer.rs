@@ -879,6 +879,10 @@ mod tests {
             &self.trust
         }
 
+        fn schedule_signer_fingerprint(&self) -> &str {
+            ""
+        }
+
         fn get_thread_status(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
             Ok(self.statuses.lock().unwrap().get(thread_id).cloned())
         }
