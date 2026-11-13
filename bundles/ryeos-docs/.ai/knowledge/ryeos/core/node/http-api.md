@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:05:09Z:c3f867f2448985b2d18b17e22d85835f77f5ca35e9addb98d2e8f82ad59cedfd:ED4smy835RERQYPnv7w2qanNDk4D7dB7eVLcvEm8bFZp4EfTK94KJ8kIXee84FRf3Sj1yJG0JqGxEbufhgXpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:57:19Z:57fe7bfebd4a3312b9d7cba3b3270a42d187fa79083ce06ee0e25aad840bee0d:CXAJ98/fwWu392MnbkuzHwtNsBPjGpjuFjfkzXH11JEB1CXiEY9VcjHRNP3Wvwaoy8CUKvYBygRyU9dV5lxYAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -160,9 +160,15 @@ being admitted.
 - **Source:** `service:admission/claim`
 - **Auth:** none; validates token hash file, token expiry, requested
   scopes subset, nonce/timestamp, and claimant signature
-- **Request:** `{ token, public_key, label, scopes, nonce, timestamp_unix, signature }`
-- **Response:** authorized-key metadata including fingerprint, scopes and
-  `expires_at` (the `remote_node` class maximum)
+- **Request:** `{ protocol_version: 3, token, public_key, principal_class, origin_site_id?, label, scopes, signed_at, nonce, signature, forwarding_key_id?, forwarding_signature? }`.
+  `principal_class` must equal the class the token admits; a
+  `remote_principal` claim carries the origin node's co-signature in the
+  `forwarding_*` fields.
+- **Response:** authorized-key metadata including fingerprint, class, scopes
+  and `expires_at` (bounded by the authorization policy for that class)
+- **Refusals:** `admission_token_stale`, `admission_token_invalid` (400);
+  `admission_class_mismatch`, `admission_origin_site_mismatch`,
+  `admission_cosignature_missing`, `admission_cosignature_invalid` (403)
 - **Used by:** `ryeos remote admit`
 
 ## Thread Routes

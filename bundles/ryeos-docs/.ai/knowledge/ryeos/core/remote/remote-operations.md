@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:49:48Z:c192ccc40e6b2977d0db020b1a34b15111f032e5d1c4dc5d152c1e50aee7d03f:6iF6QljIrf5bIO3sjQ6uevmxS7RpookP790z9Sykha7wtDNx+00woQwtyS6G5KuPNkp45gVNV31CiNbdm3DZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:57:19Z:629b8a9a8bc48f880ca9c9ae1b05b3a6882b949b45113fbe9f35f841e01408ba:XNMjAaqCXAj5Ie8eo4li2U0+uAvt1C+XawW92gwix8IXsRj2/tfapRqvQLTzy21VDNbt311QUGf1ZXyVWl7rCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -185,6 +185,7 @@ principal's grant ends all of them, and `not_after` bounds the rest.
 
    ```bash
    ryeos admission-token \
+     --class remote_node \
      --label "dev-machine" \
      --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
      --ttl-secs 600
@@ -461,6 +462,7 @@ ryeos remote-descriptor \
   --url https://ryeos.example.com
 
 ryeos admission-token \
+  --class remote_node \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600

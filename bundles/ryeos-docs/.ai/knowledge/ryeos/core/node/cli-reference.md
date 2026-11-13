@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:15:40Z:0e4e16d7f02fb191f3a631a9e677643aa77e1b636f2dcbad5bccd093c2cde0fd:32LF2bHzslcXgka9Oa9nfZFn3QouE7hJdvNoyTsmyPxEA0DQIOLAcwmcXrLTuk3FdExGx9ke+F/+NVpad9KtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T19:53:53Z:fad0b179c21067043bfcec8fa69b168e0752f9c8030bb7c7f22a33f7c372b129:9YmYxuuCIWPenfYxblf8MNPzMEahdPoCoNIynSOm6VAYVfwAurnSjMgcDr5NYX7GiRMI4aicEph1g42mmyd7BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -554,7 +554,7 @@ until the external snapshot driver is retired.
 - `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
 - `ryeos remote-descriptor --name <name> --url <url>` — ask the running daemon for this node's signed remote descriptor (a trust pin signed by the node key inside the daemon). The reply carries the descriptor and its signed `yaml`.
-- `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
+- `ryeos admission-token --class <local_client|remote_node|remote_principal> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]` — mint a one-time local admission token file that admits one grant class. `--origin-site-id` is required for `remote_principal` and refused otherwise.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 
 ## Trust verbs

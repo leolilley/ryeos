@@ -994,8 +994,41 @@ pub fn write_authorized_remote_node_key_toml(
     origin_site_id: &str,
     node_signing_key: &lillux::crypto::SigningKey,
 ) -> Result<std::path::PathBuf> {
-    validate_canonical_site_id(origin_site_id)
-        .context("remote-node origin_site_id is not canonical")?;
+    create_authorized_key_toml_for_subject(
+        auth_dir,
+        fingerprint,
+        public_key_b64,
+        scopes,
+        label,
+        granted_by,
+        created_at,
+        terms,
+        node_signing_key,
+        AuthorizedKeySubject::RemoteNode { origin_site_id },
+    )
+}
+
+/// Create a node-signed grant of any class without replacing an incumbent.
+/// A remote subject's origin site must be canonical. Admission redeems a
+/// token through this writer, so the class and origin come from the token.
+pub fn create_authorized_key_toml_for_subject(
+    auth_dir: &Path,
+    fingerprint: &str,
+    public_key_b64: &str,
+    scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    terms: &GrantTerms,
+    node_signing_key: &lillux::crypto::SigningKey,
+    subject: AuthorizedKeySubject<'_>,
+) -> Result<std::path::PathBuf> {
+    if let AuthorizedKeySubject::RemoteNode { origin_site_id }
+    | AuthorizedKeySubject::RemotePrincipal { origin_site_id } = subject
+    {
+        validate_canonical_site_id(origin_site_id)
+            .context("remote grant origin_site_id is not canonical")?;
+    }
     let signed = render_authorized_key_toml_for_subject(
         fingerprint,
         public_key_b64,
@@ -1006,7 +1039,7 @@ pub fn write_authorized_remote_node_key_toml(
         terms,
         node_signing_key,
         WildcardPolicy::Reject,
-        AuthorizedKeySubject::RemoteNode { origin_site_id },
+        subject,
     )?;
     let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
     let _lock = directory.lock_exclusive()?;

@@ -3273,6 +3273,48 @@ mod tests {
     }
 
     #[test]
+    fn init_refuses_to_repin_a_revoked_official_signer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let opts = make_opts(&state, tmp.path());
+        run_init(&opts).expect("first init");
+
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(
+            &ryeos_engine::roots::RuntimeRoot::new(state.clone()).node_signing_key_path(),
+        )
+        .unwrap();
+        {
+            let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+                &ryeos_node_runtime::state_lock::default_lock_path(&state),
+            )
+            .unwrap();
+            crate::trust_registry::apply_change(
+                &state,
+                &lock,
+                &crate::trust_registry::Actor {
+                    node_key: node.signing_key(),
+                    operator: "op",
+                    request_digest: &"a".repeat(64),
+                },
+                &crate::trust_registry::Change::Revoke {
+                    fingerprint: OFFICIAL_PUBLISHER_FP.to_owned(),
+                },
+            )
+            .expect("revoke the official signer");
+        }
+
+        let error = format!("{:#}", run_init(&opts).expect_err("init must refuse"));
+        assert!(error.contains("trust_signer_revoked"), "{error}");
+        assert!(error.contains(OFFICIAL_PUBLISHER_FP), "{error}");
+        let registry = TrustStore::load_node_registry(&state).unwrap();
+        assert_eq!(
+            registry.signer(OFFICIAL_PUBLISHER_FP).unwrap().status,
+            ryeos_engine::trust::SignerStatus::Revoked,
+            "the refusal must leave the revocation in place"
+        );
+    }
+
+    #[test]
     fn run_init_records_the_selected_host_class_in_the_binding_and_the_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");

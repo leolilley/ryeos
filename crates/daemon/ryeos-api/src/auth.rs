@@ -96,7 +96,7 @@ static REPLAY_GUARD: LazyLock<Mutex<ReplayGuard>> =
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-struct AuthorizedKey {
+pub(crate) struct AuthorizedKey {
     public_key: VerifyingKey,
     scopes: Vec<String>,
     owner: String,
@@ -334,6 +334,53 @@ pub(crate) fn forwarding_request_content_hash(
     lillux::cas::sha256_hex(string_to_sign.as_bytes())
 }
 
+/// Check that `forwarding_signature` over `content_hash` was made by an
+/// admitted `remote_node` key for `forwarding_site_id` that holds the
+/// forwarded-operator attestation scope. Returns the forwarding node's
+/// fingerprint and its grant. The caller builds `content_hash` for its own
+/// subject, so request authentication and admission claims share one rule.
+pub(crate) fn verify_source_node_cosignature(
+    state: &AppState,
+    forwarding_key_id: &str,
+    forwarding_site_id: &str,
+    forwarding_signature: &str,
+    content_hash: &str,
+) -> Result<(String, AuthorizedKey), String> {
+    let forwarding_fingerprint = forwarding_key_id
+        .strip_prefix("fp:")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "invalid forwarding key ID format".to_string())?;
+    let forwarding_key = load_authorized_key(
+        forwarding_fingerprint,
+        &state.config.authorized_keys_dir,
+        &state.identity,
+    )
+    .map_err(|error| format!("untrusted forwarding node: {error:#}"))?;
+    if forwarding_key.principal_class != AuthorizedKeyPrincipalClass::RemoteNode {
+        return Err("forwarding proof must be signed by an admitted remote_node".into());
+    }
+    if !forwarding_key
+        .scopes
+        .iter()
+        .any(|scope| scope == ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE)
+    {
+        return Err("forwarding-node grant lacks forwarded-operator attestation authority".into());
+    }
+    if forwarding_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
+        return Err("forwarding-node grant does not match the asserted source site".into());
+    }
+    let forwarding_sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(forwarding_signature)
+        .map_err(|_| "invalid forwarding signature encoding".to_string())?;
+    let forwarding_sig = Signature::from_slice(&forwarding_sig_bytes)
+        .map_err(|_| "invalid forwarding signature".to_string())?;
+    forwarding_key
+        .public_key
+        .verify(content_hash.as_bytes(), &forwarding_sig)
+        .map_err(|_| "invalid forwarding signature".to_string())?;
+    Ok((forwarding_fingerprint.to_owned(), forwarding_key))
+}
+
 pub(crate) fn verify_request(
     state: &AppState,
     method: &str,
@@ -510,34 +557,6 @@ pub(crate) fn verify_request(
                     "source-node forwarding site does not match the remote_principal grant".into(),
                 );
             }
-            let forwarding_fingerprint = forwarding_key_id
-                .strip_prefix("fp:")
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| "invalid forwarding key ID format".to_string())?;
-            let forwarding_key = load_authorized_key(
-                forwarding_fingerprint,
-                &state.config.authorized_keys_dir,
-                &state.identity,
-            )
-            .map_err(|error| format!("untrusted forwarding node: {error:#}"))?;
-            if forwarding_key.principal_class != AuthorizedKeyPrincipalClass::RemoteNode {
-                return Err("forwarding proof must be signed by an admitted remote_node".into());
-            }
-            if !forwarding_key.scopes.iter().any(|scope| {
-                scope == ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE
-            }) {
-                return Err(
-                    "forwarding-node grant lacks forwarded-operator attestation authority".into(),
-                );
-            }
-            if forwarding_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
-                return Err("forwarding-node grant does not match the asserted source site".into());
-            }
-            let forwarding_sig_bytes = base64::engine::general_purpose::STANDARD
-                .decode(forwarding_signature)
-                .map_err(|_| "invalid forwarding signature encoding".to_string())?;
-            let forwarding_sig = Signature::from_slice(&forwarding_sig_bytes)
-                .map_err(|_| "invalid forwarding signature".to_string())?;
             let forwarding_content_hash = forwarding_request_content_hash(
                 method,
                 &canon,
@@ -550,15 +569,18 @@ pub(crate) fn verify_request(
                 forwarding_key_id,
                 forwarding_site_id,
             );
-            forwarding_key
-                .public_key
-                .verify(forwarding_content_hash.as_bytes(), &forwarding_sig)
-                .map_err(|_| "invalid forwarding signature".to_string())?;
+            let (forwarding_fingerprint, forwarding_key) = verify_source_node_cosignature(
+                state,
+                forwarding_key_id,
+                forwarding_site_id,
+                forwarding_signature,
+                &forwarding_content_hash,
+            )?;
             (
                 Some(forwarding_site_id.to_string()),
                 Some(
                     ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
-                        source_node_fingerprint: forwarding_fingerprint.to_string(),
+                        source_node_fingerprint: forwarding_fingerprint,
                         source_node_grant_hash: forwarding_key.source_file_hash,
                         delegation_digest: None,
                     },

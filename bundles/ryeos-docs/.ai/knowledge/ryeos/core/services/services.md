@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:05:09Z:617e06e7ec275b73d54f201364a9a2afd79a66f746a39e8c30a2a06c1ca1efbe:g2sRk5c7CFztNbsXKm7JsLAUSwv/qypztm/y3ImeGLcaCjlSoHGQ0e2Kj3MAr4k2SoXmcoRbrbXXVgUbMEzlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:57:19Z:e8dcfcfe144aa54df45b0cb1d4c43c7f1c9b3e837caaa5f3cbc30e287be1450c:WzNaml8vPSws347FEh0oYby2bEmeiF5FdatVtledBSldKn1tCCdGJLh/6g/BcVrjUDFFJfHUCqh8n6sFOX+hAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -97,18 +97,36 @@ Admission token files are target-node-local control-plane material, not
 execution credentials. Shape:
 
 ```toml
-version = 1
+version = 2
 token_hash = "sha256-hex-of-token"
 label = "optional-default-label"
 scopes = ["ryeos.execute.service.threads/list"]
 expires_at_unix = 1767225600
+class = "remote_principal"        # local_client | remote_node | remote_principal
+origin_site_id = "site:home"      # remote_principal only
+grant_lifetime_secs = 86400       # optional; bounded by the authorization policy
 ```
+
+The minted grant takes the token's class and origin site, the claim's scopes,
+and an expiry bounded by the node's signed authorization policy. Its
+`authorized_by` is the claimant and the digest of its signed claim, and its
+`granted_by` names the token. Tokens are a stored format with no reader for
+older versions: a token of any other version is refused with
+`admission_token_stale`, and the cure is to mint a new one.
 
 The claim signature covers:
 
 ```text
-ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}\n{sorted_scopes_csv}\n{signed_at_unix}\n{nonce}
+ryeos-admission-claim-v3\n{target_node_principal_id}\n{token_hash}\n{principal_class}\n{public_key}\n{origin_site_id_or_empty}\n{sorted_scopes_csv}\n{signed_at_unix}\n{nonce}
 ```
+
+A `remote_principal` claim also carries `forwarding_key_id` and
+`forwarding_signature`: the co-signature of an admitted `remote_node` of the
+token's origin site over the forwarded-request hash of the claim, which
+includes the principal's own signature. A claim of the wrong class, for the
+wrong origin site, or without a valid co-signature is refused with
+`admission_class_mismatch`, `admission_origin_site_mismatch`,
+`admission_cosignature_missing` or `admission_cosignature_invalid`.
 
 ## Object Services
 

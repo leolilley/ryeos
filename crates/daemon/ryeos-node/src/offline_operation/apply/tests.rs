@@ -14,7 +14,9 @@ use super::*;
 use crate::offline_operation::contract::genesis_ledger_head;
 use crate::offline_operation::contract::{MAX_REQUEST_BYTES, SignedRefusal};
 use crate::offline_operation::envelope::authorized_keys_dir;
-use crate::offline_operation::facts::{FACT_POLICY_GENERATION, FACT_RESTART_INHIBITION};
+use crate::offline_operation::facts::{
+    FACT_POLICY_GENERATION, FACT_RESTART_INHIBITION, FACT_TRUST_REGISTRY,
+};
 use crate::offline_operation::host::BareHost;
 
 struct Fixture {
@@ -780,6 +782,66 @@ fn a_changed_fact_refuses_the_request() {
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::PreconditionFailed);
     assert_eq!(fx.ledger().last_sequence, 0);
+}
+
+/// A `node.trust.pin` body for `key`, pinned to the node's present facts, and
+/// the trust document it names as its `signer` input.
+fn trust_pin_body(fx: &Fixture, key: &SigningKey) -> (RequestBody, Vec<u8>) {
+    let document = ryeos_engine::trust::PublisherTrustDoc {
+        public_key: format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes())
+        ),
+        fingerprint: fingerprint(key),
+        owner: "stale-registry-test".to_owned(),
+    }
+    .to_toml()
+    .into_bytes();
+    let mut body = fx.body(
+        "node.trust.pin",
+        json!({ "role": "project_author", "spaces": [], "kinds": [], "projects": ["/srv/p"] }),
+    );
+    body.inputs
+        .insert("signer".into(), lillux::sha256_hex(&document));
+    (body, document)
+}
+
+#[test]
+fn a_trust_request_pinned_to_an_older_registry_is_refused() {
+    let fx = fixture();
+    fx.node
+        .write_public_identity(&ryeos_engine::trust::node_public_identity_path(fx.path()))
+        .unwrap();
+    let first = SigningKey::generate(&mut rand::rngs::OsRng);
+    let second = SigningKey::generate(&mut rand::rngs::OsRng);
+    let before = fx.facts()[FACT_TRUST_REGISTRY].clone();
+
+    let (body, document) = trust_pin_body(&fx, &first);
+    fx.drop_input(&document);
+    fx.drop_request(&fx.sign(body));
+    assert_eq!(fx.run().applied.len(), 1, "the first pin applies");
+    assert_ne!(
+        fx.facts()[FACT_TRUST_REGISTRY],
+        before,
+        "pinning changes the registry digest"
+    );
+
+    // A request that still pins the registry as it was before that change.
+    let (mut stale, document) = trust_pin_body(&fx, &second);
+    stale
+        .precondition
+        .insert(FACT_TRUST_REGISTRY.into(), before);
+    fx.drop_input(&document);
+    fx.drop_request(&fx.sign(stale));
+    fx.run();
+
+    assert_eq!(fx.only_refusal(), RefusalReason::PreconditionFailed);
+    let registry = ryeos_engine::trust::TrustStore::load_node_registry(fx.path()).unwrap();
+    assert!(registry.signer(&fingerprint(&first)).is_some());
+    assert!(
+        registry.signer(&fingerprint(&second)).is_none(),
+        "a stale request must not change the registry"
+    );
 }
 
 #[test]
