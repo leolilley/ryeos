@@ -424,6 +424,19 @@ fn install(
         queue: routes,
         _listener: listener,
     });
+    // Give the seat back as the page goes away, so a reload resumes it. The
+    // relinquish names this producer's own control, learned once now.
+    wasm_bindgen_futures::spawn_local(running.runtime.learn_relinquish_basis());
+    let relinquish = running.runtime.unload_relinquish();
+    running.unload = ryeos_client_runtime::platform::web::on_unload(move || match relinquish() {
+        Ok((path, body)) => {
+            ryeos_client_runtime::platform::web::send_outliving_page(path, &body);
+        }
+        Err(reason) => ryeos_client_runtime::platform::web::console_note(&format!(
+            "RyeOS: the seat was not given back as the page closed: {reason}"
+        )),
+    })
+    .ok();
     Ok(running)
 }
 
@@ -443,6 +456,9 @@ pub struct Running {
     documents_generation: u64,
     #[cfg(target_arch = "wasm32")]
     routes: Option<Routes>,
+    /// Gives the seat back when the page unloads.
+    #[cfg(target_arch = "wasm32")]
+    unload: Option<ryeos_client_runtime::platform::web::UnloadListener>,
 }
 
 impl Running {
@@ -463,6 +479,8 @@ impl Running {
             documents_generation: 0,
             #[cfg(target_arch = "wasm32")]
             routes: None,
+            #[cfg(target_arch = "wasm32")]
+            unload: None,
         }
     }
 

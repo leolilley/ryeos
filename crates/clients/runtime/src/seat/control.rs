@@ -209,6 +209,77 @@ pub async fn relinquish_claimed_seat<P: Platform>(
     relinquish_observed(platform, producer, coordinate, observation).await
 }
 
+/// Learn this producer's own control predecessor, for a relinquish sent as
+/// the page goes away. Best effort: nothing is recorded unless the observed
+/// active writer is exactly this producer, still current when the answer
+/// comes back.
+pub async fn learn_relinquish_basis<P: Platform>(shared: &Rc<SeatShared<P>>) {
+    let Some(producer) = shared.current_producer() else {
+        return;
+    };
+    let (coordinate, root) = {
+        let delivery = shared.delivery.borrow();
+        let (Some(coordinate), Some(root)) = (delivery.coordinate.clone(), delivery.root.clone())
+        else {
+            return;
+        };
+        (coordinate, root)
+    };
+    let Ok(observation) = observe_producer(&*shared.platform, &coordinate, &root).await else {
+        return;
+    };
+    let ours = matches!(
+        &observation.producer,
+        UiObservedPresentationProducer::Active { producer_incarnation }
+            if *producer_incarnation == producer.producer_incarnation
+    );
+    if ours && shared.is_current(&producer) {
+        *shared.relinquish_basis.borrow_mut() = Some((producer, observation.control_predecessor));
+    }
+}
+
+/// The relinquish to send as the page goes away, encoded, when this producer
+/// can give the seat back without awaiting anything: it is current, nothing
+/// it wrote is unsettled, and it learned its own control predecessor. The
+/// answer is never seen; a reload that finds the seat relinquished resumes
+/// it, and one that finds it still held offers the takeover.
+pub fn unload_relinquish<P: Platform>(shared: &SeatShared<P>) -> Result<String, &'static str> {
+    let producer = shared.current_producer().ok_or("no current producer")?;
+    let coordinate = {
+        let delivery = shared.delivery.borrow();
+        if delivery.pending.is_some() {
+            return Err("an append is unsettled");
+        }
+        if delivery.blocked {
+            return Err("delivery is blocked");
+        }
+        delivery.coordinate.clone().ok_or("no seat coordinate")?
+    };
+    let predecessor = {
+        let basis = shared.relinquish_basis.borrow();
+        let (owner, predecessor) = basis.as_ref().ok_or("its own control was not learned")?;
+        if *owner != producer {
+            return Err("the learned control names another producer");
+        }
+        predecessor.clone()
+    };
+    let mut request = UiSeatControlRequest::Relinquish {
+        schema: 2,
+        operation_id: String::new(),
+        presentation_id: producer.presentation_id.clone(),
+        thread_id: producer.thread_id.clone(),
+        chain_root_id: coordinate.chain_root_id,
+        predecessor,
+        intent_nonce: random_uuid(&*shared.platform),
+        producer_incarnation: producer.producer_incarnation,
+    };
+    request
+        .assign_identity()
+        .map_err(|_| "the relinquish identity was refused")?;
+    let body = serde_json::to_value(&request).map_err(|_| "the relinquish did not encode")?;
+    encode_control(&body).map_err(|_| "the relinquish did not encode")
+}
+
 /// Relinquish the current producer after the seat has settled.
 ///
 /// Local mutation is fenced before the observation is awaited, so nothing is

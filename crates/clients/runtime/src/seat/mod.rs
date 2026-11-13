@@ -28,7 +28,9 @@ use std::time::Duration;
 
 use ryeos_client_base::ui::SeatEvent;
 use ryeos_client_base::ui::binding::UiPresentationProducer;
-use ryeos_client_base::ui::{UiBindingAttachmentCoordinate, UiSeatControlRequest};
+use ryeos_client_base::ui::{
+    UiBindingAttachmentCoordinate, UiSeatControlPredecessor, UiSeatControlRequest,
+};
 use serde_json::Value;
 
 use crate::codec::exact_u64;
@@ -51,7 +53,10 @@ pub use bootstrap::{
     read_session, replace_session_in_place, reproof_seat, session_unchanged,
 };
 pub(crate) use control::{control_post, encode_control};
-pub use control::{observe_producer, relinquish_claimed_seat, relinquish_current, touch_seat};
+pub use control::{
+    learn_relinquish_basis, observe_producer, relinquish_claimed_seat, relinquish_current,
+    touch_seat, unload_relinquish,
+};
 
 /// Frames of a platform's history streams.
 pub type Frames<P> = <<P as Platform>::Transport as Transport>::Frames;
@@ -420,6 +425,11 @@ pub struct SeatShared<P: Platform> {
     /// It is still fenceable, and it stays here while the relinquishment's
     /// outcome is unresolved.
     pub relinquishing: RefCell<Option<UiPresentationProducer>>,
+    /// The control predecessor this producer observed as its own after it
+    /// was installed: what a relinquish names when there is no time to
+    /// observe, as the page goes away. Keyed by its producer, so it never
+    /// names another writer's control.
+    pub relinquish_basis: RefCell<Option<(UiPresentationProducer, UiSeatControlPredecessor)>>,
 }
 
 impl<P: Platform> SeatShared<P> {
@@ -430,6 +440,7 @@ impl<P: Platform> SeatShared<P> {
             delivery: RefCell::new(SeatDelivery::default()),
             handoff: RefCell::new(None),
             relinquishing: RefCell::new(None),
+            relinquish_basis: RefCell::new(None),
         })
     }
 

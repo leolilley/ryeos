@@ -814,6 +814,25 @@ impl<P: Platform + 'static> ClientRuntime<P> {
             })
     }
 
+    /// Learn this producer's own control predecessor, so the seat can be given
+    /// back as the page goes away. Runs on its own; a failure only means the
+    /// next page offers a takeover instead of resuming.
+    pub fn learn_relinquish_basis(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let shared = self.shared.clone();
+        async move { crate::seat::learn_relinquish_basis(&shared).await }
+    }
+
+    /// A hook for the page going away: the path and encoded relinquish to
+    /// send, or why the seat cannot be given back without awaiting anything.
+    pub fn unload_relinquish(
+        &self,
+    ) -> impl Fn() -> Result<(&'static str, String), &'static str> + 'static {
+        let shared = self.shared.clone();
+        move || {
+            crate::seat::unload_relinquish(&shared).map(|body| (crate::api::SEAT_CLOSE_PATH, body))
+        }
+    }
+
     /// Whether a presentation was prepared, so the writer can be inspected.
     pub fn has_prepared_presentation(&self) -> bool {
         self.shared.delivery.borrow().coordinate.is_some()

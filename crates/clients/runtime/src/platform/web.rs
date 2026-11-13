@@ -79,6 +79,74 @@ pub fn on_route_change(f: impl Fn(String) + 'static) -> Result<RouteListener, Ru
     Ok(RouteListener { callback })
 }
 
+/// A `beforeunload` listener, removed when dropped.
+pub struct UnloadListener {
+    callback: wasm_bindgen::closure::Closure<dyn FnMut()>,
+}
+
+impl Drop for UnloadListener {
+    fn drop(&mut self) {
+        let _ = window().remove_event_listener_with_callback(
+            "beforeunload",
+            self.callback.as_ref().unchecked_ref(),
+        );
+    }
+}
+
+/// Call `f` as the page is about to unload: a reload, a close or a
+/// navigation away. `beforeunload` runs before `pagehide`, whose windowing
+/// handler ends the app; it does not run for a page kept in the back-forward
+/// cache. `f` never asks the user to stay.
+pub fn on_unload(f: impl Fn() + 'static) -> Result<UnloadListener, RuntimeError> {
+    let callback = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(f);
+    window()
+        .add_event_listener_with_callback("beforeunload", callback.as_ref().unchecked_ref())
+        .map_err(|error| {
+            RuntimeError::BindingRequest(format!("unload listener: {}", js_message(&error)))
+        })?;
+    Ok(UnloadListener { callback })
+}
+
+/// POST `body` to `path` so that it outlives the page (`keepalive`). Its
+/// answer is never read: what it did is observed by whoever comes next.
+pub fn send_outliving_page(path: &str, body: &str) {
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_credentials(web_sys::RequestCredentials::SameOrigin);
+    init.set_redirect(web_sys::RequestRedirect::Error);
+    // `keepalive` lets the request outlive the page; this web-sys has no
+    // setter for it.
+    let _ = Reflect::set(&init, &JsValue::from_str("keepalive"), &JsValue::TRUE);
+    if let Ok(headers) = web_sys::Headers::new() {
+        let _ = headers.set("Accept", "application/json");
+        let _ = headers.set("Content-Type", "application/json");
+        init.set_headers(&headers);
+    }
+    init.set_body(&JsValue::from_str(body));
+    match web_sys::Request::new_with_str_and_init(path, &init) {
+        Ok(request) => {
+            // The promise settles after the page is gone; nothing awaits it.
+            let _ = window().fetch_with_request(&request);
+        }
+        Err(error) => console_note(&format!(
+            "RyeOS: the seat was not given back as the page closed: {}",
+            js_message(&error)
+        )),
+    }
+}
+
+/// Note `message` in the browser console, for an operator reading it after
+/// the fact.
+pub fn console_note(message: &str) {
+    let console = Reflect::get(&js_sys::global(), &JsValue::from_str("console"));
+    if let Ok(console) = console
+        && let Ok(info) = Reflect::get(&console, &JsValue::from_str("info"))
+        && let Some(info) = info.dyn_ref::<js_sys::Function>()
+    {
+        let _ = info.call1(&console, &JsValue::from_str(message));
+    }
+}
+
 /// The browser's side of the effects the runtime cannot perform itself:
 /// location hash navigation, clipboard copying, opening an external URL and
 /// navigating to a successor session's launch URL. Independent presentation
