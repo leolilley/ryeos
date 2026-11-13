@@ -541,12 +541,14 @@ async fn dispatch_managed_subprocess(
         );
         credential_names.sort();
         credential_names.dedup();
-        let credentials_ready = credential_names.is_empty();
-        let credential_readiness = if credentials_ready {
-            "required_none"
-        } else {
-            "not_checked"
-        };
+        let credential_presence = report_preview_secret_presence(
+            &credential_names,
+            acting_principal,
+            request.provenance.project_authority(),
+            state,
+        )?;
+        let (credentials_ready, credential_readiness) =
+            preview_credential_readiness(&credential_names, &credential_presence);
         let project_result_ready =
             crate::execution::launch_preparation::project_result_requirement_satisfied(
                 &launch_contract,
@@ -601,10 +603,7 @@ async fn dispatch_managed_subprocess(
                 "execution_dependencies": dependencies.execution_dependencies,
                 "content_dependencies": dependencies.content_dependencies,
                 "environment_contributions": dependencies.environment_contributions,
-                "credential_readiness": {
-                    "status": credential_readiness,
-                    "required_count": credential_names.len(),
-                },
+                "credential_readiness": credential_readiness,
                 "admission_ready": runtime_preparation_ready,
             },
         }));
@@ -657,6 +656,73 @@ async fn dispatch_managed_subprocess(
             .map_err(|error| DispatchError::Internal(error.into()))?;
     }
     Ok(response)
+}
+
+/// Names-only vault check for the validate-only preview, over the same secret
+/// sources, recipient and project authority the delivering launch uses.
+/// Values are read inside the vault helper, zeroized and discarded; only
+/// per-name presence leaves it.
+fn report_preview_secret_presence(
+    names: &[String],
+    recipient_principal: &str,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    state: &AppState,
+) -> Result<Vec<(String, bool)>, DispatchError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    ryeos_app::vault::report_secret_presence(
+        &state.secret_sources(),
+        ryeos_app::vault::SecretRecipient {
+            principal: recipient_principal,
+        },
+        names,
+        project_authority,
+    )
+    .map_err(|error| DispatchError::LaunchPreparationFailed {
+        code: "launch_secret_check_failed".to_owned(),
+        message: error.to_string(),
+        classification: "internal".to_owned(),
+        binding: None,
+        details: Box::new(std::collections::BTreeMap::new()),
+    })
+}
+
+/// The preview's `credential_readiness` view: `required_none` when nothing is
+/// declared, `present` when the vault would deliver every name, `missing`
+/// with the undelivered names otherwise. A name absent from the presence
+/// report counts as missing.
+fn preview_credential_readiness(names: &[String], presence: &[(String, bool)]) -> (bool, Value) {
+    if names.is_empty() {
+        return (
+            true,
+            json!({ "status": "required_none", "required_count": 0 }),
+        );
+    }
+    let missing: Vec<&str> = names
+        .iter()
+        .filter(|name| {
+            !presence
+                .iter()
+                .any(|(candidate, present)| *present && candidate == *name)
+        })
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        (
+            true,
+            json!({ "status": "present", "required_count": names.len() }),
+        )
+    } else {
+        (
+            false,
+            json!({
+                "status": "missing",
+                "required_count": names.len(),
+                "missing": missing,
+            }),
+        )
+    }
 }
 
 fn validate_managed_effective_program(
@@ -1363,6 +1429,54 @@ mod runner_error_tests {
         };
         assert_eq!(item_ref, "tool:test/run");
         assert_eq!(detail, "spawn item: lillux refused exact mount authority");
+    }
+
+    #[test]
+    fn preview_reports_present_credentials_ready() {
+        let names = vec!["API_TOKEN".to_owned(), "OTHER_KEY".to_owned()];
+        let presence = vec![
+            ("API_TOKEN".to_owned(), true),
+            ("OTHER_KEY".to_owned(), true),
+        ];
+        let (ready, view) = preview_credential_readiness(&names, &presence);
+        assert!(ready);
+        assert_eq!(
+            view,
+            serde_json::json!({ "status": "present", "required_count": 2 })
+        );
+    }
+
+    #[test]
+    fn preview_reports_missing_credential_names() {
+        let names = vec![
+            "API_TOKEN".to_owned(),
+            "OTHER_KEY".to_owned(),
+            "UNREPORTED".to_owned(),
+        ];
+        let presence = vec![
+            ("API_TOKEN".to_owned(), true),
+            ("OTHER_KEY".to_owned(), false),
+        ];
+        let (ready, view) = preview_credential_readiness(&names, &presence);
+        assert!(!ready);
+        assert_eq!(
+            view,
+            serde_json::json!({
+                "status": "missing",
+                "required_count": 3,
+                "missing": ["OTHER_KEY", "UNREPORTED"],
+            })
+        );
+    }
+
+    #[test]
+    fn preview_without_declared_secrets_keeps_required_none_shape() {
+        let (ready, view) = preview_credential_readiness(&[], &[]);
+        assert!(ready);
+        assert_eq!(
+            view,
+            serde_json::json!({ "status": "required_none", "required_count": 0 })
+        );
     }
 
     #[test]
