@@ -54,6 +54,13 @@ pub async fn handle(
         .filter(|cursor| cursor.spec_hash == spec.spec_hash);
     let now = lillux::time::timestamp_millis();
     let plan = planning::plan_schedule(&spec, last_fire.as_ref(), now);
+    let paused_reason = if spec.enabled {
+        None
+    } else {
+        super::scheduler_register::schedule_paused_reason(&scheduler, &spec)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
+    };
+    let lifetime_last_boundary = planning::lifetime_horizon(&spec).map(|(last, _)| last);
 
     let last_fire_json = last_fire.as_ref().map(|f| {
         serde_json::json!({
@@ -102,6 +109,14 @@ pub async fn handle(
         "decision": plan.decision,
         "decision_reason": plan.decision_reason,
         "total_fires": total_fires,
+        "paused_reason": paused_reason,
+        "lifetime": {
+            "max_fires": spec.execution.max_fires,
+            "expires_at": spec.execution.expires_at,
+            "last_admitted_boundary": lifetime_last_boundary,
+            "exhausted": plan.lifetime_exhausted,
+        },
+        "limits": spec.execution.limits,
     }))
 }
 

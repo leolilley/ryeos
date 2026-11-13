@@ -60,7 +60,7 @@ pub async fn handle(
         }));
     }
 
-    let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, false)
+    let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, false, None)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     scheduler_db
         .upsert_spec(&rec)

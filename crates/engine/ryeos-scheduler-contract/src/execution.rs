@@ -6,15 +6,35 @@ use ryeos_engine::execution_contract::{
     ProjectExecutionPolicy,
 };
 use ryeos_engine::principal_contract::{AuthenticatedGrantAuthority, AuthorizedKeyPrincipalClass};
+use ryeos_engine::scheduled_fire_context::ScheduleFireLimits;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The largest `max_fires` a schedule may declare. Counting boundaries for a
+/// cron expression walks them from registration, so the bound keeps every
+/// planning pass to the same iteration cap the cron planner already uses.
+pub const SCHEDULE_MAX_FIRES_LIMIT: u32 = 10_000;
+
+/// Admitted execution authority for a schedule, and the bounds its owner put
+/// on that authority. The bounds are optional; an absent bound is no bound,
+/// and omits the key so specs signed before the bounds existed keep their
+/// exact shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleExecution {
     pub authority: ScheduleExecutionAuthority,
     pub capabilities: Vec<String>,
     pub policy: ExecutionPolicy,
+    /// Per-fire ceiling, clamped into each fire under the item and node caps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ScheduleFireLimits>,
+    /// Lifetime bound: the schedule admits at most this many boundaries,
+    /// counted from registration whether each one ran or was skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fires: Option<u32>,
+    /// Lifetime bound: no boundary at or after this RFC 3339 instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,8 +131,46 @@ pub fn validate_schedule_ref_bindings(ref_bindings: &BTreeMap<String, String>) -
     Ok(())
 }
 
+/// Validate a schedule's optional per-fire ceiling and lifetime bounds. The
+/// register request, project declarations and the signed spec share this one
+/// check.
+pub fn validate_schedule_bounds(
+    limits: Option<&ScheduleFireLimits>,
+    max_fires: Option<u32>,
+    expires_at: Option<&str>,
+) -> Result<()> {
+    if let Some(limits) = limits {
+        limits.validate()?;
+    }
+    if let Some(max_fires) = max_fires
+        && !(1..=SCHEDULE_MAX_FIRES_LIMIT).contains(&max_fires)
+    {
+        anyhow::bail!(
+            "schedule max_fires must be between 1 and {SCHEDULE_MAX_FIRES_LIMIT}, got {max_fires}"
+        );
+    }
+    if let Some(expires_at) = expires_at
+        && crate::parse_iso_ts(expires_at).is_none()
+    {
+        anyhow::bail!("schedule expires_at must be an RFC 3339 timestamp, got {expires_at:?}");
+    }
+    Ok(())
+}
+
+impl ScheduleExecution {
+    /// The `expires_at` bound in milliseconds since the epoch.
+    pub fn expires_at_ms(&self) -> Option<i64> {
+        self.expires_at.as_deref().and_then(crate::parse_iso_ts)
+    }
+}
+
 pub fn validate_schedule_execution(execution: &ScheduleExecution) -> Result<()> {
     execution.policy.validate()?;
+    validate_schedule_bounds(
+        execution.limits.as_ref(),
+        execution.max_fires,
+        execution.expires_at.as_deref(),
+    )?;
     if execution.policy.ownership != ExecutionOwnership::DaemonOwned
         || execution.policy.recovery != ExecutionRecovery::RestartRecoverable
         || execution.policy.response != ExecutionResponse::Accepted
@@ -239,7 +297,55 @@ mod tests {
             },
             capabilities: vec!["ryeos.execute.directive.test/job".into()],
             policy,
+            limits: None,
+            max_fires: None,
+            expires_at: None,
         }
+    }
+
+    #[test]
+    fn absent_bounds_keep_the_signed_wire_shape() {
+        let value = execution(ExecutionPolicy::local_live(ExecutionResponse::Accepted));
+        let wire = serde_json::to_value(&value).unwrap();
+        for key in ["limits", "max_fires", "expires_at"] {
+            assert!(wire.get(key).is_none(), "{key} must be omitted when absent");
+        }
+        let decoded: ScheduleExecution = serde_json::from_value(wire).unwrap();
+        assert!(decoded.limits.is_none() && decoded.max_fires.is_none());
+    }
+
+    #[test]
+    fn bounds_refuse_zero_out_of_range_and_unparseable_values() {
+        let mut value = execution(ExecutionPolicy::local_live(ExecutionResponse::Accepted));
+        value.max_fires = Some(3);
+        value.expires_at = Some("2030-01-01T00:00:00Z".into());
+        value.limits = Some(ScheduleFireLimits {
+            turns: Some(4),
+            ..ScheduleFireLimits::default()
+        });
+        validate_schedule_execution(&value).unwrap();
+        assert_eq!(
+            value.expires_at_ms(),
+            crate::parse_iso_ts("2030-01-01T00:00:00Z")
+        );
+
+        for max_fires in [0, SCHEDULE_MAX_FIRES_LIMIT + 1] {
+            let mut invalid = value.clone();
+            invalid.max_fires = Some(max_fires);
+            assert!(
+                validate_schedule_execution(&invalid).is_err(),
+                "{max_fires}"
+            );
+        }
+        let mut invalid = value.clone();
+        invalid.expires_at = Some("next tuesday".into());
+        assert!(validate_schedule_execution(&invalid).is_err());
+        let mut invalid = value;
+        invalid.limits = Some(ScheduleFireLimits {
+            turns: Some(0),
+            ..ScheduleFireLimits::default()
+        });
+        assert!(validate_schedule_execution(&invalid).is_err());
     }
 
     #[test]

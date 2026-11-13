@@ -37,6 +37,9 @@ pub fn detect_misfires_before(
     let mut missed = Vec::new();
     let mut cursor = anchor;
     let mut scanned = 0usize;
+    // Boundaries past the schedule's lifetime bounds do not exist, so they are
+    // never missed either.
+    let horizon_exclusive = super::planning::clamp_to_lifetime_exclusive(spec, horizon_exclusive);
 
     if cursor >= horizon_exclusive {
         return Ok(missed);
@@ -308,6 +311,9 @@ mod tests {
                 policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
                     ryeos_engine::execution_contract::ExecutionResponse::Accepted,
                 ),
+                limits: None,
+                max_fires: None,
+                expires_at: None,
             },
         }
     }
@@ -480,6 +486,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(missed, vec![1780458300000]); // 03:45
+    }
+
+    #[test]
+    fn detect_misfires_never_reports_boundaries_past_the_lifetime() {
+        let db = crate::test_native::TestSchedulerDb::open();
+        let mut spec = make_cron_spec(1780457760000); // 2026-06-03T03:36:00Z
+        spec.execution.expires_at = Some("2026-06-03T03:45:00Z".to_string());
+
+        let missed = detect_misfires_before(
+            &spec,
+            spec.registered_at,
+            1780458720000, // 03:52; startup reconcile horizon
+            &db,
+        )
+        .unwrap();
+
+        assert!(
+            missed.is_empty(),
+            "the 03:45 boundary is at the expiry instant and must not be admitted"
+        );
     }
 
     #[test]

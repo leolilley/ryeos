@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-05T01:24:38Z:b835dd67038b09681d4e7bf2bb0e5642c28eeb1cb964f968eb1d0381001bea22:B5ZpLprGmvaV0uVZnYyf7bwLXqDPbjWT+992ekWTApYLy9YrJXNhsG2GpPtz0ngdO562dg759iPFPusY7NVOAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T01:08:33Z:3d528865fa9a93c011c87c760dcc03badc3e349c755bc02b7d021600caf42c4f:3Opc+WrKTp3QfMVlBOsNvNURLh7GE2sWDZ9IW3MLSv3dz1/KQInk8sFq6MbWCCsUiJdloljBnQ0uDVASzCYdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - register
@@ -8,6 +8,9 @@ description: >-
   misfire_policy, overlap_policy, lateness_grace_secs, enabled, capabilities, and
   execution_policy;
   execution_policy is required and project_root is optional only for projectless execution.
+  Optional bounds: limits (a per-fire ceiling of turns, tokens, spend_usd, spawns,
+  depth, duration_seconds), max_fires and expires_at (an RFC 3339 instant). A schedule
+  that reaches max_fires or expires_at pauses itself.
 arguments:
 - name: params
   kind: json

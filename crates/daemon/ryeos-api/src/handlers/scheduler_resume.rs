@@ -58,7 +58,37 @@ pub async fn handle(
         }));
     }
 
-    let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, true)
+    // A schedule whose signed lifetime is used up would only be paused again
+    // on the timer's next pass; refuse instead, naming the bound. Extending
+    // the lifetime is a new registration.
+    let mut resumed = spec.clone();
+    resumed.enabled = true;
+    let last_fire = scheduler_db
+        .get_last_fire(&req.schedule_id)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+    if let Some(reason) = ryeos_scheduler::planning::plan_schedule(
+        &resumed,
+        last_fire.as_ref(),
+        lillux::time::timestamp_millis(),
+    )
+    .lifetime_exhausted
+    {
+        return Err(HandlerError::Structured {
+            code: "schedule_lifetime_exhausted".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "schedule_lifetime_exhausted",
+                "schedule_id": req.schedule_id,
+                "reason": reason,
+                "message": format!(
+                    "schedule {} cannot resume: its lifetime bound is reached ({reason}); register it again with a new bound",
+                    req.schedule_id
+                ),
+            }),
+        });
+    }
+
+    let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, true, None)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     scheduler_db
         .upsert_spec(&rec)

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-10T19:41:38Z:04d44fba6e7384629d93a91c6fae7cd2c464fc775d2dd963d20b00b6f8738785:gV89MS4cNEodYua+NFLvcyzKmXqLUiRQaAYGr/nKZ1TFakrdmvQTWc0SCaRti749NzavLRgwTZwHgtAA1F/qDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:08:33Z:7c0206890b5670fb7206f86fd3a8828a5d93fd1622338a348b94504e2bf7b396:e4frNSfX+bnC7/Yg3Lrw/sYt+wKw+uYX1gtoedqp1hkaTV86y6NMjIh29KKnzyHa5rNUJO213B2Fd3uI+rJwDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, scheduler, scheduling]
@@ -20,6 +20,15 @@ Services: `scheduler/register`, `scheduler/list`, `scheduler/deregister`, `sched
 be absent for projectless execution and present for both explicit
 `live_direct` and `pinned` project execution. No scheduling or execution-policy
 field is defaulted by the daemon.
+
+Three optional bounds are signed into the schedule's execution authority:
+`limits` (a per-fire ceiling clamped into each fire under the item and node
+caps), `max_fires` (at most that many boundaries from registration) and
+`expires_at` (no boundary at or after that RFC 3339 instant). When the lifetime
+bounds admit no further boundary, the scheduler pauses the schedule through
+the ordinary signed pause write and records `paused_reason`
+(`max_fires_reached` or `expired`); `scheduler/resume` then refuses with
+`schedule_lifetime_exhausted`.
 
 Registration seals the authenticated principal's current grant generation
 into the schedule authority. Every fire revalidates that exact grant and the
