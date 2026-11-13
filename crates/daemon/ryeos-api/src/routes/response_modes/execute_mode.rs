@@ -761,19 +761,20 @@ pub(crate) fn admit_host_direct_execution(
     else {
         return Ok(None);
     };
-    let (_, output) = engine
-        .effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+    // A root that does not resolve here is left to dispatch, which reports
+    // its own error and re-judges host access at launch. That stays fail
+    // closed: a host-direct launch whose authority was sealed confined is
+    // refused by the launch-time gate or the disabled-shape compile.
+    let Ok((_, output)) =
+        engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
             item_ref: root.clone(),
             expected_kind: Some(root.kind.clone()),
             project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
             subject_resolution_authority: provenance.subject_resolution_authority(),
         })
-        .map_err(|error| {
-            ryeos_executor::dispatch_error::DispatchError::InvalidRef(
-                root.to_string(),
-                error.to_string(),
-            )
-        })?;
+    else {
+        return Ok(None);
+    };
     let posture = execution
         .project_execution_posture(&output.composed.composed)
         .map_err(

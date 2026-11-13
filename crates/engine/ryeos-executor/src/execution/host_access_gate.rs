@@ -105,6 +105,35 @@ pub(crate) fn enforce_host_access(
     .map_err(refusal)
 }
 
+/// Require the sealed project authority to be true for a host process: a
+/// projectless execution, or a read-write live project sealed as
+/// `unconfined_host`. The execute route seals a host-direct root that way. A
+/// callback child inherits its parent's sealed authority, so on an enforced
+/// lane (a descriptor-rooted parent) a graph child is refused rather than run
+/// under a record that says it was confined.
+pub(crate) fn require_host_direct_project(
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+) -> Result<(), DispatchError> {
+    use ryeos_state::objects::{
+        ExecutionProjectAuthority, LiveFilesystemConfinement, LiveProjectAccess,
+    };
+    let honest = match provenance.project_authority() {
+        ExecutionProjectAuthority::Projectless { .. } => true,
+        ExecutionProjectAuthority::LiveProject { live_access, .. } => {
+            live_access.access == LiveProjectAccess::ReadWrite
+                && live_access.confinement == LiveFilesystemConfinement::UnconfinedHost
+        }
+        ExecutionProjectAuthority::PinnedGeneration { .. } => false,
+    };
+    if honest {
+        return Ok(());
+    }
+    Err(refusal(HostAccessRefusal::new(
+        HostAccessRefusal::PROJECT_REFUSED,
+        "a host-direct launch runs unconfined on the host, but its sealed project authority is pinned, read-only or confined (a child of a launch on an enforced lane inherits its parent's confinement); run it directly with a read-write live or projectless policy",
+    )))
+}
+
 /// Require a built plan to agree with the launch's admission: a host-direct
 /// plan only with its grant, pinned to the runtime the plan selected, and a
 /// confined plan never with one.

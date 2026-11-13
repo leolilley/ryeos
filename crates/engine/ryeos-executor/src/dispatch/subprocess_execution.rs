@@ -1059,6 +1059,9 @@ async fn dispatch_tool_subprocess(
         request,
         handler_context.as_ref(),
     )?;
+    if host_access.is_some() {
+        crate::execution::host_access_gate::require_host_direct_project(&request.provenance)?;
+    }
 
     if request.validate_only {
         let engine = ctx.engine.clone();

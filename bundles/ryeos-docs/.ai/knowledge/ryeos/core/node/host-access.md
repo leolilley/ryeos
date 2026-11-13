@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:27:19Z:220acb6bcb702b0cd7ad5e9cca26d30bc7bbfb217ac2b710debbbb34465bb0cc:5KhNraa6xlKxnzdCEaBbS/H1FxAuttaFEqjp6LDQ/H54gaxrVKUxUVDnuDksS3w2l8oTWOfBKJOtWjtsXpyHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:31:47Z:20eb05dbcb9f0722477a4913e94a4f9a8a603dc0440395cf0d70b9bfcf730ce0:Wfi2ui8RvWwX8AolMcJf74/XjPaZq1p2Di4j8u8GTFXnRf1JQMKcrtwhqndv4ARIPqTTGvrRPTxWFpA/OSNPAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, host-access, node-policy, operator]
@@ -80,7 +80,11 @@ host_access:
 - `origins` lists the launch roots that may reach the grant: `direct` (the
   operator runs it), `graph_child` (a node of a graph the operator rooted;
   the parent thread's profile must be one the tool kind lists) and `schedule`
-  (an operator schedule fire). `schedule` is never implied.
+  (an operator schedule fire). `schedule` is never implied. A graph child
+  inherits its parent's sealed project authority; on an enforced lane that
+  authority is confined, so the child is refused
+  (`host_access_project_refused`) rather than recorded as confined while it
+  runs on the host.
 - `host_env` names come from the **daemon's own boot environment**, not the
   caller's shell. Nothing else is inherited. Site Configs should use absolute
   paths. Secrets still arrive only through `required_secrets`.
@@ -177,7 +181,7 @@ Every refusal is a launch-policy error (HTTP 403) with a stable code:
 | `host_access_origin_not_granted` | The launch's origin is not in the grant's `origins` |
 | `host_access_containment_unavailable` | `scope_required`, but the lane has no qualified scope provider |
 | `host_access_signer_refused` | The item is unsigned or node-signed, or the grant's signer is not pinned |
-| `host_access_project_refused` | A pinned or read-only project policy |
+| `host_access_project_refused` | A pinned or read-only project policy, or a child whose inherited project authority is confined |
 
 ## Existing nodes
 
