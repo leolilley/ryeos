@@ -976,12 +976,12 @@ fn materialize_seed_node_policy_generation(
             selected_profile.name()
         );
     }
-    // Every fast-fixture node runs under its profile's local class.
+    // Every fast-fixture node runs under its profile's unconfined class.
     let mut profile = profile
         .for_host_class(FAST_FIXTURE_HOST_CLASS)
         .with_context(|| {
             format!(
-                "select the local class of profile {}",
+                "select the fixture host class of profile {}",
                 selected_profile.name()
             )
         })?;
@@ -1023,8 +1023,10 @@ fn materialize_seed_node_policy_generation(
     Ok(())
 }
 
-/// Host class every fast-fixture node is initialized under.
-const FAST_FIXTURE_HOST_CLASS: &str = "local";
+/// Host class every fast-fixture node is initialized under. Fixture tests
+/// judge behaviour other than the sandbox, so they run on the unconfined
+/// class; the enforced class needs a host that proves the sandbox.
+pub const FAST_FIXTURE_HOST_CLASS: &str = "local_unconfined";
 
 /// Author a profile source root for switching a fast-fixture node to
 /// `profile` through the real `ryeos node reset policy-generation`.

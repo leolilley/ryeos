@@ -2616,8 +2616,9 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
-    // Use the same policy loader as daemon and offline execution. Disabled is
-    // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
+    // Use the same policy loader as daemon and offline execution. A disabled
+    // lane warns: runs are unconfined. Enforced policy failures remain
+    // fail-closed.
     if initialized {
         let policy_path = config
             .app_root
@@ -4176,7 +4177,6 @@ fn node_policy_failure_detail(error: &anyhow::Error) -> serde_json::Value {
 }
 
 fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolicyInspection> {
-    use ryeos_core_tools::actions::doctor::{NA, OK};
     use ryeos_engine::isolation::IsolationMode;
 
     let runtime = ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)?;
@@ -4187,50 +4187,75 @@ fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolic
         (true, None) => "not_configured",
         (true, Some(_)) => "enforced_on_spawn",
     };
-    Ok(IsolationPolicyInspection {
-        detail: serde_json::json!({
-            "policy": runtime.source(),
-            "version": runtime.version(),
-            "mode": runtime.mode(),
-            "host_direct": inspection.host_direct,
-            "policy_digest": runtime.digest(),
-            "backend": inspection.backend,
-            "backend_status": inspection.backend.status,
-            "filesystem": inspection.filesystem,
-            "network": inspection.network,
-            "environment": inspection.environment,
-            "limits": inspection.limits,
-            "limit_enforcement": {
-                "open_files": {
-                    "configured": inspection.limits.open_files,
-                    "status": open_files_status,
-                    "runtime_mechanism": if enforced && inspection.limits.open_files.is_some() {
-                        Some("RLIMIT_NOFILE (installed before exec; spawn fails closed on error)")
-                    } else {
-                        None
-                    }
-                },
-                "captured_output": {
-                    "stdout_bytes": inspection.limits.stdout_bytes,
-                    "stderr_bytes": inspection.limits.stderr_bytes,
-                    "status": "enforced_while_draining",
-                    "runtime_mechanism": "bounded stdout/stderr retention with continued draining and workload termination on overflow",
-                },
-                "verified_artifacts": {
-                    "file_bytes": inspection.limits.verified_artifact_file_bytes,
-                    "total_bytes": inspection.limits.verified_artifact_total_bytes,
-                    "files": inspection.limits.verified_artifact_files,
-                    "status": if enforced { "enforced_on_materialization" } else { "inactive" },
-                    "runtime_mechanism": if enforced {
-                        Some("metadata/read caps plus synchronized per-runtime file and byte accounting")
-                    } else {
-                        None
-                    }
+    let (status, advice) = isolation_mode_advice(enforced);
+    let mut detail = serde_json::json!({
+        "policy": runtime.source(),
+        "version": runtime.version(),
+        "mode": runtime.mode(),
+        "host_direct": inspection.host_direct,
+        "policy_digest": runtime.digest(),
+        "backend": inspection.backend,
+        "backend_status": inspection.backend.status,
+        "filesystem": inspection.filesystem,
+        "network": inspection.network,
+        "environment": inspection.environment,
+        "limits": inspection.limits,
+        "limit_enforcement": {
+            "open_files": {
+                "configured": inspection.limits.open_files,
+                "status": open_files_status,
+                "runtime_mechanism": if enforced && inspection.limits.open_files.is_some() {
+                    Some("RLIMIT_NOFILE (installed before exec; spawn fails closed on error)")
+                } else {
+                    None
                 }
             },
+            "captured_output": {
+                "stdout_bytes": inspection.limits.stdout_bytes,
+                "stderr_bytes": inspection.limits.stderr_bytes,
+                "status": "enforced_while_draining",
+                "runtime_mechanism": "bounded stdout/stderr retention with continued draining and workload termination on overflow",
+            },
+            "verified_artifacts": {
+                "file_bytes": inspection.limits.verified_artifact_file_bytes,
+                "total_bytes": inspection.limits.verified_artifact_total_bytes,
+                "files": inspection.limits.verified_artifact_files,
+                "status": if enforced { "enforced_on_materialization" } else { "inactive" },
+                "runtime_mechanism": if enforced {
+                    Some("metadata/read caps plus synchronized per-runtime file and byte accounting")
+                } else {
+                    None
+                }
+            }
+        },
+    });
+    if let (Some(advice), Some(object)) = (advice, detail.as_object_mut()) {
+        object.insert("warning".to_owned(), advice.warning.into());
+        object.insert("fix".to_owned(), advice.fix.into());
+    }
+    Ok(IsolationPolicyInspection { detail, status })
+}
+
+struct IsolationAdvice {
+    warning: &'static str,
+    fix: &'static str,
+}
+
+/// The doctor status for an isolation lane, and what a disabled lane means.
+/// Disabled is not a healthy state: it is an operator's explicit choice that
+/// leaves every run unconfined, so it warns.
+fn isolation_mode_advice(enforced: bool) -> (&'static str, Option<IsolationAdvice>) {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    if enforced {
+        return (OK, None);
+    }
+    (
+        WARN,
+        Some(IsolationAdvice {
+            warning: "isolation is disabled: runs execute as the daemon user, can read the operator key on the volume and write any `.ai/` path, and the live-run floors hold only under an enforced lane",
+            fix: "re-initialize on a host class with an enforced lane (for example `--host-class local`), or cut a policy generation whose host class has `mode: enforce`; `--host-class local_unconfined` is the explicit opt-out that keeps this state",
         }),
-        status: if enforced { OK } else { NA },
-    })
+    )
 }
 
 #[derive(Parser, Debug)]
@@ -4876,6 +4901,26 @@ mod tests {
                     .contains("own key")
             );
         }
+    }
+
+    #[test]
+    fn a_disabled_isolation_lane_warns_and_names_what_it_means_and_the_fix() {
+        use ryeos_core_tools::actions::doctor::{OK, WARN};
+        let (status, advice) = isolation_mode_advice(false);
+        assert_eq!(status, WARN);
+        let advice = advice.expect("a disabled lane carries advice");
+        assert!(advice.warning.contains("daemon user"), "{}", advice.warning);
+        assert!(
+            advice.warning.contains("operator key"),
+            "{}",
+            advice.warning
+        );
+        assert!(advice.warning.contains(".ai/"), "{}", advice.warning);
+        assert!(advice.fix.contains("re-initialize"), "{}", advice.fix);
+        assert!(advice.fix.contains("mode: enforce"), "{}", advice.fix);
+        let (status, advice) = isolation_mode_advice(true);
+        assert_eq!(status, OK);
+        assert!(advice.is_none());
     }
 
     #[test]

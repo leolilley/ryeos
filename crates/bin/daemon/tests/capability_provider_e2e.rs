@@ -66,12 +66,15 @@ impl Launch {
     /// isolation policy, re-sign it with the fixture node key, seal, and
     /// spawn.
     fn spawn(edit: impl FnOnce(&mut Value)) -> Result<Self> {
-        // The fixture node runs under the profile's local class.
+        // The fixture node runs under the profile's fixture host class.
         Self::spawn_with_policy_document(|document| {
             edit(
                 document
-                    .pointer_mut("/policy/host_classes/local")
-                    .context("fixture isolation policy has no local class")?,
+                    .pointer_mut(&format!(
+                        "/policy/host_classes/{}",
+                        common::fast_fixture::FAST_FIXTURE_HOST_CLASS
+                    ))
+                    .context("fixture isolation policy has no fixture host class")?,
             );
             Ok(())
         })

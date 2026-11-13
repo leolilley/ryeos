@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:6c2c16da46928680f5bec561b7fd637a62388af9f2037a6dc3ef177077b7c4e0:juKoqL6e2Dnuxo8Jr8j9ZwtGPf4euTME8Gnp2b17kMP5OalrRKhK48cf33kdNFHt02VEZkO/wtoHL/5B7CSyDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T13:04:03Z:aaa00ad73cc2a90eae1ed2956e40818c2741c0ec4a17018a4478c34896e8d624:rY+RsKNyJt5UEnjyLilf3NJxPsy6D0JO4xpfJtwsGTwzPnhiPhXQ1lUhbC7GnmbXkHR2mxSfMkf0M9uAG+CSAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -273,6 +273,31 @@ policies:
       # different floor and lane in another profile.
       host_classes:
         local:
+          # A host whose supervisor delegates qualified per-job process scopes:
+          # jobs run in the enforced namespace sandbox and in their own scope.
+          # Hosts that cannot provide the sandbox refuse initialization; the
+          # explicit opt-out is the `local_unconfined` class.
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
+          process_scopes:
+            # Device allocation and bounded occupancy are released only after
+            # Lillux proves this exact process scope empty.
+            mode: required
+            control_timeout_ms: 5000
+          trusted_process_group_sessions: false
+          mode: enforce
+          backend:
+            bundle: core
+            implementation: linux-lillux
+          proc_filesystem: pid_namespace
+        local_unconfined:
+          # The explicit opt-out from the sandbox: a host the operator runs
+          # where jobs execute as the daemon user with no isolation backend.
+          # Nothing selects this class implicitly; initialization names it
+          # with `--host-class local_unconfined`. Jobs can read the node's
+          # operator key on the volume and write any `.ai/` path, and the
+          # live-run floors hold only under an enforced lane.
           # Capabilities this node must prove on its host before it starts.
           # `ryeos node doctor` shows what the host proves and what is missing.
           requires_capabilities: [accounting, limits:scope, recovery:scope, storage:durable_root, termination:scope, time]
@@ -308,7 +333,19 @@ policies:
           - "{checkpoint_dir}"
       network:
         mode: host
-        runtime_files: []
+        runtime_files:
+          - source: /etc/resolv.conf
+            destination: /etc/resolv.conf
+            max_bytes: 65536
+          - source: /etc/hosts
+            destination: /etc/hosts
+            max_bytes: 65536
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/certs/ca-certificates.crt
+            max_bytes: 4194304
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/cert.pem
+            max_bytes: 4194304
       environment:
         allow:
           - "*"

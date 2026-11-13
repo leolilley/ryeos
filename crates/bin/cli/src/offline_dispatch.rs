@@ -1408,6 +1408,9 @@ mod tests {
             let body = lillux::signature::strip_signature_lines(&raw);
             let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
                 serde_yaml::from_str(&body).unwrap();
+            // Offline dispatch is not about the sandbox: the node runs under
+            // the profile's unconfined class.
+            let profile = profile.for_host_class("local_unconfined").unwrap();
             for (name, source_policy) in profile.policies() {
                 let mut policy = source_policy.clone();
                 if name == "command_registration" {

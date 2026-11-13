@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:46:00Z:b92548a27035786be24806b8616580c2ef9b15a0256846397ad4cd96e878a1a4:e3XK/Y6eaijJbyyMASQ0OWbzgjP222yNpn6NhSOElbn59Tp2A7jtxZpd4fcp2FPPONXQBUKeX5gZBQ4SKiQzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T13:04:03Z:f3b47c03ba52b386d4daa697b7405954ee431eecff0378128e90135016047745:zyglfSuUZOXKvf/ulccAdO9Y1e4vF5bSK2n4SQHvpTaDuBC6nsipKiLgsuBKLXQLkOVrbriTHbO/dAvdf2ZwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -28,7 +28,9 @@ or `RYEOS_APP_ROOT`. Every fresh initialization requires
 `--node-profile full --host-class local`; each lean distribution uses its exact
 same-named profile. `--host-class <class>` names which of the profile's
 declared host classes the node runs under (`local` on a host the operator
-runs, `hosted` in a hosting provider's container); the node holds that class's
+runs, with enforced isolation; `local_unconfined` on that host with no
+sandbox, an explicit opt-out init never selects for you; `hosted` in a hosting
+provider's container); the node holds that class's
 signed capability floor and isolation lane, and keeps the class for life.
 Neither selection is inferred from the bundles present in the source or from
 what the host proves, and absence fails rather than manufacturing an implicit

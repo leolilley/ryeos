@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:24:05Z:12bd64f3b14c9316db67e8eab56baa3a32e666e87179f65cc7d5e8a30682c493:k6Vxg0WG6dAjAynUWW8uyDN+y7eDaGyJF4EsM1/YrVoVlPSOveeIgof6e47tBc7bR6VKV2ELg9LUyr6oV+CTCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T13:04:03Z:a4e381c966877bce220a88b805ca3398b9171e1a83fe22ddd61e194ce2366565:L+H4Qjjlp60dtspjewt5+FH9mMUzTYO7DDzAK54ZjGFqlSP3jBHIff79QAFoxHRx4xZrY45g6UUYJlmL87/iAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -65,7 +65,12 @@ ryeos init --node-profile full --host-class local
 
 Fresh init refuses an absent selector; bundle presence never implies one.
 `--host-class` is given exactly when `--node-profile` is, and names one of the
-profile's declared host classes (`full` declares only `local`).
+profile's declared host classes (`full` declares `local` and
+`local_unconfined`). `local` enforces the sandbox lane: init refuses when the
+host's sandbox probe cannot prove it, and the refusal names
+`--host-class local_unconfined`, the explicit opt-out that runs jobs as the
+daemon user. Init never selects the opt-out for you, and `ryeos node doctor`
+warns while a node runs it.
 Development usage:
 
 ```bash
@@ -206,7 +211,8 @@ ryeos node doctor [--json] [--no-bundles] [--app-root <dir>]
 ```
 
 Runs the offline node checklist. Its isolation row uses the production strict
-loader: disabled is a healthy inactive opt-out, while enforced mode resolves
+loader: disabled is a warning (runs are unconfined; re-init or cut a policy
+with an enforce lane), while enforced mode resolves
 and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md). Its `process_quarantine` row

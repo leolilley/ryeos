@@ -450,11 +450,16 @@ mod tests {
             "../../../../bundles/.ai/node/init/profiles/full.yaml"
         ))
         .unwrap();
-        let original = profile["policies"]["isolation"].clone();
+        let mut original = profile["policies"]["isolation"].clone();
+        // A node's selected policy declares exactly one host class: keep the
+        // class the fixture runs under, as initialization would.
+        original["policy"]["host_classes"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|name, _| name == fast_fixture::FAST_FIXTURE_HOST_CLASS);
         fn flag(document: &mut Value) -> &mut Value {
-            &mut document["policy"]["host_classes"]["local"]["trusted_process_group_sessions"]
+            &mut document["policy"]["host_classes"][fast_fixture::FAST_FIXTURE_HOST_CLASS]["trusted_process_group_sessions"]
         }
-        let mut original = original;
         assert_eq!(*flag(&mut original), false);
         let node = fast_fixture::node_signing_key();
         let raw = lillux::signature::sign_content_at(

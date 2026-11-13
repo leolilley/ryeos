@@ -251,7 +251,7 @@ ryeos_term_update "verifying staged node init profile" "$node_init_profile"
     --substrate-image-digest "$verification_substrate_digest" \
     --substrate-protocol "$verification_substrate_protocol" \
     --node-profile "$node_init_profile" \
-    --host-class local >/dev/null
+    --host-class local_unconfined >/dev/null
 
 selected_node_init_profile="$stage/.ai/node/init/profiles/$node_init_profile.yaml"
 # Every generation carries its signed operator record beside the sections.
