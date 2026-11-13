@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 ASSET = ROOT / "bundles/bundle-release/.ai"
 QUALIFIER = ASSET / "tools/ryeos/bundle-release/lib/core-seed-qualify.py"
 CAPTURE = ASSET / "tools/ryeos/bundle-release/lib/core-seed-capture.py"

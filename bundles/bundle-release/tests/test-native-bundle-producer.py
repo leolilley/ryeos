@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 GRAPH = ROOT / "bundles/bundle-release/.ai/graphs/ryeos/bundle-release/publish.yaml"
 SERVICES = ROOT / "bundles/bundle-release/.ai/services/bundle-release"
 NATIVE_QUALIFIER = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-qualify.py"

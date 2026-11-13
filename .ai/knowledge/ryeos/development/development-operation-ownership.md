@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-12T12:57:28Z:11cbc389a4e0bb2859f00300f1f15296c54eb43c6d01407621769fa071cb6836:aTmtPNJ2RxYl9PemISVmllkq7hjg0fPWjqPKrmjM3l6xHJFbpOIb05KbVs32EGatuimqfALXTYuOxs/c+7LPBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:27:48Z:1347fcddda69e314898c65a8914313edcc8fa285744114c4debd54a96c17f59b:aFyBU3DXD/jFA2KiTfq4byrtn7WqjlJ4QNbwAS1NYDk7U8/hgfFyUAC24MaukwGE7exmqXmJfs/B5E7EHVjrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.6.0"
+version: "1.7.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -105,12 +105,78 @@ Routine non-core bundle updates must reuse admitted environment products;
 they must not repeat compiler acquisition or rebuild the serving host image.
 Do not narrow the agreed end-to-end proof merely to avoid its current gates.
 
-## Complete source inventory and disposition
+## What may live in `scripts/`
 
-This inventory covers every file in the 59-file pre-cleanup `scripts/` tree.
-Paths in this table are relative to `scripts/` unless stated otherwise.
-"Final owner" describes the required end state; an open gate is not completed
-by moving source into a different directory.
+`scripts/` holds only external entries that something calls: CI, Docker,
+release and install plumbing that must run before a RyeOS node exists, plus
+their tests. The rule:
+
+- Add no file to `scripts/` without a caller in the same change: a workflow,
+  a Dockerfile or bake file, `gate.sh`, or another script listed below. A new
+  `test-*` file is named in `ci.yml` or `gate.sh` in the same change.
+- Temporary, personal or one-off scripts go in the gitignored `.tmp/`, never
+  in the tracked tree.
+- Reusable development tooling goes in the repository-root `.ai` development
+  bundle under `.ai/tools/ryeos/development/`: an admitted operation as a
+  Tool with its `ryeos-tool` header, a host-run helper as signed source in a
+  `lib/` directory (which Tool resolution excludes).
+- Tests live beside their subject: `bundles/<bundle>/tests/`,
+  `tests/development/`, or the matching `tests/e2e/` family.
+
+## Current `scripts/` tree
+
+After the 2026-11-13 cleanup `scripts/` holds 68 files. Paths are relative to
+`scripts/`. Every test named here runs in the CI `static-policy` job unless
+the row says otherwise.
+
+| Files | Caller | Note |
+| --- | --- | --- |
+| `gate.sh` | `ci.yml` workspace jobs, maintainers | Broad test orchestration. |
+| `test-gate-package-selection.py` | none yet | Each fake-Cargo `gate.sh` call is bounded to 10 s, but `gate.sh` first runs the custody check, which can exceed that on a loaded host. Wire it once that bound is fixed. |
+| `populate-bundles.sh` | Dockerfiles, `gate.sh` | Pre-install bundle build and staging entry. |
+| `lib/ryeos-terminal.sh`, `pkg/test-ryeos-terminal.sh` | sourced by the shell entries here | Shared external-shell presentation. |
+| `ci/install-static-linters.sh`, `ci/lint-workflows-and-shell.sh` | `ci.yml` | The lint script holds the ShellCheck file list. |
+| `ci/check-custody-tokens.sh`, `ci/strip-rust-comments.py` | `ci.yml`, `gate.sh` | The Python file is the check's helper. |
+| `ci/prepare-runner.sh`, `ci/pack-bundle-state.sh`, `ci/unpack-bundle-state.sh` | `ci.yml` | Runner and bundle-state hand-off between jobs. |
+| `ci/test-daemon-image-init-policy.sh`, `ci/test-image-build-cache.sh`, `ci/test-publisher-trust-policy.sh` | `ci.yml` | Tests of Docker, init and publisher boundaries. |
+| `ci/check-test-support-feature-leak.sh` | `ci.yml` `rust-policy` job | Runs `cargo tree --locked` (no compile) so shipped `ryeosd`/`ryeos-cli` feature sets never resolve a test-support feature. |
+| `pkg/install-local-direct.sh`, `pkg/bundle-sets.sh`, `pkg/bundle-features.py`, `pkg/composition-features.sh`, `pkg/fixtures/payload-ownership.parsed.json` | `Dockerfile.release`, `ci.yml`, `gate.sh` | Host install entry and its bundle-set data helpers. |
+| `pkg/test-bundle-sets.sh`, `pkg/test-bundle-features.py`, `pkg/test-bundle-features-signature.py`, `pkg/test-install-lifecycle.sh` | `ci.yml` | `test-bundle-sets.sh` runs the two bundle-features tests. |
+| `pkg/install-contained-docker-runtime.py`, `pkg/setup-contained-docker-node.py`, `pkg/test-contained-docker-node.py`, `pkg/test-contained-docker-runtime.py` | operator (documented `sudo` commands) | Host installers for a contained Docker node. |
+| `release/resolve-version.sh`, `release/official-publisher-fingerprint.sh`, `release/prepare-aur.sh`, `release/package-bundle-artifact.sh`, `release/verify-bundle-artifact.sh`, `release/materialize-release-bundles.sh` and their `test-*` files | release workflows, `Dockerfile.release` | Workflow-input adapters and bundle artifact packaging. |
+| `release/package-workload-client-realization.sh`, `release/verify-workload-client-realization.sh`, `release/test-workload-client-realization.sh` | `Dockerfile.release`, `publish-ryeosd.yml` | The test needs a built binary and release coordinates; it is a manual qualification step, not run in CI. |
+| `release/author-local-inference-realizations.py`, `release/local-inference-qwen3-0.6b-v1.json`, `release/verify-local-inference-release.py` | local-inference workflows | Open conversion to Tools and Config, below. |
+| `release/check-workspace-versions.py`, `release/versioned-crates.txt`, `release/test-check-workspace-versions.py` | `publish-ryeosd.yml` | Publish-time version gate. |
+| `release/check-composition-daemon-features.py` and its test | `ci.yml` | |
+| `release/contained-oci-hook-artifact.py` and its test | `Dockerfile.release` | |
+| `release/bundle-payload-ownership.py`, `release/shared-static-payloads.py`, `release/shared-static-payloads.yaml`, `release/test-shared-static-payloads.py` | `populate-bundles.sh`, `ci.yml` | Payload ownership parser shared by the build entries. |
+| `release/test-native-bundle-wp0.py` | `ci.yml` | Checks `pkg/bundle-sets.sh`, payload ownership and runtime images against `tests/fixtures/native-bundle-publication/`. Update that fixture when a bundle set changes. |
+| `release/acquire-development-toolchain-stage0.sh` | `Dockerfile.development-realizations`, Stage-0 bootstrap | Pre-RyeOS acquisition entry, below. |
+| `release/fetch-development-registry.py`, `release/test-development-registry.py` | operator first bootstrap | First-bootstrap transport entry, below. |
+| `release/release-candidate.py`, `release/audit-bundle-generation.py`, `release/inspect-native-bundle-input.py`, `release/inspect-core-native-set.py` and their four tests | tests only; `inspect-core-native-set.py` also by a daemon Rust test | Producer and verifier for bundle-release's `release_candidate` kind. They belong in that bundle, but three load `release/bundle-payload-ownership.py` as a sibling. They can move only once they read the signed payload-ownership Config. Bundle-release Tools load their whole item directory as source, and their closure contract forbids naming that parser. |
+
+Moved out on 2026-11-13: the bundle-release source tests to
+`bundles/bundle-release/tests/`; `sign-dev.sh` and `revert-sig-churn.sh` to
+`.ai/tools/ryeos/development/maintainer/lib/`; `dev-tui.sh` and
+`dev-ui-assets.sh` to `.ai/tools/ryeos/development/interactive-host/lib/`;
+`rebuild-build-support-inputs.py` to
+`.ai/tools/ryeos/development/build-support-inputs/lib/`;
+`prove-contained-oci-provider.py` to
+`.ai/tools/ryeos/development/contained-oci-provider/lib/`, with their tests
+in `tests/e2e/authoring-environment/` and `tests/development/`. Removed:
+`check-ui-wasm-fresh.sh` (call `browser-assets-production/publish.sh --check`),
+`release/verify-contained-oci-hook.sh`,
+`release/validate-native-deployment-coordinates.sh` (`deploy/entrypoint.sh`
+makes the same checks), and the personal `dev/free-build-space.py` and
+`dev/rehearse-guest-relay-loopback.sh`.
+
+## Source ownership backlog and disposition
+
+This table records the final owner of each operation family that came from
+`scripts/`, including families since moved out. Paths are relative to
+`scripts/` unless stated otherwise. "Final owner" describes the required end
+state; an open gate is not completed by moving source into a different
+directory.
 
 | Source family | Final owner / external boundary | Completion criterion |
 | --- | --- | --- |
@@ -136,10 +202,10 @@ by moving source into a different directory.
 | `ci/install-static-linters.sh`, `ci/lint-workflows-and-shell.sh` | Pre-install CI acquisition/orchestration entry; exact actionlint/ShellCheck are reusable validation Tool inputs, not ambient worker dependencies. | Preserve checksum-pinned acquisition; signed validation operation must bind exact binaries and complete child PATH before replacing CI behavior. |
 | `ci/test-daemon-image-init-policy.sh`, `ci/test-publisher-trust-policy.sh` | Focused tests of genuinely external Docker/init/install/publisher integration; remain with that owner. | Run relevant contract tests when those scripts change; no automatic live node mutation. |
 | `gate.sh` | Explicit broad CI/maintainer test orchestration, not default worker operation. Runtime test behaviors remain Cargo/project-owned Tools. | Keep full test/rebuild opt-in and crash-feature isolation; do not hide unrelated tests in release packaging. |
-| `browser-assets-production/publish.sh`, `dev-ui-assets.sh`, `dev-tui.sh` | Rune renderer assembly (`scripts/build-rune-web.sh --out`), its freshness check (`publish.sh --check`) and atomic publication have one canonical signed source under `.ai/tools/ryeos/development/browser-assets-production/`; host file-watcher and interactive TUI/browser launch remain thin host entrypoints. | The operation builds one closed six-file generation into `crates/clients/rune/pkg/`, rejects stale bytes and atomically replaces it; the exact wasm-bindgen CLI the lock names must come from the admitted development environment. Watching/process lifecycle remains separate. No host PATH inside worker children. |
-| `dev/sign-dev.sh` | Existing RyeOS/Lillux signing is canonical; the public development fixture selects a key, not another signature algorithm. Only the necessary explicit pre-install key-selection entry may remain. | Expose/reuse safe per-item publisher signing without whole-checkout exchange or node identity impersonation; remove duplicate envelope/hash/signature implementation after canonical entry qualification. Current script remains an open consolidation item. |
-| `dev/revert-sig-churn.sh` | Maintainer-only Git working-tree operation; Git remains the authority for local review/commits. Reusable filtering should live beside its signed maintainer Tool if retained. | Exact path selection, dry-run, reject mixed edits, never staged-change loss; no blanket worker Git/signing grant. |
-| `dev/free-build-space.py` | Host build-cache housekeeping, not project production or node GC. Existing Cargo cache and RyeOS GC owners must remain separate. | Remove personal default path and silent deletion errors, require exact exclusively owned target and explicit destructive intent. Do not run it against active builds or add node/host mounts to a Tool. |
+| `browser-assets-production/publish.sh`, `interactive-host/lib/dev-ui-assets.sh`, `interactive-host/lib/dev-tui.sh` (development bundle) | Rune renderer assembly (`scripts/build-rune-web.sh --out`), its freshness check (`publish.sh --check`) and atomic publication have one canonical signed source under `.ai/tools/ryeos/development/browser-assets-production/`; host file-watcher and interactive TUI/browser launch remain thin host entrypoints. | The operation builds one closed six-file generation into `crates/clients/rune/pkg/`, rejects stale bytes and atomically replaces it; the exact wasm-bindgen CLI the lock names must come from the admitted development environment. Watching/process lifecycle remains separate. No host PATH inside worker children. |
+| `.ai/tools/ryeos/development/maintainer/lib/sign-dev.sh` (was `dev/sign-dev.sh`) | Existing RyeOS/Lillux signing is canonical; the public development fixture selects a key, not another signature algorithm. Only the necessary explicit pre-install key-selection entry may remain. | Expose/reuse safe per-item publisher signing without whole-checkout exchange or node identity impersonation; remove duplicate envelope/hash/signature implementation after canonical entry qualification. Current script remains an open consolidation item. |
+| `.ai/tools/ryeos/development/maintainer/lib/revert-sig-churn.sh` (was `dev/revert-sig-churn.sh`) | Maintainer-only Git working-tree operation; Git remains the authority for local review/commits. Reusable filtering should live beside its signed maintainer Tool if retained. | Exact path selection, dry-run, reject mixed edits, never staged-change loss; no blanket worker Git/signing grant. |
+| `dev/free-build-space.py` (removed) | Personal host build-cache housekeeping, not project production or node GC. Removed from the repository; it is kept outside it. Existing Cargo cache and RyeOS GC owners remain separate. | Do not reintroduce it under `scripts/`. A reusable version would need an exact exclusively owned target and explicit destructive intent, and must not add node/host mounts to a Tool. |
 
 ## Acquisition and production are different authorities
 

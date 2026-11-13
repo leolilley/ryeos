@@ -11,7 +11,7 @@ description = "reviewed non-secrets"
 paths = [
   '''^vendor/''',
   '''^\.dev-keys/PUBLISHER_DEV\.pem$''',
-  '''^scripts/dev/test-.*\.py$''',
+  '''^tests/e2e/authoring-environment/test_rebuild_build_support_inputs\.py$''',
   '''^crates/.*/tests/.*\.rs$''',
   '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/tokenizer\.py$''',
   '''^bundles/local-inference/\.ai/workers/local-inference/lib/local-tinygrad-gnu/cuda_lifecycle/nvml_qualification\.md$''',

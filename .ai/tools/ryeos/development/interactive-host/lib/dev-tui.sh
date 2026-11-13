@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# ryeos:signed:2026-11-13T00:09:46Z:f4fca4c70ff40e249851a99931fe352983169a0bbcda2ab1510f7e13f87e14aa:BgXSlW/pjOKiAzYC8ViPCsfirRIZnvizI5DO3ffKcArmYr/JjZt39xK/FfAr14IU63NEuohjGGy2SxU107k2AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
 # Dev fast-path for the native TUI: build from this checkout and launch
 # the built binary directly.
 #
@@ -22,14 +26,14 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)"
 # shellcheck source=scripts/lib/ryeos-terminal.sh
 source "$REPO_ROOT/scripts/lib/ryeos-terminal.sh"
 ryeos_term_init
 
 usage() {
     cat <<'EOF'
-Usage: scripts/dev-tui.sh [SURFACE_REF] [options]
+Usage: .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh [SURFACE_REF] [options]
 
 Build ryeos-client-terminal from this checkout and run it directly,
 bypassing the packaged client:ryeos/tui bundle-binary dispatch.
@@ -52,10 +56,10 @@ Options:
   -h, --help        Show this help
 
 Examples:
-  scripts/dev-tui.sh
-  scripts/dev-tui.sh --local                 # iterate on backdrop/view content
-  scripts/dev-tui.sh --local --no-build      # content-only loop, instant
-  scripts/dev-tui.sh surface:ryeos/ui/workbench --release
+  .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh
+  .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh --local                 # iterate on backdrop/view content
+  .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh --local --no-build      # content-only loop, instant
+  .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh surface:ryeos/ui/workbench --release
 EOF
 }
 

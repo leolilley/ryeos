@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ryeos:signed:2026-11-13T00:09:46Z:bc6813f6b35ffc5628a851da0d539fe6c3f970ac1db571e7947258dbc97d4135:Orsolj80qsrR5amJLPi070snoVF7vKFJoep1zryJR+vHlz8TnRz9zke/WXj83gdBjNmRvDnKkRYzO3GGLU02CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
+# Canonical RyeOS per-item signing is meant to replace this second signer
+# (see .ai/knowledge/ryeos/development/development-operation-ownership.md).
 # Re-sign one or more source/bundle files with the local DEV publisher key
 # (.dev-keys/PUBLISHER_DEV.pem) — the same key, fingerprint, and signing scheme
 # `populate-bundles.sh` uses, but for individual files. Use this after editing a
@@ -10,7 +16,7 @@
 # snapshot exclusions are not publisher staging filters. This helper signs
 # bytes only: validate them through the normal resolver/admission separately.
 #
-# Usage: scripts/dev/sign-dev.sh <file> [<file> ...]
+# Usage: .ai/tools/ryeos/development/maintainer/lib/sign-dev.sh <file> [<file> ...]
 # Env:   RYEOS_DEV_KEY  override the key path (default: .dev-keys/PUBLISHER_DEV.pem)
 #
 # Envelope is chosen by extension: `# ryeos:signed:...` for
@@ -18,11 +24,11 @@
 # `<!-- ryeos:signed:... -->` for .md.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../../../../.." && pwd)"
 KEY="${RYEOS_DEV_KEY:-$ROOT/.dev-keys/PUBLISHER_DEV.pem}"
 
 [[ -f "$KEY" ]] || { echo "sign-dev: dev key not found: $KEY" >&2; exit 2; }
-[[ $# -ge 1 ]] || { echo "Usage: scripts/dev/sign-dev.sh <file> [<file> ...]" >&2; exit 2; }
+[[ $# -ge 1 ]] || { echo "Usage: .ai/tools/ryeos/development/maintainer/lib/sign-dev.sh <file> [<file> ...]" >&2; exit 2; }
 
 base64_one_line() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
 

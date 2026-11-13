@@ -5,7 +5,7 @@ import hashlib
 import unittest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 class ConsumerUpdateContract(unittest.TestCase):
     def test_exact_stopped_node_coordinator(self):

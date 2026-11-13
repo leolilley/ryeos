@@ -25,7 +25,8 @@
 //! with and without its declared tolerance), and a supervisor that ends before
 //! it attaches (the owner's report of that end must reach the start failure).
 //! The clock offset is process-global, so run the cases one at a time
-//! (`--test-threads=1`); `scripts/rehearsal/guest-relay-loopback.sh` does.
+//! (`--test-threads=1`). The rehearsal driver that builds the static guests
+//! and host and runs the cases this way is kept outside the repository.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

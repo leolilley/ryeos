@@ -16,7 +16,7 @@ from unittest.mock import patch
 import yaml
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 FIXTURE = ROOT / "tests/fixtures/native-bundle-publication/central-auth-data-only-release.json"
 INSPECTOR = ROOT / "scripts/release/inspect-native-bundle-input.py"
 BUILD = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/native-build.py"
@@ -147,7 +147,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
                 self.assertIn(mode, {0o644, 0o755})
             self.assertEqual(sorted(path.name for path in product.parent.iterdir()), ["tree"])
             subprocess.run(
-                [str(ROOT / "scripts/dev/sign-dev.sh"), str(product / ".ai/manifest.yaml")],
+                [str(ROOT / ".ai/tools/ryeos/development/maintainer/lib/sign-dev.sh"), str(product / ".ai/manifest.yaml")],
                 check=True,
                 capture_output=True,
                 text=True,

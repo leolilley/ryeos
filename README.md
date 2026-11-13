@@ -514,7 +514,7 @@ Common loops:
 | Rust-only compile feedback                 | `cargo build` or targeted `cargo test -p <crate>`                                                     |
 | Rust affecting bundled binaries            | `install-local-direct.sh --populate --crates "<package ...>" ...`; unselected payload generations remain exact. |
 | Bundle YAML, schemas, tools, or runtimes   | Targeted signing/publish flow; use `./scripts/gate.sh --refresh-bundles` only for release validation. |
-| Browser UI assets                          | `./scripts/dev-ui-assets.sh --background --open`; no bundle refresh.                                  |
+| Browser UI assets                          | `./.ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh --background --open`; no bundle refresh. |
 | Daemon/CLI behavior with installed bundles | Target only `ryeosd`, `ryeos-cli`, or both through `--populate --crates`, then install.               |
 | Packaged layout repair                     | Run without `--populate` to reinstall the existing exact closed artifact generation.                 |
 

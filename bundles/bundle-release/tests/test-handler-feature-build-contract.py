@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 ASSET = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib"
 NATIVE = ASSET / "native-build.py"
 CORE = ASSET / "core-seed-build.py"

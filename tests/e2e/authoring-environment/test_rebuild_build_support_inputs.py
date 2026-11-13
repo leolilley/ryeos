@@ -13,7 +13,8 @@ import unittest
 from pathlib import Path
 
 sys.dont_write_bytecode = True
-SCRIPT = Path(__file__).resolve().with_name("rebuild-build-support-inputs.py")
+SCRIPT = (Path(__file__).resolve().parents[3]
+          / ".ai/tools/ryeos/development/build-support-inputs/lib/rebuild-build-support-inputs.py")
 spec = importlib.util.spec_from_file_location("rebuild_build_support_inputs", SCRIPT)
 rebuild = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rebuild)

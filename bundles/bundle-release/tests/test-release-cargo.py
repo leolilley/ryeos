@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
     "release_cargo", ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/release-cargo.py")
 RECIPE = importlib.util.module_from_spec(SPEC)

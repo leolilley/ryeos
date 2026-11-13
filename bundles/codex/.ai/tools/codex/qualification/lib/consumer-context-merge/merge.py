@@ -251,7 +251,7 @@ def main(argv=None) -> int:
         print("refused: " + str(error), file=sys.stderr)
         return 1
     print(("merged into " if changed else "already populated, unchanged: ") + str(output))
-    print("sign with, from the repository root: ./scripts/dev/sign-dev.sh " + str(output))
+    print("sign with, from the repository root: ./.ai/tools/ryeos/development/maintainer/lib/sign-dev.sh " + str(output))
     return 0
 
 
