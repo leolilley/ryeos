@@ -308,7 +308,7 @@ assert_runtime_init_profile Dockerfile.release f5r-controller ryeos-f5r-controll
 # holds. It describes where an image is deployed, so no image may preset it.
 for path in "$root"/Dockerfile*; do
     [[ -f "$path" ]] || continue
-    if dockerfile_instructions "$path" | grep -Eq '^(ENV|ARG) RYEOS_INIT_HOST_CLASS([= ]|$)'; then
+    if grep -Eq '^(ENV|ARG) RYEOS_INIT_HOST_CLASS([= ]|$)' <<<"$(dockerfile_instructions "$path")"; then
         echo "$(basename "$path") presets RYEOS_INIT_HOST_CLASS; the deployment must declare it" >&2
         exit 1
     fi
@@ -669,7 +669,7 @@ fi
     unset RYEOS_OPERATOR_HOLD
     [[ "$RESTART_INHIBITED_HOLD_SECONDS" -gt 0 && "$RESTART_INHIBITED_HOLD_SECONDS" -le 60 ]]
     grep -Fq 'exec ryeosd "${DAEMON_ARGS[@]}"' "$root/deploy/entrypoint.sh"
-    ! sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh" | grep -Fq -- '--bind'
+    ! grep -Fq -- '--bind' <<<"$(sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh")"
 )
 
 # These current images require Python for readiness probes and admitted tools;
@@ -802,7 +802,7 @@ while IFS= read -r set_id; do
     }
 done < <(ryeos_bundle_set_ids)
 for listed_id in "${image_bundle_sets[@]}" "${no_image_bundle_sets[@]}"; do
-    ryeos_bundle_set_ids | grep -Fxq -- "$listed_id" || {
+    grep -Fxq -- "$listed_id" <<<"$(ryeos_bundle_set_ids)" || {
         echo "image inventory names $listed_id, which is not a bundle set" >&2
         exit 1
     }
@@ -822,7 +822,7 @@ while IFS= read -r target_name; do
         echo "composition Bake target $target_name names no Dockerfile.release stage" >&2
         exit 1
     }
-    printf '%s\n' "${release_daemon_stages[@]}" | grep -Fxq -- "$stage" || {
+    grep -Fxq -- "$stage" <<<"$(printf '%s\n' "${release_daemon_stages[@]}")" || {
         echo "composition Bake target $target_name names $stage, which is not a release daemon stage" >&2
         exit 1
     }
@@ -833,7 +833,7 @@ while IFS= read -r target_name; do
     bake_stages+=("$stage")
 done < <(sed -nE 's/^target "([^"]+)" \{$/\1/p' "$composition_bake")
 for stage in "${release_daemon_stages[@]}"; do
-    printf '%s\n' "${bake_stages[@]}" | grep -Fxq -- "$stage" || {
+    grep -Fxq -- "$stage" <<<"$(printf '%s\n' "${bake_stages[@]}")" || {
         echo "release daemon stage $stage has no composition Bake target" >&2
         exit 1
     }
@@ -932,7 +932,7 @@ shipped_bundle_tree_violations() {
         case "/$path/" in
             */lib/* | */__pycache__/* | */.ai/manifest.source.yaml/) continue ;;
         esac
-        head -n 2 -- "$tree_root/$path" | grep -Fq 'ryeos:signed:' ||
+        grep -Fq 'ryeos:signed:' <<<"$(head -n 2 -- "$tree_root/$path")" ||
             printf '%s: no signature line\n' "$path"
     done < <(git -C "$tree_root" ls-files -z -- ':(glob)bundles/*/.ai/**')
 }
