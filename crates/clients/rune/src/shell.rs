@@ -2,13 +2,13 @@
 //! set, status bar, notices and dialogs. Layout and metrics follow the
 //! browser shell's stylesheet.
 
-use rune::{Align, El, Key, KeyEvent, Side, col, el, row, text, text_input};
+use rune::{El, Key, KeyEvent, col, el, row, text, text_input};
 use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
-    RyeOsDialogVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSessionVm,
-    RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm,
-    RyeOsViewModel, RyeOsViewSetVm,
+    RyeOsDialogVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm,
+    RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone,
+    RyeOsTopBarVm, RyeOsViewModel, RyeOsViewSetVm,
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
@@ -119,9 +119,6 @@ pub fn shell(
     for dialog in &vm.dialogs {
         page = page.child(dialog_layer(dialog, local));
     }
-    if local.surfaces_open && !vm.session.surfaces.is_empty() {
-        page = page.child(surface_picker(&vm.session, local));
-    }
     // An open actions menu draws last, anchored to its control.
     if let Some(key) = &local.menu
         && let Some(intents) = vm
@@ -135,76 +132,171 @@ pub fn shell(
     page
 }
 
-/// The key of the Surface picker's control; its list anchors to it.
-const SURFACE_PICKER: &str = "surface-picker";
-
+/// The top bar: the node's status, then the open Surfaces as a list that
+/// grows to the right, the current one filled orange to the bar's edges.
 fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
     let p = Palette::get();
     let session = &vm.session;
-    let mut context = row()
-        .center_y()
-        .gap(10.0)
-        .min_w(0.0)
-        .grow(1.0)
-        .role("group")
-        .label("Surface context");
-    let title = text(session.title.clone())
-        .font(theme::data(10.0).tracking(0.4))
-        .color(p.muted)
-        .truncate();
-    if session.surfaces.is_empty() {
-        context = context.child(title);
+    // Health names the node's state; a feed that is not current tints the
+    // dot whatever the health says.
+    let dot = if vm.transport.freshness == RyeOsTransportFreshness::Current {
+        p.tone(vm.chrome.health_tone, p.muted)
     } else {
-        let open = local.surfaces_open;
-        let mut summary = row()
-            .key(SURFACE_PICKER)
-            .center_y()
-            .gap(10.0)
-            .min_w(0.0)
-            .role("button")
-            .label("Select an open Surface")
-            .expanded(open);
-        if let Some(ordinal) = session.surface_ordinal {
-            summary = summary.child(
-                text(format!("{ordinal:02}"))
-                    .font(theme::data(10.0).tracking(0.4))
-                    .color(p.accent),
-            );
-        }
-        context = context.child(
-            summary
-                .child(title)
-                .child(crate::icons::glyph(
-                    &crate::icons::CHEVRON_DOWN,
-                    12.0,
-                    p.muted,
-                ))
-                .on_press(move |app: &mut App| app.set_surfaces_open(!open)),
-        );
-    }
-    let state = row()
+        p.yellow
+    };
+    let status = row()
+        .h_full()
+        .px(12.0)
+        .gap(8.0)
         .center_y()
-        .gap(10.0)
+        .role("status")
+        .label(format!(
+            "{} · {}",
+            vm.chrome.health_label,
+            freshness_label(vm.transport.freshness)
+        ))
+        .child(el().size(5.0, 5.0).radius(2.5).fill(dot))
         .child(
             text(vm.chrome.health_label.to_uppercase())
                 .font(theme::data(10.0).tracking(0.4))
                 .color(p.muted),
-        )
-        .child(
-            text(freshness_label(vm.transport.freshness))
-                .font(theme::data(10.0).tracking(0.4))
-                .color(p.muted),
         );
+    let mut surfaces = row()
+        .h_full()
+        .min_w(0.0)
+        .grow(1.0)
+        .role("tablist")
+        .label("Open Surfaces")
+        .scroll_x();
+    if session.surfaces.is_empty() {
+        surfaces = surfaces.child(
+            row().h_full().px(12.0).center_y().child(
+                text(session.title.clone())
+                    .font(theme::ui(12.0))
+                    .color(p.text)
+                    .truncate(),
+            ),
+        );
+    }
+    for surface in &session.surfaces {
+        surfaces = surfaces.child(surface_entry(surface, local));
+    }
+    surfaces = surfaces.child(
+        col()
+            .h_full()
+            .min_w(34.0)
+            .center()
+            .role("button")
+            .label("Open a Surface")
+            .hover(p.plane_selected)
+            .child(crate::icons::glyph(&crate::icons::PLUS, 12.0, p.muted))
+            .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
+    );
     row()
         .w_full()
         .h(SYSTEM_HEIGHT)
-        .px(12.0)
-        .gap(14.0)
         .center_y()
-        .fill(p.bar)
+        .fill(p.bg)
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-        .child(context)
-        .child(state)
+        .child(status)
+        .child(el().w(1.0).h(12.0).fill(p.line))
+        .child(surfaces)
+}
+
+/// One open Surface in the top bar. The current one is filled orange and
+/// carries its rename and close; any other selects on press.
+fn surface_entry(surface: &RyeOsSurfaceChoiceVm, local: &Local) -> El {
+    let p = Palette::get();
+    let key = format!("surface:{:?}", surface.surface_instance_id);
+    let renaming = matches!(
+        &local.rename,
+        Some(crate::Rename { target: RenameTarget::Surface(RyeOsUiIntent::RenameSurface { surface_instance_id, .. }), .. })
+            if *surface_instance_id == surface.surface_instance_id
+    );
+    if renaming {
+        return row()
+            .key(key.clone())
+            .h_full()
+            .px(8.0)
+            .center_y()
+            .child(rename_form(local, key, "Surface name", ("Save", "Cancel")));
+    }
+    let (ink, number) = if surface.active {
+        (p.on_accent, p.on_accent)
+    } else {
+        (p.muted, p.faint)
+    };
+    let select = surface.select_intent.clone();
+    let mut entry = row()
+        .key(key)
+        .h_full()
+        .pl(12.0)
+        .pr(if surface.active { 4.0 } else { 12.0 })
+        .gap(8.0)
+        .center_y()
+        .role("tab")
+        .label(surface.title.clone())
+        .focus_selected(surface.active)
+        .child(
+            text(format!("{:02}", surface.ordinal))
+                .font(theme::data(10.0))
+                .color(number),
+        )
+        .child(
+            text(surface.title.clone())
+                .font(theme::ui(12.0))
+                .color(ink)
+                .max_w(220.0)
+                .truncate(),
+        );
+    if surface.active {
+        entry = entry.fill(p.accent_bright);
+        if let Some(intent) = surface.rename_intent.clone() {
+            let title = surface.title.clone();
+            entry = entry.child(surface_action(
+                &crate::icons::PENCIL,
+                format!("Rename {}", surface.title),
+                move |app| app.begin_rename(RenameTarget::Surface(intent.clone()), &title),
+            ));
+        }
+        if let Some(intent) = surface.close_intent.clone() {
+            entry = entry.child(surface_action(
+                &crate::icons::CLOSE,
+                format!("Close {}; running work is unaffected", surface.title),
+                move |app| {
+                    app.ui(RyeOsUiEvent::Activate {
+                        intent: intent.clone(),
+                    })
+                },
+            ));
+        }
+    } else {
+        entry = entry
+            .hover(p.plane_selected)
+            .on_press(move |app: &mut App| {
+                app.ui(RyeOsUiEvent::Activate {
+                    intent: select.clone(),
+                });
+            });
+    }
+    entry
+}
+
+/// A small action on the current Surface, drawn on its orange fill.
+fn surface_action(
+    icon: &'static rune::Icon,
+    label: String,
+    act: impl Fn(&mut App) + 'static,
+) -> El {
+    let p = Palette::get();
+    col()
+        .size(22.0, 22.0)
+        .center()
+        .role("button")
+        .label(label)
+        .hover(p.accent)
+        .child(crate::icons::glyph(icon, 11.0, p.on_accent))
+        .on_press(act)
 }
 
 /// The transport freshness as its wire name, uppercased.
@@ -213,123 +305,6 @@ fn freshness_label(freshness: RyeOsTransportFreshness) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_uppercase))
         .unwrap_or_default()
-}
-
-/// The open Surfaces: select, rename in place, or close (running work is
-/// unaffected by a close).
-fn surface_picker(session: &RyeOsSessionVm, local: &Local) -> El {
-    let p = Palette::get();
-    let mut list = col()
-        .key("surface-picker:list")
-        .anchored_fit(SURFACE_PICKER, Side::Bottom, Align::Start, 6.0)
-        .min_w(250.0)
-        .max_w(480.0)
-        .padding(4.0)
-        .fill(p.plane)
-        .border(1.0, p.line)
-        .role("group")
-        .label("Open Surfaces")
-        .modal(true, |app: &mut App| app.set_surfaces_open(false));
-    for surface in &session.surfaces {
-        let renaming = matches!(
-            &local.rename,
-            Some(crate::Rename { target: RenameTarget::Surface(RyeOsUiIntent::RenameSurface { surface_instance_id, .. }), .. })
-                if *surface_instance_id == surface.surface_instance_id
-        );
-        let mut choice = row()
-            .key(format!("surface:{:?}", surface.surface_instance_id))
-            .w_full()
-            .min_h(30.0)
-            .center_y();
-        if surface.active {
-            choice = choice.fill(p.accent.alpha(0.12));
-        }
-        if renaming {
-            choice = choice.child(
-                rename_form(
-                    local,
-                    format!("surface:{:?}", surface.surface_instance_id),
-                    "Surface name",
-                    ("Save", "Cancel"),
-                )
-                .grow(1.0),
-            );
-        } else {
-            let select = surface.select_intent.clone();
-            choice = choice.child(
-                row()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .min_h(30.0)
-                    .px(8.0)
-                    .gap(10.0)
-                    .center_y()
-                    .role("button")
-                    .focus_selected(surface.active)
-                    .hover(p.plane_selected)
-                    .child(
-                        text(format!("{:02}", surface.ordinal))
-                            .font(theme::data(10.0))
-                            .color(p.accent),
-                    )
-                    .child(
-                        text(surface.title.clone())
-                            .font(theme::data(10.0))
-                            .color(p.text)
-                            .truncate(),
-                    )
-                    .on_press(move |app: &mut App| {
-                        app.set_surfaces_open(false);
-                        app.ui(RyeOsUiEvent::Activate {
-                            intent: select.clone(),
-                        });
-                    }),
-            );
-            let mut rename = col()
-                .child(crate::icons::glyph(&crate::icons::PENCIL, 12.0, p.text))
-                .px(8.0)
-                .h_full()
-                .center()
-                .role("button")
-                .label(format!("Rename {}", surface.title))
-                .disabled(surface.rename_intent.is_none());
-            if let Some(intent) = surface.rename_intent.clone() {
-                let title = surface.title.clone();
-                rename = rename
-                    .hover(p.plane_selected)
-                    .on_press(move |app: &mut App| {
-                        app.begin_rename(RenameTarget::Surface(intent.clone()), &title);
-                    });
-            } else {
-                rename = rename.opacity(0.35);
-            }
-            choice = choice.child(rename);
-        }
-        let mut close = text("×")
-            .font(theme::data(10.0))
-            .color(p.muted)
-            .px(8.0)
-            .role("button")
-            .label(format!(
-                "Close {}; running work is unaffected",
-                surface.title
-            ))
-            .disabled(surface.close_intent.is_none());
-        if let Some(intent) = surface.close_intent.clone() {
-            close = close
-                .hover(p.plane_selected)
-                .on_press(move |app: &mut App| {
-                    app.set_surfaces_open(false);
-                    app.ui(RyeOsUiEvent::Activate {
-                        intent: intent.clone(),
-                    });
-                });
-        } else {
-            close = close.opacity(0.35);
-        }
-        list = list.child(choice.child(close));
-    }
-    list
 }
 
 fn view_set_strip(top_bar: &RyeOsTopBarVm, local: &Local) -> El {
@@ -925,50 +900,64 @@ pub(crate) fn menu_intents<'a>(
     }
 }
 
+/// The bottom bar: RyeOS in the corner opens the launcher, its key hints
+/// beside it, the core's status segments to the right. Running work warms
+/// the RyeOS block; an attention tone tints the bar.
 fn status_bar(model: &RyeOsStatusBarVm) -> El {
     let p = Palette::get();
     if !model.visible {
         return el().h(0.0);
     }
+    let fill = match model.attention {
+        Some(tone) => p.tone(tone, p.yellow).alpha(0.08),
+        None => p.bg,
+    };
+    let working = model.energy > 0.05;
     let mut bar = row()
         .w_full()
         .h(STATUS_HEIGHT)
-        .px(18.0)
         .gap(14.0)
+        .pr(12.0)
         .center_y()
-        .fill(p.bar)
-        .border_sides([1.0, 0.0, 0.0, 0.0], p.line);
-    for segment in &model.segments {
-        let label = match segment.label.as_deref().filter(|label| !label.is_empty()) {
-            Some(label) => format!("{label} {}", segment.value),
-            None => segment.value.clone(),
-        };
-        let mut part = text(label.to_uppercase())
-            .font(theme::data(9.0))
-            .color(p.tone(segment.tone, p.muted));
-        if segment.grow {
-            part = part.grow(1.0);
-        }
-        bar = bar.child(part);
-    }
-    bar.child(el().grow(1.0))
-        .child(
-            text(theme::drawable(&model.key_hint, theme::Face::Data).to_uppercase())
-                .font(theme::data(9.0))
-                .color(p.faint),
-        )
+        .fill(fill)
+        .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
         .child(
             row()
                 .key("shell:launch")
                 .role("button")
                 .label("Open the launcher")
                 .h_full()
-                .px(10.0)
+                .px(12.0)
                 .center_y()
-                .fill(p.accent_bright)
-                .child(text("RYEOS").font(theme::data(9.0)).color(p.on_accent))
+                .fill(if working { p.accent_bright } else { p.accent })
+                .hover(p.accent_bright)
+                .child(
+                    text("RYEOS")
+                        .font(theme::data(10.0).tracking(1.2))
+                        .color(p.on_accent),
+                )
                 .on_press(|app: &mut App| app.ui(RyeOsUiEvent::OpenLauncher)),
         )
+        .child(
+            text(theme::drawable(&model.key_hint, theme::Face::Data).to_uppercase())
+                .font(theme::data(9.0))
+                .color(p.faint)
+                .truncate()
+                .min_w(0.0),
+        )
+        .child(el().grow(1.0));
+    for segment in &model.segments {
+        let label = match segment.label.as_deref().filter(|label| !label.is_empty()) {
+            Some(label) => format!("{label} {}", segment.value),
+            None => segment.value.clone(),
+        };
+        bar = bar.child(
+            text(label.to_uppercase())
+                .font(theme::data(9.0))
+                .color(p.tone(segment.tone, p.muted)),
+        );
+    }
+    bar
 }
 
 fn notices(notices: &[RyeOsNoticeVm], documents: &[(DocumentOffer, Option<String>)]) -> El {

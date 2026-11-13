@@ -314,8 +314,8 @@ fn the_system_bar_never_shows_the_project_path() {
             .project_path
             .clone()
             .expect("the fixture session has a project path to hide");
-        // The system bar is the first 24 points of the page.
-        let bar = texts_in_band(&rt, 0.0, 24.0);
+        // The system bar is the first 28 points of the page.
+        let bar = texts_in_band(&rt, 0.0, 28.0);
         assert!(!bar.is_empty(), "{scene}: the system bar says something");
         for text in &bar {
             assert!(
@@ -464,4 +464,33 @@ fn long_lists_build_only_the_rows_in_view_and_the_feed_opens_at_its_end() {
     let last = "Step 200 of the run.".to_owned();
     assert!(texts.contains(&last), "the feed opens at its newest entry");
     assert!(!texts.iter().any(|text| text == "Step 1 of the run."));
+}
+
+/// RyeOS fills the bottom-left corner and opens the launcher; the open
+/// Surfaces run along the top from the left, the current one filled; the two
+/// bars are the same height.
+#[test]
+fn ryeos_holds_the_bottom_left_corner_and_the_bars_match() {
+    let (width, height) = (1280.0, 800.0);
+    let rt = shell("", (width, height));
+    let [x, y, _, bottom] = keyed(&rt, "shell:launch").expect("the launch control is drawn");
+    assert_eq!(x, 0.0, "RyeOS starts at the left edge");
+    assert!(
+        (y + bottom - height).abs() < 0.5,
+        "RyeOS reaches the bottom edge"
+    );
+    let vm = model(&rt);
+    let current = vm
+        .session
+        .surfaces
+        .iter()
+        .find(|surface| surface.active)
+        .expect("the fixture has a current Surface");
+    let [_, top, _, tall] = keyed(&rt, &format!("surface:{:?}", current.surface_instance_id))
+        .expect("the current Surface is in the top bar");
+    assert!(top.abs() < 0.5, "the Surfaces sit in the top bar");
+    assert!(
+        (tall - bottom).abs() <= 1.0,
+        "top {tall} and bottom {bottom} bars match"
+    );
 }

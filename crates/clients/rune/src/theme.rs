@@ -88,9 +88,9 @@ pub const fn data(size: f32) -> TextStyle {
 }
 
 /// Fixed shell metrics, in points.
-pub const SYSTEM_HEIGHT: f32 = 24.0;
+pub const SYSTEM_HEIGHT: f32 = 28.0;
 pub const STRIP_HEIGHT: f32 = 53.0;
-pub const STATUS_HEIGHT: f32 = 27.0;
+pub const STATUS_HEIGHT: f32 = 28.0;
 pub const HEADER_HEIGHT: f32 = 34.0;
 
 /// Which embedded face a string is set in.

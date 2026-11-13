@@ -52,8 +52,6 @@ pub struct Local {
     pub(crate) menu: Option<String>,
     /// An unfinished name being typed; committing it goes through the core.
     pub(crate) rename: Option<Rename>,
-    /// Whether the system bar's Surface picker is open.
-    pub(crate) surfaces_open: bool,
     /// Whether the recovery screen is asking to confirm an independent
     /// presentation.
     pub(crate) confirming_independent: bool,
@@ -731,13 +729,6 @@ impl App {
 
     pub(crate) fn set_split_preview(&mut self, preview: Option<(String, f32)>) {
         self.local.split_preview = preview;
-    }
-
-    pub(crate) fn set_surfaces_open(&mut self, open: bool) {
-        self.local.surfaces_open = open;
-        if !open {
-            self.local.rename = None;
-        }
     }
 }
 
