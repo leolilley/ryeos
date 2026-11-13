@@ -37,11 +37,21 @@ pub const REMOTE_TRUST_FIELDS: &[&str] = &[
     "descriptor",
 ];
 
+/// Stable refusal code: a descriptor lacks a field `remote pin` needs to
+/// write a complete remote entry without contacting the remote.
+pub const REMOTE_DESCRIPTOR_INCOMPLETE: &str = "remote_descriptor_incomplete";
+/// Stable refusal code: the remote was pinned from a descriptor that carried
+/// no ingest rules, so nothing may be pushed to it.
+pub const REMOTE_PINNED_WITHOUT_INGEST_RULES: &str = "remote_pinned_without_ingest_rules";
+
 /// Provider/import descriptor for a remote RyeOS node.
 ///
 /// A descriptor is a trust pin and discovery convenience, not a credential.
 /// Importing one records the expected node identity for `remote configure`,
 /// which still verifies the live node before writing local remote config.
+/// `remote pin` writes the entry from the descriptor alone, so it also needs
+/// the node's site and vault fingerprint; the ingest rules are optional and
+/// their absence means nothing is pushed to the pinned remote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteDescriptor {
@@ -49,6 +59,8 @@ pub struct RemoteDescriptor {
     pub name: Option<String>,
     pub url: String,
     pub node: RemoteDescriptorNode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_ignore: Option<ryeos_app::ignore::IgnoreConfig>,
     #[serde(default)]
     pub capabilities: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -64,6 +76,12 @@ pub struct RemoteDescriptorNode {
     pub public_key: String,
     /// Expected fingerprint for `public_key`.
     pub fingerprint: String,
+    /// The node's site, `site:<fingerprint>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<String>,
+    /// The fingerprint of the node's vault public key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_fingerprint: Option<String>,
 }
 
 impl RemoteDescriptor {
@@ -103,7 +121,62 @@ impl RemoteDescriptor {
                 actual_fingerprint,
             );
         }
+        if let Some(site_id) = &self.node.site_id
+            && *site_id != format!("site:{actual_fingerprint}")
+        {
+            anyhow::bail!(
+                "remote descriptor node.site_id {site_id} is not the site of node {actual_fingerprint}"
+            );
+        }
         Ok(())
+    }
+
+    /// The complete remote entry this descriptor pins under `name`, with no
+    /// contact with the remote. A descriptor without the node's site or vault
+    /// fingerprint is refused with [`REMOTE_DESCRIPTOR_INCOMPLETE`].
+    pub fn pinned_remote_config(&self, name: &str) -> Result<RemoteConfig, HandlerError> {
+        self.validate()
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
+        let missing: Vec<&str> = [
+            ("node.site_id", self.node.site_id.is_none()),
+            (
+                "node.vault_fingerprint",
+                self.node.vault_fingerprint.is_none(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, absent)| absent.then_some(field))
+        .collect();
+        if !missing.is_empty() {
+            return Err(HandlerError::Structured {
+                code: REMOTE_DESCRIPTOR_INCOMPLETE.to_owned(),
+                status: 400,
+                body: serde_json::json!({
+                    "code": REMOTE_DESCRIPTOR_INCOMPLETE,
+                    "message": format!(
+                        "the descriptor for '{name}' lacks {}, which pinning without contacting the remote needs; export it again with `ryeos remote-descriptor` from a current node",
+                        missing.join(" and ")
+                    ),
+                    "remote": name,
+                    "missing": missing,
+                }),
+            });
+        }
+        let config = RemoteConfig {
+            name: name.to_owned(),
+            url: normalize_url(&self.url)
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?,
+            principal_id: format!("fp:{}", self.node.fingerprint),
+            signing_key: self.node.public_key.clone(),
+            site_id: self.node.site_id.clone().unwrap_or_default(),
+            vault_fingerprint: self.node.vault_fingerprint.clone().unwrap_or_default(),
+            ingest_ignore: self.ingest_ignore.clone(),
+            project_bindings: HashMap::new(),
+        };
+        config
+            .validate()
+            .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
+        Ok(config)
     }
 }
 
@@ -147,9 +220,11 @@ pub struct RemoteConfig {
     /// Required — populated during `remote configure`.
     pub vault_fingerprint: String,
     /// Cached remote ingest-ignore config, populated during
-    /// `remote configure`. Required for push to use the correct
-    /// ignore rules. Re-run `remote configure` if stale.
-    pub ingest_ignore: ryeos_app::ignore::IgnoreConfig,
+    /// `remote configure`. Push needs it to use the correct ignore rules;
+    /// re-run `remote configure` if stale. A remote pinned from a
+    /// descriptor that carried none has none, and nothing is pushed to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_ignore: Option<ryeos_app::ignore::IgnoreConfig>,
     /// Canonical local project path -> remote project binding.
     ///
     /// These bindings are operator-local and are written only to the
@@ -160,6 +235,26 @@ pub struct RemoteConfig {
 }
 
 impl RemoteConfig {
+    /// The remote's ingest rules, or the typed refusal
+    /// [`REMOTE_PINNED_WITHOUT_INGEST_RULES`] for a remote pinned without
+    /// them.
+    pub fn ingest_rules(&self) -> Result<&ryeos_app::ignore::IgnoreConfig, HandlerError> {
+        self.ingest_ignore
+            .as_ref()
+            .ok_or_else(|| HandlerError::Structured {
+                code: REMOTE_PINNED_WITHOUT_INGEST_RULES.to_owned(),
+                status: 409,
+                body: serde_json::json!({
+                    "code": REMOTE_PINNED_WITHOUT_INGEST_RULES,
+                    "message": format!(
+                        "remote '{}' was pinned from a descriptor without ingest rules, so this node pushes nothing to it; run `ryeos remote configure {}` once the remote is reachable, or pin a descriptor that carries them",
+                        self.name, self.name
+                    ),
+                    "remote": self.name,
+                }),
+            })
+    }
+
     /// Decode and validate the pinned daemon signing key against the
     /// remote's pinned principal/fingerprint identity.
     pub fn pinned_signing_key(&self) -> Result<lillux::crypto::VerifyingKey> {
@@ -635,6 +730,35 @@ pub fn save_remotes(app_root: &Path, remotes: &HashMap<String, RemoteConfig>) ->
     Ok(())
 }
 
+/// Pin a remote from its descriptor in the node's own remotes file, without
+/// contacting it: the descriptor is the trust anchor. An existing entry of
+/// the same name is replaced; its project bindings are kept. This is the one
+/// core behind `ryeos remote pin` and the offline operation
+/// `node.remote.pin`.
+pub fn pin_remote(
+    app_root: &Path,
+    name: &str,
+    descriptor: &RemoteDescriptor,
+) -> Result<serde_json::Value, HandlerError> {
+    let mut config = descriptor.pinned_remote_config(name)?;
+    let internal = |error: anyhow::Error| HandlerError::Internal(format!("{error:#}"));
+    let mut remotes = load_remotes(app_root).map_err(internal)?;
+    if let Some(existing) = remotes.get(name) {
+        config.project_bindings = existing.project_bindings.clone();
+    }
+    remotes.insert(name.to_owned(), config.clone());
+    save_remotes(app_root, &remotes).map_err(internal)?;
+    Ok(serde_json::json!({
+        "pinned": name,
+        "config_path": remotes_config_path(app_root),
+        "url": config.url,
+        "principal_id": config.principal_id,
+        "site_id": config.site_id,
+        "vault_fingerprint": config.vault_fingerprint,
+        "ingest_rules": config.ingest_ignore.is_some(),
+    }))
+}
+
 /// Get a named remote. Returns an error if not found.
 pub fn get_remote(remotes: &HashMap<String, RemoteConfig>, name: &str) -> Result<RemoteConfig> {
     remotes
@@ -915,6 +1039,88 @@ pub fn resolve_loaded_remote_by_site_id(
 
 #[cfg(test)]
 mod tests {
+
+    fn pin_descriptor(seed: u8, site: bool, vault: bool, ingest: bool) -> RemoteDescriptor {
+        let key = test_signing_key(seed);
+        let fingerprint = lillux::crypto::fingerprint(&decode_signing_key(&key).unwrap());
+        RemoteDescriptor {
+            version: 1,
+            name: Some("origin".into()),
+            url: "https://origin.example.com".into(),
+            node: RemoteDescriptorNode {
+                public_key: key,
+                site_id: site.then(|| format!("site:{fingerprint}")),
+                vault_fingerprint: vault.then(|| "sha256:origin-vault".to_owned()),
+                fingerprint,
+            },
+            ingest_ignore: ingest.then(|| ryeos_app::ignore::IgnoreConfig {
+                patterns: vec!["target/".into()],
+            }),
+            capabilities: None,
+            admission: None,
+            provider: None,
+        }
+    }
+
+    fn structured_code(error: HandlerError) -> String {
+        match error {
+            HandlerError::Structured { code, .. } => code,
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_pin_operation_writes_complete_entry_without_dial() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let descriptor = pin_descriptor(9, true, true, true);
+        let report = pin_remote(tmpdir.path(), "origin", &descriptor).unwrap();
+        assert_eq!(report["ingest_rules"], true);
+        let loaded = load_remotes(tmpdir.path()).unwrap();
+        let pinned = &loaded["origin"];
+        assert_eq!(pinned.signing_key, descriptor.node.public_key);
+        assert_eq!(
+            pinned.principal_id,
+            format!("fp:{}", descriptor.node.fingerprint)
+        );
+        assert_eq!(pinned.site_id, descriptor.node.site_id.clone().unwrap());
+        assert_eq!(pinned.vault_fingerprint, "sha256:origin-vault");
+        assert_eq!(pinned.ingest_rules().unwrap().patterns, ["target/"]);
+        // Pinning again converges on the same entry.
+        pin_remote(tmpdir.path(), "origin", &descriptor).unwrap();
+        assert_eq!(load_remotes(tmpdir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remote_pin_refuses_descriptor_missing_site() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        for descriptor in [
+            pin_descriptor(9, false, true, true),
+            pin_descriptor(9, true, false, true),
+        ] {
+            let refusal = pin_remote(tmpdir.path(), "origin", &descriptor).unwrap_err();
+            assert_eq!(structured_code(refusal), REMOTE_DESCRIPTOR_INCOMPLETE);
+        }
+        assert!(load_remotes(tmpdir.path()).unwrap().is_empty());
+        // A site that is not the node's own is refused outright.
+        let mut foreign = pin_descriptor(9, true, true, true);
+        foreign.node.site_id = Some("site:somewhere-else".into());
+        assert!(pin_remote(tmpdir.path(), "origin", &foreign).is_err());
+    }
+
+    #[test]
+    fn push_to_pinned_remote_without_ingest_rules_refused() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let report = pin_remote(
+            tmpdir.path(),
+            "origin",
+            &pin_descriptor(9, true, true, false),
+        )
+        .unwrap();
+        assert_eq!(report["ingest_rules"], false);
+        let loaded = load_remotes(tmpdir.path()).unwrap();
+        let refusal = loaded["origin"].ingest_rules().unwrap_err();
+        assert_eq!(structured_code(refusal), REMOTE_PINNED_WITHOUT_INGEST_RULES);
+    }
     use super::*;
 
     #[test]
@@ -1086,9 +1292,9 @@ remotes:
                 signing_key: test_signing_key(1),
                 site_id: "site:example".into(),
                 vault_fingerprint: "sha256:def456".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
+                ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig {
                     patterns: vec![".git/".into(), "target/".into()],
-                },
+                }),
                 project_bindings: HashMap::new(),
             },
         );
@@ -1098,7 +1304,15 @@ remotes:
         assert_eq!(loaded["default"].url, "https://example.com");
         assert_eq!(loaded["default"].site_id, "site:example");
         assert_eq!(loaded["default"].vault_fingerprint, "sha256:def456");
-        assert_eq!(loaded["default"].ingest_ignore.patterns.len(), 2);
+        assert_eq!(
+            loaded["default"]
+                .ingest_ignore
+                .as_ref()
+                .unwrap()
+                .patterns
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -1127,9 +1341,9 @@ remotes:
                 signing_key: test_signing_key(2),
                 site_id: "site:example".into(),
                 vault_fingerprint: "sha256:def456".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
+                ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig {
                     patterns: vec![".git/".into()],
-                },
+                }),
                 project_bindings: bindings,
             },
         );
@@ -1156,7 +1370,7 @@ remotes:
             signing_key: test_signing_key(seed),
             site_id: format!("site:{name}"),
             vault_fingerprint: format!("sha256:{name}"),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }
@@ -1389,7 +1603,7 @@ remotes:
                 signing_key: test_signing_key(6),
                 site_id: "site:example".into(),
                 vault_fingerprint: "sha256:example".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+                ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
                 project_bindings: HashMap::new(),
             },
         );
@@ -1408,7 +1622,7 @@ remotes:
             signing_key: test_signing_key(seed),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".to_string(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }

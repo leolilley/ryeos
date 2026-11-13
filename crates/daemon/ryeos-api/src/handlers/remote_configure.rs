@@ -220,7 +220,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         signing_key: pubkey.signing_key,
         site_id: pubkey.site_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
-        ingest_ignore,
+        ingest_ignore: Some(ingest_ignore),
         project_bindings: existing_project_bindings,
     };
     remote_config.validate()?;

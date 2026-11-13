@@ -2055,10 +2055,24 @@ async fn admit_execution_with_publication(
             }
             let client =
                 crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote);
-            let remote_ignore = IgnoreMatcher::from_config(&plan.remote.remote.ingest_ignore)
-                .map_err(|e| {
-                    RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+            let rules = plan
+                .remote
+                .remote
+                .ingest_rules()
+                .map_err(|refusal| match refusal {
+                    crate::handler_error::HandlerError::Structured { code, status, body } => {
+                        RouteDispatchError::Structured {
+                            code,
+                            status,
+                            body,
+                            thread_id: None,
+                        }
+                    }
+                    other => RouteDispatchError::Internal(other.to_string()),
                 })?;
+            let remote_ignore = IgnoreMatcher::from_config(rules).map_err(|e| {
+                RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+            })?;
             let state_arc = Arc::new(state.clone());
             let mut destination_policy = request.execution_policy.clone();
             destination_policy.target = ExecutionTarget::Here;
@@ -3676,7 +3690,7 @@ mod tests {
             ),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".into(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }

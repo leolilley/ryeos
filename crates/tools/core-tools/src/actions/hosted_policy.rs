@@ -14,6 +14,9 @@ use ryeos_node_runtime::node_policy::sections::hosted::HostedNodePolicy;
 pub struct LoadedHostedNodePolicy {
     pub policy: HostedNodePolicy,
     pub source_file: std::path::PathBuf,
+    /// The node's signed ingest-ignore patterns, the rules a remote applies
+    /// before it pushes here.
+    pub ingest_ignore_patterns: Vec<String>,
 }
 
 impl std::ops::Deref for LoadedHostedNodePolicy {
@@ -40,6 +43,10 @@ pub fn load_hosted_policy(app_root: &Path) -> Result<LoadedHostedNodePolicy> {
     Ok(LoadedHostedNodePolicy {
         policy: snapshot.require::<HostedNodePolicy>()?.clone(),
         source_file: snapshot.source_file::<HostedNodePolicy>()?.to_path_buf(),
+        ingest_ignore_patterns: snapshot
+            .require::<ryeos_node_runtime::node_policy::sections::ingest_ignore::CompiledIngestIgnorePolicy>()?
+            .patterns
+            .clone(),
     })
 }
 

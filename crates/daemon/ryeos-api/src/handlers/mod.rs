@@ -94,6 +94,7 @@ pub mod remote_execute;
 pub mod remote_import_admitted_head;
 pub mod remote_import_admitted_root;
 pub mod remote_list;
+pub mod remote_pin;
 pub mod remote_project_status;
 pub mod remote_pull;
 pub mod remote_pull_worker_result;
@@ -336,6 +337,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     sync_jobs_list::DESCRIPTOR,
     sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
+    remote_pin::DESCRIPTOR,
     remote_bind_project::DESCRIPTOR,
     remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,

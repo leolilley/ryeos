@@ -165,7 +165,7 @@ pub async fn handle(
     // Load remote's cached ignore rules (required). Inline fetch on cache miss,
     // without persisting partial/invalid remote configs.
     let remote_ignore = match remote_cfg.as_ref() {
-        Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)
+        Some(cfg) => IgnoreMatcher::from_config(cfg.ingest_rules()?)
             .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?,
         None => {
             let fetched = client.get_ingest_ignore().await.map_err(|e| {

@@ -131,7 +131,12 @@ mod tests {
         );
         assert_eq!(
             delegating[0].1,
-            ["node.external-execution.compose".to_owned()]
+            [
+                "node.external-execution.compose",
+                "node.authorize-client",
+                "node.remote.pin",
+                "node.bundle.replace",
+            ]
         );
     }
 

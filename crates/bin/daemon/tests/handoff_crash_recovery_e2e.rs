@@ -134,7 +134,7 @@ fn remote_config(
         signing_key: format!("ed25519:{public_key}"),
         site_id: site_id.to_owned(),
         vault_fingerprint: format!("sha256:{name}-fixture-vault"),
-        ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
         project_bindings,
     })
 }
@@ -3092,7 +3092,7 @@ fn plant_target_abort_state(
             signing_key: format!("ed25519:{source_public_key}"),
             site_id: REMOTE_SOURCE_SITE_ID.to_owned(),
             vault_fingerprint: "sha256:handoff-source-fixture".to_owned(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         },
     );

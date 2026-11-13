@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:50:13Z:b39fdeed8657cf87efe32145893de6f35f3ddc3af8b77e23f93424f862080d50:fuhGQG9Hq1D/jEOr9oj0A/b3M0a5ldGsqi21lxNIrdWVAugp2lA52GOIRd/CQxk6EjMlQbupfP3qHQJspYc/Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:57:23Z:96e922b59b89e35f6c0c46dd3b9203f628712f7ef738aa6c966421d80c0de7ce:B77WiYo2UCpdTUrw7gBNKijdzK7rESo4MikRRzaG1bYSRPsXdDsdscDmURWDkinaVFs+90S/SmR8apPCLngEAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -445,6 +445,15 @@ verbs such as `thread list`, `thread get`, `events replay`,
 Remote verbs cover cross-node configure/status, push/pull, execute,
 threads, token-based admission, remote authorization, live bundle
 install, and vault proxying.
+
+- `ryeos remote pin <name> --descriptor <file>` — pin a remote from its
+  descriptor without contacting it; refused `remote_descriptor_incomplete`
+  without the node's site and vault fingerprint.
+- `ryeos node offline-operation sign --operation node.authorize-client|node.remote.pin|node.bundle.replace ...`
+  — wire a hosted node that delegates these operations: a remote grant, a
+  remote pin (`--input descriptor=<file>`) or a bundle installed from an
+  archive (`--input archive=<file.tar.gz>`). See "Wiring a hosted node
+  without a shell" in [Remote Operations](../remote/remote-operations.md).
 See [Remote Command Reference](../remote/remote-command-reference.md).
 
 ## Aliases Quick Reference

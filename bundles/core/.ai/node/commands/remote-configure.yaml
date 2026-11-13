@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T00:41:47Z:70fdcdcfd584101d81598675b676b237e2441deac5310a61298d9949412ced49:XbrlXpG89wHVC72y+d0ZRVb4F5crAh6v+FZR6m/h6Z6QD0wOugUn7yvrTZkLWOp6Y14BBVIC4KOiALP9CRE5AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:57:23Z:e5cfd446dc53f67425c219d31d9564cfba25eb03d357b55dd360b2290dd32f34:fdvyawMH1U/7doyXBwEl5O7h/7SvY0gsD/LZr3ViQ9mFGyNN1ndFU5ec3Jeow34qO+JWSFdZx4dNNCEh3+eWCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - configure
@@ -7,6 +7,8 @@ description: Add or update a remote node configuration; pin the remote key with
 forms:
 - slots:
   - field: remote
+help:
+  usage: ryeos remote configure <name> [--url <url>] (--descriptor <file> | --expect-fingerprint <sha256>)
 dispatch:
   kind: execute_ref
   execute: service:remote/configure

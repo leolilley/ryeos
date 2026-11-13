@@ -1587,3 +1587,221 @@ fn an_unreadable_grant_leaves_a_signed_request_waiting_until_it_is_stuck() {
         fx.refusals()[0].body.detail
     );
 }
+
+// ── Hosted wiring: grants, remote pins and bundle replacement ────────────
+
+fn grant_arguments(key: &SigningKey, scopes: &[&str], class: &str, merge: bool) -> Value {
+    json!({
+        "public_key": base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes()),
+        "scopes": scopes,
+        "label": "origin node",
+        "class": class,
+        "origin_site_id": SITE,
+        "merge_scopes": merge,
+    })
+}
+
+fn apply_grant(fx: &Fixture, arguments: Value) -> ApplyReport {
+    fx.drop_request(&fx.sign(fx.body("node.authorize-client", arguments)));
+    fx.run()
+}
+
+#[test]
+fn authorize_client_operation_reconciles_one_grant() {
+    let fx = fixture();
+    let peer = lillux::crypto::generate_signing_key();
+    let scopes = ["ryeos.execute.service.external-content/product-offer"];
+    let report = apply_grant(&fx, grant_arguments(&peer, &scopes, "remote_node", false));
+    assert_eq!(report.applied.len(), 1, "{:?}", report.refused);
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+        &fingerprint(&peer),
+        &authorized_keys_dir(fx.path()),
+        &fx.node,
+    )
+    .unwrap()
+    .expect("the grant was written");
+    assert_eq!(grant.scopes, scopes);
+    assert_eq!(
+        grant.principal_class,
+        ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode
+    );
+    assert_eq!(grant.configured_origin_site_id.as_deref(), Some(SITE));
+}
+
+#[test]
+fn authorize_client_operation_merges_scopes() {
+    let fx = fixture();
+    let peer = lillux::crypto::generate_signing_key();
+    let first = "ryeos.execute.service.external-content/product-offer";
+    let second = "ryeos.execute.service.objects/stage-chunk";
+    apply_grant(
+        &fx,
+        grant_arguments(&peer, &[first], "remote_operator", false),
+    );
+    let report = apply_grant(
+        &fx,
+        grant_arguments(&peer, &[second], "remote_operator", true),
+    );
+    assert_eq!(report.applied.len(), 1, "{:?}", report.refused);
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+        &fingerprint(&peer),
+        &authorized_keys_dir(fx.path()),
+        &fx.node,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(grant.scopes, [first, second]);
+    assert_eq!(fx.ledger().last_sequence, 2);
+}
+
+#[test]
+fn authorize_client_operation_never_grants_offline_or_wildcard_scopes() {
+    for scope in ["ryeos.offline.node.allow-restart", "ryeos.execute.*"] {
+        let fx = fixture();
+        let peer = lillux::crypto::generate_signing_key();
+        apply_grant(&fx, grant_arguments(&peer, &[scope], "remote_node", false));
+        assert_eq!(
+            fx.only_refusal(),
+            RefusalReason::InvalidArguments,
+            "{scope}"
+        );
+    }
+    let fx = fixture();
+    let peer = lillux::crypto::generate_signing_key();
+    apply_grant(
+        &fx,
+        grant_arguments(
+            &peer,
+            &["ryeos.execute.service.objects/get"],
+            "local_client",
+            false,
+        ),
+    );
+    assert_eq!(fx.only_refusal(), RefusalReason::InvalidArguments);
+}
+
+#[test]
+fn undelegated_operation_refused_for_remote_signer() {
+    for (operation, arguments) in [
+        (
+            "node.authorize-client",
+            grant_arguments(
+                &lillux::crypto::generate_signing_key(),
+                &["ryeos.execute.service.objects/get"],
+                "remote_node",
+                false,
+            ),
+        ),
+        ("node.remote.pin", json!({ "name": "origin" })),
+        ("node.bundle.replace", json!({ "name": "site" })),
+    ] {
+        let fx = fixture();
+        let scope = format!("ryeos.offline.{operation}");
+        let (key, grant) = fx.remote_operator(&[scope.as_str()], SITE, WildcardPolicy::Reject);
+        let mut body = fx.remote_body(&key, &grant, SITE, operation);
+        body.arguments = arguments;
+        fx.drop_request(&SignedRequest::sign(body, &key).unwrap());
+        fx.run();
+        assert_eq!(
+            fx.only_refusal(),
+            RefusalReason::NotDelegable,
+            "{operation}"
+        );
+    }
+}
+
+/// A host that records what the remote-pin and bundle-replace handlers hand
+/// it, standing for the daemon's.
+#[derive(Default)]
+struct RecordingHost {
+    pinned: std::cell::RefCell<Vec<(String, Vec<u8>)>>,
+    replaced: std::cell::RefCell<Vec<(String, Vec<u8>, bool)>>,
+}
+
+impl OfflineHost for RecordingHost {
+    fn image_seed(&self) -> Option<crate::offline_operation::host::ImageSeed> {
+        None
+    }
+
+    fn scheduler_history_participant(
+        &self,
+        _app_root: &Path,
+    ) -> anyhow::Result<
+        Option<Box<dyn ryeos_app::execution_history_reset::SchedulerHistoryResetParticipant>>,
+    > {
+        Ok(None)
+    }
+
+    fn pin_remote(
+        &self,
+        request: crate::offline_operation::host::RemotePin<'_>,
+    ) -> anyhow::Result<Value> {
+        request
+            .state_lock
+            .ensure_protects_app_root(request.app_root)?;
+        self.pinned
+            .borrow_mut()
+            .push((request.name.to_owned(), request.descriptor.to_vec()));
+        Ok(json!({ "pinned": request.name }))
+    }
+
+    fn replace_bundle(
+        &self,
+        request: crate::offline_operation::host::BundleReplace<'_>,
+    ) -> anyhow::Result<Value> {
+        request
+            .state_lock
+            .ensure_protects_app_root(request.app_root)?;
+        self.replaced.borrow_mut().push((
+            request.name.to_owned(),
+            request.archive.to_vec(),
+            request.preserve_runtime_artifacts,
+        ));
+        Ok(json!({ "replaced": request.name }))
+    }
+}
+
+#[test]
+fn remote_pin_and_bundle_replace_hand_their_verified_input_to_the_host() {
+    let fx = fixture();
+    let host = RecordingHost::default();
+    let descriptor = b"version: 1\n".to_vec();
+    let mut pin = fx.body("node.remote.pin", json!({ "name": "origin" }));
+    pin.inputs
+        .insert("descriptor".to_owned(), fx.drop_input(&descriptor));
+    fx.drop_request(&fx.sign(pin));
+    let report = apply_pending_offline_operations(fx.path(), &host).unwrap();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.refused);
+    assert_eq!(
+        *host.pinned.borrow(),
+        [("origin".to_owned(), descriptor.clone())]
+    );
+
+    let archive = b"not inspected by the table".to_vec();
+    let mut replace = fx.body(
+        "node.bundle.replace",
+        json!({ "name": "site", "preserve_runtime_artifacts": true }),
+    );
+    replace
+        .inputs
+        .insert("archive".to_owned(), fx.drop_input(&archive));
+    fx.drop_request(&fx.sign(replace));
+    let report = apply_pending_offline_operations(fx.path(), &host).unwrap();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.refused);
+    assert_eq!(
+        *host.replaced.borrow(),
+        [("site".to_owned(), archive, true)]
+    );
+}
+
+#[test]
+fn a_host_without_the_cores_refuses_remote_pin_and_bundle_replace() {
+    let fx = fixture();
+    let mut pin = fx.body("node.remote.pin", json!({ "name": "origin" }));
+    pin.inputs
+        .insert("descriptor".to_owned(), fx.drop_input(b"version: 1\n"));
+    fx.drop_request(&fx.sign(pin));
+    let report = fx.run();
+    assert!(report.applied.is_empty());
+    assert!(fx.ledger().last_sequence == 0);
+}
