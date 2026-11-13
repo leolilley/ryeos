@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T18:15:40Z:1c8fa57a28151fcb67f76d784739304cf1b7e09551cf82dfb24f9b2319769633:DA4hyKF5tCLQqnPtIbtOeEm5h71ZZjCOG08WxBuWR75ZdxVBQorF28SeqChPnNQE3t7B+EpWpCX9PcEzaTWMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T19:42:23Z:0632359a6215ead0fc81cb684376de34110e905b2afdd0581984aa66d9f1336b:PYxROeuPxCTeqIExnXBDPjDZ5gPMj427r4lLGkpbdKh3Yx0loed/MutrbEb/ZeU6zkRWqSkWZTElT3ol4GY1Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -279,6 +279,7 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace
+          host_direct: unavailable
         local_unconfined:
           # The explicit opt-out from the sandbox: a host the operator runs
           # where jobs execute as the daemon user with no isolation backend.
