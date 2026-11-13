@@ -5360,6 +5360,89 @@ impl PinnedDirectory {
         }
     }
 
+    /// Remove one symlink child only when it still names exactly `expected`.
+    /// `Ok(false)` means no entry exists under `name`. Another entry type, or
+    /// a link naming anything else, is refused and left in place. The caller
+    /// must exclude concurrent writers of this coordinate: the target read
+    /// and the unlink are not one atomic compare-and-remove.
+    pub fn remove_symlink_if_target(&self, name: &OsStr, expected: &[u8]) -> Result<bool> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, expected);
+            anyhow::bail!("descriptor-relative symlink removal is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let Some(entry) = self.entry_no_follow(name)? else {
+                return Ok(false);
+            };
+            if entry.entry_type != PinnedEntryType::Symlink {
+                anyhow::bail!(
+                    "{} is not a symlink; refusing to remove it",
+                    self.path.join(name).display()
+                );
+            }
+            let actual = self
+                .read_symlink_target(name, expected.len() + 1)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("symlink {} disappeared", self.path.join(name).display())
+                })?;
+            if actual != expected {
+                anyhow::bail!(
+                    "symlink {} names another target; refusing to remove it",
+                    self.path.join(name).display()
+                );
+            }
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("remove symlink {}", self.path.join(name).display()));
+            }
+            self.directory.sync_all()?;
+            Ok(true)
+        }
+    }
+
+    /// Whether some process holds the named FIFO child open for reading,
+    /// probed by a non-blocking write-only open that writes nothing. `None`
+    /// means no entry exists under `name`; any other entry type is refused.
+    pub fn fifo_has_reader(&self, name: &OsStr) -> Result<Option<bool>> {
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            anyhow::bail!("descriptor-relative FIFO probing is unavailable on this platform");
+        }
+        #[cfg(unix)]
+        {
+            let Some(entry) = self.entry_no_follow(name)? else {
+                return Ok(None);
+            };
+            if entry.entry_type != PinnedEntryType::Fifo {
+                anyhow::bail!("{} is not a FIFO", self.path.join(name).display());
+            }
+            let name_c = std::ffi::CString::new(name.as_bytes())?;
+            let fd = unsafe {
+                libc::openat(
+                    self.directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                    libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 {
+                // Closing a writer that wrote nothing delivers no data.
+                drop(unsafe { File::from_raw_fd(fd) });
+                return Ok(Some(true));
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ENXIO) => Ok(Some(false)),
+                Some(libc::ENOENT) => Ok(None),
+                _ => Err(error)
+                    .with_context(|| format!("probe FIFO {}", self.path.join(name).display())),
+            }
+        }
+    }
+
     /// Publish one reserved child name as an ephemeral view of an exact
     /// inherited regular-file descriptor. The target contains only the
     /// process-local descriptor coordinate; file bytes never enter the
