@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-12T13:52:53Z:23fe26e974ef79cb8d198c68e3563444f32689bd26452fa451439e8114bd690f:EdTbH/tq4rCzIN8htf+DExOHLON4ClDu2bkfh+p4zyoY8Vzc8794z79pru1tTi4dBilqTa1jZNeZvrItD8LTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T23:22:23Z:7efd2970bc5fe267d64f3f0e1998fc05f77bdac0470e607d6eb65eb0f2c19cb5:zlWNpgAMQ5C1Qxm0NOcFKEo+2PTv4ToQ5Eq8F+sqXa8BRN2duOCvMq4ZwDCQLx39UUqxBuU7v6SS2F5sqqa5AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -23,9 +23,11 @@ expected=(
   index.html
   rune_bridge.js
   rune_platform.js
+  ryeos-cjk.ttf.gz
+  ryeos-emoji.ttf.gz
   ryeos_boot.js
   ryeos_rune.js
-  ryeos_rune_bg.wasm
+  ryeos_rune_bg.wasm.gz
 )
 mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
 if [[ "${actual[*]}" != "${expected[*]}" ]]; then

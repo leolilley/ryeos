@@ -227,7 +227,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_HEAD(self):
-        if self.path == "/" or self.path == "/ui" or self.path.startswith("/ui?"):
+        if urllib.parse.urlsplit(self.path).path in {"/", "/ui", "/ui/"}:
             return self.serve_asset("index.html", head_only=True)
         if self.path.startswith("/ui/assets/"):
             path = urllib.parse.urlsplit(self.path).path.removeprefix("/ui/assets/")
@@ -235,7 +235,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.proxy(head_only=True)
 
     def do_GET(self):
-        if self.path == "/" or self.path == "/ui" or self.path.startswith("/ui?"):
+        if urllib.parse.urlsplit(self.path).path in {"/", "/ui", "/ui/"}:
             return self.serve_asset("index.html")
         if self.path.startswith("/ui/assets/"):
             path = urllib.parse.urlsplit(self.path).path.removeprefix("/ui/assets/")
@@ -257,11 +257,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             candidate.relative_to(asset_dir)
         except ValueError:
             return self.send_error(403)
+        # The renderer and fonts are stored gzip-encoded, as the daemon serves them.
+        encoding = None
+        if not candidate.is_file() and candidate.with_name(candidate.name + ".gz").is_file():
+            candidate, encoding = candidate.with_name(candidate.name + ".gz"), "gzip"
         if not candidate.is_file():
             return self.send_error(404)
         data = candidate.read_bytes()
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        if candidate.suffix == ".js":
+        name = candidate.name.removesuffix(".gz") if encoding else candidate.name
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        if name.endswith(".wasm"):
+            content_type = "application/wasm"
+        elif name.endswith(".ttf"):
+            content_type = "font/ttf"
+        elif candidate.suffix == ".js":
             content_type = "application/javascript; charset=utf-8"
         elif candidate.suffix == ".css":
             content_type = "text/css; charset=utf-8"
@@ -269,6 +278,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             content_type = "text/html; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()

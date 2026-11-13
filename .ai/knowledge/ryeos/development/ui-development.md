@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:27:48Z:c5c2624d5b4f7d9b7fb50e4d3ca77beb29079a63db268fa323859b5da31eaa28:vJXArxf9m2bEHyMs48FVVZJ2TSprzie3aZ4edAv3+tCScIgLU5OKEcSY6qEhJQaiEl91df3+mEa2OX9RrKMxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T13:04:56Z:69cb32229f3f7649a89652c3edebb30f76bf87678aeb9e0dcc6734007eadb88f:fjdiEFT8LPn2QBYAPGk1aH9c49OPZ9RumTIPgp/o/IGrCBzL3wURrSpRe7WHrUV+CQXL7b/X0s2WdTRJvz6xCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -478,8 +478,19 @@ The browser is a renderer, not a second application model:
 - `crates/daemon/ryeos-ui/src/assets.rs` serves only that registered closure.
 
 The installed closure is exactly `index.html`, `ryeos_boot.js`, `ryeos_rune.js`,
-`ryeos_rune_bg.wasm`, `rune_bridge.js` and `rune_platform.js`. There is no
-alternate browser renderer, compatibility bootstrap or runtime fallback.
+`ryeos_rune_bg.wasm`, `rune_bridge.js`, `rune_platform.js`, `ryeos-cjk.ttf` and
+`ryeos-emoji.ttf`. The renderer and the two fonts are stored gzip-encoded
+(`.gz` in `pkg/`) and served that way; a client that does not accept gzip gets
+them decoded. There is no alternate browser renderer, compatibility bootstrap
+or runtime fallback.
+
+On the web Rune draws only the faces it is given. Inter and IBM Plex Mono are
+compiled in; `ryeos-cjk.ttf` (common Chinese and Japanese, kana) and
+`ryeos-emoji.ttf` (monochrome Noto Emoji) cover content in other scripts. The
+boot module fetches them beside the renderer and hands them over (`add_font`)
+before `start`; one that fails to load leaves its characters undrawn and the
+client still starts. `scripts/build-rune-fonts.py` produces them from pinned
+upstream Noto sources.
 `crates/clients/web/` is only the `web` launcher binary: it mints a launch URL
 and opens the browser.
 

@@ -7,7 +7,7 @@
       "filename": "index.html",
       "mime": "text/html; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "4b95eca117085a5c5ff9e1ef21f311ac8a2ac155fe0a887efe2fe8cdd08c4202",
+      "sha256": "8172e368840fb5e41937ee4dfecb6d4f7c5b8fd9b2349549670377716bd26b9e",
       "imports": [
         "/ui/assets/ryeos_boot.js"
       ]
@@ -17,9 +17,11 @@
       "filename": "ryeos_boot.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "df15eded4f1a3d9dedbb0c12af0902f3b2deb67fe745860aa1e723506f55c2cf",
+      "sha256": "cf40b5b7ecbe326098c9389618c4d028327222d590709ec99f6e00487e38f3fc",
       "imports": [
-        "/ui/assets/ryeos_rune.js"
+        "/ui/assets/ryeos_rune.js",
+        "/ui/assets/ryeos-cjk.ttf",
+        "/ui/assets/ryeos-emoji.ttf"
       ]
     },
     {
@@ -27,7 +29,7 @@
       "filename": "ryeos_rune.js",
       "mime": "application/javascript; charset=utf-8",
       "cache": "no-cache",
-      "sha256": "8a19d35b778663187932b0f22086e2023778f90f4cf076063ff12e2df3d39407",
+      "sha256": "f8c80b048887b796c922303006d39ff3528bc16f657f7a4c95a5126be6e0eca2",
       "imports": [
         "/ui/assets/rune_bridge.js",
         "/ui/assets/rune_platform.js",
@@ -52,10 +54,29 @@
     },
     {
       "route": "/ui/assets/ryeos_rune_bg.wasm",
-      "filename": "ryeos_rune_bg.wasm",
+      "filename": "ryeos_rune_bg.wasm.gz",
       "mime": "application/wasm",
       "cache": "no-cache",
-      "sha256": "8ff145fee883963545a70e6e69a6a0b17bc87c04fea1d1da604290667dbb2474",
+      "sha256": "c560e908ccb9b6c31643729555868f7128c4321ddfeafd552a35bd2276252c12",
+      "imports": [],
+      "encoding": "gzip"
+    },
+    {
+      "route": "/ui/assets/ryeos-cjk.ttf",
+      "filename": "ryeos-cjk.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "199b2f451085c70084374dba4ee64b9b60ff93646c26b48dd4b47fb910036af2",
+      "imports": []
+    },
+    {
+      "route": "/ui/assets/ryeos-emoji.ttf",
+      "filename": "ryeos-emoji.ttf.gz",
+      "encoding": "gzip",
+      "mime": "font/ttf",
+      "cache": "no-cache",
+      "sha256": "2da9fbdc39dfa60745991459a5e4a4298a35af66df15fb3077fcca4143401203",
       "imports": []
     }
   ]

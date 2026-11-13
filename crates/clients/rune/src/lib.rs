@@ -871,8 +871,12 @@ impl App {
     }
 }
 
-pub fn spec() -> AppSpec<App> {
+/// The app. `fonts` are the coverage faces the page fetched beside the
+/// renderer (CJK and emoji); Rune keeps its embedded Inter and IBM Plex Mono
+/// first and falls back to these.
+pub fn spec(fonts: &'static [&'static [u8]]) -> AppSpec<App> {
     AppSpec {
+        fonts,
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
@@ -920,8 +924,34 @@ fn fixture_app(
     .init(move || App::fixture(core))
 }
 
-/// The page's entry point.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
+/// Font files the page hands over before `start`.
+#[cfg(target_arch = "wasm32")]
+static PENDING_FONTS: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+
+/// Hand the renderer one font file. The page calls this for each coverage
+/// face it fetched, then `start`; a face that failed to load is just absent.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn add_font(bytes: Vec<u8>) {
+    if let Ok(mut pending) = PENDING_FONTS.lock() {
+        pending.push(bytes);
+    }
+}
+
+/// The page's entry point, after its fonts.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
 pub fn start() {
-    rune::run(spec());
+    // Rune borrows its fonts for the life of the page.
+    static FILES: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    static FONTS: std::sync::OnceLock<Vec<&'static [u8]>> = std::sync::OnceLock::new();
+    #[cfg(target_arch = "wasm32")]
+    let handed = PENDING_FONTS
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default();
+    #[cfg(not(target_arch = "wasm32"))]
+    let handed = Vec::new();
+    let files = FILES.get_or_init(|| handed);
+    let fonts = FONTS.get_or_init(|| files.iter().map(Vec::as_slice).collect());
+    rune::run(spec(fonts));
 }

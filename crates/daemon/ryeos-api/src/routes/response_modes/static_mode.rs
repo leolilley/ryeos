@@ -14,8 +14,11 @@ use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 
 /// A static asset served by an injected provider.
 pub struct StaticAsset {
-    pub bytes: Vec<u8>,
+    pub bytes: std::borrow::Cow<'static, [u8]>,
     pub content_type: &'static str,
+    /// `Some("gzip")` when `bytes` are gzip-encoded: sent as they are to a
+    /// client that accepts gzip, decoded for one that does not.
+    pub content_encoding: Option<&'static str>,
     pub etag: String,
     /// Cache-Control header value.
     pub cache_control: &'static str,
@@ -80,6 +83,51 @@ pub struct CompiledStaticMode {
 }
 
 /// Security headers applied to all embedded asset responses.
+/// Whether an `Accept-Encoding` value admits gzip: named (or `*`) without a
+/// zero quality.
+fn accepts_gzip(accept_encoding: Option<&HeaderValue>) -> bool {
+    let Some(value) = accept_encoding.and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    value.split(',').any(|coding| {
+        let mut parts = coding.split(';').map(str::trim);
+        let name = parts.next().unwrap_or_default();
+        let refused = parts.any(|parameter| {
+            parameter
+                .strip_prefix("q=")
+                .and_then(|quality| quality.parse::<f32>().ok())
+                .is_some_and(|quality| quality <= 0.0)
+        });
+        (name.eq_ignore_ascii_case("gzip") || name == "*") && !refused
+    })
+}
+
+/// The body to send for `asset` and its `Content-Encoding`, if any. A
+/// gzip-encoded asset goes out as stored when the client accepts gzip and is
+/// decoded otherwise.
+fn encoded_body(
+    asset: StaticAsset,
+    accept_encoding: Option<&HeaderValue>,
+) -> Result<(std::borrow::Cow<'static, [u8]>, Option<&'static str>), RouteDispatchError> {
+    match asset.content_encoding {
+        None => Ok((asset.bytes, None)),
+        Some("gzip") if accepts_gzip(accept_encoding) => Ok((asset.bytes, Some("gzip"))),
+        Some("gzip") => {
+            use std::io::Read as _;
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(&*asset.bytes)
+                .read_to_end(&mut decoded)
+                .map_err(|error| {
+                    RouteDispatchError::Internal(format!("stored gzip asset is corrupt: {error}"))
+                })?;
+            Ok((std::borrow::Cow::Owned(decoded), None))
+        }
+        Some(other) => Err(RouteDispatchError::Internal(format!(
+            "unsupported stored asset encoding {other}"
+        ))),
+    }
+}
+
 static CSP_VALUE: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:";
 
 impl ResponseMode for StaticMode {
@@ -275,11 +323,23 @@ impl CompiledResponseMode for CompiledStaticMode {
                     .unwrap_or_else(|| asset.content_type.parse().unwrap());
 
                 let cache_control = asset.cache_control;
+                let etag = asset.etag.clone();
+                let stored_encoded = asset.content_encoding.is_some();
+                let (body, encoding) = encoded_body(
+                    asset,
+                    ctx.request_parts.headers.get(header::ACCEPT_ENCODING),
+                )?;
 
-                let mut resp = (self.status, asset.bytes).into_response();
+                let mut resp = (self.status, body).into_response();
                 let headers = resp.headers_mut();
+                if let Some(encoding) = encoding {
+                    headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static(encoding));
+                }
+                if stored_encoded {
+                    headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+                }
                 headers.insert(header::CONTENT_TYPE, ct);
-                headers.insert(header::ETAG, asset.etag.parse().unwrap());
+                headers.insert(header::ETAG, etag.parse().unwrap());
                 headers.insert(header::CACHE_CONTROL, cache_control.parse().unwrap());
                 headers.insert(header::X_CONTENT_TYPE_OPTIONS, "nosniff".parse().unwrap());
                 headers.insert(header::REFERRER_POLICY, "same-origin".parse().unwrap());
@@ -307,14 +367,16 @@ mod tests {
         fn get(&self, path: &str) -> Option<StaticAsset> {
             match path.trim_start_matches('/') {
                 "index.html" | "app/index.html" => Some(StaticAsset {
-                    bytes: b"<html></html>".to_vec(),
+                    bytes: std::borrow::Cow::Borrowed(b"<html></html>"),
                     content_type: "text/html; charset=utf-8",
+                    content_encoding: None,
                     etag: "\"fake-etag-html\"".to_string(),
                     cache_control: "no-cache",
                 }),
                 "main.js" | "app/assets/main.js" => Some(StaticAsset {
-                    bytes: b"// main".to_vec(),
+                    bytes: std::borrow::Cow::Borrowed(b"// main"),
                     content_type: "application/javascript; charset=utf-8",
+                    content_encoding: None,
                     etag: "\"fake-etag-js\"".to_string(),
                     cache_control: "no-cache",
                 }),
@@ -554,5 +616,36 @@ mod tests {
                 assert!(msg.contains("missing 'body_b64'"), "got: {msg}");
             }
         }
+    }
+
+    #[test]
+    fn gzip_is_accepted_unless_refused() {
+        let accepts = |value: &str| accepts_gzip(Some(&HeaderValue::from_str(value).unwrap()));
+        assert!(accepts("gzip, deflate, br"));
+        assert!(accepts("br;q=1.0, GZIP;q=0.5"));
+        assert!(accepts("*"));
+        assert!(!accepts("gzip;q=0"));
+        assert!(!accepts("br, deflate"));
+        assert!(!accepts_gzip(None));
+    }
+
+    #[test]
+    fn a_gzip_asset_is_sent_as_stored_or_decoded() {
+        use std::io::Write as _;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(b"(module)").unwrap();
+        let stored = encoder.finish().unwrap();
+        let asset = || StaticAsset {
+            bytes: std::borrow::Cow::Owned(stored.clone()),
+            content_type: "application/wasm",
+            content_encoding: Some("gzip"),
+            etag: "\"e\"".to_string(),
+            cache_control: "no-cache",
+        };
+        let gzip = HeaderValue::from_static("gzip");
+        let (body, encoding) = encoded_body(asset(), Some(&gzip)).unwrap();
+        assert_eq!((&*body, encoding), (stored.as_slice(), Some("gzip")));
+        let (body, encoding) = encoded_body(asset(), None).unwrap();
+        assert_eq!((&*body, encoding), (&b"(module)"[..], None));
     }
 }
