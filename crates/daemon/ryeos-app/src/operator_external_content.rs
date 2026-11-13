@@ -28,6 +28,7 @@ pub mod product_receipt;
 pub mod products;
 pub mod qualification_launch;
 pub mod qualification_testimony;
+pub mod remote_testimony_inspection;
 mod retained_binding;
 mod retained_product;
 mod retained_result;
