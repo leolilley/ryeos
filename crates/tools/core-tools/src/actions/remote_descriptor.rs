@@ -48,6 +48,8 @@ pub struct RemoteDescriptorFile {
     pub name: String,
     pub url: String,
     pub node: RemoteDescriptorNode,
+    /// The rules a remote applies before it pushes to this node.
+    pub ingest_ignore: IngestIgnoreDescriptor,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +62,16 @@ pub struct RemoteDescriptorFile {
 pub struct RemoteDescriptorNode {
     pub public_key: String,
     pub fingerprint: String,
+    /// The node's site, derived from its key.
+    pub site_id: String,
+    /// The fingerprint of the node's vault public key, when it has a vault.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vault_fingerprint: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IngestIgnoreDescriptor {
+    pub patterns: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -174,7 +186,12 @@ pub fn run_export_remote_descriptor(
         url,
         node: RemoteDescriptorNode {
             public_key: identity.signing_key,
+            site_id: format!("site:{fingerprint}"),
             fingerprint,
+            vault_fingerprint: vault_fingerprint(&app_root)?,
+        },
+        ingest_ignore: IngestIgnoreDescriptor {
+            patterns: hosted_policy.ingest_ignore_patterns.clone(),
         },
         capabilities,
         admission,
@@ -207,6 +224,18 @@ pub fn run_export_remote_descriptor(
             path: None,
         })
     }
+}
+
+/// The fingerprint of the node's vault public key, as the node's own
+/// `/public-key` route reports it; `None` for a node without a vault.
+fn vault_fingerprint(app_root: &std::path::Path) -> Result<Option<String>> {
+    let path = app_root.join(".ai/node/vault/public_key.pem");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let key = lillux::vault::read_public_key(&path)
+        .with_context(|| format!("read the vault public key {}", path.display()))?;
+    Ok(Some(key.fingerprint()))
 }
 
 fn resolve_app_root(opt: Option<String>) -> Result<PathBuf> {
@@ -399,6 +428,13 @@ admission_enabled: {admission_enabled}
 
         assert!(result.descriptor.capabilities.is_empty());
         assert_eq!(result.descriptor.admission.unwrap().mode, "one_time_token");
+        // Everything a pin without contact needs.
+        assert_eq!(
+            result.descriptor.node.site_id,
+            format!("site:{}", identity.fingerprint())
+        );
+        assert!(result.yaml.contains("site_id:"), "{}", result.yaml);
+        assert!(result.yaml.contains("ingest_ignore:"), "{}", result.yaml);
     }
 
     #[test]

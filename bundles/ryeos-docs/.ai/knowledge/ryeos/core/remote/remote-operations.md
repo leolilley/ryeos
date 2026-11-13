@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:11:14Z:20a94ef85cbc91a47879e4912cbbce938cdc19c0d510cbab00f79ccff9731d0c:pit03NpfRJmqpxwIAonNDshrHBnNcxCi9qN0/5Z9mt6P3WYggGm+BNXOwYw9qjdvrbpGhkzRY4NwEyMVn5jjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:12:59Z:595eeb7a08736a02630625e4fb8755c1835687a5c77ea43af1923b125ee99903:ON2ScC0wh1C/qXNMwJACxpTjOtTXYNjxMIOHhUKsxo7LhpI1n/u3KYhYd6HSVE5Jsrsyz3H31Y0XVosz3BmaDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -300,6 +300,67 @@ hosted/provider bundle may distribute it through a web UI later, but the
 authority model does not depend on that distribution channel. The caller
 still verifies the descriptor against the live node identity during
 `remote configure --descriptor`.
+
+A descriptor also carries the node's site (`node.site_id`), its vault
+fingerprint (`node.vault_fingerprint`) and its signed ingest-ignore rules
+(`ingest_ignore`). With them a node can pin the remote without contacting it:
+
+```bash
+ryeos remote pin origin --descriptor ./origin.remote.yaml
+```
+
+`remote pin` writes a complete entry in the node's own remotes file from the
+descriptor alone. The descriptor is the trust anchor, so it must reach the
+pinning node through a channel its operator trusts. A descriptor without the
+site or vault fingerprint is refused with `remote_descriptor_incomplete`. One
+without ingest rules pins a remote this node never pushes to: push, execute
+and project sync to it refuse with `remote_pinned_without_ingest_rules` until
+`remote configure` (or a pin with the rules) replaces the entry.
+
+## Wiring a hosted node without a shell
+
+A hosted controller behind an origin's NAT cannot dial the origin, and its
+operator has no terminal on it. The origin operator wires it with three signed
+offline operations, which the controller's signed profile delegates
+(`maintenance.remote_offline_operations` in the `hosted-controller` profile):
+
+| Operation | Input | Effect |
+|---|---|---|
+| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_operator` grant (public key, exact scopes, label, origin site, `merge_scopes`). Never an offline-operation scope or a wildcard. |
+| `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its descriptor, as `ryeos remote pin`. |
+| `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
+
+Each is signed against the controller's facts (`authorized_keys`, `remotes`,
+`bundle_registrations` respectively) and applies at the controller's next
+start:
+
+```bash
+# controller-facts.json: the controller's facts, from its signed
+# GET /offline-operations/facts or the facts line of its startup log
+ryeos node offline-operation sign --operation node.remote.pin \
+  --arguments pin.json --input descriptor=./origin.remote.yaml \
+  --facts controller-facts.json --grant-digest <sha256> --origin-site site:<origin> \
+  --signing-key ./origin-operator.pem --stage-dir ./pin-delivery
+```
+
+Deliver `--stage-dir`'s `request.json` and `inputs/` through the platform
+channel the entrypoint reads (`RYEOS_OFFLINE_OPERATION_REQUEST` and
+`RYEOS_OFFLINE_OPERATION_INPUTS`, see `deploy/composition-images.md`) and
+restart the service. `ryeos node offline-operation submit` authenticates with
+the signing key alone, which a remote operator's grant does not accept without
+a source-node forwarding proof, so it serves the controller's local operator,
+not the origin's.
+
+Requests pin the ledger head, so sign the next operation against the facts
+the controller reports after the previous one applied, or sign each against
+the same head and submit them in order of application. A bundle replacement
+needs the daemon's own startup: it composes the node's configuration as
+`run-service` does to verify the new bundle, and only the daemon can.
+
+Delegating any of these is close to delegating the whole controller: a grant
+or a bundle changes who the node trusts and what it runs. The operator whose
+grant names the `ryeos.offline.node.*` scopes is trusted that far. Those
+scopes are themselves granted only by the controller's local operator.
 
 ## End-to-End Operator Workflow
 

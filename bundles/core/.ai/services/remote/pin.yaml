@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-13T09:57:23Z:d33d204e977ca69456d007dcbe437310e127704a608584e90dc6791be3e33ee8:5z8aojotqAtfUNhqTR2Ht3w9qhM2D4p4fREvDa6c1b5vKNq3vxAtDlbeB4ZadUxz0iz92C2LZKFBjH7LMVfcAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.pin
+availability: both
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.remote/pin"]
+schema:
+  remote: string?
+  descriptor: string
+description: "Pin a remote node from its exported descriptor without contacting it. The descriptor is the trust anchor and must carry the node's site and vault fingerprint; one without ingest rules pins a remote this node never pushes to (push refuses with remote_pinned_without_ingest_rules)."

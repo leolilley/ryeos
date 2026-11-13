@@ -17,13 +17,15 @@ use serde_json::Value;
 
 use super::contract::RequestBody;
 use super::facts::{
-    FACT_AUTHORIZED_KEYS, FACT_CAPACITY_ACCOUNT, FACT_EXTERNAL_EXECUTION, FACT_POLICY_GENERATION,
-    FACT_RESTART_INHIBITION, FACT_RUNTIME_SNAPSHOTS,
+    FACT_AUTHORIZED_KEYS, FACT_BUNDLE_REGISTRATIONS, FACT_CAPACITY_ACCOUNT,
+    FACT_EXTERNAL_EXECUTION, FACT_POLICY_GENERATION, FACT_REMOTES, FACT_RESTART_INHIBITION,
+    FACT_RUNTIME_SNAPSHOTS,
 };
 use super::handlers;
 use super::host::OfflineHost;
 
 const KIB: u64 = 1024;
+const MIB: u64 = 1024 * KIB;
 
 /// One named input of an operation and the most bytes it may hold.
 #[derive(Debug, Clone, Copy)]
@@ -500,6 +502,77 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.authorize-client",
+        authority_bearing: true,
+        local_signer_only: false,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_AUTHORIZED_KEYS],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::AuthorizeClientArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::authorize_client),
+        recovery: Recovery {
+            record: "the node-signed grant itself, keyed by the public key's fingerprint",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "reconciling the same scopes, class and origin over a grant that already carries them writes an equivalent grant; a merge is a union and adds nothing the second time",
+        },
+    },
+    OperationSpec {
+        id: "node.remote.pin",
+        authority_bearing: true,
+        local_signer_only: false,
+        alone: false,
+        inputs: &[InputSlot {
+            name: "descriptor",
+            max_bytes: 64 * KIB,
+            required: true,
+        }],
+        preconditions: &[FACT_REMOTES],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::RemotePinArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::remote_pin),
+        recovery: Recovery {
+            record: "the remotes file entry under the pinned name",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "pinning the same descriptor under the same name writes the same entry over itself",
+        },
+    },
+    OperationSpec {
+        id: "node.bundle.replace",
+        authority_bearing: true,
+        local_signer_only: false,
+        alone: false,
+        inputs: &[InputSlot {
+            name: "archive",
+            max_bytes: 2 * MIB,
+            required: true,
+        }],
+        preconditions: &[FACT_BUNDLE_REGISTRATIONS],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::BundleReplaceArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::bundle_replace),
+        recovery: Recovery {
+            record: "the bundle transaction journal, which the next mutation of the name reconciles first",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "an interrupted replacement is finished or rolled back by its journal, and replacing a bundle with the same archive again installs the same tree and registration",
+        },
+    },
+    OperationSpec {
         id: "node.reset.authorization",
         authority_bearing: true,
         local_signer_only: true,
@@ -604,11 +677,14 @@ mod tests {
             "node.reset.replay-indexes",
             "node.reset.external-content-bindings",
             "node.large-objects.purge-quarantine",
+            "node.authorize-client",
+            "node.remote.pin",
+            "node.bundle.replace",
             "node.reset.authorization",
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 15);
+        assert_eq!(operations().len(), 18);
     }
 
     #[test]
@@ -643,6 +719,9 @@ mod tests {
                 "node.external-execution.qualification-session-compose",
                 "node.external-execution.snapshot-compose",
                 "node.external-execution.snapshot-qualification-compose",
+                "node.authorize-client",
+                "node.remote.pin",
+                "node.bundle.replace",
                 "node.reset.authorization",
             ]
         );

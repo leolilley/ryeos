@@ -6,11 +6,14 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ryeos_app::execution_history_reset::{
     ExecutionHistoryResetProgress, ExecutionHistoryResetReport,
     ExecutionHistoryScratchRepairReport, SchedulerHistoryResetParticipant,
 };
+use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::state_lock::StateLock;
+use serde_json::Value;
 
 /// The immutable image tree a policy replacement is seeded from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +30,31 @@ pub enum TypedReport<'a> {
     ExecutionHistoryReset(&'a ExecutionHistoryResetReport),
     ExecutionHistoryScratch(&'a ExecutionHistoryScratchRepairReport),
     ReplayIndexes(&'a ryeos_state::operational::ReplayIndexResetReport),
+}
+
+/// What `node.remote.pin` asks the host to write: the remote's descriptor,
+/// pinned under `name` in the node's own remotes file without contacting it.
+pub struct RemotePin<'a> {
+    pub app_root: &'a Path,
+    /// Held by the application for the whole call.
+    pub state_lock: &'a StateLock,
+    pub name: &'a str,
+    /// The descriptor bytes, digest-verified.
+    pub descriptor: &'a [u8],
+}
+
+/// What `node.bundle.replace` asks the host to do: install the bundle the
+/// archive holds under `name`, replacing the installed one, with the same
+/// verification a local `bundle install --replace` makes.
+pub struct BundleReplace<'a> {
+    pub app_root: &'a Path,
+    /// Held by the application for the whole call.
+    pub state_lock: &'a StateLock,
+    pub node: &'a NodeIdentity,
+    pub name: &'a str,
+    /// A gzip-compressed tar of the bundle tree, digest-verified.
+    pub archive: &'a [u8],
+    pub preserve_runtime_artifacts: bool,
 }
 
 pub trait OfflineHost {
@@ -51,6 +79,22 @@ pub trait OfflineHost {
     /// receipt carries only the JSON; an interactive host that renders the
     /// typed report keeps it from here.
     fn observe_report(&self, _report: TypedReport<'_>) {}
+
+    /// Pin a remote from its descriptor. The remotes file and its schema
+    /// belong to a crate above this one, so the host that has it does the
+    /// write; a host without it refuses.
+    fn pin_remote(&self, _request: RemotePin<'_>) -> Result<Value> {
+        bail!("this process cannot pin remotes; the operation is applied when the daemon starts")
+    }
+
+    /// Replace a bundle from an archive. Verification needs the node's full
+    /// configuration composed as the daemon composes it, so only the daemon's
+    /// startup can do it; every other host refuses.
+    fn replace_bundle(&self, _request: BundleReplace<'_>) -> Result<Value> {
+        bail!(
+            "this process cannot replace bundles; the operation is applied when the daemon starts"
+        )
+    }
 }
 
 /// A host with no image seed and no scheduler: enough for every operation

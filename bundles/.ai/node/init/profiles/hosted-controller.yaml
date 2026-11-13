@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:d8d9f9fb72e637f2133967006376110e1e162a6e0e082c26760787516fdfaa8b:kHXlXT+zFKkE65B7jIKND285Ms04MhYMU8bOGUjcS7xvSIP7qt2lT6byl584ljsExPmknpKYZRlzGDgb1BZtCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T15:12:59Z:30a978d695c7465475ef74c0ff5781adb1e04a83d23457ff43f4ec97aaf0c165:BsfkhU4p5+qZl88vRtmLtBa84X8XCH+QQf5hxc5BkBpnei+wkj1jfefXEAoz6ozoGTYzL34JFjnYIOy2CPKWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -234,11 +234,20 @@ policies:
       max_cleanup_steps: 1024
       max_recovery_record_bytes: 2097152
     schedules: []
-    # The origin operator that drives this controller may request external
-    # placement composition through a signed offline operation; no other
+    # The origin operator that drives this controller may request, through
+    # signed offline operations applied at the next start, external placement
+    # composition and the controller's wiring: a remote-node or
+    # remote-operator grant, a remote pinned from its descriptor, and a site
+    # bundle installed or replaced from an archive. Delegating one
+    # authority-bearing operation is close to delegating them all (a grant or a
+    # bundle changes who the node trusts and what it runs), so the operator
+    # granted these scopes is trusted with the whole controller. No other
     # authority-bearing offline operation is open to a remote signer.
     remote_offline_operations:
       - node.external-execution.compose
+      - node.authorize-client
+      - node.remote.pin
+      - node.bundle.replace
   hosted:
     schema: 1
     admission_enabled: false

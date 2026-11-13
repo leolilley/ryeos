@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T13:04:03Z:f3b47c03ba52b386d4daa697b7405954ee431eecff0378128e90135016047745:zyglfSuUZOXKvf/ulccAdO9Y1e4vF5bSK2n4SQHvpTaDuBC6nsipKiLgsuBKLXQLkOVrbriTHbO/dAvdf2ZwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:12:59Z:f3e4c261dd4e09c4ac567de35bb89ea9cde6ff575c32db5f7fc979632ff51347:R9Kjlfo4xFz9bK1E/5XdMyGOfVxBdW+Zv6xHvybjXJfcN4QW4STJLN2bn9l7SYqZYCwWuoeXgC7we4imuo6kDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -138,6 +138,13 @@ bundle generation is absent but the app root holds a node identity or a
 completed init, the entrypoint refuses instead of initializing it again under
 the image's profile. Signed offline operations on a hosted container are
 described in `deploy/composition-images.md`.
+
+A remote operator may sign only the offline operations the node's signed
+profile delegates (`maintenance.remote_offline_operations`); every other
+authority-bearing operation is refused `not_delegable`. Only the
+`hosted-controller` profile delegates any: `node.external-execution.compose`,
+`node.authorize-client`, `node.remote.pin` and `node.bundle.replace`. See
+"Wiring a hosted node without a shell" in `remote/remote-operations.md`.
 
 Release containers pass no packaged trust documents to `ryeos init`.
 Development opt-ins trust every publisher document in the selected source

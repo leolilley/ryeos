@@ -112,7 +112,7 @@ pub async fn handle(
             // `__pycache__/`, etc. are dropped before we POST a
             // manifest the remote would reject.
             let remote_ignore = match remote_cfg.as_ref() {
-                Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
+                Some(cfg) => IgnoreMatcher::from_config(cfg.ingest_rules()?)?,
                 None => {
                     let fetched = client.get_ingest_ignore().await.map_err(|e| {
                         anyhow::anyhow!(
@@ -161,7 +161,7 @@ pub async fn handle(
             // Fetch inline on miss, but do not persist partial/invalid remote
             // config. Operators should use `remote configure` for durable config.
             let remote_ignore = match remote_cfg {
-                Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
+                Some(cfg) => IgnoreMatcher::from_config(cfg.ingest_rules()?)?,
                 None => {
                     let fetched = client.get_ingest_ignore().await.map_err(|e| {
                         anyhow::anyhow!(

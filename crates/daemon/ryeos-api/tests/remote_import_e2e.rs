@@ -263,7 +263,7 @@ fn remote_config(name: &str, remote: &RemoteNode) -> RemoteConfig {
         signing_key: remote.signing_key.clone(),
         site_id: remote.site_id.clone(),
         vault_fingerprint: "sha256:test-vault".to_string(),
-        ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
         project_bindings: HashMap::new(),
     }
 }

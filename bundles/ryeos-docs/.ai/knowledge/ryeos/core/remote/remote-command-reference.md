@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:11:14Z:43424218b2728651347c75c955c580a182df124b152032afcdf845362c6d19ea:pCEB5eu60oUTk7H7jdO6JFsQ4knaXQzB4sv/4xNTpCz2FHLw90l4di3PBaRFnUyFAzni2O4KA78IoxUPAf15Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:12:59Z:b822f98674aec6ff2b8e4acf728382d97d6a7fba04197b54809588a8151aa43f:p+b0/B9D25JOqPdQYlWfmP2g66Ymg5uFBpsBGj+1hMEYCtyRgY+hfoLc61iTYxtLyz9k87VhyriVBJI8b3aTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -43,6 +43,7 @@ to delegated callers.
 | Command | Local service cap | Remote scopes on target | Remote routes used |
 |---|---|---|---|
 | `ryeos remote configure` | `ryeos.execute.service.remote/configure` | none | `GET /public-key`, `GET /ingest-ignore` |
+| `ryeos remote pin` | `ryeos.execute.service.remote/pin` | none | none |
 | `ryeos remote-descriptor` | local tool execution | none | none |
 | `ryeos admission-token` | local tool execution | none | none |
 | `ryeos remote admit` | `ryeos.execute.service.remote/admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
@@ -88,6 +89,25 @@ Notes:
   remote origin, so these calls do not satisfy local-only operator checks.
   Their remote HEAD and session ownership do not interoperate with a HEAD
   previously pushed under the default node principal.
+
+## `ryeos remote pin`
+
+Pin a remote from its descriptor without contacting it.
+
+```bash
+ryeos remote pin origin --descriptor ./origin.remote.yaml
+```
+
+The descriptor is the trust anchor: the entry's key, principal, site and vault
+fingerprint come from it alone, so it must reach this node through a channel
+its operator trusts. It must carry `node.site_id` (the node's own
+`site:<fingerprint>`) and `node.vault_fingerprint`, or the pin is refused with
+`remote_descriptor_incomplete`. Descriptors exported by `ryeos
+remote-descriptor` carry both, plus the node's `ingest_ignore` rules. A remote
+pinned without ingest rules is one this node never pushes to: push, execute
+and project sync refuse with `remote_pinned_without_ingest_rules`. Pinning
+again replaces the entry and keeps its project bindings. A hosted node applies
+the same pin through the signed offline operation `node.remote.pin`.
 
 ## `ryeos remote configure`
 

@@ -494,9 +494,9 @@ mod tests {
                 ),
                 site_id: "site:fixture-peer".into(),
                 vault_fingerprint: "fixture-vault".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig {
+                ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig {
                     patterns: Vec::new(),
-                },
+                }),
                 project_bindings: std::collections::HashMap::new(),
             };
             crate::remote::client::RemoteClient::from_remote_cfg_as_configured_operator(

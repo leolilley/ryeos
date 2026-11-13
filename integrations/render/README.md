@@ -32,6 +32,22 @@ and node fingerprint
 The daemon logged startup ready and the public readiness endpoint returned
 HTTP 200. No Codex turn or Render guest was launched by this deployment.
 
+## Wiring the controller
+
+The controller's grants, its pin of the origin node and its site bundle are
+applied as signed offline operations the `hosted-controller` profile
+delegates (`node.authorize-client`, `node.remote.pin`, `node.bundle.replace`),
+not by running `authorize-client` or `bundle install` in a Render shell. The
+origin operator signs them against the controller's facts and they are
+delivered through the entrypoint's platform channel
+(`RYEOS_OFFLINE_OPERATION_REQUEST`, `RYEOS_OFFLINE_OPERATION_INPUTS`); the
+next start applies them. A grant carries no inputs, so its request alone
+(base64 in the environment) is enough; a pin or a bundle replacement also
+needs its input files on the container's filesystem. See "Wiring a hosted node without a
+shell" in the remote-operations knowledge. A controller runs a new profile
+only after an image carrying it is deployed and its policy generation is
+replaced.
+
 ## Current qualification boundary
 
 The signed `render-sandbox` provider specification still declares

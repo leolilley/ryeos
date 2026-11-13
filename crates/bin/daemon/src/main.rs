@@ -3961,7 +3961,12 @@ async fn run(
     // it before the ordinary start below takes it again. Only the node
     // controller applies them; the standalone subcommands do not.
     if cli.command.is_none() {
-        let host = offline_host::DaemonOfflineHost::from_cli(&cli);
+        let host = offline_host::DaemonOfflineHost::from_cli(
+            &cli,
+            provider_environment
+                .as_ref()
+                .and_then(|environment| environment.as_ref().ok()),
+        );
         // Nothing offline operations do may keep the node from starting: an
         // error here is logged and the ordinary startup checks run next, so a
         // bad inbox can never make a crash loop.

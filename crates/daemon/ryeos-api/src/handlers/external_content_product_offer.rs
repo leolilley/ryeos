@@ -483,7 +483,7 @@ mod tests {
             ),
             site_id: site_id.to_owned(),
             vault_fingerprint: "sha256:test".to_owned(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }

@@ -66,7 +66,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Apply the remote's ingest ignore rules client-side so files the
     // remote would later reject (e.g. `__pycache__/`, `*.pyc`) are
     // dropped before we POST the manifest.
-    let remote_ignore = ryeos_app::ignore::IgnoreMatcher::from_config(&remote_cfg.ingest_ignore)?;
+    let remote_ignore = ryeos_app::ignore::IgnoreMatcher::from_config(remote_cfg.ingest_rules()?)?;
     let authority = state
         .state_store
         .with_state_db(|db| db.pinned_authority())?;

@@ -308,6 +308,134 @@ pub struct SchemaCutArguments {
     pub to: u32,
 }
 
+/// The principal class a delegated grant writes. Only the remote classes:
+/// a local-client grant carries no origin binding, so it is never written on
+/// a remote signer's authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantClass {
+    /// The node key of a remote RyeOS node, bound to its site.
+    RemoteNode,
+    /// An operator key forwarded by a remote RyeOS node of one origin site.
+    RemoteOperator,
+}
+
+/// Most scopes one grant operation may name.
+pub const MAX_GRANT_SCOPES: usize = 64;
+
+/// Reconcile one node-signed grant for a remote node or a remote operator,
+/// with the same core `ryeos authorize-client` uses.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizeClientArguments {
+    /// The raw 32-byte Ed25519 public key, base64.
+    pub public_key: String,
+    pub scopes: Vec<String>,
+    pub label: String,
+    pub class: GrantClass,
+    /// The site the grant is bound to: the remote node's own site, or the
+    /// site whose node forwards the operator.
+    pub origin_site_id: String,
+    /// Union the scopes with the grant already on disk instead of replacing
+    /// them.
+    #[serde(default)]
+    pub merge_scopes: bool,
+    /// Allow changing an existing grant's class or origin site. The node is
+    /// stopped while the operation applies, which that change requires.
+    #[serde(default)]
+    pub allow_semantic_conversion: bool,
+}
+
+impl AuthorizeClientArguments {
+    pub fn validate(&self) -> Result<()> {
+        self.verifying_key()?;
+        ensure!(!self.scopes.is_empty(), "scopes must not be empty");
+        ensure!(
+            self.scopes.len() <= MAX_GRANT_SCOPES,
+            "more than {MAX_GRANT_SCOPES} scopes"
+        );
+        ensure!(
+            !self.label.trim().is_empty() && self.label.len() <= 128,
+            "the label must be 1 to 128 bytes"
+        );
+        ensure!(
+            !self.scopes.iter().any(|scope| scope.contains('*')),
+            "a delegated grant names exact scopes; wildcards are refused"
+        );
+        // Offline-operation scopes are granted only by the node's local
+        // operator: a delegated grant cannot widen who may sign them.
+        ryeos_node_runtime::identity::reject_offline_scopes(&self.scopes)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id)
+            .context("origin site id is not canonical")?;
+        Ok(())
+    }
+
+    fn verifying_key(&self) -> Result<lillux::crypto::VerifyingKey> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.public_key)
+            .context("the public key is not base64")?;
+        let bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .context("the public key is not 32 bytes (Ed25519)")?;
+        lillux::crypto::VerifyingKey::from_bytes(&bytes).context("the public key is not Ed25519")
+    }
+}
+
+/// Pin a remote node as a trust anchor from its descriptor (the `descriptor`
+/// input), without contacting it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemotePinArguments {
+    /// The name the remote is pinned under.
+    pub name: String,
+}
+
+impl RemotePinArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.name.is_empty()
+                && self.name.len() <= 64
+                && self
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'),
+            "remote name `{}` is not a plain name",
+            self.name
+        );
+        Ok(())
+    }
+}
+
+/// Install a bundle from an archive (the `archive` input), replacing the
+/// installed bundle of that name when there is one.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleReplaceArguments {
+    pub name: String,
+    /// Keep the installed `.ai/bin`, `.ai/objects` and `.ai/refs` when the
+    /// archive omits them.
+    #[serde(default)]
+    pub preserve_runtime_artifacts: bool,
+}
+
+impl BundleReplaceArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.name.is_empty()
+                && self.name.len() <= 64
+                && self.name.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b == b'_'
+                    || b == b'-'),
+            "bundle name `{}` is not 1-64 lowercase letters, digits, `_` or `-`",
+            self.name
+        );
+        Ok(())
+    }
+}
+
 // ── Shared pieces ────────────────────────────────────────────────────────
 
 fn config(ctx: &HandlerContext<'_>) -> Result<Config> {
@@ -900,6 +1028,80 @@ pub(super) fn purge_quarantined_large_objects(ctx: &HandlerContext<'_>) -> Resul
     )
     .context("purge the large-object quarantine")?;
     Ok(serde_json::to_value(purged)?)
+}
+
+// ── Grants, remotes and bundles ──────────────────────────────────────────
+
+pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: AuthorizeClientArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let public_key = arguments.verifying_key()?;
+    let fingerprint = lillux::crypto::fingerprint(&public_key);
+    let subject = match arguments.class {
+        GrantClass::RemoteNode => ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode {
+            origin_site_id: &arguments.origin_site_id,
+        },
+        GrantClass::RemoteOperator => {
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteOperator {
+                origin_site_id: &arguments.origin_site_id,
+            }
+        }
+    };
+    // The canonical reconciliation, under the state lock the application
+    // holds: the node is stopped, so a class or origin change is allowed
+    // when the request asks for it.
+    let (path, dropped_scopes, transition) =
+        ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes_for_subject(
+            &super::envelope::authorized_keys_dir(ctx.app_root),
+            &fingerprint,
+            &arguments.public_key,
+            &arguments.scopes,
+            &arguments.label,
+            &ctx.command_label(),
+            &lillux::time::iso8601_now(),
+            ctx.node,
+            ryeos_node_runtime::identity::WildcardPolicy::Reject,
+            arguments.merge_scopes,
+            subject,
+            arguments.allow_semantic_conversion,
+        )
+        .context("reconcile the authorized-key grant")?;
+    Ok(json!({
+        "fingerprint": fingerprint,
+        "path": path,
+        "principal_class": transition.principal_class.as_str(),
+        "origin_site_id": transition.origin_site_id,
+        "previous_principal_class": transition
+            .previous_principal_class
+            .map(|class| class.as_str().to_owned()),
+        "previous_origin_site_id": transition.previous_origin_site_id,
+        "dropped_scopes": dropped_scopes,
+        "merged": arguments.merge_scopes,
+    }))
+}
+
+pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: RemotePinArguments = ctx.arguments()?;
+    arguments.validate()?;
+    ctx.host.pin_remote(super::host::RemotePin {
+        app_root: ctx.app_root,
+        state_lock: ctx.state_lock,
+        name: &arguments.name,
+        descriptor: ctx.inputs.require("descriptor")?,
+    })
+}
+
+pub(super) fn bundle_replace(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: BundleReplaceArguments = ctx.arguments()?;
+    arguments.validate()?;
+    ctx.host.replace_bundle(super::host::BundleReplace {
+        app_root: ctx.app_root,
+        state_lock: ctx.state_lock,
+        node: ctx.node,
+        name: &arguments.name,
+        archive: ctx.inputs.require("archive")?,
+        preserve_runtime_artifacts: arguments.preserve_runtime_artifacts,
+    })
 }
 
 // ── Authorization reset ──────────────────────────────────────────────────
