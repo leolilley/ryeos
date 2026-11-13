@@ -1639,6 +1639,54 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
         })
     }
 
+    fn observe_snapshot_qualification_occurrence(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>>{
+        use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse;
+        self.preflight_snapshot_qualification_create(producer, qualification, credential)?;
+        request.validate()?;
+        ensure!(
+            request.qualification_intent.qualification_profile_digest == qualification.digest()
+                && request.qualification_intent.provider_id == producer.backend()
+                && request.qualification_intent.adapter_artifact_hash == self.adapter_hash
+                && request.qualification_intent.provider_spec_digest == self.provider_spec.sha256
+                && request.qualification_intent.settings_digest == qualification.settings_digest()
+                && request.provider_spec_digest == self.provider_spec.sha256,
+            "qualification observation differs from inspected signed authority"
+        );
+        let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs(u64::from(qualification.contact_timeout_seconds())),
+        ));
+        let bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        let output = self.invoke_sealed_snapshot_operation(
+            producer.network_inputs(),
+            &self.provider_spec,
+            qualification.settings(),
+            qualification.settings_digest(),
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::QualifySnapshotObserve,
+            None,
+            deadline,
+        )?;
+        let value: RuntimeSnapshotQualificationReadinessAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES).map_err(|_| {
+                anyhow::anyhow!("invalid qualification observation adapter response")
+            })?;
+        value
+            .validate_for(request)
+            .map_err(|_| anyhow::anyhow!("invalid qualification observation adapter response"))?;
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
     fn seal_restoration_verifier_upload(
         &self,
         producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,

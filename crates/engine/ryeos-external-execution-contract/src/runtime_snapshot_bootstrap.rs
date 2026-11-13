@@ -71,14 +71,10 @@ impl RuntimeSnapshotBootstrapIntent {
                 "bootstrap {label} is invalid"
             );
         }
+        // Either retained source a snapshot is produced from may be
+        // bootstrapped: an admitted bundle materialization or a captured
+        // guest-owner product. The source is part of the operation identity.
         self.source.validate()?;
-        ensure!(
-            matches!(
-                self.source,
-                RuntimeSnapshotSource::BundleMaterialization { .. }
-            ),
-            "bootstrap cannot represent captured-product or arbitrary worker source"
-        );
         ensure!(
             (1..=3600).contains(&self.maximum_lifetime_seconds) && self.attempt_deadline_ms > 0,
             "bootstrap lifetime or deadline exceeds its bound"
@@ -489,13 +485,30 @@ mod tests {
         changed.source = RuntimeSnapshotSource::CapturedProduct {
             product_witness_hash: "6".repeat(64),
         };
-        changed.operation_id = changed.derived_operation_id().unwrap();
+        // Another source is another create opportunity, never the same one.
         assert!(changed.validate().is_err());
+        changed.operation_id = changed.derived_operation_id().unwrap();
+        assert_ne!(changed.operation_id, original.operation_id);
         changed = original.clone();
         changed.production_binding_digest = "a".repeat(64);
         assert!(changed.validate().is_err());
         changed.operation_id = changed.derived_operation_id().unwrap();
         assert_ne!(changed.operation_id, original.operation_id);
+    }
+
+    #[test]
+    fn bootstrap_intent_accepts_captured_product_source() {
+        let mut captured = intent();
+        captured.source = RuntimeSnapshotSource::CapturedProduct {
+            product_witness_hash: "6".repeat(64),
+        };
+        captured.operation_id = captured.derived_operation_id().unwrap();
+        captured.validate().unwrap();
+        captured.source = RuntimeSnapshotSource::CapturedProduct {
+            product_witness_hash: "not-a-hash".into(),
+        };
+        captured.operation_id = captured.derived_operation_id().unwrap();
+        assert!(captured.validate().is_err());
     }
 
     #[test]

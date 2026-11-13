@@ -314,6 +314,153 @@ pub(crate) fn run_restored_verifier(adapter: &lillux::InheritedDescriptorAuthori
 
 /// The mutation entry is called only after a durable first-contact claim.
 /// The observation entry must never issue a second POST.
+/// One read-only GET of the exact restored sandbox, before the daemon claims
+/// its one verifier attempt. The status the provider reports is mapped to
+/// `running` or a bounded status word; nothing is created, run or ended.
+pub(crate) fn observe_restored_sandbox(
+    adapter: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    use ryeos_external_execution_contract::runtime_snapshot::{
+        RuntimeSnapshotQualificationReadinessAdapterResponse,
+        RuntimeSnapshotQualificationReadinessRequest,
+    };
+    let deadline = crate::operation_deadline()?;
+    ensure!(
+        [
+            crate::LIFECYCLE_BOOTSTRAP_FD_ENV,
+            crate::LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+            crate::LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
+        ]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none()),
+        "qualification observation received worker activation authority"
+    );
+    let bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_REQUEST_FD_ENV,
+        MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+    )?;
+    let request: RuntimeSnapshotQualificationReadinessRequest =
+        ryeos_external_execution_contract::from_json_slice_strict(
+            &bytes,
+            MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    ensure!(
+        ryeos_external_execution_contract::canonical_json(&request)? == bytes
+            && request.qualification_intent.provider_id == ADAPTER_ID,
+        "qualification observation request is noncanonical or selects another provider"
+    );
+    crate::verify_artifact(
+        adapter,
+        &request.qualification_intent.adapter_artifact_hash,
+        None,
+    )?;
+    let spec_bytes = crate::read_sealed_env(
+        crate::LIFECYCLE_PROVIDER_SPEC_FD_ENV,
+        usize::try_from(ryeos_external_execution_contract::MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?,
+    )?;
+    let captured_spec_digest = std::env::var(crate::LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
+        .context("qualification observation lacks captured provider spec digest")?;
+    ensure!(
+        captured_spec_digest == request.provider_spec_digest
+            && lillux::sha256_hex(&spec_bytes) == request.provider_spec_digest,
+        "qualification observation provider spec changed its signed handoff"
+    );
+    let spec = ProviderSpec::parse(
+        &spec_bytes,
+        &lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json")),
+    )?;
+    let settings_bytes =
+        crate::read_sealed_env(crate::LIFECYCLE_SETTINGS_FD_ENV, crate::MAX_SETTINGS_BYTES)?;
+    let settings = selected_qualification_settings(
+        &settings_bytes,
+        &request.qualification_intent.settings_digest,
+        &request.qualification_intent.provider_group_id,
+        &request.qualification_intent.snapshot_id,
+    )?;
+    let (url, target) = crate::api_url(
+        &spec,
+        crate::provider_spec::RouteName::ById,
+        Some(&request.occurrence.occurrence_id),
+        &settings,
+        None,
+    )?;
+    crate::validate_api_url(
+        &url,
+        &target.path_segments,
+        target.owner_id_query.as_deref(),
+        None,
+    )?;
+    let network = crate::network_context_from_captured_inputs()?;
+    let cancellation = lillux::network::NetworkCancellation::default();
+    let _signal_cancellation = crate::SignalCancellation::install(cancellation.clone())?;
+    let credential = crate::read_credential()?;
+    let (status, body) = crate::read_response(crate::send_api_request(
+        &network,
+        &url,
+        "GET",
+        None,
+        &credential,
+        deadline,
+        &settings,
+        &cancellation,
+    )?)
+    .map_err(|()| anyhow::anyhow!("qualification observation response is not bounded JSON"))?;
+    let result = restored_sandbox_readiness(&request, status, &body)?;
+    result.validate_for(&request)?;
+    crate::write_response(&result)
+}
+
+/// Map one provider answer about the exact restored sandbox.
+pub(crate) fn restored_sandbox_readiness(
+    request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+    status: u16,
+    body: &[u8],
+) -> Result<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>{
+    use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse as Response;
+    let not_running = |word: &str| Response::NotRunning {
+        operation_id: request.qualification_intent.operation_id.clone(),
+        occurrence_id: request.occurrence.occurrence_id.clone(),
+        status: word.to_owned(),
+    };
+    if status == 404 {
+        return Ok(not_running("absent"));
+    }
+    ensure!(
+        status == 200,
+        "qualification observation returned an unexpected provider status"
+    );
+    let sandbox = ryeos_external_execution_contract::from_json_slice_strict::<crate::RenderSandbox>(
+        body,
+        usize::try_from(crate::MAX_API_RESPONSE_BYTES)?,
+    )?;
+    ensure!(
+        sandbox.id == request.occurrence.occurrence_id
+            && sandbox.sandbox_group_id == request.qualification_intent.provider_group_id,
+        "qualification observation returned another sandbox"
+    );
+    Ok(
+        if sandbox.status == crate::RenderSandboxStatus::Running && sandbox.terminated_at.is_none()
+        {
+            Response::Running {
+                operation_id: request.qualification_intent.operation_id.clone(),
+                occurrence_id: sandbox.id,
+                provider_response_sha256: lillux::sha256_hex(body),
+            }
+        } else {
+            not_running(match sandbox.status {
+                crate::RenderSandboxStatus::Creating => "creating",
+                crate::RenderSandboxStatus::Errored => "errored",
+                crate::RenderSandboxStatus::Resuming => "resuming",
+                crate::RenderSandboxStatus::Running => "terminated",
+                crate::RenderSandboxStatus::Suspended => "suspended",
+                crate::RenderSandboxStatus::Suspending => "suspending",
+                crate::RenderSandboxStatus::Terminated => "terminated",
+            })
+        },
+    )
+}
+
 pub(crate) fn terminate_restored_sandbox(
     adapter: &lillux::InheritedDescriptorAuthority,
     first_contact: bool,
@@ -1238,6 +1385,65 @@ mod tests {
         );
         assert!(reason.detail.ends_with("END"), "{}", reason.detail);
         reason.validate().unwrap();
+    }
+
+    #[test]
+    fn qualification_observation_maps_creating_and_running() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL, RuntimeSnapshotQualificationIntent,
+            RuntimeSnapshotQualificationOccurrence,
+            RuntimeSnapshotQualificationReadinessAdapterResponse as Response,
+            RuntimeSnapshotQualificationReadinessRequest,
+        };
+        let mut intent = RuntimeSnapshotQualificationIntent {
+            schema: 1,
+            operation_id: String::new(),
+            owner_principal: format!("fp:{}", "a".repeat(64)),
+            snapshot_operation_id: "b".repeat(64),
+            snapshot_intent_digest: "c".repeat(64),
+            snapshot_id: "snp-exact".into(),
+            provider_id: ADAPTER_ID.into(),
+            provider_group_id: "sbg-damv59p42hec73ck8b7g".into(),
+            qualification_profile_digest: "d".repeat(64),
+            adapter_artifact_hash: "e".repeat(64),
+            provider_spec_digest: "f".repeat(64),
+            settings_digest: "1".repeat(64),
+            verifier_artifact_hash: "2".repeat(64),
+            maximum_lifetime_seconds: 900,
+            attempt_deadline_ms: 42,
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        let request = RuntimeSnapshotQualificationReadinessRequest {
+            protocol: RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL.into(),
+            occurrence: RuntimeSnapshotQualificationOccurrence {
+                schema: 1,
+                operation_id: intent.operation_id.clone(),
+                occurrence_id: "sbx-18p4gdbht7ogae00c739p3070".into(),
+                provider_response_sha256: "3".repeat(64),
+                contact_deadline_exceeded: false,
+            },
+            provider_spec_digest: intent.provider_spec_digest.clone(),
+            qualification_intent: intent,
+        };
+        request.validate().unwrap();
+        let body = |status: &str| {
+            format!(
+                r#"{{"createdAt":"2026-10-29T23:16:50Z","id":"sbx-18p4gdbht7ogae00c739p3070","idleTimeoutSeconds":900,"networkPolicy":{{"default":"deny-all","type":"deny-all"}},"plan":"starter","region":"oregon","sandboxGroupId":"sbg-damv59p42hec73ck8b7g","status":"{status}","terminatedAt":null,"timeoutSeconds":600}}"#
+            )
+        };
+        let creating =
+            restored_sandbox_readiness(&request, 200, body("creating").as_bytes()).unwrap();
+        assert!(matches!(&creating, Response::NotRunning { status, .. } if status == "creating"));
+        creating.validate_for(&request).unwrap();
+        let running =
+            restored_sandbox_readiness(&request, 200, body("running").as_bytes()).unwrap();
+        assert!(matches!(running, Response::Running { .. }));
+        running.validate_for(&request).unwrap();
+        let absent = restored_sandbox_readiness(&request, 404, b"{}").unwrap();
+        assert!(matches!(&absent, Response::NotRunning { status, .. } if status == "absent"));
+        let other = body("running").replace("sbx-18p4gdbht7ogae00c739p3070", "sbx-other");
+        assert!(restored_sandbox_readiness(&request, 200, other.as_bytes()).is_err());
+        assert!(restored_sandbox_readiness(&request, 500, b"{}").is_err());
     }
 
     #[test]

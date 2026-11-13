@@ -1130,6 +1130,60 @@ pub(crate) fn terminate_snapshot_qualification(
     crate::write_response(&terminate_core(&context.root, &request, first_contact)?)
 }
 
+/// Read-only: is the fake restored sandbox running? A terminated one is
+/// `terminated`, one never created is `absent`.
+pub(crate) fn observe_snapshot_qualification(
+    adapter: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    let request: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest =
+        read_request(MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES)?;
+    request.validate()?;
+    crate::verify_artifact(
+        adapter,
+        &request.qualification_intent.adapter_artifact_hash,
+        None,
+        "adapter",
+    )?;
+    let context = load_context(
+        &request.qualification_intent.settings_digest,
+        &request.provider_spec_digest,
+    )?;
+    crate::write_response(&observe_core(&context.root, &request)?)
+}
+
+pub(crate) fn observe_core(
+    root: &lillux::PinnedDirectory,
+    request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+) -> Result<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>{
+    use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse as Response;
+    request.validate()?;
+    let id = &request.occurrence.occurrence_id;
+    let not_running = |status: &str| Response::NotRunning {
+        operation_id: request.qualification_intent.operation_id.clone(),
+        occurrence_id: id.clone(),
+        status: status.to_owned(),
+    };
+    let response = if open_or_create(root, TERMINATIONS_DIR, 0o700)?
+        .open_pinned_regular(OsStr::new(&format!("{id}.json")), false)?
+        .is_some()
+    {
+        not_running("terminated")
+    } else if open_or_create(root, SANDBOXES_DIR, 0o700)?
+        .open_child_directory(OsStr::new(id))?
+        .is_some()
+    {
+        Response::Running {
+            operation_id: request.qualification_intent.operation_id.clone(),
+            occurrence_id: id.clone(),
+            provider_response_sha256: lillux::sha256_hex(id.as_bytes()),
+        }
+    } else {
+        not_running("absent")
+    };
+    response.validate_for(request)?;
+    Ok(response)
+}
+
 /// Retained run records by operation, for tests and diagnostics.
 #[cfg(test)]
 fn read_run_records(

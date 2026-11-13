@@ -23,6 +23,7 @@ pub mod offline_apply;
 pub mod offline_dispatch;
 pub mod presenter;
 pub mod project_resolve;
+mod runtime_snapshot_run;
 #[cfg(feature = "model-provider-setup")]
 pub(crate) mod setup;
 #[cfg(test)]

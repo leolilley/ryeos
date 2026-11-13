@@ -351,6 +351,7 @@ fn run() -> Result<()> {
         "observe-snapshot-readiness" => snapshot_lane::observe_snapshot_readiness(&adapter),
         "qualify-snapshot-create" => snapshot_lane::qualify_snapshot_create(&adapter),
         "qualify-snapshot-verify" => snapshot_lane::qualify_snapshot_verify(&adapter),
+        "qualify-snapshot-observe" => snapshot_lane::observe_snapshot_qualification(&adapter),
         "qualify-snapshot-terminate" => {
             snapshot_lane::terminate_snapshot_qualification(&adapter, true)
         }
