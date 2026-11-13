@@ -114,7 +114,7 @@ fn ended_state(state: &str) -> bool {
 
 /// Join one provider listing with the node's journals. Records of other
 /// backends are not this listing's to judge.
-pub fn classify(
+pub(crate) fn classify(
     backend: &str,
     listing: &ProviderInventoryAdapterResponse,
     records: &[NodeProviderRecord],

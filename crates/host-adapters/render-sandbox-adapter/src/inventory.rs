@@ -123,7 +123,7 @@ pub(crate) fn list_provider_resources(
     let cancellation = lillux::network::NetworkCancellation::default();
     let _signal = crate::SignalCancellation::install(cancellation.clone())?;
     let credential = crate::read_credential()?;
-    let mut fetch = |base: &url::Url, cursor: Option<&str>| -> Result<Vec<u8>> {
+    let fetch = |base: &url::Url, cursor: Option<&str>| -> Result<Vec<u8>> {
         let url = page_url(base, &settings.owner_id, cursor);
         let (status, body) = crate::read_response(crate::send_api_request(
             &network,
