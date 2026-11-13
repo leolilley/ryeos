@@ -88,6 +88,27 @@ pub async fn handle(
         });
     }
 
+    // Resume only a schedule whose retained authority holds now. A schedule
+    // paused because its grant was revoked or replaced resumes after
+    // `scheduler.reauthorize` (or a new registration) re-pins it.
+    let authority =
+        super::scheduler_explain::schedule_authority_view(state.as_ref(), &spec.execution);
+    if authority["valid"] != true {
+        return Err(HandlerError::Structured {
+            code: "schedule_authority_invalid".to_string(),
+            status: 409,
+            body: serde_json::json!({
+                "code": "schedule_authority_invalid",
+                "schedule_id": req.schedule_id,
+                "authority": authority,
+                "message": format!(
+                    "schedule {} cannot resume: its retained authority no longer holds; reauthorize it first",
+                    req.schedule_id
+                ),
+            }),
+        });
+    }
+
     let rec = super::scheduler_register::rewrite_schedule_enabled(&scheduler, &spec, true, None)
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     scheduler_db

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:08:33Z:137cc00f5fc50f03339f591e092fe75e33c36a3d8c6cd95fba85ed6eb25f0e97:RfHFuHUEqMv0iMHmcvtnh0jd5dYRa7eJpLmaMEBE9+88PSnTCiXVO1USRH/M2BGzp5L+MgY57IeytmH0pCSWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:16:30Z:9e5e2b60a635475624c0343d7815de21402b8d6959a0da0c905974f2c4df174f:B71FUZJNJsMmKUNDPOn2tAf0iNILb8CLVIMXI0VMqoHmKYQJAV8vusUtR7qdgaJJQOIPIMg400c4pv4o1Rb5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -171,6 +171,29 @@ specified times. Each fire creates a new thread.
 - Thread IDs for each execution
 - Result status (completed, failed, cancelled)
 - The schedule-spec hash, bound project authority, and admitted capsule hash
+
+## Schedule Authority
+
+Registration pins the exact authorized-key grant generation of the
+registering principal, and every fire proves that generation still holds
+before anything launches. When it does not, the fire is recorded as `failed`
+with a typed outcome instead of the generic `dispatch_failed`:
+
+| Outcome | Cause |
+|---|---|
+| `authority_revoked` | the principal's grant, or a forwarding node's grant, no longer exists |
+| `authority_changed` | a different grant generation, principal class or origin site; a node-owned schedule that no longer names this node |
+| `authority_narrowed` | the grant no longer covers a declared capability |
+
+The first such refusal pauses the schedule through the same signed write
+`scheduler.pause` uses, with `paused_reason` set to the outcome, so later
+boundaries do not fail one by one. `scheduler.explain` reports an `authority`
+block computed by the same revalidation: `valid`, the typed `refusal`
+(`grant_revoked`, `grant_generation_changed`, `class_or_origin_changed`,
+`capability_no_longer_covered`, `forwarding_grant_revoked`,
+`forwarding_grant_changed`, `forwarding_attestation_not_covered` or
+`node_authority_changed`), its `outcome`, and a `detail`. `scheduler.resume`
+refuses with `schedule_authority_invalid` until the authority holds again.
 
 ## Pause and Resume
 

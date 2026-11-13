@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:08:33Z:7c0206890b5670fb7206f86fd3a8828a5d93fd1622338a348b94504e2bf7b396:e4frNSfX+bnC7/Yg3Lrw/sYt+wKw+uYX1gtoedqp1hkaTV86y6NMjIh29KKnzyHa5rNUJO213B2Fd3uI+rJwDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:16:30Z:df0a60f8c3c0a2be5f697752aca72e5628638b892d2d505abaf30d0737318099:k52Nji/0sreuwKRqYxnsJuG5p6VjoFh9Gmx/ynbs3pE+LAP0AvSgrgylHd807h4K2XbRODPJXXwuLk0nTlfKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, scheduler, scheduling]
@@ -32,7 +32,16 @@ the ordinary signed pause write and records `paused_reason`
 
 Registration seals the authenticated principal's current grant generation
 into the schedule authority. Every fire revalidates that exact grant and the
-declared capability subset before launching. A `live_direct` fire intentionally
+declared capability subset before launching. A fire refused because that
+authority no longer holds is recorded as `failed` with a typed outcome:
+`authority_revoked` (the grant, or a forwarding node's grant, is gone),
+`authority_changed` (a different grant generation, class or origin) or
+`authority_narrowed` (the grant no longer covers a declared capability). The
+first such refusal pauses the schedule through the ordinary signed pause write
+and records the same code as `paused_reason`. `scheduler/explain` reports an
+`authority` block (`valid`, `refusal`, `outcome`, `detail`) computed by the
+same revalidation, and `scheduler/resume` refuses with
+`schedule_authority_invalid` while the authority does not hold. A `live_direct` fire intentionally
 resolves the live project again at each fire and recovery and is never
 implicitly snapshotted. A `pinned` fire binds one durable
 `current_head` or explicit `snapshot` authority and retains it through recovery;

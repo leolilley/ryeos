@@ -14,6 +14,14 @@ pub enum ScheduleAutoPauseReason {
     MaxFiresReached,
     /// The schedule reached its signed `expires_at` bound.
     Expired,
+    /// A fire was refused because the pinned grant was revoked.
+    AuthorityRevoked,
+    /// A fire was refused because the pinned grant generation, class or
+    /// origin changed.
+    AuthorityChanged,
+    /// A fire was refused because the pinned grant no longer covers the
+    /// schedule's capabilities.
+    AuthorityNarrowed,
 }
 
 impl ScheduleAutoPauseReason {
@@ -21,6 +29,9 @@ impl ScheduleAutoPauseReason {
         match self {
             Self::MaxFiresReached => "max_fires_reached",
             Self::Expired => "expired",
+            Self::AuthorityRevoked => "authority_revoked",
+            Self::AuthorityChanged => "authority_changed",
+            Self::AuthorityNarrowed => "authority_narrowed",
         }
     }
 }
@@ -40,6 +51,9 @@ mod tests {
         for reason in [
             ScheduleAutoPauseReason::MaxFiresReached,
             ScheduleAutoPauseReason::Expired,
+            ScheduleAutoPauseReason::AuthorityRevoked,
+            ScheduleAutoPauseReason::AuthorityChanged,
+            ScheduleAutoPauseReason::AuthorityNarrowed,
         ] {
             assert_eq!(
                 serde_json::to_value(reason).unwrap(),

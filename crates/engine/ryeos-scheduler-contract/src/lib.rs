@@ -4,6 +4,7 @@
 //! belongs here.
 
 mod accounting;
+mod authority;
 mod execution;
 mod expression;
 mod maintenance;
@@ -14,6 +15,7 @@ mod retirement;
 mod vocabulary;
 
 pub use accounting::{SchedulerFireHistoryAccounting, SchedulerFireHistoryDiscardReport};
+pub use authority::{ScheduledAuthorityRefusal, ScheduledAuthorityRefusalKind};
 pub use execution::{
     SCHEDULE_MAX_FIRES_LIMIT, ScheduleExecution, ScheduleExecutionAuthority,
     validate_schedule_bounds, validate_schedule_execution, validate_schedule_ref_bindings,
