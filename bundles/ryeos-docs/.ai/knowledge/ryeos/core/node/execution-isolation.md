@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:36e51b6a186c1bcdae22ccee3870b5e01e4fc4d2bb4236b90c1594ada345f0ab:0yVEreO7Rjn7m7XJtBxaDMw6okI5v2IdFbvTzwVskgN21IqKLoXHX44Qs3a+L+6pAaTxIzr50YAx6NFMoGgEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:51:43Z:67b19c48d9e6a6829494c0c1c20009fa7bae1c10ff773923614099dc89ecac5e:HK/iiGT6eIkmrFIAfdfQHsZtPdyZha7x3WQL4nDAX5UF1RQkp+zY41mz5QNh1M0jYALWcuPskuLij4rVc/o7DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -623,6 +623,14 @@ no association retain the ordinary direct lifecycle. Setup leaves a new service
 down, so provisioning does not unexpectedly start a node. That native boot
 disposition remains inert after a host reboot; an operator explicitly uses
 `ryeos start` when the node should run again.
+
+The association is removed by the matching administrator transition,
+`ryeos node host retire --confirm [--app-root <existing-node-root>]`, while the
+node is stopped. Lillux brings the native service down, deactivates it, waits
+for the service manager to release it, and removes the service definition and
+its logs. It retires only an association whose recorded launch is the RyeOS
+node launch for that exact app root. An association left behind by a deleted
+app root is retired with `ryeos node host retire --orphaned --confirm`.
 
 The native adapter is a Lillux concern. Its first qualified implementation is
 the local Artix/runit adapter; systemd, launchd and Windows require their own

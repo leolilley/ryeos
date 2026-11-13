@@ -24,6 +24,7 @@
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
 //!   - `ryeos node bundle-set update` — install one exact remotely published bundle set
 //!   - `ryeos node host setup` — one-time administrator-owned host association
+//!   - `ryeos node host retire` — retire a stopped node's host service, or every orphaned one
 //!   - `ryeos node external-execution compose` — compose and install a node-signed external placement binding on a stopped node
 //!   - `ryeos node external-execution provision-credential` — provision the placement credential an installed binding names into the node vault
 //!   - `ryeos node external-execution qualification-session-compose` — compose and install the node-signed qualification-only session binding on a stopped node
@@ -214,6 +215,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "lifecycle",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "host", "retire"],
+        summary: "Retire a stopped node's host service, or every orphaned one",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
         tokens: &["help"],
         summary: "Open the compact TTY help screen",
         category: "meta",
@@ -396,6 +402,10 @@ pub async fn try_dispatch(
             run_node_host_setup_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("host")) if argv.get(2).map(String::as_str) == Some("retire") => {
+            run_node_host_retire_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("start", _) => {
             run_start_command(&argv[1..], console)
                 .await
@@ -465,11 +475,7 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
         args.uds_path,
     )?;
     let account = lillux::ControllerAccount::current().map_err(anyhow::Error::msg)?;
-    let daemon = std::env::current_exe()
-        .context("locate installed ryeos CLI")?
-        .parent()
-        .context("installed ryeos CLI has no binary directory")?
-        .join("ryeosd");
+    let daemon = installed_daemon()?;
     let arguments = vec![
         "host-provision".into(),
         "--app-root".into(),
@@ -481,6 +487,86 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
     ];
     lillux::run_as_administrator(&daemon, &arguments)
         .with_context(|| format!("run administrator host setup through {}", daemon.display()))?;
+    Ok(())
+}
+
+/// The daemon installed beside this CLI: host maintenance runs exactly it.
+fn installed_daemon() -> Result<PathBuf> {
+    Ok(std::env::current_exe()
+        .context("locate installed ryeos CLI")?
+        .parent()
+        .context("installed ryeos CLI has no binary directory")?
+        .join("ryeosd"))
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node host retire",
+    about = "Retire an administrator-owned host service",
+    long_about = "Removes the native host service that `ryeos node host setup` provisioned: the service is brought down, deactivated, and its service definition and logs are removed. With --app-root (or the default node), the node must be stopped; nothing is written in its app root, and the node can still run unsupervised. With --orphaned, every RyeOS node service whose recorded app root no longer exists is listed and retired; a service whose app root exists is never touched by the sweep. Runs the installed ryeosd as administrator, like host setup.",
+    no_binary_name = true
+)]
+struct NodeHostRetireArgs {
+    /// App root whose host service to retire (defaults to the normal local node).
+    #[arg(long, conflicts_with = "orphaned")]
+    app_root: Option<PathBuf>,
+
+    /// Retire every RyeOS node service whose recorded app root no longer exists.
+    #[arg(long)]
+    orphaned: bool,
+
+    /// Required acknowledgement that this removes a root-owned service
+    /// association.
+    #[arg(long)]
+    confirm: bool,
+}
+
+/// The administrator daemon arguments for one retirement request.
+fn host_retire_arguments(args: &NodeHostRetireArgs) -> Result<Vec<std::ffi::OsString>> {
+    if !args.confirm {
+        anyhow::bail!("host retire requires --confirm");
+    }
+    if args.orphaned {
+        return Ok(vec!["host-retire".into(), "--orphaned".into()]);
+    }
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    Ok(vec![
+        "host-retire".into(),
+        "--app-root".into(),
+        app_root.into_os_string(),
+    ])
+}
+
+fn run_node_host_retire_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeHostRetireArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let arguments = host_retire_arguments(&args)?;
+    if args.orphaned {
+        // The listing is unprivileged; the administrator re-checks every root
+        // before it retires anything.
+        let orphans = ryeos_node::supervision::orphaned_host_services()?.context(
+            "this host has no native service directory readable without root; nothing to list",
+        )?;
+        if orphans.is_empty() {
+            println!("no orphaned host services");
+            return Ok(());
+        }
+        for service in &orphans {
+            println!(
+                "orphaned host service {} (app root gone: {})",
+                service.name,
+                service
+                    .app_root
+                    .as_deref()
+                    .map(|root| root.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
+    }
+    let daemon = installed_daemon()?;
+    lillux::run_as_administrator(&daemon, &arguments)
+        .with_context(|| format!("run administrator host retire through {}", daemon.display()))?;
     Ok(())
 }
 
@@ -2487,6 +2573,10 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Host-wide: native services of nodes whose app root is gone. Read-only
+    // enumeration of administrator-owned records; nothing is retired here.
+    checks.push(host_services_check(ryeos_node::supervision::host_services()));
+
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
     //    daemon (metadata present, not responding) may be hung-but-alive and
@@ -3334,6 +3424,72 @@ fn floor_entry_text(entry: &lillux::process_control::CapabilityRequirement) -> S
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
+/// The `host_services` row: WARN when a RyeOS node service records an app
+/// root that no longer exists; NA when this host has no native service
+/// directory readable without root.
+fn host_services_check(
+    listing: Result<Option<Vec<ryeos_node::supervision::NodeHostService>>>,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+    let services = match listing {
+        Ok(Some(services)) => services,
+        Ok(None) => {
+            return check(
+                "host_services",
+                NA,
+                serde_json::json!({
+                    "note": "no native service directory is readable without root here; orphaned host services cannot be listed",
+                }),
+            );
+        }
+        Err(error) => {
+            return check(
+                "host_services",
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "note": "native host services could not be enumerated",
+                }),
+            );
+        }
+    };
+    let orphaned: Vec<_> = services
+        .iter()
+        .filter(|service| service.orphaned())
+        .map(|service| serde_json::json!({ "name": service.name, "app_root": service.app_root }))
+        .collect();
+    let unrecognized: Vec<_> = services
+        .iter()
+        .filter_map(|service| {
+            service
+                .problem
+                .as_ref()
+                .map(|problem| serde_json::json!({ "name": service.name, "problem": problem }))
+        })
+        .collect();
+    if orphaned.is_empty() {
+        return check(
+            "host_services",
+            OK,
+            serde_json::json!({
+                "services": services.len(),
+                "unrecognized": unrecognized,
+            }),
+        );
+    }
+    check(
+        "host_services",
+        WARN,
+        serde_json::json!({
+            "services": services.len(),
+            "orphaned": orphaned,
+            "unrecognized": unrecognized,
+            "note": "these host services belong to nodes whose app root no longer exists",
+            "fix": "run: ryeos node host retire --orphaned --confirm",
+        }),
+    )
+}
+
 fn check(
     name: &str,
     status: &str,
@@ -4017,6 +4173,106 @@ mod tests {
         );
         assert!(unmoved.heading.starts_with("ALREADY ANCHORED"));
         assert_eq!(value(&unmoved, "document"), None);
+    }
+
+    fn host_service_for(root: &std::path::Path) -> ryeos_node::supervision::NodeHostService {
+        let launch: lillux::HostServiceLaunch = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "executable": "/usr/bin/ryeosd",
+            "arguments": ["host-service", "--app-root", root],
+            "environment": {},
+            "account": {"implementation": "unix", "uid": 1000, "gid": 1000}
+        }))
+        .unwrap();
+        // The association name is the digest host setup derives from the root.
+        let name = format!(
+            "ryeos-{}",
+            lillux::sha256_hex(
+                lillux::canonical_json(&serde_json::to_value(root).unwrap())
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
+        ryeos_node::supervision::NodeHostService::from_association(lillux::HostServiceAssociation {
+            name,
+            launch: Ok(launch),
+            activated: true,
+        })
+    }
+
+    #[test]
+    fn doctor_host_services_warns_on_orphan() {
+        use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+        let directory = tempfile::tempdir().unwrap();
+        let live = directory.path().join("live");
+        std::fs::create_dir(&live).unwrap();
+        let gone = directory.path().join("gone");
+
+        let healthy = host_services_check(Ok(Some(vec![host_service_for(&live)])));
+        assert_eq!(healthy.status, OK);
+        assert_eq!(healthy.detail["services"], 1);
+
+        let orphaned = host_services_check(Ok(Some(vec![
+            host_service_for(&live),
+            host_service_for(&gone),
+        ])));
+        assert_eq!(orphaned.name, "host_services");
+        assert_eq!(orphaned.status, WARN);
+        let listed = orphaned.detail["orphaned"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["app_root"], serde_json::json!(gone));
+        assert!(
+            orphaned.detail["fix"]
+                .as_str()
+                .unwrap()
+                .contains("ryeos node host retire --orphaned --confirm")
+        );
+
+        assert_eq!(host_services_check(Ok(None)).status, NA);
+        assert_eq!(
+            host_services_check(Err(anyhow::anyhow!("unsafe ownership"))).status,
+            WARN
+        );
+    }
+
+    #[test]
+    fn host_retire_requires_confirm() {
+        let unconfirmed = NodeHostRetireArgs::try_parse_from(["--orphaned"]).unwrap();
+        let error = host_retire_arguments(&unconfirmed).unwrap_err();
+        assert!(error.to_string().contains("--confirm"));
+
+        let sweep = NodeHostRetireArgs::try_parse_from(["--orphaned", "--confirm"]).unwrap();
+        assert_eq!(
+            host_retire_arguments(&sweep).unwrap(),
+            ["host-retire", "--orphaned"]
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("node");
+        let by_root = NodeHostRetireArgs::try_parse_from([
+            std::ffi::OsStr::new("--app-root"),
+            root.as_os_str(),
+            std::ffi::OsStr::new("--confirm"),
+        ])
+        .unwrap();
+        assert_eq!(
+            host_retire_arguments(&by_root).unwrap(),
+            [
+                std::ffi::OsString::from("host-retire"),
+                "--app-root".into(),
+                root.clone().into_os_string(),
+            ]
+        );
+
+        assert!(
+            NodeHostRetireArgs::try_parse_from([
+                std::ffi::OsStr::new("--orphaned"),
+                std::ffi::OsStr::new("--app-root"),
+                root.as_os_str(),
+                std::ffi::OsStr::new("--confirm"),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

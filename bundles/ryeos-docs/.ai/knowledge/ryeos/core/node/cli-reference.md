@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:23ae2ff7abf536732dc45037e52da88ec623890675eba42845994a722fc20cd6:7r8vN1BaY89pnootpyEeqgRZjg2nnMUnhIWLcYU+4RqkxJfH9sJtMAyEe/k+0FUrCac+qnvZjsR5pVbooShdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:51:43Z:2c6c46dec758838f7251e860b78fc03d23a50ff21857254b9afd0984eb5edf98:OA0sikTDzArzjKllQ3XoefG9oVcdaGvtskt7fujXJlWPxgkDSQpLfs7U3jP6KFLIBmlDmF6kxJdeJIxhtZUzAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -148,6 +148,38 @@ stopping the node. A service intentionally pinned to another prefix must be
 upgraded by that prefix's owning installation mechanism; the ordinary package
 installer never writes there or silently changes the association.
 
+### `ryeos node host retire`
+
+```bash
+ryeos node host retire --confirm [--app-root <dir>]
+ryeos node host retire --orphaned --confirm
+```
+
+Retires the native service that `ryeos node host setup` provisioned, through
+the installed daemon as administrator, like setup. The service is brought down,
+deactivated, and its service definition and logs are removed. Every form
+requires `--confirm`.
+
+With `--app-root` (or the default node), the node must be stopped: retirement
+takes the node's existing lifecycle and state locks and refuses while either is
+held. It creates and writes nothing in the app root, and the node remains a
+usable direct node. A service whose recorded launch is not a RyeOS node
+service for exactly that app root is refused.
+
+With `--orphaned`, the CLI first lists every RyeOS node service whose recorded
+app root no longer exists, then the administrator step re-checks each root and
+retires only those still missing. A service whose app root exists is never
+touched by the sweep. `ryeos node doctor` reports such services in its
+`host_services` row.
+
+Retirement needs root and a live service manager, so it has no automated
+end-to-end test. A manual check on a runit host: set up a throwaway node with
+`ryeos node host setup --confirm --app-root <dir>`, confirm
+`/etc/runit/runsvdir/default/ryeos-<digest>` exists, run
+`ryeos node host retire --confirm --app-root <dir>`, and confirm the link, the
+`/etc/runit/sv/ryeos-<digest>` directory and
+`/var/log/lillux-host-service/ryeos-<digest>` are gone.
+
 ### `ryeos node status`
 
 ```bash
@@ -171,6 +203,12 @@ loader: disabled is a healthy inactive opt-out, while enforced mode resolves
 and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md).
+
+The host-wide `host_services` row reads the administrator-owned native service
+records without root. It warns when a RyeOS node service records an app root
+that no longer exists, and names the fix,
+`ryeos node host retire --orphaned --confirm`. It reports `n/a` where no native
+service directory is readable without root.
 
 ### `ryeos node reset execution-history`
 

@@ -3616,6 +3616,36 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    if let Some(config::DaemonCommand::HostRetire { app_root, orphaned }) = &cli.command {
+        lillux::require_administrator()?;
+        if *orphaned {
+            let retired = ryeos_node::supervision::retire_orphaned_host_services()?;
+            if retired.is_empty() {
+                println!("no orphaned host services");
+            }
+            for service in &retired {
+                println!(
+                    "retired host service {} (app root gone: {})",
+                    service.name,
+                    service
+                        .app_root
+                        .as_deref()
+                        .map(|root| root.display().to_string())
+                        .unwrap_or_default()
+                );
+            }
+        } else {
+            let app_root = app_root
+                .as_deref()
+                .context("host-retire requires --app-root or --orphaned")?;
+            if ryeos_node::supervision::retire_host_service(app_root)? {
+                println!("retired the host service of {}", app_root.display());
+            } else {
+                println!("no host service is associated with {}", app_root.display());
+            }
+        }
+        return Ok(());
+    }
     if let Some(config::DaemonCommand::HostInstall {
         package_root,
         action,
@@ -3965,7 +3995,8 @@ async fn run(
     // their own state lock and must not conflict with the daemon's.
     if let Some(ref cmd) = cli.command {
         match cmd {
-            config::DaemonCommand::HostProvision { .. } => {
+            config::DaemonCommand::HostProvision { .. }
+            | config::DaemonCommand::HostRetire { .. } => {
                 unreachable!("handled before node startup")
             }
             config::DaemonCommand::InitPolicyPreflight { .. }

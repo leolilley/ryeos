@@ -853,6 +853,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
             "--confirm         confirm administrator-owned host-service provisioning\n--app-root <DIR>  existing initialized application root\n--bind <ADDR>      replace the stopped node's persisted TCP endpoint\n--uds-path <PATH>  replace the stopped node's persisted lifecycle endpoint",
         ),
+        "node host retire" => (
+            "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
+            "--confirm         confirm removing the administrator-owned host association\n--app-root <DIR>  application root of the stopped node whose service to retire\n--orphaned        retire every node service whose app root no longer exists",
+        ),
         "node doctor" => (
             "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",
             "--json            emit structured diagnostics\n--no-bundles      skip bundle diagnostics\n--app-root <DIR>  application root",

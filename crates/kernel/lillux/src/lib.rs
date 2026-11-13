@@ -90,9 +90,9 @@ pub use cas::{
 };
 pub use guest_account::{GuestRuntimeAccount, effective_uid};
 pub use host_service::{
-    HostServiceController, HostServiceInstallation, HostServiceLaunch, discover_host_service,
-    exec_install_transaction, provision_host_service, run_as_administrator,
-    validate_install_transaction,
+    HostServiceAssociation, HostServiceController, HostServiceInstallation, HostServiceLaunch,
+    discover_host_service, exec_install_transaction, list_host_services, provision_host_service,
+    retire_host_service, run_as_administrator, validate_install_transaction,
 };
 pub use json::deserialize_json_str_stack_safe;
 pub use local_ipc::{
