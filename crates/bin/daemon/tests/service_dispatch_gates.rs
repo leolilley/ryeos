@@ -44,6 +44,7 @@ fn service_refs(engine: &ryeos_engine::engine::Engine) -> Vec<CanonicalRef> {
         .filter(|canonical| {
             let effective = engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: canonical.clone(),
                     expected_kind: Some(canonical.kind.clone()),
                     project_root: None,
@@ -115,6 +116,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
 fn local_plan_ctx() -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-gate".into(),
             scopes: vec![],

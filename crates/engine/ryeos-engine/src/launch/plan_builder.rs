@@ -689,8 +689,10 @@ fn resolve_executor_chain(
                     &crate::trust::SignerContext::new(
                         source_space,
                         &ref_.kind,
-                        project_authority
-                            .map(|(root, _)| root)
+                        roots
+                            .logical_project_root
+                            .as_deref()
+                            .or_else(|| project_authority.map(|(root, _)| root))
                             .or_else(|| roots.project_root()),
                     ),
                 )
@@ -1974,6 +1976,7 @@ metadata:
         let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
+            logical_project_root: None,
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
             kind: kind.to_string(),
             source_path,
@@ -2014,6 +2017,7 @@ metadata:
             crate::contracts::SubjectResolutionAuthority::Projectless
         };
         PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

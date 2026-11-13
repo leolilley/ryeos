@@ -54,6 +54,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
 fn local_plan_ctx() -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-gate".into(),
             scopes: vec![],

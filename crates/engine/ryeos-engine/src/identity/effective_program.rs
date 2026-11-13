@@ -654,6 +654,7 @@ mod tests {
             content_root: Some(temp.path().to_path_buf()),
         };
         let roots = ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: Vec::new(),
             ordered: vec![node_root.clone()],
         };

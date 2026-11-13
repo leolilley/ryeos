@@ -425,6 +425,7 @@ fn build_item_inspect(
     // Effective content
     let effective = if req.include_effective {
         let effective_req = ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: item_ref.clone(),
             expected_kind: None,
             project_root: project_path.cloned(),

@@ -70,6 +70,11 @@ pub enum LoadStrictness {
 
 pub struct VerifiedLoader {
     project_root: PathBuf,
+    /// The logical project of `project_root` for signer project scopes: the
+    /// project as the node knows it. It differs from `project_root` when the
+    /// loader reads a pinned or COW checkout. Defaults to `project_root`,
+    /// which is correct for a live project.
+    logical_project_root: Option<PathBuf>,
     project_config_enabled: bool,
     node_config_root: Option<PathBuf>,
     bundle_roots: Vec<PathBuf>,
@@ -421,7 +426,7 @@ impl VerifiedLoader {
     ) -> SignerContext<'a> {
         match root_class {
             ConfigCandidateRootClass::Project => {
-                SignerContext::project(kind, Some(self.project_root.as_path()))
+                SignerContext::project(kind, self.logical_project_root.as_deref())
             }
             ConfigCandidateRootClass::Node => SignerContext::node(kind),
             ConfigCandidateRootClass::Bundle => SignerContext::bundle(kind),
@@ -457,6 +462,7 @@ impl VerifiedLoader {
     ) -> Result<Self> {
         let (trust_store, trusted_signers_digest) = Self::build_trust(trusted_signers)?;
         Ok(Self {
+            logical_project_root: Some(project_root.clone()),
             project_root,
             project_config_enabled: true,
             node_config_root,
@@ -476,6 +482,7 @@ impl VerifiedLoader {
         let (trust_store, trusted_signers_digest) = Self::build_trust(trusted_signers)?;
         Ok(Self {
             project_root: node_config_root.clone().unwrap_or_default(),
+            logical_project_root: None,
             project_config_enabled: false,
             node_config_root,
             bundle_roots,
@@ -486,6 +493,26 @@ impl VerifiedLoader {
 
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    /// State the logical project this loader's project root belongs to, when
+    /// the root is a pinned or COW checkout rather than the project itself.
+    /// `None` states that the logical project is unknown, so signers scoped to
+    /// specific projects admit nothing.
+    pub fn with_logical_project_of(
+        self,
+        roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    ) -> Self {
+        match roots.logical_project_root.clone() {
+            Some(logical) => self.with_logical_project_root(Some(logical)),
+            None => self,
+        }
+    }
+
+    /// As [`Self::with_logical_project_of`] with an explicit value.
+    pub fn with_logical_project_root(mut self, logical_project_root: Option<PathBuf>) -> Self {
+        self.logical_project_root = logical_project_root;
+        self
     }
 
     pub fn trust_store(&self) -> &TrustStore {
@@ -1680,6 +1707,58 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(project_config.value["name"], "project");
+    }
+
+    #[test]
+    fn project_scope_matches_the_logical_project_not_the_checkout() {
+        let key = SigningKey::from_bytes(&[53u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        // The loader reads a materialized checkout; the registered project
+        // the signer is scoped to is a different path.
+        let checkout = tmp.path().join("checkout");
+        let logical = tmp.path().join("registered-project");
+        create_file(
+            &checkout,
+            ".ai/config/scoped.yaml",
+            &lillux::signature::sign_content("name: scoped\n", &key, "#", None),
+        );
+        let signers = vec![signer_entry(
+            &key,
+            SignerScope {
+                spaces: vec![SignerSpace::Project],
+                kinds: vec!["*".to_string()],
+                projects: vec![logical.to_string_lossy().into_owned()],
+            },
+        )];
+
+        // Without a stated logical project the checkout path is judged, which
+        // is not the scoped project: the signer is out of scope.
+        let by_checkout = VerifiedLoader::new(checkout.clone(), vec![], &signers).unwrap();
+        assert!(
+            by_checkout
+                .load_config_strict_signed_with_proof::<serde_yaml::Value>("scoped")
+                .is_err()
+        );
+
+        // Stating the logical project admits the signer.
+        let by_logical = VerifiedLoader::new(checkout.clone(), vec![], &signers)
+            .unwrap()
+            .with_logical_project_root(Some(logical.clone()));
+        let loaded = by_logical
+            .load_config_strict_signed_with_proof::<serde_yaml::Value>("scoped")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.value["name"], "scoped");
+
+        // An unknown logical project admits nothing a project scope names.
+        let unknown = VerifiedLoader::new(checkout, vec![], &signers)
+            .unwrap()
+            .with_logical_project_root(None);
+        assert!(
+            unknown
+                .load_config_strict_signed_with_proof::<serde_yaml::Value>("scoped")
+                .is_err()
+        );
     }
 
     #[test]

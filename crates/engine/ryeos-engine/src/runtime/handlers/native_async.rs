@@ -413,6 +413,7 @@ mod tests {
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
         let roots = ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: Vec::new(),
             ordered: vec![],
         };

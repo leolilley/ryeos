@@ -167,6 +167,7 @@ fn projectless_admission(
     fixture: &Fixture,
 ) -> Result<crate::thread_lifecycle::RootExecutionAdmission> {
     let plan_context = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: fixture.context.fingerprint.clone(),
             scopes: fixture.context.scopes.clone(),
@@ -948,6 +949,7 @@ fn signed_probe_dependency_capture_refuses_changed_tool_envelope() -> Result<()>
     let canonical = CanonicalRef::parse(AUX_VERIFIER)?;
     let site = fixture.state.threads.site_id().to_owned();
     let context = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: fixture.context.fingerprint.clone(),
             scopes: vec![],
@@ -1367,6 +1369,7 @@ fn pinned_fixture(fixture: &Fixture) -> Result<PinnedFixture> {
         },
     )?;
     let plan = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: fixture.context.fingerprint.clone(),
             scopes: fixture.context.scopes.clone(),

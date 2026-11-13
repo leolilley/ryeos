@@ -159,6 +159,7 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
     let signed = state.engine.with_checked_bundle_generation(|generation| {
         let resolution =
             generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                     "worker:codex/external-hosted-authoring",
                 )?,

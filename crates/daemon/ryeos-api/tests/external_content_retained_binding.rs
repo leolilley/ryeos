@@ -554,6 +554,7 @@ async fn bind_through_managed_activation_owner(
     let resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse("tool:test/source").unwrap(),
             expected_kind: Some("tool".to_owned()),
             project_root: None,

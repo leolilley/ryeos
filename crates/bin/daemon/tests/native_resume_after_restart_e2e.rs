@@ -105,6 +105,7 @@ fn build_engine_against_bundle() -> Engine {
 
 fn plan_ctx(project_dir: &Path) -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],

@@ -4526,11 +4526,19 @@ pub(crate) fn finalize_direct_effective_program(
     }
 
     let mut resolution = admission.resolution_output().clone();
-    let roots = engine.resolution_roots(
-        admission
-            .resolution_workspace()
-            .map(std::path::Path::to_path_buf),
-    );
+    let roots = engine
+        .resolution_roots(
+            admission
+                .resolution_workspace()
+                .map(std::path::Path::to_path_buf),
+        )
+        .with_logical_project_root(
+            admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     // A declaring kind captures here exactly as the managed path does. A
     // direct launch dispatched as a child (`parent_thread_id`) may reuse the
     // parent's outer sealed realization set under the existing inheritance
@@ -8686,6 +8694,7 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         base_authority,
     )?;
     let base_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: base_provenance.logical_project_root(),
         requested_by: resume.requested_by.clone(),
         project_context: ProjectContext::LocalPath {
             path: base.effective_path.clone(),

@@ -214,6 +214,7 @@ pub mod test_support {
             caller_scopes: scopes.clone(),
             engine: state.engine.clone(),
             plan_ctx: PlanContext {
+                logical_project_root: None,
                 requested_by: EffectivePrincipal::Local(Principal {
                     fingerprint: operator.principal_id(),
                     scopes,
@@ -360,6 +361,7 @@ pub mod test_support {
                 .with_context(|| format!("fixture selection omits signed slot `{}`", slot.id))?;
             let relationship_resolution = state.engine.effective_resolution_output(
                 ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         &slot.relationship_ref,
                     )?,

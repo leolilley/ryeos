@@ -642,6 +642,7 @@ fn assert_resolved_handler_source_anchored(
         })?;
     let site_id = ctx.state.threads.site_id().to_string();
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: execution_principal_id.to_string(),
             scopes: execution_scopes.to_vec(),

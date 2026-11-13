@@ -29,7 +29,26 @@ pub struct EffectiveItemRequest {
     pub item_ref: CanonicalRef,
     pub expected_kind: Option<String>,
     pub project_root: Option<PathBuf>,
+    /// The logical project of `project_root` (see
+    /// `PlanContext::logical_project_root`); `None` means the root is its
+    /// own logical project when the authority is live.
+    pub logical_project_root: Option<PathBuf>,
     pub subject_resolution_authority: SubjectResolutionAuthority,
+}
+
+impl EffectiveItemRequest {
+    /// The logical project for signer scopes: the stated one, or the project
+    /// root itself when the authority is the live project.
+    pub fn effective_logical_project_root(&self) -> Option<PathBuf> {
+        match (
+            &self.logical_project_root,
+            &self.subject_resolution_authority,
+        ) {
+            (Some(logical), _) => Some(logical.clone()),
+            (None, SubjectResolutionAuthority::LiveFs) => self.project_root.clone(),
+            (None, _) => None,
+        }
+    }
 }
 
 /// Source metadata for an effective item.
@@ -2402,6 +2421,7 @@ impl Engine {
         );
 
         let resolved = ResolvedItem {
+            logical_project_root: ctx.effective_logical_project_root(project_root.as_deref()),
             canonical_ref: item_ref.clone(),
             kind: item_ref.kind.clone(),
             source_path: result.winner_path,
@@ -3024,7 +3044,11 @@ impl Engine {
             materialized_project_root.as_deref(),
             subject_resolution_authority,
         )?;
-        let roots = self.resolution_roots(materialized_project_root.clone());
+        let roots = self
+            .resolution_roots(materialized_project_root.clone())
+            .with_logical_project_root(
+                ctx.effective_logical_project_root(materialized_project_root.as_deref()),
+            );
         let (output, probed_absent) = crate::resolution::run_resolution_pipeline_with_probes(
             &verified_root.resolved.canonical_ref,
             &self.kinds,
@@ -3084,7 +3108,11 @@ impl Engine {
             &materialized_project_root,
             admitted,
         )?;
-        let roots = self.resolution_roots(Some(materialized_project_root.clone()));
+        let roots = self
+            .resolution_roots(Some(materialized_project_root.clone()))
+            .with_logical_project_root(
+                ctx.effective_logical_project_root(Some(materialized_project_root.as_path())),
+            );
         let project_content = admitted.project_content_for_root(&materialized_project_root)?;
         let (output, probed_absent) =
             crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
@@ -3755,7 +3783,9 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self.resolution_roots(request.project_root.clone());
+        let roots = self
+            .resolution_roots(request.project_root.clone())
+            .with_logical_project_root(request.effective_logical_project_root());
         let request_snapshot = self.effective_request_snapshot_current(
             request.project_root.as_deref(),
             &request.subject_resolution_authority,
@@ -3788,7 +3818,9 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self.resolution_roots(request.project_root.clone());
+        let roots = self
+            .resolution_roots(request.project_root.clone())
+            .with_logical_project_root(request.effective_logical_project_root());
         let snapshot = self.effective_request_snapshot_from_project_content(
             project_root,
             project_content,
@@ -3970,7 +4002,9 @@ impl Engine {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
             _ => None,
         };
-        let roots = self.resolution_roots(project_root.clone());
+        let roots = self
+            .resolution_roots(project_root.clone())
+            .with_logical_project_root(ctx.effective_logical_project_root(project_root.as_deref()));
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             &ctx.subject_resolution_authority,
@@ -4017,7 +4051,11 @@ impl Engine {
                 crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
                 _ => None,
             };
-            let roots = self.resolution_roots(project_root.clone());
+            let roots = self
+                .resolution_roots(project_root.clone())
+                .with_logical_project_root(
+                    ctx.effective_logical_project_root(project_root.as_deref()),
+                );
             let request_snapshot = self.effective_request_snapshot_current(
                 project_root.as_deref(),
                 &ctx.subject_resolution_authority,
@@ -4140,7 +4178,9 @@ impl Engine {
             }
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let roots = self
+                .resolution_roots(Some(project_root.to_path_buf()))
+                .with_logical_project_root(ctx.effective_logical_project_root(Some(project_root)));
             let project_content = admitted.project_content_for_root(project_root)?;
             let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
                 item,
@@ -4176,6 +4216,7 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        logical_project_root: Option<PathBuf>,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
@@ -4184,6 +4225,7 @@ impl Engine {
                 root_executor_id,
                 root_kind,
                 project_root,
+                logical_project_root,
                 subject_resolution_authority,
             )
         })
@@ -4196,13 +4238,16 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: &Path,
+        logical_project_root: Option<PathBuf>,
         admitted: &AdmittedRequestAuthoritySnapshot,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
             admitted.validate_root_binding(project_root)?;
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let roots = self
+                .resolution_roots(Some(project_root.to_path_buf()))
+                .with_logical_project_root(logical_project_root);
             let project_content = admitted.project_content_for_root(project_root)?;
             crate::plan_builder::resolve_terminal_executor_under_project_authority(
                 root_executor_id,
@@ -4224,9 +4269,12 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        logical_project_root: Option<PathBuf>,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
-        let roots = self.resolution_roots(project_root.clone());
+        let roots = self
+            .resolution_roots(project_root.clone())
+            .with_logical_project_root(logical_project_root);
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             subject_resolution_authority,
@@ -4371,6 +4419,7 @@ impl Engine {
         let mut ordered = roots.ordered.clone();
         let Some(node_config_root) = &self.node_config_root else {
             return ResolutionRoots {
+                logical_project_root: None,
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4381,6 +4430,7 @@ impl Engine {
             .any(|root| root.ai_root == node_config_ai_root)
         {
             return ResolutionRoots {
+                logical_project_root: None,
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4400,6 +4450,7 @@ impl Engine {
             },
         );
         ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: roots.owned_namespaces.clone(),
             ordered,
         }
@@ -4744,6 +4795,7 @@ formats:
 
     fn test_plan_context() -> PlanContext {
         PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -4943,6 +4995,7 @@ formats:
             assert_eq!(verified.trust_class, TrustClass::Trusted);
             let resolution = selected
                 .effective_resolution_output(EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: hook.clone(),
                     expected_kind: Some("tool".to_owned()),
                     project_root: None,
@@ -5039,6 +5092,7 @@ formats:
         engine
             .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
                 let resolution = generation.effective_resolution_output(EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: CanonicalRef::parse("tool:hello")?,
                     expected_kind: Some("tool".to_owned()),
                     project_root: None,
@@ -5285,6 +5339,7 @@ formats:
                 assert!(
                     generation
                         .effective_resolution_output(EffectiveItemRequest {
+                            logical_project_root: None,
                             item_ref: CanonicalRef::parse("worker:missing").unwrap(),
                             expected_kind: Some("worker".to_string()),
                             project_root: None,
@@ -5414,6 +5469,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5510,6 +5566,7 @@ formats:
         .with_trust_store(trust_store);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5555,6 +5612,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5597,6 +5655,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5644,6 +5703,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5708,6 +5768,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5756,6 +5817,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5824,6 +5886,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5883,6 +5946,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6114,6 +6178,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

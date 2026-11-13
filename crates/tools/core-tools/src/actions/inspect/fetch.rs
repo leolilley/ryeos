@@ -58,6 +58,7 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
     };
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "inspect-tool".to_string(),
             scopes: vec!["bundle.read".to_string()],

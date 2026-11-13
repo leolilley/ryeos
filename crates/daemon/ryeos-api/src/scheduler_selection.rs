@@ -70,6 +70,7 @@ pub fn scheduler_selected_by_composition(engine: &ryeos_engine::engine::Engine) 
         let requests = scheduler_refs
             .iter()
             .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: canonical.clone(),
                 expected_kind: Some(canonical.kind.clone()),
                 project_root: None,

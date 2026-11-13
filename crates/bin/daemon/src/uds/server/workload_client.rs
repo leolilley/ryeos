@@ -499,6 +499,7 @@ fn present_admitted_executions(
         engine: provenance.request_engine().clone(),
         requested_call: None,
         plan_ctx: PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.to_owned(),
                 scopes: scopes.to_vec(),

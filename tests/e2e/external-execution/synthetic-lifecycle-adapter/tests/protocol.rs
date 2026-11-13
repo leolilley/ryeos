@@ -762,6 +762,7 @@ fn publish_external_runtime_product_witness(
     let relationship_resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "config:fixtures/build_recipe",
             )
@@ -874,6 +875,7 @@ fn bind_external_runtimes_to_qualification_verifier(
     let mut resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: canonical,
             expected_kind: Some("tool".into()),
             project_root: None,
@@ -1088,6 +1090,7 @@ async fn prepare_external_worker_program_and_binding(
     let roots = engine.resolution_roots(Some(project_root.to_path_buf()));
     let mut resolution = engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "worker:test/external-candidate",
             )
@@ -1787,6 +1790,7 @@ async fn try_execute_recorded_service(
         caller_scopes: scopes.clone(),
         engine: state.engine.clone(),
         plan_ctx: PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.to_owned(),
                 scopes: scopes.clone(),
@@ -1893,6 +1897,7 @@ fn dispatch_pinned_public_worker(
                 let scopes = vec!["*".to_owned()];
                 let site = state.threads.site_id().to_owned();
                 let plan_ctx = ryeos_engine::contracts::PlanContext {
+                    logical_project_root: None,
                     requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                         ryeos_engine::contracts::Principal {
                             fingerprint: principal.clone(),
@@ -4234,6 +4239,7 @@ async fn run_production_tls_candidate(
         let scopes = vec!["*".to_owned()];
         let principal = format!("fp:{}", state.identity.fingerprint());
         let plan_ctx = ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: principal.clone(),

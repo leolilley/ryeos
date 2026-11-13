@@ -361,6 +361,7 @@ pub fn prepare_bundle_structured_worker_profile(
         let roots = state.engine.resolution_roots(None);
         let mut resolution =
             generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: canonical,
                 expected_kind: Some("worker".into()),
                 project_root: None,

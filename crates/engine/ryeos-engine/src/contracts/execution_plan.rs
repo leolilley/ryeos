@@ -164,6 +164,15 @@ pub struct PlanContext {
     /// a materialization; this field states whether its bytes are live,
     /// immutable pinned content, or a writable COW generation.
     pub subject_resolution_authority: SubjectResolutionAuthority,
+    /// The project this plan belongs to, as the node knows it: the absolute
+    /// canonical project path. For a live project it equals the
+    /// materialized root. For a pinned generation or COW workspace the
+    /// materialized root is a per-generation checkout path, so the daemon
+    /// states the original project path here. Signer scopes that name
+    /// projects are matched against this, never against a checkout path.
+    /// `None` means the logical project is unknown, and a signer scoped to
+    /// specific projects then admits nothing.
+    pub logical_project_root: Option<PathBuf>,
     pub current_site_id: String,
     pub origin_site_id: String,
     pub execution_hints: ExecutionHints,
@@ -174,6 +183,27 @@ pub struct PlanContext {
     /// `build_plan` succeeds. The engine does not enforce this — it is
     /// safe structurally because `PlanContext` does not carry thread IDs.
     pub validate_only: bool,
+}
+
+impl PlanContext {
+    /// The logical project of this plan for signer project scopes: the stated
+    /// `logical_project_root`, or the materialized root itself when the plan
+    /// resolves against the live project (which is its own logical root).
+    pub fn effective_logical_project_root(
+        &self,
+        materialized_project_root: Option<&std::path::Path>,
+    ) -> Option<PathBuf> {
+        match (
+            &self.logical_project_root,
+            &self.subject_resolution_authority,
+        ) {
+            (Some(logical), _) => Some(logical.clone()),
+            (None, SubjectResolutionAuthority::LiveFs) => {
+                materialized_project_root.map(std::path::Path::to_path_buf)
+            }
+            (None, _) => None,
+        }
+    }
 }
 
 // ── Engine context (execute_plan) ────────────────────────────────────
@@ -874,6 +904,58 @@ impl ExecutionPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan_context(
+        authority: SubjectResolutionAuthority,
+        logical_project_root: Option<&str>,
+    ) -> PlanContext {
+        PlanContext {
+            logical_project_root: logical_project_root.map(PathBuf::from),
+            requested_by: EffectivePrincipal::Local(crate::contracts::Principal {
+                fingerprint: "fp:test".to_owned(),
+                scopes: Vec::new(),
+            }),
+            project_context: ProjectContext::None,
+            subject_resolution_authority: authority,
+            current_site_id: "site:test".to_owned(),
+            origin_site_id: "site:test".to_owned(),
+            execution_hints: Default::default(),
+            scheduled_fire: None,
+            validate_only: false,
+        }
+    }
+
+    #[test]
+    fn logical_project_root_is_the_stated_one_never_the_checkout() {
+        let checkout = std::path::Path::new("/cache/pinned/ab12/project");
+        let pinned = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        // A pinned checkout with no stated logical project has none: the
+        // checkout path is never offered as project identity.
+        assert_eq!(
+            plan_context(pinned.clone(), None).effective_logical_project_root(Some(checkout)),
+            None
+        );
+        // A stated logical project wins over the checkout.
+        assert_eq!(
+            plan_context(pinned, Some("/srv/projects/alpha"))
+                .effective_logical_project_root(Some(checkout)),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A live project is its own logical root.
+        let live = std::path::Path::new("/srv/projects/alpha");
+        assert_eq!(
+            plan_context(SubjectResolutionAuthority::LiveFs, None)
+                .effective_logical_project_root(Some(live)),
+            Some(live.to_path_buf())
+        );
+        assert_eq!(
+            plan_context(SubjectResolutionAuthority::Projectless, None)
+                .effective_logical_project_root(None),
+            None
+        );
+    }
 
     #[test]
     fn subprocess_defaults_and_plan_node_wire_shape_are_stable() {

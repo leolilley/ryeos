@@ -877,7 +877,7 @@ pub(crate) fn verify_resolved_item_content_with_hash(
             let context = SignerContext::new(
                 item.source_space,
                 &item.kind,
-                item.materialized_project_root.as_deref(),
+                item.logical_project_root.as_deref(),
             );
             let (trust_class, signer) = verify_item_signature(
                 content,

@@ -305,6 +305,7 @@ fn effective_item_from_project_root(
     execute_ref: &str,
 ) -> Result<EffectiveItem, CliError> {
     let request = ryeos_engine::engine::EffectiveItemRequest {
+        logical_project_root: None,
         item_ref: canonical,
         expected_kind: None,
         subject_resolution_authority:

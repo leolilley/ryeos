@@ -717,6 +717,7 @@ mod tests {
             ],
         };
         let roots = ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
@@ -771,6 +772,7 @@ mod tests {
             }],
         };
         let roots = ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Node,

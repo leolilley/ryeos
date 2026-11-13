@@ -122,7 +122,9 @@ pub async fn run(
         ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
     ))
     .then_some(project_path);
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(provenance.logical_project_root());
     let node_config_root = engine.node_config_root();
     let resolution_materialization =
         ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(

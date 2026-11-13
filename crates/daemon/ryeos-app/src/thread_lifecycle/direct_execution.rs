@@ -2923,6 +2923,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
         );
         let site = state.threads.site_id().to_owned();
         let context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: state.identity.fingerprint().to_owned(),
                 scopes: vec![execute_cap],

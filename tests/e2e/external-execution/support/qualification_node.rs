@@ -553,6 +553,7 @@ pub fn bind_typed_manifests_to_tool(
     let mut resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: canonical,
             expected_kind: Some("tool".into()),
             project_root: None,

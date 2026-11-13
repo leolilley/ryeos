@@ -53,6 +53,7 @@ pub fn observe_bundle_structured_source(
         let roots = engine.resolution_roots(None);
         let resolution = generation.effective_resolution_output(
             ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: canonical,
                 expected_kind: Some(kind.clone()),
                 project_root: None,

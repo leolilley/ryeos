@@ -737,6 +737,7 @@ fn resolve_dispatch_hop_with_verified(
                 let effective = ctx
                     .engine
                     .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                        logical_project_root: item.resolved.logical_project_root.clone(),
                         item_ref: current_ref.clone(),
                         expected_kind: Some(schema_kind.clone()),
                         project_root: item.resolved.materialized_project_root.clone(),
@@ -1165,7 +1166,11 @@ fn project_corpus(
     );
     let engine_roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
     if ctx
         .plan_ctx
         .subject_resolution_authority
@@ -1800,6 +1805,7 @@ fn verified_loader_for_method_runtime_under_authority(
                 bundle_roots,
                 trusted_signers,
             )
+            .map(|loader| loader.with_logical_project_of(engine_roots))
         }
         (Some(project_root), None) => {
             ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
@@ -1808,6 +1814,7 @@ fn verified_loader_for_method_runtime_under_authority(
                 bundle_roots,
                 trusted_signers,
             )
+            .map(|loader| loader.with_logical_project_of(engine_roots))
         }
         (None, Some(_)) => {
             anyhow::bail!("admitted method runtime project authority has no project root")
@@ -1883,7 +1890,11 @@ pub(crate) async fn dispatch_method(
     );
     let engine_roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
 
     // Payload projection (single-root resolution+trust / corpus build) is
     // deferred via `project_method_payload`: for `validate_only` it runs
@@ -4674,7 +4685,11 @@ pub async fn prepare_admitted_launch_contract(
     let resolution_project_root = root_admission.resolution_workspace();
     let roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
     let request_snapshot = match root_admission.admitted_request_snapshot() {
         Some(admitted) => ctx
             .engine
@@ -4915,7 +4930,11 @@ fn prepare_launch_contract_with_cache(
         resolution_project_root(&ctx.plan_ctx.subject_resolution_authority, project_path);
     let roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
     let request_snapshot = ctx
         .engine
         .effective_request_snapshot(
@@ -6583,6 +6602,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
             executor_ref,
             &subject.kind,
             None,
+            None,
             &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         );
     }
@@ -6598,6 +6618,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
                 executor_ref,
                 &subject.kind,
                 project_root,
+                subject.logical_project_root.clone(),
                 authority,
             )
         }
@@ -6606,6 +6627,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
             executor_ref,
             &subject.kind,
             execution_project_root.map(Path::to_path_buf),
+            subject.logical_project_root.clone(),
             &subject.subject_resolution_authority,
         ),
     }
@@ -7196,6 +7218,7 @@ metadata:
 
     fn test_plan_context(project_path: PathBuf) -> ryeos_engine::contracts::PlanContext {
         ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: "fp:test".into(),
@@ -7254,6 +7277,7 @@ metadata:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx: ryeos_engine::contracts::PlanContext {
+                logical_project_root: None,
                 requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                     ryeos_engine::contracts::Principal {
                         fingerprint: "fp:test".into(),
@@ -7285,6 +7309,7 @@ metadata:
         let canonical_ref = CanonicalRef::parse("service:example/status").unwrap();
         VerifiedItem {
             resolved: ResolvedItem {
+                logical_project_root: None,
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind.clone(),
                 source_path,
@@ -7610,6 +7635,7 @@ metadata:
                 .expect("signed tool fixture has a signature header");
         let canonical_ref = CanonicalRef::parse(item_ref).unwrap();
         let resolved_item = ResolvedItem {
+            logical_project_root: None,
             canonical_ref: canonical_ref.clone(),
             kind: canonical_ref.kind.clone(),
             source_path,
@@ -8905,6 +8931,7 @@ requires:
     fn resolve_dispatch_hop_enumerates_kinds_when_schema_absent() {
         let engine = build_test_engine();
         let plan_ctx = ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: "fp:test".into(),

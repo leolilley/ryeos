@@ -19,7 +19,7 @@ Every executable item must be signed before the daemon will run it.
 
 | Key | Purpose | Location |
 |-----|---------|----------|
-| **Operator key** | Operator identity — CLI auth, signing project items | `<system>/.ai/config/keys/signing/private_key.pem` |
+| **Operator key** | Operator identity — CLI auth, signing project items | `<system>/.ai/node/operator/signing/private_key.pem` |
 | **Node key** | Daemon identity — bundle registrations, node config | `<system>/.ai/node/identity/private_key.pem` |
 | **Publisher key** | Bundle author identity — signs items in published bundles | Signer record in `<system>/.ai/node/trust/signers/` |
 
@@ -196,6 +196,16 @@ A record carries the signer's fingerprint and public key, a label, and:
 
 Defaults: a publisher is scoped to the bundle space for every kind; the
 operator key is scoped to the project and node spaces for every kind.
+
+`scope.projects` names projects by their logical project path: the absolute
+project path as the node knows it. A run against a live project matches by that
+path. A run against a pinned generation, a copy-on-write workspace or a pushed
+head is materialized at a per-generation checkout, so it matches by the
+project's original path instead, but only when the node's stable project
+identity for it is local (`local:<path>`); the checkout path never matches. A
+run whose logical project is unknown (for example a head whose project
+identity names another site) is judged as no project, so a signer scoped to
+specific projects is untrusted there.
 
 The scope is checked on every verification. A signer outside its scope is
 not trusted for that item: in project space the item is

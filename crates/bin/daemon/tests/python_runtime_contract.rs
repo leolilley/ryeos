@@ -131,6 +131,7 @@ fn run_tool_with_hints(
     let engine = build_engine_against_bundle();
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],

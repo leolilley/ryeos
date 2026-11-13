@@ -748,6 +748,7 @@ pub(crate) fn reset_for_cross_site_admission(
         let canonical =
             ryeos_engine::canonical_ref::CanonicalRef::parse(&dependency.canonical_ref)?;
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: principal.clone(),
             project_context: ProjectContext::None,
             subject_resolution_authority: SubjectResolutionAuthority::Projectless,
@@ -761,6 +762,7 @@ pub(crate) fn reset_for_cross_site_admission(
         let target_verified = engine.verify(&plan_context, target_resolved)?;
         let target_resolution =
             engine.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: canonical,
                 expected_kind: None,
                 project_root: None,
@@ -862,6 +864,7 @@ fn transferred_content_resolution_request(
         }
     };
     Ok(ryeos_engine::engine::EffectiveItemRequest {
+        logical_project_root: roots.logical_project_root.clone(),
         item_ref,
         expected_kind: None,
         project_root: project_root.map(std::path::Path::to_path_buf),
@@ -4888,6 +4891,7 @@ fn direct_request(
         resolved_item: verified.resolved.clone(),
         root_raw_content_digest: dependency.subject.raw_content_digest.clone(),
         plan_context: PlanContext {
+            logical_project_root: None,
             requested_by: principal,
             project_context: ProjectContext::None,
             subject_resolution_authority: SubjectResolutionAuthority::Projectless,

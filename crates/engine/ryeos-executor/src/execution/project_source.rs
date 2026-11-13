@@ -605,6 +605,7 @@ fn prepare_external_consumer_context(
         .map(|context| context.effective_path.clone());
     let site_id = state.threads.site_id().to_owned();
     let plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: principal_fingerprint,
@@ -637,6 +638,7 @@ fn prepare_external_consumer_context(
     }
     let mut resolution =
         engine.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: verified.resolved.logical_project_root.clone(),
             item_ref: canonical,
             expected_kind: None,
             project_root: project_root.clone(),

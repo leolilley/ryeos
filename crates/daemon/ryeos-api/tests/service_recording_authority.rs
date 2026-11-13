@@ -80,6 +80,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
         caller_scopes: principal.scopes.clone(),
         engine: state.engine.clone(),
         plan_ctx: PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(principal),
             project_context: ProjectContext::None,
             subject_resolution_authority:

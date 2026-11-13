@@ -55,6 +55,7 @@ pub fn resolve_effective_composed_value(
         .with_context(|| format!("parse canonical ref '{execute_ref}'"))?;
     let item = engine
         .effective_item(EffectiveItemRequest {
+            logical_project_root: None,
             item_ref,
             expected_kind: None,
             project_root: project_path.map(Path::to_path_buf),

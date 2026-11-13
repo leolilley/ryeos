@@ -367,6 +367,7 @@ fn check_imports(
         .collect::<Vec<_>>();
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:doctor".into(),
             scopes: vec!["execute".into()],

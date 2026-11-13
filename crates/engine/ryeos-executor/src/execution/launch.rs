@@ -2673,7 +2673,8 @@ fn build_verified_loader_for_thread(
             node_config_root.map(Path::to_path_buf),
             bundle_roots,
             trusted_signers,
-        ),
+        )
+        .map(|loader| loader.with_logical_project_of(engine_roots)),
         None => ryeos_runtime::verified_loader::VerifiedLoader::new_projectless_with_node_config(
             node_config_root.map(Path::to_path_buf),
             bundle_roots,
@@ -2708,6 +2709,7 @@ fn build_verified_loader_for_thread_under_project_authority(
         bundle_roots,
         trusted_signers,
     )
+    .map(|loader| loader.with_logical_project_of(engine_roots))
 }
 
 fn load_limits_snapshot_under_current_authority(
@@ -4279,7 +4281,15 @@ async fn prepare_managed_launch_authority(
     })?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            root_admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let bundle_roots: Vec<PathBuf> = engine_roots
         .authoritative_bundle_roots()
         .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?
@@ -6696,7 +6706,15 @@ async fn run_claimed_thread_row_inner(
         .ok_or_else(|| anyhow::anyhow!("managed launch has no exact root admission"))?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            root_admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let effective_request_snapshot = match resolved
         .root_admission
         .as_ref()
