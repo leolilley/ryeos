@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:02:02Z:8e1e5f2018263687ae8b494e0f0604c36e2bd18aec64f82ffbafd107b68b2233:GTFmG0h06qtbRkPCyubLP+5O3BE9PntGEQ3hv7HUocVDm6DNLTSnXrKm+qRMJnKjRXmf2t4Z0zDWNYN/GNFeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:04:15Z:2750abc2b63c54263a86a6a187490b325e20d0c78842e524c8ec5cd763a18047:2ri+ztCW2ls8B/Hdd5gEee7u42yHNxUI+83Rl6l5btZT4EPTm4Gv6TaVA4bMX0LPc8kJ3bgSnHlcBA8MpMKUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -119,9 +119,17 @@ Request params:
 - `content` — the **unsigned** item body. It must not contain a signature line or
   a `ryeos:authored:` provenance marker; both are daemon-owned.
 - `mode` — `create` (default; fails if the item already exists) or `upsert`
-  (replaces the existing file).
+  (replaces the existing file, or creates it when there is none).
 - `format_ext` — the file extension (e.g. `.md`); required when creating a new
   item.
+- `expected_digest` — compare-and-swap guard for `upsert`. **Required when the
+  item already exists**: the upsert commits only if the incumbent's authored
+  `content_digest` (from its provenance, and from the response that wrote it)
+  equals this value, and fails with an `author_item conflict` otherwise. An
+  upsert without it over an existing item is refused with code
+  `author_item_expected_digest_required`, naming the incumbent's
+  `content_digest` to resend with. An item with no runtime provenance (one the
+  operator signed) cannot be replaced through `author_item` at all.
 
 On success the daemon:
 
@@ -156,7 +164,8 @@ when the node key signed the item and its signed bytes carry the
 The callback is driven by the `ryeos-core-tools author-item` subcommand — a
 capability-bounded callback client. When the daemon dispatches it as a tool it
 reads the callback token, thread-auth token, and thread id from the env, sends
-`runtime.author_item` with `{item_ref, content, mode, format_ext}` on stdin, and
+`runtime.author_item` with `{item_ref, content, mode, format_ext,
+expected_digest}` on stdin, and
 prints the daemon's response. It never touches project state directly.
 
 ### Authority lives on the wrapper tool — scope it tightly
@@ -218,6 +227,7 @@ config_schema:
     content:    { type: string }
     mode:       { type: string, enum: [create, upsert], default: create }
     format_ext: { type: string }
+    expected_digest: { type: string }   # required by upsert over an existing item
   required: [item_ref, content]
 requires:
   capabilities:

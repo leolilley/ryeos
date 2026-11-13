@@ -202,6 +202,17 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
                     json!({ "code": dispatch.code() }),
                 );
             }
+            if let Some(refusal) =
+                err.downcast_ref::<ryeos_app::runtime_item_author_service::AuthorItemRefusal>()
+            {
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    json!({ "code": refusal.code() }),
+                );
+            }
             RpcResponse::err(request_id, "request_failed", format!("{err:#}"))
         }
     }
@@ -228,5 +239,23 @@ mod tests {
         let error = response.error.expect("request failure");
         assert_eq!(error.code, "request_failed");
         assert_eq!(error.message, "handler context: root cause");
+    }
+
+    #[test]
+    fn author_item_refusal_keeps_its_typed_code() {
+        let error = anyhow::Error::from(
+            ryeos_app::runtime_item_author_service::AuthorItemRefusal::UpsertOverUnauthoredItem {
+                item_ref: "knowledge:notes/x".to_string(),
+                path: "/p/.ai/knowledge/notes/x.md".to_string(),
+            },
+        );
+        let response = rpc_result(43, Err(error));
+        let error = response.error.expect("author_item refusal");
+        assert_eq!(error.code, "author_item_expected_digest_required");
+        assert!(
+            error.message.contains("knowledge:notes/x"),
+            "{}",
+            error.message
+        );
     }
 }
