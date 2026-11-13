@@ -184,6 +184,7 @@ impl Fixture {
             "local operator",
             "test",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             &self.node,
             WildcardPolicy::AllowBootstrap,
             false,
@@ -213,6 +214,7 @@ impl Fixture {
             "remote operator",
             "test",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             &self.node,
             wildcard,
             false,
@@ -549,6 +551,7 @@ fn a_remote_node_grant_may_not_sign() {
         "peer",
         "test",
         "2026-01-01T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         SITE,
         fx.node.signing_key(),
     )

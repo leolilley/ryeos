@@ -171,6 +171,7 @@ fn authorize_remote_node(
         "portable-handoff-peer",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         remote_site_id,
         &local.node,
     )?;
@@ -201,6 +202,7 @@ fn authorize_remote_principal(
         "portable-handoff-operator",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &identity,
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,
@@ -3112,6 +3114,7 @@ fn plant_target_abort_state(
         "handoff-source-fixture",
         &target_fixture.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         REMOTE_SOURCE_SITE_ID,
         &target_fixture.node,
     )?;

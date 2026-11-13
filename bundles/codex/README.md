@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:13Z:5e66541c45cb25dba7adae83b49ecd7d2b4bb26c6bcb94ae3060548c07756ffe:Hjz4TdBfABTVwPBW7nkfFIO38lH3szp2t7pfI9my+3KlSZ1T9K73tKro9grLy8SstLSLomkTbGlWuedi9/y0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:5e66541c45cb25dba7adae83b49ecd7d2b4bb26c6bcb94ae3060548c07756ffe:Hjz4TdBfABTVwPBW7nkfFIO38lH3szp2t7pfI9my+3KlSZ1T9K73tKro9grLy8SstLSLomkTbGlWuedi9/y0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a

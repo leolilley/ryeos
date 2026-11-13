@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:13Z:9b6524b499ead45768fe18200dfd34eb836ff896e04d8f41ec9ce8ac78d66121:OSDCmWgOdT3SMq1gqneI/5njR7ICXAObzl+Robg2Mg+h9Fv3JNYgfeOR3sUo6LXEdblDUtcDdEC56aTyg679DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:9b6524b499ead45768fe18200dfd34eb836ff896e04d8f41ec9ce8ac78d66121:OSDCmWgOdT3SMq1gqneI/5njR7ICXAObzl+Robg2Mg+h9Fv3JNYgfeOR3sUo6LXEdblDUtcDdEC56aTyg679DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]

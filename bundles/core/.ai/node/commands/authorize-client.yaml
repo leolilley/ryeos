@@ -1,9 +1,9 @@
-# ryeos:signed:2026-09-10T20:28:16Z:1262cd199a9aadc7be0951bc6208fa2f920a9081352b0bef1caec676caa17fb7:9LCzWwtIcssdDJ3qX2LoKDbTf0Xh7VOU4/5t6Z3bi//tsEwjKVIcNrFGHTPYFPOYdo2mlw95TWh3XPTKjasRAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:53Z:19b0de58f713092f6b84c01a9f133226d8804529b817cbf742ef6ee72131e737:GPD5JxIvvU6pQIcnb518gIG7RbVkwnLojyafEkOz9lX8bzJwtzhskZ8QbTabXyJsOwE0lpKUbn7CtYHGUKl9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - authorize-client
 description: Reconcile one authorized client grant with local node authority
 help:
-  usage: "ryeos authorize-client --public-key <raw-ed25519-base64> --scopes <scope,...> [--label <label>] [--origin-site-id <site:id> | --remote-node-origin-site-id <site:id>] [--allow-semantic-conversion] [--merge-scopes]"
+  usage: "ryeos authorize-client --public-key <raw-ed25519-base64> --scopes <scope,...> [--label <label>] [--origin-site-id <site:id> | --remote-node-origin-site-id <site:id>] [--allow-semantic-conversion] [--merge-scopes] [--lifetime-secs <seconds>]"
 parameter_binding:
   mode: tail_object
   flag_key_normalization: hyphen_to_underscore

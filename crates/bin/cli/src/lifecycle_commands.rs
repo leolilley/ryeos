@@ -2683,6 +2683,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // node, so their count is not available here.
     checks.push(ui_browser_sessions_check(&config.app_root, initialized));
 
+    // Grants that have lapsed, are about to, or are of a retired schema or
+    // class. Reading them needs only the node key and the signed policy.
+    if initialized {
+        checks.push(authorized_keys_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "authorized_keys",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     if initialized {
         match ryeos_app::bundle_transaction::inspect_bundle_transactions(&config.app_root) {
             Ok(diagnostics) if !diagnostics.invalid.is_empty() => checks.push(check(
@@ -3187,6 +3199,122 @@ fn remote_content_testimonies_check(
             }),
         ),
     }
+}
+
+/// Doctor row for the node-signed authorized-key grants: which have lapsed,
+/// which lapse within the policy's warning window, and which are of a retired
+/// schema or class or cannot be read. Stale and unreadable grants fail the row
+/// because they keep the daemon from starting; lapsed and expiring grants warn.
+fn authorized_keys_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    let inspect = || -> Result<_> {
+        let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
+        let warn_before_secs =
+            ryeos_core_tools::actions::hosted_policy::load_authorization_policy(app_root)?
+                .warn_before_secs;
+        let inspections = ryeos_node_runtime::identity::inspect_authorized_keys(
+            &root.authorized_keys_dir(),
+            &node,
+        )?;
+        Ok((inspections, warn_before_secs))
+    };
+    match inspect() {
+        Ok((inspections, warn_before_secs)) => {
+            let report = grant_report(
+                &inspections,
+                warn_before_secs,
+                lillux::time::unix_secs_now(),
+            );
+            let status = if !report.stale.is_empty() || !report.invalid.is_empty() {
+                FAIL
+            } else if !report.expired.is_empty() || !report.expiring.is_empty() {
+                WARN
+            } else {
+                OK
+            };
+            check("authorized_keys", status, report.into_detail())
+        }
+        Err(error) => check(
+            "authorized_keys",
+            FAIL,
+            serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
+/// The doctor's reading of every grant file at one instant.
+#[derive(Debug, Default)]
+struct GrantReport {
+    grants: usize,
+    expired: Vec<serde_json::Value>,
+    expiring: Vec<serde_json::Value>,
+    stale: Vec<serde_json::Value>,
+    invalid: Vec<serde_json::Value>,
+}
+
+impl GrantReport {
+    fn into_detail(self) -> serde_json::Value {
+        serde_json::json!({
+            "grants": self.grants,
+            "expired": self.expired,
+            "expiring": self.expiring,
+            "stale": self.stale,
+            "invalid": self.invalid,
+        })
+    }
+}
+
+fn grant_report(
+    inspections: &[ryeos_node_runtime::identity::GrantFileInspection],
+    warn_before_secs: u64,
+    now: u64,
+) -> GrantReport {
+    use ryeos_node_runtime::identity::{GrantExpiry, GrantFileState};
+    let mut report = GrantReport {
+        grants: inspections.len(),
+        ..GrantReport::default()
+    };
+    for inspection in inspections {
+        match &inspection.state {
+            GrantFileState::Current(grant) => {
+                let GrantExpiry::At(expires) = grant.expires_at else {
+                    continue;
+                };
+                let row = |fix: String| {
+                    serde_json::json!({
+                        "fingerprint": grant.fingerprint,
+                        "class": grant.principal_class.as_str(),
+                        "label": grant.owner,
+                        "granted_by": grant.granted_by,
+                        "expires_at": grant.expires_at.to_grant_text(),
+                        "fix": fix,
+                    })
+                };
+                let fix = format!(
+                    "the principal that granted it or the node operator renews it: `ryeos renew-key --fingerprint {}`",
+                    grant.fingerprint
+                );
+                if grant.expires_at.is_expired_at(now) {
+                    report.expired.push(row(fix));
+                } else if expires.saturating_sub(now) <= warn_before_secs {
+                    report.expiring.push(row(fix));
+                }
+            }
+            GrantFileState::Stale(error) => report.stale.push(serde_json::json!({
+                "file": inspection.name,
+                "error_code": error.code(),
+                "fix": error.to_string(),
+            })),
+            GrantFileState::Invalid(error) => report.invalid.push(serde_json::json!({
+                "file": inspection.name,
+                "error": error,
+            })),
+        }
+    }
+    report
 }
 
 /// Doctor row for the app root's durable identity: whether persisted
@@ -5527,5 +5655,72 @@ mod tests {
         assert_eq!(parse_installed_revision(b"unknown\n"), None);
         assert_eq!(parse_installed_revision(b"two revisions\n"), None);
         assert_eq!(parse_installed_revision(&[b'a'; 129]), None);
+    }
+
+    fn doctor_grant(
+        seed: u8,
+        expires_at: ryeos_node_runtime::identity::GrantExpiry,
+    ) -> ryeos_node_runtime::identity::GrantFileInspection {
+        use ryeos_node_runtime::identity::{
+            AuthorizedBy, AuthorizedKeyPrincipalClass, GrantFileInspection, GrantFileState,
+            VerifiedAuthorizedKeyGrant,
+        };
+        let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]).verifying_key();
+        let fingerprint = lillux::signature::compute_fingerprint(&key);
+        GrantFileInspection {
+            name: fingerprint.clone(),
+            state: GrantFileState::Current(Box::new(VerifiedAuthorizedKeyGrant {
+                public_key: key,
+                scopes: vec!["ryeos.execute.service.vault/list".to_owned()],
+                owner: format!("grant-{seed}"),
+                principal_class: AuthorizedKeyPrincipalClass::RemoteNode,
+                configured_origin_site_id: Some("site:source".to_owned()),
+                source_file_hash: "0".repeat(64),
+                fingerprint,
+                granted_by: format!("fp:{}", "a".repeat(64)),
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+                expires_at,
+                authorized_by: AuthorizedBy::principal_request(&"a".repeat(64), None),
+            })),
+        }
+    }
+
+    #[test]
+    fn doctor_grant_report_lists_expired_expiring_stale_and_invalid_grants() {
+        use ryeos_node_runtime::identity::{
+            AuthorizedKeyError, GrantExpiry, GrantFileInspection, GrantFileState,
+        };
+        let now = 1_000_000;
+        let inspections = vec![
+            doctor_grant(1, GrantExpiry::At(now - 1)),
+            doctor_grant(2, GrantExpiry::At(now + 100)),
+            doctor_grant(3, GrantExpiry::At(now + 10_000)),
+            doctor_grant(4, GrantExpiry::Never),
+            GrantFileInspection {
+                name: "old".to_owned(),
+                state: GrantFileState::Stale(AuthorizedKeyError::StaleSchema {
+                    fingerprint: "old".to_owned(),
+                    seen: 2,
+                    admitted: 3,
+                }),
+            },
+            GrantFileInspection {
+                name: "broken".to_owned(),
+                state: GrantFileState::Invalid("tampered key file".to_owned()),
+            },
+        ];
+        let report = grant_report(&inspections, 3_600, now);
+        assert_eq!(report.grants, 6);
+        assert_eq!(report.expired.len(), 1);
+        assert_eq!(report.expiring.len(), 1);
+        assert_eq!(report.stale.len(), 1);
+        assert_eq!(report.invalid.len(), 1);
+        assert_eq!(report.stale[0]["error_code"], "grant_schema_stale");
+        assert!(
+            report.expired[0]["fix"]
+                .as_str()
+                .unwrap()
+                .contains("ryeos renew-key")
+        );
     }
 }

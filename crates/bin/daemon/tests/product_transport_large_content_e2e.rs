@@ -189,6 +189,7 @@ fn authorize_remote_node(
         "product-transport-peer",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         remote_site_id,
         &local.node,
     )?;
@@ -215,6 +216,7 @@ fn authorize_remote_principal(
         "product-transport-operator",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &identity,
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,

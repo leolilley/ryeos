@@ -55,10 +55,14 @@ impl AuthenticatedGrantAuthority {
                 )?;
             }
             (AuthorizedKeyPrincipalClass::RemotePrincipal, None) => {
-                anyhow::bail!("remote-principal grant authority requires source-node grant evidence")
+                anyhow::bail!(
+                    "remote-principal grant authority requires source-node grant evidence"
+                )
             }
             (_, Some(_)) => {
-                anyhow::bail!("only remote-principal grant authority may carry source-node evidence")
+                anyhow::bail!(
+                    "only remote-principal grant authority may carry source-node evidence"
+                )
             }
             (_, None) => {}
         }

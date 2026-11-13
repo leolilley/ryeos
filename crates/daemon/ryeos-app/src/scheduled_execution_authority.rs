@@ -281,6 +281,7 @@ mod tests {
                 "scheduled principal",
                 &format!("fp:{}", "99".repeat(32)),
                 created_at,
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 self.node.signing_key(),
             )
             .unwrap();

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:13Z:d18a7124c26111599e9c49beaacdb34453cff5074c0e2629d0618368596bc642:UwxBAxE93J3tCLxu82qW3I5Nc6djd8+EDDHYfRzOKQ5RQsS0iX/sRgYBw3IF2klQh/SYlXo8TbY5zHH9GeG5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:f68f1318c9dd25f8a8a68118f341d5177fd2deae8df80b1c802b7ce49ad12ca9:p/J0yjPjtFVBp394sZIHITWYW4ftd/6Namm6/YNeogidfGNccg1KeayQL7M3ToUt2ApzJwIw1CSWw508RRT4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -101,6 +101,54 @@ may grant wildcard `*`; normal remote delegation should enumerate scopes.
 Daemon startup may repair the local user's authorized-key entry after
 `ryeos init` has created the required keys and trust docs, but the daemon
 never writes user trust.
+
+### Grant lifetime, provenance and renewal
+
+Every grant is a schema-3 body and carries two fields that older grants lack:
+
+- `expires_at`, required: an RFC 3339 UTC time, or the literal `never`. Only
+  the configured operator's own grant (written by `ryeos init` and by
+  `ryeos node reset authorization`) is issued as `never`. A grant of any other
+  class, or any other `local_client`, always ends.
+- `authorized_by { principal, request_digest }`: the `fp:<64 hex>` of the key
+  that asked for the grant and the `ryeos-request-v1` content hash of the
+  signed request that carried the ask. `granted_by` stays the granting
+  authority (the asking principal, or `admission:<token>` for an admitted
+  node); `authorized_by` is the evidence.
+
+| Issuance path | `authorized_by.principal` | `authorized_by.request_digest` |
+|---|---|---|
+| `authorize-key` (online) | the authenticated caller | hash of the caller's signed request |
+| `authorize-client` through the daemon | the configured local operator | hash of the operator's signed request |
+| `ryeos-core-tools authorize-client` on the volume | the configured operator | absent: no signed request exists |
+| `admission/claim` | the admitted key | hash of the admitted key's signed claim |
+| `renew-key` | the renewing caller | hash of the renewing request |
+| `ryeos init` and daemon start repair | the configured operator | absent: init is not a signed request |
+| `node reset authorization` | the signer of the offline request | the offline request digest |
+
+The node-policy `authorization` section sets the longest lifetime per class
+(`local_client`, `remote_node`, `remote_principal`) and `warn_before_secs`, in
+signed data. The shipped profiles allow 365, 90 and 30 days. A request that
+names no lifetime receives the class maximum; one above it is refused with
+`grant_lifetime_exceeds_policy` (HTTP 400), which names the maximum.
+
+An expired grant authenticates nothing. The holder of its key, once its
+signature verifies, receives HTTP 401 `grant_expired` naming the cure; anyone
+else still receives the plain 401. The cure is `ryeos renew-key --fingerprint
+<fp> [--lifetime-secs <n>]`, which re-signs the grant with a new expiry and
+keeps its key, class, origin, scopes, label and granting authority. Only the
+principal that granted the key (while it still holds the grant's scopes) or the
+configured operator may renew: the grantee cannot extend its own grant. A
+refused renewal is `grant_renewal_not_permitted`, `grant_renewal_scopes_not_covered`,
+`grant_not_found` or `grant_never_expires` (the operator grant is not renewed).
+
+Grants written before schema 3 are refused, not read: `grant_schema_stale`
+names the cure (re-issue the key with `ryeos authorize-client`, or run
+`ryeos node reset authorization` and re-issue every key). A grant of the
+retired `remote_operator` class is refused as `grant_class_stale`: re-admit the
+key as `remote_principal`. There is no upgrade or reclassify operation.
+`ryeos node doctor` lists expired, soon-expiring, stale and unreadable grants
+in its `authorized_keys` row.
 
 An opt-in `remote_principal` grant is the narrow exception for an
 operator-owned workflow forwarded by another RyeOS node. The source request is

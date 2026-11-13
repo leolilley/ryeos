@@ -1182,9 +1182,17 @@ pub(super) fn authorization_reset_effect(ctx: &HandlerContext<'_>) -> Result<Val
         operator.fingerprint(),
         &operator_key,
         &["*".to_string()],
-        "bootstrap-authorized-user",
+        "operator",
         operator.fingerprint(),
         &lillux::time::iso8601_now(),
+        // The operator asked for this reset through the signed offline request
+        // whose digest the receipt records; the grant never lapses.
+        &ryeos_node_runtime::identity::GrantTerms::operator(
+            ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+                &ctx.request.signer_fingerprint,
+                Some(ctx.request_digest.to_owned()),
+            ),
+        ),
         node.signing_key(),
         ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;

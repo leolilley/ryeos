@@ -137,6 +137,7 @@ mod tests {
                 "schedule owner",
                 &format!("fp:{}", "99".repeat(32)),
                 created_at,
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 self.identity.signing_key(),
             )
             .unwrap();

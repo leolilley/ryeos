@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:13Z:5019f0504acd0944e97e87f4c0e66eb9beb232ecc30378ff4f567f8e84a13a16:Om6kZpmT0/3eTao3955UL5ODacpULKghxTgvtIh5/HaXOqGjD4Rj3QUwCF+j136kYag/eD2aA5ub04qKMMujBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:53Z:5019f0504acd0944e97e87f4c0e66eb9beb232ecc30378ff4f567f8e84a13a16:Om6kZpmT0/3eTao3955UL5ODacpULKghxTgvtIh5/HaXOqGjD4Rj3QUwCF+j136kYag/eD2aA5ub04qKMMujBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, import-binding]
 description: Stage an exact active binding's retained manifest for an independently authorized consumer
 defaults:

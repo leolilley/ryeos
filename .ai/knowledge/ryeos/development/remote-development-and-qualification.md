@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:13Z:e1bdabac82685dfc206da4b2bfedd6db8b2e17b6727d85b8cc15422508fc1fcf:iWzTA7ZyoSESxky6BGFmUxgyATf4uZWHfCuVXPcPVDPN88fyN1ijcGZw79GSTr1AKt2EDM6kKaVQw7Sb59VoDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:52Z:e1bdabac82685dfc206da4b2bfedd6db8b2e17b6727d85b8cc15422508fc1fcf:iWzTA7ZyoSESxky6BGFmUxgyATf4uZWHfCuVXPcPVDPN88fyN1ijcGZw79GSTr1AKt2EDM6kKaVQw7Sb59VoDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"

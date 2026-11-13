@@ -37,13 +37,26 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
             &ctx.headers,
             &ctx.body_raw,
         )
-        .map_err(|msg| {
+        .map_err(|error| {
             tracing::warn!(
                 route_id = %ctx.route_id,
-                error = %msg,
+                error = %error,
                 "ryeos_signed verification failed"
             );
-            RouteDispatchError::Unauthorized
+            match error {
+                // The caller proved it holds the key: tell it why the grant is
+                // refused and how to cure that.
+                crate::auth::RequestAuthError::Grant(refusal) => RouteDispatchError::Structured {
+                    code: refusal.code().to_owned(),
+                    status: 401,
+                    body: serde_json::json!({
+                        "error": refusal.to_string(),
+                        "error_code": refusal.code(),
+                    }),
+                    thread_id: None,
+                },
+                crate::auth::RequestAuthError::Refused(_) => RouteDispatchError::Unauthorized,
+            }
         })?;
 
         Ok(RouteInvocationResult::Principal(RoutePrincipal {
@@ -54,7 +67,10 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
             authorized_key_class: Some(principal.principal_class),
             authenticated_origin_site_id: principal.authenticated_site_id,
             authenticated_grant_authority: Some(principal.grant_authority),
-            metadata: BTreeMap::new(),
+            metadata: BTreeMap::from([(
+                crate::routes::invocation::SIGNED_REQUEST_DIGEST_METADATA_KEY.to_owned(),
+                principal.request_digest,
+            )]),
         }))
     }
 }

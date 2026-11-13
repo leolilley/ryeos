@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T13:04:03Z:14514272d18b9c0c951f46e249edaeaad348b35440fe02ce088ee197b59a2864:f1kvHk71C4hXe1q5rbSkcx35e7xB4UTdP3fqzlEOw9cPtI+hznwXCCrcwcGOgsgWnimd/jHoodoZitP9F0UpAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:53Z:13727c21f4617982e720fc316c275648036760729c35e7df437fa41b44930e34:6UnP9Ka4tMoesPP9OrogDWXAmE3XEzJF92j5LGiCzDuH7+rPHlAHw9knno3S6iwbDjOEYwJ+0fxeUCkZ/C3rCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -362,6 +362,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:

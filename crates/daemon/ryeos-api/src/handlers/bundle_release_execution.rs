@@ -1126,6 +1126,7 @@ mod tests {
             "release qualification test operator",
             state.identity.fingerprint(),
             "2026-09-07T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             &state.identity,
             WildcardPolicy::Reject,
             false,

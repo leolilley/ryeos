@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:13Z:3b0afb03a10a2a77ba3ea8c3a494f73cfdbe1bbf3f5d882240697238673f2295:QdASRjbvm/kxWunrNIqP6r85PSqIhYfKyktKIchenaIXYWioiELMlvoOdzS3w9DbSiE4ilnPaOwh59qCbEHrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:52Z:70c13499482d328e1899acac80cae14797b6b20b35a8fd4c167537de5a1b27ab:sA3UwSIdFQRZFtyZTJspDUsOvPoWHaupFITzaecr9tCq+7SlmY6sOjqvciOfE5gMwnLi3UPrrHTeBva1qUUwCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -376,6 +376,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:

@@ -9,7 +9,9 @@ use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 
 use ryeos_app::state::AppState;
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::{
+    AuthorizedKeyError, AuthorizedKeyPrincipalClass, GrantExpiry, NodeIdentity,
+};
 
 const TIMESTAMP_MAX_AGE_SECS: u64 = 300;
 
@@ -25,6 +27,9 @@ pub struct Principal {
     pub principal_class: AuthorizedKeyPrincipalClass,
     pub authenticated_site_id: Option<String>,
     pub grant_authority: ryeos_engine::principal_contract::AuthenticatedGrantAuthority,
+    /// `ryeos-request-v1` content hash of the signed request this principal
+    /// was verified from.
+    pub request_digest: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,14 +99,50 @@ struct AuthorizedKey {
     principal_class: AuthorizedKeyPrincipalClass,
     configured_origin_site_id: Option<String>,
     source_file_hash: String,
+    /// The verified grant, kept so its expiry can be judged once the caller's
+    /// signature has proved it holds the key.
+    grant: ryeos_node_runtime::identity::VerifiedAuthorizedKeyGrant,
 }
 
-fn load_authorized_key(
+/// Why `verify_request` refused a request.
+#[derive(Debug)]
+pub(crate) enum RequestAuthError {
+    /// A plain refusal that tells the caller nothing beyond "unauthorized".
+    Refused(String),
+    /// The caller proved it holds the grant's key, and the grant is refused for
+    /// a reason the holder is entitled to be told, with its cure.
+    Grant(AuthorizedKeyError),
+}
+
+impl std::fmt::Display for RequestAuthError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(reason) => formatter.write_str(reason),
+            Self::Grant(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl From<String> for RequestAuthError {
+    fn from(reason: String) -> Self {
+        Self::Refused(reason)
+    }
+}
+
+impl From<&str> for RequestAuthError {
+    fn from(reason: &str) -> Self {
+        Self::Refused(reason.to_owned())
+    }
+}
+
+/// Load a grant without judging its expiry. Request verification judges it
+/// only after the signature check.
+fn load_authorized_key_unjudged(
     fingerprint: &str,
     auth_dir: &Path,
     node_identity: &NodeIdentity,
 ) -> Result<AuthorizedKey> {
-    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key_unjudged(
         fingerprint,
         auth_dir,
         node_identity,
@@ -109,18 +150,31 @@ fn load_authorized_key(
     .ok_or_else(|| anyhow::anyhow!("unknown principal"))?;
     Ok(AuthorizedKey {
         public_key: grant.public_key,
-        scopes: grant.scopes,
-        owner: grant.owner,
+        scopes: grant.scopes.clone(),
+        owner: grant.owner.clone(),
         principal_class: grant.principal_class,
-        configured_origin_site_id: grant.configured_origin_site_id,
-        source_file_hash: grant.source_file_hash,
+        configured_origin_site_id: grant.configured_origin_site_id.clone(),
+        source_file_hash: grant.source_file_hash.clone(),
+        grant,
     })
+}
+
+/// Load a grant that must not have lapsed.
+fn load_authorized_key(
+    fingerprint: &str,
+    auth_dir: &Path,
+    node_identity: &NodeIdentity,
+) -> Result<AuthorizedKey> {
+    let key = load_authorized_key_unjudged(fingerprint, auth_dir, node_identity)?;
+    key.grant.ensure_unexpired(lillux::time::unix_secs_now())?;
+    Ok(key)
 }
 
 /// Validate the complete authorized-key namespace during daemon startup.
 /// Authentication is a boot invariant: accepting the node and discovering an
-/// unusable legacy grant only on the first request would leave an apparently
-/// healthy daemon that rejects its operator.
+/// unusable stale grant only on the first request would leave an apparently
+/// healthy daemon that rejects its operator. A grant that has merely lapsed is
+/// not a boot failure: the invariant is integrity, not freshness.
 pub fn validate_authorized_key_directory(
     auth_dir: &Path,
     node_identity: &NodeIdentity,
@@ -153,7 +207,7 @@ pub fn validate_authorized_key_directory(
                     path.display()
                 )
             })?;
-        load_authorized_key(fingerprint, auth_dir, node_identity).map_err(|error| {
+        load_authorized_key_unjudged(fingerprint, auth_dir, node_identity).map_err(|error| {
             anyhow::anyhow!("invalid authorized-key grant {}: {error:#}", path.display())
         })?;
     }
@@ -277,7 +331,7 @@ pub(crate) fn verify_request(
     uri: &axum::http::Uri,
     headers: &axum::http::HeaderMap,
     body: &[u8],
-) -> Result<Principal, String> {
+) -> Result<Principal, RequestAuthError> {
     let key_id = headers
         .get("x-ryeos-key-id")
         .and_then(|v| v.to_str().ok())
@@ -305,12 +359,12 @@ pub(crate) fn verify_request(
         .and_then(|v| v.to_str().ok());
 
     if key_id.is_empty() || timestamp.is_empty() || nonce.is_empty() || signature.is_empty() {
-        return Err("missing auth headers".to_string());
+        return Err("missing auth headers".into());
     }
 
     // Extract fingerprint
     if !key_id.starts_with("fp:") {
-        return Err("invalid key ID format".to_string());
+        return Err("invalid key ID format".into());
     }
     let fingerprint = &key_id[3..];
 
@@ -323,11 +377,13 @@ pub(crate) fn verify_request(
         .unwrap()
         .as_secs();
     if now.abs_diff(req_time) > TIMESTAMP_MAX_AGE_SECS {
-        return Err("request expired".to_string());
+        return Err("request expired".into());
     }
 
-    // Load authorized key file
-    let auth_key = load_authorized_key(
+    // Load authorized key file. Expiry is judged only after the signature
+    // check below, so a caller that does not hold the key learns nothing about
+    // the grant.
+    let auth_key = load_authorized_key_unjudged(
         fingerprint,
         &state.config.authorized_keys_dir,
         &state.identity,
@@ -338,8 +394,7 @@ pub(crate) fn verify_request(
             .map_err(|error| format!("load configured operator identity: {error:#}"))?;
         if configured_operator.fingerprint() == fingerprint {
             return Err(
-                "configured operator key cannot authenticate through a remote_node grant"
-                    .to_string(),
+                "configured operator key cannot authenticate through a remote_node grant".into(),
             );
         }
     }
@@ -363,21 +418,37 @@ pub(crate) fn verify_request(
         .verify(content_hash.as_bytes(), &sig)
         .map_err(|_| "invalid signature".to_string())?;
 
+    // The caller holds the key. A lapsed grant is refused with its cure, and a
+    // grant without an end is honoured only for the configured operator.
+    auth_key
+        .grant
+        .ensure_unexpired(lillux::time::unix_secs_now())
+        .map_err(RequestAuthError::Grant)?;
+    if auth_key.grant.expires_at == GrantExpiry::Never {
+        let configured_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            .map_err(|error| format!("load configured operator identity: {error:#}"))?;
+        if configured_operator.fingerprint() != fingerprint {
+            return Err(RequestAuthError::Grant(
+                AuthorizedKeyError::NeverExpiresNotOperator {
+                    fingerprint: fingerprint.to_owned(),
+                },
+            ));
+        }
+    }
+
     let forwarding_headers_present = forwarding_key_id.is_some()
         || forwarding_site_id.is_some()
         || forwarding_signature.is_some();
     let (authenticated_site_id, forwarding_authority) = match auth_key.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
             if forwarding_headers_present {
-                return Err("local_client request cannot carry forwarding proof".to_string());
+                return Err("local_client request cannot carry forwarding proof".into());
             }
             (None, None)
         }
         AuthorizedKeyPrincipalClass::RemoteNode => {
             if forwarding_headers_present {
-                return Err(
-                    "remote_node request cannot carry operator forwarding proof".to_string()
-                );
+                return Err("remote_node request cannot carry operator forwarding proof".into());
             }
             (auth_key.configured_origin_site_id.clone(), None)
         }
@@ -392,7 +463,7 @@ pub(crate) fn verify_request(
                     _ => {
                         return Err(
                         "remote_principal request requires a complete source-node forwarding proof"
-                            .to_string(),
+                            .into(),
                     );
                     }
                 };
@@ -400,8 +471,7 @@ pub(crate) fn verify_request(
                 .map_err(|error| format!("{error:#}"))?;
             if auth_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
                 return Err(
-                    "source-node forwarding site does not match the remote_principal grant"
-                        .to_string(),
+                    "source-node forwarding site does not match the remote_principal grant".into(),
                 );
             }
             let forwarding_fingerprint = forwarding_key_id
@@ -415,22 +485,17 @@ pub(crate) fn verify_request(
             )
             .map_err(|error| format!("untrusted forwarding node: {error:#}"))?;
             if forwarding_key.principal_class != AuthorizedKeyPrincipalClass::RemoteNode {
-                return Err(
-                    "forwarding proof must be signed by an admitted remote_node".to_string()
-                );
+                return Err("forwarding proof must be signed by an admitted remote_node".into());
             }
             if !forwarding_key.scopes.iter().any(|scope| {
                 scope == ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE
             }) {
                 return Err(
-                    "forwarding-node grant lacks forwarded-operator attestation authority"
-                        .to_string(),
+                    "forwarding-node grant lacks forwarded-operator attestation authority".into(),
                 );
             }
             if forwarding_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
-                return Err(
-                    "forwarding-node grant does not match the asserted source site".to_string(),
-                );
+                return Err("forwarding-node grant does not match the asserted source site".into());
             }
             let forwarding_sig_bytes = base64::engine::general_purpose::STANDARD
                 .decode(forwarding_signature)
@@ -475,11 +540,12 @@ pub(crate) fn verify_request(
             }
         };
         if !guard.check_and_record(fingerprint, nonce) {
-            return Err("replayed request".to_string());
+            return Err("replayed request".into());
         }
     }
 
     Ok(Principal {
+        request_digest: content_hash,
         fingerprint: fingerprint.to_string(),
         scopes: auth_key.scopes,
         owner: auth_key.owner,
@@ -531,7 +597,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(attacker_vk.as_bytes());
 
         let toml_body = format!(
-            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{real_fp}\"\npublic_key = \"ed25519:{attacker_key_b64}\"\nscopes = [\"*\"]\nlabel = \"evil\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
+            "schema_version = 3\nprincipal_class = \"local_client\"\nfingerprint = \"{real_fp}\"\npublic_key = \"ed25519:{attacker_key_b64}\"\nscopes = [\"*\"]\nlabel = \"evil\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\nexpires_at = \"2100-01-01T00:00:00Z\"\n[authorized_by]\nprincipal = \"fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"
         );
 
         let signed = lillux::signature::sign_content_at(
@@ -612,6 +678,7 @@ mod tests {
             "test-round-trip",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             &node_signer,
             ryeos_node_runtime::identity::WildcardPolicy::Reject,
         )
@@ -660,6 +727,7 @@ mod tests {
             "remote",
             "admission:test",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             "site:origin",
             &node_signer,
         )
@@ -691,7 +759,7 @@ mod tests {
 
         for origin_line in ["", "origin_site_id = \"source\"\n"] {
             let body = format!(
-                "schema_version = 2\nprincipal_class = \"remote_principal\"\n{origin_line}fingerprint = \"{client_fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.remote/run\"]\nlabel = \"remote operator\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
+                "schema_version = 3\nprincipal_class = \"remote_principal\"\n{origin_line}fingerprint = \"{client_fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.remote/run\"]\nlabel = \"remote operator\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\nexpires_at = \"2100-01-01T00:00:00Z\"\n[authorized_by]\nprincipal = \"fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"
             );
             let signed = lillux::signature::sign_content_at(
                 &body,
@@ -761,7 +829,7 @@ mod tests {
         // Hand-craft a TOML with short-form scopes that bypass the
         // canonical writer (which would reject them at write time).
         let body = format!(
-            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"bundle.install\", \"remote.admin\"]\nlabel = \"old-short-form\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
+            "schema_version = 3\nprincipal_class = \"local_client\"\nfingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"bundle.install\", \"remote.admin\"]\nlabel = \"old-short-form\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\nexpires_at = \"2100-01-01T00:00:00Z\"\n[authorized_by]\nprincipal = \"fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"
         );
         let signed = lillux::signature::sign_content_at(
             &body,
@@ -805,7 +873,7 @@ mod tests {
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
 
         let body = format!(
-            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\nlabel = \"ok\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
+            "schema_version = 3\nprincipal_class = \"local_client\"\nfingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\nlabel = \"ok\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\nexpires_at = \"2100-01-01T00:00:00Z\"\n[authorized_by]\nprincipal = \"fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"
         );
         let signed = lillux::signature::sign_content_at(
             &body,
@@ -851,6 +919,7 @@ mod tests {
             "victim",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             &node_signer,
             ryeos_node_runtime::identity::WildcardPolicy::Reject,
         )
@@ -1011,6 +1080,7 @@ mod tests {
             node_policy: Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::default_authorization_record(),
                     ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                     Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
@@ -1058,6 +1128,7 @@ mod tests {
             "test-client",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             state.identity.signing_key(),
             ryeos_node_runtime::identity::WildcardPolicy::Reject,
         )
@@ -1081,6 +1152,7 @@ mod tests {
             "test-remote-principal",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             &state.identity,
             ryeos_node_runtime::identity::WildcardPolicy::Reject,
             false,
@@ -1107,6 +1179,7 @@ mod tests {
             "test-forwarding-node",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms::for_tests(),
             site_id,
             state.identity.signing_key(),
         )
@@ -1277,7 +1350,7 @@ mod tests {
         let err = verify_request(&state, "GET", &uri, &headers, b"")
             .expect_err("stale timestamp must be rejected");
         assert!(
-            err.contains("expired"),
+            err.to_string().contains("expired"),
             "stale-timestamp rejection should say expired, got: {err}"
         );
 
@@ -1344,7 +1417,7 @@ mod tests {
         let err = verify_request(&state, "GET", &altered_uri, &headers, b"")
             .expect_err("altered query param value must fail verification");
         assert!(
-            err.contains("invalid signature"),
+            err.to_string().contains("invalid signature"),
             "value change should break the signature, got: {err}"
         );
     }
@@ -1373,7 +1446,7 @@ mod tests {
         );
         let error = verify_request(&state, "POST", &uri, &headers, body)
             .expect_err("remote operator without a source-node proof must fail");
-        assert!(error.contains("source-node forwarding proof"));
+        assert!(error.to_string().contains("source-node forwarding proof"));
 
         let mut headers = signed_headers(
             &operator_key,
@@ -1438,7 +1511,11 @@ mod tests {
         );
         let error = verify_request(&state, "POST", &uri, &headers, body)
             .expect_err("a different admitted site must not satisfy the operator grant");
-        assert!(error.contains("does not match the remote_principal grant"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match the remote_principal grant")
+        );
     }
 
     #[test]
@@ -1462,6 +1539,113 @@ mod tests {
         );
         let error = verify_request(&state, "POST", &uri, &headers, b"{}")
             .expect_err("configured operator remote_node confusion must fail");
-        assert!(error.contains("cannot authenticate through a remote_node grant"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot authenticate through a remote_node grant")
+        );
+    }
+
+    /// Write a grant for `client_key` that lapsed long ago.
+    fn register_expired_client_key(
+        state: &ryeos_app::state::AppState,
+        client_key: &SigningKey,
+    ) -> String {
+        let vk = client_key.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        ryeos_node_runtime::identity::create_authorized_key_toml(
+            &state.config.authorized_keys_dir,
+            &fp,
+            &key_b64,
+            &["ryeos.execute.service.vault/list".to_string()],
+            "lapsed-client",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms {
+                expires_at: GrantExpiry::At(1_000),
+                authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+                    &"a".repeat(64),
+                    None,
+                ),
+            },
+            state.identity.signing_key(),
+        )
+        .unwrap();
+        fp
+    }
+
+    #[test]
+    fn expired_grant_reveals_expiry_only_after_signature_check() {
+        let (_tmp, _store_owner, state) = build_test_state();
+        let client_key = SigningKey::from_bytes(&[81u8; 32]);
+        let impostor_key = SigningKey::from_bytes(&[82u8; 32]);
+        let fp = register_expired_client_key(&state, &client_key);
+        let audience = state.identity.principal_id();
+        let uri: axum::http::Uri = "/execute".parse().unwrap();
+
+        // The key holder is told its grant lapsed.
+        let headers = signed_headers(
+            &client_key,
+            &fp,
+            "POST",
+            &uri,
+            b"{}",
+            unix_now(),
+            "nonce-expired-holder",
+            &audience,
+        );
+        match verify_request(&state, "POST", &uri, &headers, b"{}") {
+            Err(RequestAuthError::Grant(error)) => {
+                assert_eq!(error.code(), "grant_expired");
+                assert!(error.to_string().contains("renew"), "{error}");
+            }
+            other => panic!("expected a typed expiry refusal, got {other:?}"),
+        }
+
+        // Someone who names the fingerprint but cannot sign for it is told
+        // nothing about the grant.
+        let headers = signed_headers(
+            &impostor_key,
+            &fp,
+            "POST",
+            &uri,
+            b"{}",
+            unix_now(),
+            "nonce-expired-impostor",
+            &audience,
+        );
+        match verify_request(&state, "POST", &uri, &headers, b"{}") {
+            Err(RequestAuthError::Refused(reason)) => {
+                assert!(reason.contains("invalid signature"), "{reason}");
+            }
+            other => panic!("expected a plain refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_lapsed_grant_is_not_a_boot_failure_but_a_stale_one_is() {
+        let (_tmp, _store_owner, state) = build_test_state();
+        let client_key = SigningKey::from_bytes(&[83u8; 32]);
+        register_expired_client_key(&state, &client_key);
+        validate_authorized_key_directory(&state.config.authorized_keys_dir, &state.identity)
+            .expect("a lapsed grant keeps its integrity");
+
+        let stale_key = SigningKey::from_bytes(&[84u8; 32]);
+        let vk = stale_key.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let body = format!(
+            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{fp}\"\npublic_key = \"ed25519:{}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\nlabel = \"old\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n",
+            base64::engine::general_purpose::STANDARD.encode(vk.as_bytes())
+        );
+        std::fs::write(
+            state.config.authorized_keys_dir.join(format!("{fp}.toml")),
+            lillux::signature::sign_content(&body, state.identity.signing_key(), "#", None),
+        )
+        .unwrap();
+        let error =
+            validate_authorized_key_directory(&state.config.authorized_keys_dir, &state.identity)
+                .expect_err("a stale grant keeps the daemon from starting");
+        assert!(format!("{error:#}").contains("re-issue"), "{error:#}");
     }
 }

@@ -902,6 +902,15 @@ pub fn write_authorized_key_with_scopes(
         "fast-fixture-authorized-key",
         &lillux::signature::compute_fingerprint(&signer_sk.verifying_key()),
         FAST_FIXTURE_TIME,
+        // Fixture grants outlive any test run; they exercise nothing about
+        // expiry.
+        &ryeos_node_runtime::identity::GrantTerms {
+            expires_at: ryeos_node_runtime::identity::GrantExpiry::At(4_102_444_800),
+            authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+                &lillux::signature::compute_fingerprint(&signer_sk.verifying_key()),
+                None,
+            ),
+        },
         signer_sk,
         ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;

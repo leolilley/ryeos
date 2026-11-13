@@ -85,6 +85,7 @@ fn fixture_on(
         "test operator",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )
@@ -196,6 +197,7 @@ fn replace_binding_with_remote_owner(
         "remote binding owner",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -444,6 +446,7 @@ async fn bind_through_managed_activation_owner(
         "managed activation fixture operator",
         state.identity.fingerprint(),
         "2026-09-18T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )
@@ -953,6 +956,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
         "changed remote binding owner",
         state.identity.fingerprint(),
         "2026-09-07T00:00:01Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -1030,6 +1034,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
         "changed grant",
         state.identity.fingerprint(),
         "2026-09-07T00:00:01Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )

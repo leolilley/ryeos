@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:13Z:cbca6c14301ee68f50ce08819d4d274b6dba5cd8d7afdd601b09379971c81777:AAy7rN4I5Vg+B+0tDA/VxiVkFcB3p9fWOcN1CaZAnlTXqdX6bFvPoE0NktH5TgQRO4aZVPfbeS/1KtkqD2l9Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:53Z:dad75a3b0a8459a185ee80bfc7f1e1403aedd6a2b9c008acd364a387b55e60fb:hRJDFWl9fZ+qRva5LTF74u2Id1DGXXM6/hxN2slb3fQT4B7Ov9reguUSUDKwRpho4jLE0G6sqjtV5UALRkvbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.authorize-client
 availability: both
@@ -13,4 +13,5 @@ schema:
   origin_site_id: string?
   remote_node_origin_site_id: string?
   allow_semantic_conversion: boolean?
+  lifetime_secs: number?
 description: "Configured-local-operator reconciliation of one exact local-client, remote-node, or remote-principal authorized-key grant using retained node signing authority. Uses the node-owned service online or standalone, never a confined Tool. Semantic class or origin conversion additionally requires and holds stopped-node authority through publication."

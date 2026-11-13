@@ -1,0 +1,12 @@
+# ryeos:signed:2026-11-13T16:31:53Z:080effda22d62f68149222d5ac1d9c613a3ee627a04977dee312fa022d527fe1:eQmagu5Uypmd2Kr/J5IIVNmGAgCjnYfQmwnHJUwvmaLZGU8Es9NPdNXRQRa9xHI46+QJK3BAiTkmQePsud3dDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- renew-key
+description: Renew an authorized-key grant with a new expiry
+help:
+  usage: "ryeos renew-key --fingerprint <grant-fingerprint> [--lifetime-secs <seconds>]"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:identity/renew-key

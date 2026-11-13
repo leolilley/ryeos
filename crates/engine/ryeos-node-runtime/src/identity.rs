@@ -274,7 +274,10 @@ pub enum WildcardPolicy {
     AllowBootstrap,
 }
 
-const AUTHORIZED_KEY_SCHEMA_VERSION: u32 = 2;
+/// Schema of the node-signed grant body. Version 3 added the required
+/// `expires_at` and `authorized_by` fields and renamed the forwarded-principal
+/// class to `remote_principal`.
+pub const AUTHORIZED_KEY_SCHEMA_VERSION: u32 = 3;
 
 /// Prefix of every offline-operation scope. An offline operation is
 /// authorized only by a grant that names its exact scope; no wildcard pattern
@@ -372,6 +375,230 @@ pub enum AuthorizedKeyCreateError {
     AlreadyExists,
 }
 
+/// When a grant stops authenticating its key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantExpiry {
+    /// The grant never lapses. Only the node's configured operator grant is
+    /// issued this way.
+    Never,
+    /// The grant lapses at this Unix second: from then on it authenticates
+    /// nothing.
+    At(u64),
+}
+
+const GRANT_NEVER_EXPIRES: &str = "never";
+
+impl GrantExpiry {
+    /// The exact text a grant body carries: `never` or an RFC 3339 UTC time.
+    pub fn to_grant_text(self) -> String {
+        match self {
+            Self::Never => GRANT_NEVER_EXPIRES.to_owned(),
+            Self::At(secs) => lillux::time::iso8601_from_unix_secs(secs),
+        }
+    }
+
+    pub fn from_grant_text(text: &str) -> Result<Self> {
+        if text == GRANT_NEVER_EXPIRES {
+            return Ok(Self::Never);
+        }
+        let secs = lillux::time::unix_secs_from_iso8601(text).ok_or_else(|| {
+            anyhow::anyhow!("authorized-key expires_at must be `never` or an RFC 3339 UTC time")
+        })?;
+        if lillux::time::iso8601_from_unix_secs(secs) != text {
+            bail!("authorized-key expires_at must be written in canonical UTC form");
+        }
+        Ok(Self::At(secs))
+    }
+
+    pub fn is_expired_at(self, now: u64) -> bool {
+        matches!(self, Self::At(secs) if now >= secs)
+    }
+}
+
+/// Who asked for a grant, and the exact signed request that admitted it.
+/// The node signs every grant; this records the asking principal's evidence
+/// next to that signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedBy {
+    /// `fp:<64 hex>` of the key that asked for the grant.
+    pub principal: String,
+    /// `ryeos-request-v1` content hash of the signed request (or the digest
+    /// of the signed claim) that caused the grant. Absent only where no signed
+    /// request exists, such as the operator grant written at initialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_digest: Option<String>,
+}
+
+fn is_lower_sha256_hex(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+impl AuthorizedBy {
+    /// The grant was asked for by the key `principal_fingerprint` (bare hex,
+    /// with or without the `fp:` prefix), through a signed request.
+    pub fn principal_request(principal_fingerprint: &str, request_digest: Option<String>) -> Self {
+        let bare = principal_fingerprint
+            .strip_prefix("fp:")
+            .unwrap_or(principal_fingerprint);
+        Self {
+            principal: format!("fp:{bare}"),
+            request_digest,
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !self
+            .principal
+            .strip_prefix("fp:")
+            .is_some_and(is_lower_sha256_hex)
+        {
+            bail!("authorized_by.principal must be `fp:` and a SHA-256 fingerprint");
+        }
+        if let Some(digest) = &self.request_digest
+            && !is_lower_sha256_hex(digest)
+        {
+            bail!("authorized_by.request_digest must be a lowercase SHA-256 digest");
+        }
+        Ok(())
+    }
+}
+
+/// The lifetime and provenance every grant is issued with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantTerms {
+    pub expires_at: GrantExpiry,
+    pub authorized_by: AuthorizedBy,
+}
+
+impl GrantTerms {
+    /// Terms of the configured operator's own grant, the one grant that never
+    /// lapses. Callers: initialization and the offline authorization reset.
+    pub fn operator(authorized_by: AuthorizedBy) -> Self {
+        Self {
+            expires_at: GrantExpiry::Never,
+            authorized_by,
+        }
+    }
+
+    /// Fixed far-future terms for fixtures that do not exercise expiry.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests() -> Self {
+        Self {
+            expires_at: GrantExpiry::At(4_102_444_800),
+            authorized_by: AuthorizedBy::principal_request(&"9".repeat(64), None),
+        }
+    }
+}
+
+/// A requested grant lifetime the node's authorization policy refuses.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GrantLifetimeError {
+    #[error(
+        "a {} grant may live at most {maximum_secs} seconds under this node's authorization \
+         policy; {requested_secs} seconds were requested. Request a shorter lifetime",
+        class.as_str()
+    )]
+    ExceedsPolicy {
+        class: AuthorizedKeyPrincipalClass,
+        requested_secs: u64,
+        maximum_secs: u64,
+    },
+    #[error("a grant lifetime must be at least one second")]
+    Zero,
+}
+
+impl GrantLifetimeError {
+    /// Stable machine-readable code of the refusal.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ExceedsPolicy { .. } => "grant_lifetime_exceeds_policy",
+            Self::Zero => "grant_lifetime_invalid",
+        }
+    }
+}
+
+/// A grant this node will not authenticate, with the cure each refusal names.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorizedKeyError {
+    #[error(
+        "authorized-key grant {fingerprint} expired at {expired_at}; ask the principal that \
+         granted it or the node operator to renew it with `ryeos renew-key`"
+    )]
+    Expired {
+        fingerprint: String,
+        expired_at: String,
+    },
+    #[error(
+        "authorized-key grant {fingerprint} uses schema_version {seen} but this node admits only \
+         {admitted}; re-issue it: remove the grant file and authorize the key again with \
+         `ryeos authorize-client`, or run `ryeos node reset authorization` on the stopped node \
+         and re-issue every key"
+    )]
+    StaleSchema {
+        fingerprint: String,
+        seen: u32,
+        admitted: u32,
+    },
+    #[error(
+        "authorized-key grant {fingerprint} has the retired class `{class}`; re-admit the key as \
+         `remote_principal`: remove the grant file and authorize the key again with \
+         `ryeos authorize-client --origin-site-id <site>`"
+    )]
+    StaleClass { fingerprint: String, class: String },
+    #[error(
+        "authorized-key grant {fingerprint} never expires but is not the configured operator's \
+         grant; re-issue it with a bounded lifetime"
+    )]
+    NeverExpiresNotOperator { fingerprint: String },
+}
+
+impl AuthorizedKeyError {
+    /// Stable machine-readable code of the refusal.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Expired { .. } => "grant_expired",
+            Self::StaleSchema { .. } => "grant_schema_stale",
+            Self::StaleClass { .. } => "grant_class_stale",
+            Self::NeverExpiresNotOperator { .. } => "grant_never_expires_not_operator",
+        }
+    }
+}
+
+/// A renewal this node refuses.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorizedKeyRenewError {
+    #[error("no authorized-key grant exists for fingerprint {fingerprint}")]
+    NotFound { fingerprint: String },
+    #[error(
+        "only the principal that granted {fingerprint} or the node operator may renew it; \
+         the grantee cannot renew its own grant"
+    )]
+    NotGranterOrOperator { fingerprint: String },
+    #[error("the configured operator's grant never expires and is not renewed")]
+    NeverExpires,
+    #[error(
+        "the renewing principal no longer holds the scope `{scope}` of grant {fingerprint}; \
+         renew it as the node operator, or re-issue the grant with narrower scopes"
+    )]
+    ScopesNoLongerCovered { fingerprint: String, scope: String },
+}
+
+impl AuthorizedKeyRenewError {
+    /// Stable machine-readable code of the refusal.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "grant_not_found",
+            Self::NotGranterOrOperator { .. } => "grant_renewal_not_permitted",
+            Self::NeverExpires => "grant_never_expires",
+            Self::ScopesNoLongerCovered { .. } => "grant_renewal_scopes_not_covered",
+        }
+    }
+}
+
 /// Exact semantic subject of a node-signed authorized-key grant.
 ///
 /// Scope reconciliation must carry this explicitly. Inferring it from the
@@ -403,6 +630,18 @@ struct AuthorizedKeyGrantBody<'a> {
     label: &'a str,
     granted_by: &'a str,
     created_at: &'a str,
+    expires_at: String,
+    // A table, so it stays last in the serialized body.
+    authorized_by: &'a AuthorizedBy,
+}
+
+/// Just enough of any grant body, current or stale, to name why a stale grant
+/// is refused. Deliberately lenient: its job is to read old shapes.
+#[derive(Debug, Deserialize)]
+struct GrantBodyHeader {
+    schema_version: u32,
+    #[serde(default)]
+    principal_class: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,6 +657,8 @@ struct RetainedAuthorizedKeyGrantBody {
     label: String,
     granted_by: String,
     created_at: String,
+    expires_at: String,
+    authorized_by: AuthorizedBy,
 }
 
 /// One node-signed authorized-key grant after exact descriptor-relative read,
@@ -435,6 +676,36 @@ pub struct VerifiedAuthorizedKeyGrant {
     pub configured_origin_site_id: Option<String>,
     /// Whole-file digest of the exact signed grant bytes used for this view.
     pub source_file_hash: String,
+    pub fingerprint: String,
+    /// The granting authority: the principal that granted the key, or the
+    /// admission token it was admitted with. Renewal belongs to this principal
+    /// and the node operator.
+    pub granted_by: String,
+    pub created_at: String,
+    pub expires_at: GrantExpiry,
+    pub authorized_by: AuthorizedBy,
+}
+
+impl VerifiedAuthorizedKeyGrant {
+    /// Refuse a grant that has lapsed at `now` (Unix seconds).
+    pub fn ensure_unexpired(&self, now: u64) -> Result<(), AuthorizedKeyError> {
+        match self.expires_at {
+            GrantExpiry::At(secs) if self.expires_at.is_expired_at(now) => {
+                Err(AuthorizedKeyError::Expired {
+                    fingerprint: self.fingerprint.clone(),
+                    expired_at: lillux::time::iso8601_from_unix_secs(secs),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether `principal` (`fp:<hex>` or bare hex) is the granting authority
+    /// recorded on this grant.
+    pub fn was_granted_by(&self, principal: &str) -> bool {
+        let bare = |text: &str| text.strip_prefix("fp:").unwrap_or(text).to_owned();
+        bare(&self.granted_by) == bare(principal)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -445,10 +716,44 @@ pub struct AuthorizedKeyTransition {
     pub origin_site_id: Option<String>,
 }
 
-/// Load one exact node-signed authorized-key grant. Absence is distinct from
-/// malformed or unverifiable content: callers may treat absence as no prior
-/// grant, but must never fold corrupt authority into an empty grant.
+/// Load one exact node-signed authorized-key grant that has not lapsed.
+/// Absence is distinct from malformed or unverifiable content: callers may
+/// treat absence as no prior grant, but must never fold corrupt authority into
+/// an empty grant. A lapsed grant fails with [`AuthorizedKeyError::Expired`].
 pub fn load_verified_authorized_key(
+    fingerprint: &str,
+    auth_dir: &Path,
+    node_identity: &NodeIdentity,
+) -> Result<Option<VerifiedAuthorizedKeyGrant>> {
+    load_verified_authorized_key_at(
+        fingerprint,
+        auth_dir,
+        node_identity,
+        lillux::time::unix_secs_now(),
+    )
+}
+
+/// [`load_verified_authorized_key`] judged at an explicit `now` (Unix seconds).
+pub fn load_verified_authorized_key_at(
+    fingerprint: &str,
+    auth_dir: &Path,
+    node_identity: &NodeIdentity,
+    now: u64,
+) -> Result<Option<VerifiedAuthorizedKeyGrant>> {
+    let Some(grant) = load_verified_authorized_key_unjudged(fingerprint, auth_dir, node_identity)?
+    else {
+        return Ok(None);
+    };
+    grant.ensure_unexpired(now)?;
+    Ok(Some(grant))
+}
+
+/// Load one exact node-signed grant without judging its expiry. Request
+/// authentication uses it to verify the caller's signature first, so only the
+/// holder of the key learns that its grant lapsed; renewal and inspection use
+/// it because they act on lapsed grants. Every other reader must use
+/// [`load_verified_authorized_key`].
+pub fn load_verified_authorized_key_unjudged(
     fingerprint: &str,
     auth_dir: &Path,
     node_identity: &NodeIdentity,
@@ -490,14 +795,27 @@ fn load_verified_authorized_key_from_directory(
     let signature = Signature::from_slice(&sig_bytes)?;
     node_identity.verify_hash(&header.content_hash, &signature)?;
 
+    let header: GrantBodyHeader = toml::from_str(&body)
+        .map_err(|error| anyhow::anyhow!("invalid authorized-key grant body: {error}"))?;
+    if header.schema_version != AUTHORIZED_KEY_SCHEMA_VERSION {
+        if header.principal_class.as_deref() == Some("remote_operator") {
+            return Err(AuthorizedKeyError::StaleClass {
+                fingerprint: fingerprint.to_owned(),
+                class: "remote_operator".to_owned(),
+            }
+            .into());
+        }
+        return Err(AuthorizedKeyError::StaleSchema {
+            fingerprint: fingerprint.to_owned(),
+            seen: header.schema_version,
+            admitted: AUTHORIZED_KEY_SCHEMA_VERSION,
+        }
+        .into());
+    }
     let grant: RetainedAuthorizedKeyGrantBody = toml::from_str(&body)
         .map_err(|error| anyhow::anyhow!("invalid authorized-key grant body: {error}"))?;
     if grant.schema_version != AUTHORIZED_KEY_SCHEMA_VERSION {
-        bail!(
-            "authorized-key grant schema_version must be exactly {} (got {})",
-            AUTHORIZED_KEY_SCHEMA_VERSION,
-            grant.schema_version
-        );
+        bail!("authorized-key grant schema_version changed while it was read");
     }
     let (principal_class, configured_origin_site_id) = match grant.principal_class.as_str() {
         "local_client" => {
@@ -530,6 +848,13 @@ fn load_verified_authorized_key_from_directory(
                 Some(site_id.to_owned()),
             )
         }
+        "remote_operator" => {
+            return Err(AuthorizedKeyError::StaleClass {
+                fingerprint: fingerprint.to_owned(),
+                class: "remote_operator".to_owned(),
+            }
+            .into());
+        }
         other => bail!("unknown authorized-key principal_class '{other}'"),
     };
     if grant.fingerprint != fingerprint {
@@ -558,6 +883,8 @@ fn load_verified_authorized_key_from_directory(
     if grant.granted_by.trim().is_empty() || grant.created_at.trim().is_empty() {
         bail!("authorized-key grant audit fields must not be empty");
     }
+    grant.authorized_by.validate()?;
+    let expires_at = GrantExpiry::from_grant_text(&grant.expires_at)?;
     Ok(Some(VerifiedAuthorizedKeyGrant {
         public_key,
         scopes: grant.scopes,
@@ -565,6 +892,11 @@ fn load_verified_authorized_key_from_directory(
         principal_class,
         configured_origin_site_id,
         source_file_hash: lillux::sha256_hex(&bytes),
+        fingerprint: grant.fingerprint,
+        granted_by: grant.granted_by,
+        created_at: grant.created_at,
+        expires_at,
+        authorized_by: grant.authorized_by,
     }))
 }
 
@@ -591,6 +923,7 @@ pub fn write_authorized_key_toml(
     label: &str,
     granted_by: &str,
     created_at: &str,
+    terms: &GrantTerms,
     node_signing_key: &lillux::crypto::SigningKey,
     wildcard: WildcardPolicy,
 ) -> Result<std::path::PathBuf> {
@@ -602,6 +935,7 @@ pub fn write_authorized_key_toml(
         label,
         granted_by,
         created_at,
+        terms,
         node_signing_key,
         wildcard,
         AuthorizedKeySubject::LocalClient,
@@ -622,6 +956,7 @@ pub fn create_authorized_key_toml(
     label: &str,
     granted_by: &str,
     created_at: &str,
+    terms: &GrantTerms,
     node_signing_key: &lillux::crypto::SigningKey,
 ) -> Result<std::path::PathBuf> {
     let signed = render_authorized_key_toml_for_subject(
@@ -631,6 +966,7 @@ pub fn create_authorized_key_toml(
         label,
         granted_by,
         created_at,
+        terms,
         node_signing_key,
         WildcardPolicy::Reject,
         AuthorizedKeySubject::LocalClient,
@@ -654,6 +990,7 @@ pub fn write_authorized_remote_node_key_toml(
     label: &str,
     granted_by: &str,
     created_at: &str,
+    terms: &GrantTerms,
     origin_site_id: &str,
     node_signing_key: &lillux::crypto::SigningKey,
 ) -> Result<std::path::PathBuf> {
@@ -666,6 +1003,7 @@ pub fn write_authorized_remote_node_key_toml(
         label,
         granted_by,
         created_at,
+        terms,
         node_signing_key,
         WildcardPolicy::Reject,
         AuthorizedKeySubject::RemoteNode { origin_site_id },
@@ -685,6 +1023,7 @@ fn write_authorized_key_toml_for_subject(
     label: &str,
     granted_by: &str,
     created_at: &str,
+    terms: &GrantTerms,
     node_signing_key: &lillux::crypto::SigningKey,
     wildcard: WildcardPolicy,
     subject: AuthorizedKeySubject<'_>,
@@ -696,6 +1035,7 @@ fn write_authorized_key_toml_for_subject(
         label,
         granted_by,
         created_at,
+        terms,
         node_signing_key,
         wildcard,
         subject,
@@ -713,6 +1053,7 @@ fn render_authorized_key_toml_for_subject(
     label: &str,
     granted_by: &str,
     created_at: &str,
+    terms: &GrantTerms,
     node_signing_key: &lillux::crypto::SigningKey,
     wildcard: WildcardPolicy,
     subject: AuthorizedKeySubject<'_>,
@@ -754,6 +1095,7 @@ fn render_authorized_key_toml_for_subject(
     if granted_by.trim().is_empty() || created_at.trim().is_empty() {
         bail!("authorized-key audit fields must not be empty");
     }
+    terms.authorized_by.validate()?;
 
     let (principal_class, origin_site_id) = match subject {
         AuthorizedKeySubject::LocalClient => ("local_client", None),
@@ -764,6 +1106,12 @@ fn render_authorized_key_toml_for_subject(
             ("remote_principal", Some(origin_site_id))
         }
     };
+    if terms.expires_at == GrantExpiry::Never
+        && !(matches!(subject, AuthorizedKeySubject::LocalClient)
+            && wildcard == WildcardPolicy::AllowBootstrap)
+    {
+        bail!("only the configured operator's grant may be written without an expiry");
+    }
     let body = toml::to_string(&AuthorizedKeyGrantBody {
         schema_version: AUTHORIZED_KEY_SCHEMA_VERSION,
         principal_class,
@@ -774,6 +1122,8 @@ fn render_authorized_key_toml_for_subject(
         label,
         granted_by,
         created_at,
+        expires_at: terms.expires_at.to_grant_text(),
+        authorized_by: &terms.authorized_by,
     })
     .context("serialize authorized-key grant")?;
 
@@ -870,6 +1220,7 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
     label: &str,
     granted_by: &str,
     created_at: &str,
+    terms: &GrantTerms,
     node_identity: &NodeIdentity,
     wildcard: WildcardPolicy,
     merge: bool,
@@ -896,7 +1247,9 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
     let requested_class = match subject {
         AuthorizedKeySubject::LocalClient => AuthorizedKeyPrincipalClass::LocalClient,
         AuthorizedKeySubject::RemoteNode { .. } => AuthorizedKeyPrincipalClass::RemoteNode,
-        AuthorizedKeySubject::RemotePrincipal { .. } => AuthorizedKeyPrincipalClass::RemotePrincipal,
+        AuthorizedKeySubject::RemotePrincipal { .. } => {
+            AuthorizedKeyPrincipalClass::RemotePrincipal
+        }
     };
     if merge
         && let Some(existing) = existing.as_ref()
@@ -952,6 +1305,7 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
         label,
         granted_by,
         created_at,
+        terms,
         node_identity.signing_key(),
         wildcard,
         subject,
@@ -984,6 +1338,7 @@ pub fn reconcile_authorized_key_toml_scopes(
     label: &str,
     granted_by: &str,
     created_at: &str,
+    terms: &GrantTerms,
     node_identity: &NodeIdentity,
     wildcard: WildcardPolicy,
     merge: bool,
@@ -1002,12 +1357,159 @@ pub fn reconcile_authorized_key_toml_scopes(
         label,
         granted_by,
         created_at,
+        terms,
         node_identity,
         wildcard,
         merge,
         subject,
         allow_semantic_conversion,
     )
+}
+
+/// A grant that was re-signed with a new expiry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenewedAuthorizedKey {
+    pub previous_expires_at: GrantExpiry,
+    pub expires_at: GrantExpiry,
+    pub principal_class: AuthorizedKeyPrincipalClass,
+    pub scopes: Vec<String>,
+    pub label: String,
+}
+
+/// Re-sign one existing grant with new `terms` (a new expiry and the
+/// renewer's provenance), keeping its key, class, origin, scopes, label,
+/// granting authority and creation time. Only the principal that granted it
+/// (`renewer`, as `fp:<hex>`) or the node operator (`renewer_is_operator`) may
+/// renew: the grantee cannot extend its own grant. The configured operator's
+/// grant never lapses and is not renewed. A lapsed grant can be renewed.
+pub fn renew_authorized_key_toml(
+    auth_dir: &Path,
+    fingerprint: &str,
+    renewer: &str,
+    renewer_is_operator: bool,
+    terms: &GrantTerms,
+    node_identity: &NodeIdentity,
+) -> Result<RenewedAuthorizedKey> {
+    let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
+    let _lock = directory.lock_exclusive()?;
+    directory.ensure_path_binding()?;
+    let existing =
+        load_verified_authorized_key_from_directory(fingerprint, &directory, node_identity)?
+            .ok_or_else(|| AuthorizedKeyRenewError::NotFound {
+                fingerprint: fingerprint.to_owned(),
+            })?;
+    if existing.expires_at == GrantExpiry::Never {
+        return Err(AuthorizedKeyRenewError::NeverExpires.into());
+    }
+    if !renewer_is_operator && !existing.was_granted_by(renewer) {
+        return Err(AuthorizedKeyRenewError::NotGranterOrOperator {
+            fingerprint: fingerprint.to_owned(),
+        }
+        .into());
+    }
+    let subject = match (
+        existing.principal_class,
+        existing.configured_origin_site_id.as_deref(),
+    ) {
+        (AuthorizedKeyPrincipalClass::LocalClient, _) => AuthorizedKeySubject::LocalClient,
+        (AuthorizedKeyPrincipalClass::RemoteNode, Some(origin_site_id)) => {
+            AuthorizedKeySubject::RemoteNode { origin_site_id }
+        }
+        (AuthorizedKeyPrincipalClass::RemotePrincipal, Some(origin_site_id)) => {
+            AuthorizedKeySubject::RemotePrincipal { origin_site_id }
+        }
+        _ => bail!("a remote authorized-key grant lost its origin site"),
+    };
+    let public_key_b64 =
+        base64::engine::general_purpose::STANDARD.encode(existing.public_key.as_bytes());
+    let signed = render_authorized_key_toml_for_subject(
+        fingerprint,
+        &public_key_b64,
+        &existing.scopes,
+        &existing.owner,
+        &existing.granted_by,
+        &existing.created_at,
+        terms,
+        node_identity.signing_key(),
+        WildcardPolicy::Reject,
+        subject,
+    )?;
+    directory.ensure_path_binding()?;
+    publish_authorized_key_bytes(
+        &directory,
+        fingerprint,
+        signed.as_bytes(),
+        Some(Some(existing.source_file_hash.as_str())),
+    )?;
+    Ok(RenewedAuthorizedKey {
+        previous_expires_at: existing.expires_at,
+        expires_at: terms.expires_at,
+        principal_class: existing.principal_class,
+        scopes: existing.scopes,
+        label: existing.owner,
+    })
+}
+
+/// What reading one grant file found.
+#[derive(Debug, Clone)]
+pub enum GrantFileState {
+    /// Signed by this node and current; it may still have lapsed.
+    Current(Box<VerifiedAuthorizedKeyGrant>),
+    /// Signed by this node but of a retired schema or class.
+    Stale(AuthorizedKeyError),
+    /// Unreadable, unsigned, tampered or malformed.
+    Invalid(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct GrantFileInspection {
+    /// The file name without its `.toml` suffix (a fingerprint when sound).
+    pub name: String,
+    pub state: GrantFileState,
+}
+
+/// Read every grant file in `auth_dir` and report what each is, without
+/// judging expiry and without failing on the first bad file. The doctor uses
+/// it to list lapsed, soon-lapsing, stale and invalid grants.
+pub fn inspect_authorized_keys(
+    auth_dir: &Path,
+    node_identity: &NodeIdentity,
+) -> Result<Vec<GrantFileInspection>> {
+    let Some(directory) = lillux::PinnedDirectory::open(auth_dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut names = directory
+        .entries_no_follow()?
+        .into_iter()
+        .map(|entry| entry.name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    let mut inspections = Vec::with_capacity(names.len());
+    for file_name in names {
+        let Some(name) = file_name.strip_suffix(".toml") else {
+            inspections.push(GrantFileInspection {
+                name: file_name.clone(),
+                state: GrantFileState::Invalid(format!(
+                    "`{file_name}` is not a `<fingerprint>.toml` grant file"
+                )),
+            });
+            continue;
+        };
+        let state =
+            match load_verified_authorized_key_from_directory(name, &directory, node_identity) {
+                Ok(Some(grant)) => GrantFileState::Current(Box::new(grant)),
+                Ok(None) => GrantFileState::Invalid("the grant file vanished while listing".into()),
+                Err(error) => match error.downcast::<AuthorizedKeyError>() {
+                    Ok(stale) => GrantFileState::Stale(stale),
+                    Err(error) => GrantFileState::Invalid(format!("{error:#}")),
+                },
+            };
+        inspections.push(GrantFileInspection {
+            name: name.to_owned(),
+            state,
+        });
+    }
+    Ok(inspections)
 }
 
 #[cfg(test)]
@@ -1068,6 +1570,7 @@ mod tests {
                 "client",
                 "test",
                 "2026-01-01T00:00:00Z",
+                &GrantTerms::for_tests(),
                 node.signing_key(),
                 wildcard,
             )
@@ -1082,6 +1585,7 @@ mod tests {
             "client",
             "test",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             node.signing_key(),
             WildcardPolicy::Reject,
         )
@@ -1140,6 +1644,7 @@ mod tests {
             "test",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &key,
             WildcardPolicy::Reject,
         );
@@ -1163,6 +1668,7 @@ mod tests {
             "test",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &key,
             WildcardPolicy::Reject,
         );
@@ -1186,6 +1692,7 @@ mod tests {
             "test",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &key,
             WildcardPolicy::AllowBootstrap,
         );
@@ -1214,6 +1721,7 @@ mod tests {
             "test",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &key,
             WildcardPolicy::Reject,
         );
@@ -1236,6 +1744,7 @@ mod tests {
             "test-label",
             "test-granter",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &key,
             WildcardPolicy::Reject,
         )
@@ -1249,7 +1758,7 @@ mod tests {
             .filter(|l| !l.starts_with("# ryeos:signed:"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(body.contains("schema_version = 2"));
+        assert!(body.contains("schema_version = 3"));
         assert!(body.contains("principal_class = \"local_client\""));
         assert!(!body.contains("origin_site_id"));
         assert!(body.contains(&format!("fingerprint = \"{fp}\"")));
@@ -1340,6 +1849,7 @@ mod tests {
             "configured operator",
             "test",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &node,
             WildcardPolicy::Reject,
             false,
@@ -1390,6 +1900,7 @@ mod tests {
                 "configured operator",
                 "test",
                 "2026-01-01T00:00:00Z",
+                &GrantTerms::for_tests(),
                 &node,
                 wildcard,
                 false,
@@ -1416,6 +1927,7 @@ mod tests {
             "operator \"one\"",
             "bootstrap\\owner",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &key,
             WildcardPolicy::Reject,
         )
@@ -1450,6 +1962,7 @@ mod tests {
                     "client",
                     "test",
                     "2026-01-01T00:00:00Z",
+                    &GrantTerms::for_tests(),
                     &node,
                     WildcardPolicy::Reject,
                     true,
@@ -1493,6 +2006,7 @@ mod tests {
             "remote node",
             "test",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             "site:source",
             &node_key,
         )
@@ -1507,6 +2021,7 @@ mod tests {
             "changed remote node",
             "new admission",
             "2026-01-02T00:00:00Z",
+            &GrantTerms::for_tests(),
             "site:different",
             &node_key,
         )
@@ -1525,6 +2040,7 @@ mod tests {
             "reclassified",
             "remote caller",
             "2026-01-02T00:00:00Z",
+            &GrantTerms::for_tests(),
             &node_key,
         )
         .expect_err("online creation must not replace a remote grant");
@@ -1552,6 +2068,7 @@ mod tests {
             "operator",
             "offline",
             "2026-01-01T00:00:00Z",
+            &GrantTerms::for_tests(),
             &node,
             WildcardPolicy::Reject,
             false,
@@ -1568,6 +2085,7 @@ mod tests {
             "operator",
             "offline",
             "2026-01-02T00:00:00Z",
+            &GrantTerms::for_tests(),
             &node,
             WildcardPolicy::Reject,
             true,
@@ -1586,6 +2104,372 @@ mod tests {
         assert_eq!(
             grant.configured_origin_site_id.as_deref(),
             Some("site:source")
+        );
+    }
+
+    // ── Grant lifetime, provenance and stale-schema refusals ────────────────
+
+    struct GrantFixture {
+        _dir: tempfile::TempDir,
+        auth_dir: std::path::PathBuf,
+        node: NodeIdentity,
+        fingerprint: String,
+        public_key: String,
+    }
+
+    fn grant_fixture() -> GrantFixture {
+        let dir = tempfile::tempdir().unwrap();
+        let node = NodeIdentity::from_signing_key(SigningKey::from_bytes(&[61; 32])).unwrap();
+        let grantee = SigningKey::from_bytes(&[62; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&grantee.verifying_key());
+        let public_key =
+            base64::engine::general_purpose::STANDARD.encode(grantee.verifying_key().as_bytes());
+        GrantFixture {
+            auth_dir: dir.path().join("authorized_keys"),
+            _dir: dir,
+            node,
+            fingerprint,
+            public_key,
+        }
+    }
+
+    fn granter_fingerprint() -> String {
+        format!("fp:{}", "a".repeat(64))
+    }
+
+    fn terms_expiring(secs: u64) -> GrantTerms {
+        GrantTerms {
+            expires_at: GrantExpiry::At(secs),
+            authorized_by: AuthorizedBy::principal_request(
+                &granter_fingerprint(),
+                Some("c".repeat(64)),
+            ),
+        }
+    }
+
+    impl GrantFixture {
+        fn issue(&self, terms: &GrantTerms) {
+            create_authorized_key_toml(
+                &self.auth_dir,
+                &self.fingerprint,
+                &self.public_key,
+                &["ryeos.execute.service.vault/list".to_owned()],
+                "grantee",
+                &granter_fingerprint(),
+                "2026-01-01T00:00:00Z",
+                terms,
+                self.node.signing_key(),
+            )
+            .unwrap();
+        }
+
+        fn write_raw(&self, body: &str) {
+            std::fs::create_dir_all(&self.auth_dir).unwrap();
+            let signed = lillux::signature::sign_content(body, self.node.signing_key(), "#", None);
+            std::fs::write(
+                self.auth_dir.join(format!("{}.toml", self.fingerprint)),
+                signed,
+            )
+            .unwrap();
+        }
+
+        fn operator_terms(&self) -> GrantTerms {
+            GrantTerms::operator(AuthorizedBy::principal_request(&self.fingerprint, None))
+        }
+
+        fn write_operator_grant(&self) {
+            write_authorized_key_toml(
+                &self.auth_dir,
+                &self.fingerprint,
+                &self.public_key,
+                &["*".to_owned()],
+                "operator",
+                &self.fingerprint,
+                "2026-01-01T00:00:00Z",
+                &self.operator_terms(),
+                self.node.signing_key(),
+                WildcardPolicy::AllowBootstrap,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn grant_records_expiry_and_authorized_by() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(2_000_000_000));
+        let grant = load_verified_authorized_key_at(&fx.fingerprint, &fx.auth_dir, &fx.node, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.expires_at, GrantExpiry::At(2_000_000_000));
+        assert_eq!(grant.authorized_by.principal, granter_fingerprint());
+        assert_eq!(
+            grant.authorized_by.request_digest.as_deref(),
+            Some("c".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn expired_grant_is_typed_expired_and_only_the_unjudged_loader_reads_it() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(1_000));
+        let error = load_verified_authorized_key_at(&fx.fingerprint, &fx.auth_dir, &fx.node, 1_000)
+            .unwrap_err();
+        let typed = error.downcast_ref::<AuthorizedKeyError>().unwrap();
+        assert_eq!(typed.code(), "grant_expired");
+        assert!(matches!(typed, AuthorizedKeyError::Expired { .. }));
+        assert!(typed.to_string().contains("renew"), "{typed}");
+        // One second earlier it still authenticates.
+        load_verified_authorized_key_at(&fx.fingerprint, &fx.auth_dir, &fx.node, 999)
+            .unwrap()
+            .unwrap();
+        let unjudged =
+            load_verified_authorized_key_unjudged(&fx.fingerprint, &fx.auth_dir, &fx.node)
+                .unwrap()
+                .unwrap();
+        assert!(unjudged.ensure_unexpired(1_000).is_err());
+    }
+
+    #[test]
+    fn never_is_written_only_for_the_bootstrap_local_client_grant() {
+        let fx = grant_fixture();
+        let never = fx.operator_terms();
+        let error = write_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &fx.public_key,
+            &["ryeos.execute.service.vault/list".to_owned()],
+            "grantee",
+            "test",
+            "2026-01-01T00:00:00Z",
+            &never,
+            fx.node.signing_key(),
+            WildcardPolicy::Reject,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("without an expiry"),
+            "{error:#}"
+        );
+        let error = write_authorized_remote_node_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &fx.public_key,
+            &["ryeos.execute.service.vault/list".to_owned()],
+            "node",
+            "test",
+            "2026-01-01T00:00:00Z",
+            &never,
+            "site:source",
+            fx.node.signing_key(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("without an expiry"),
+            "{error:#}"
+        );
+        fx.write_operator_grant();
+        let grant = load_verified_authorized_key_unjudged(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.expires_at, GrantExpiry::Never);
+        assert!(grant.ensure_unexpired(u64::MAX).is_ok());
+    }
+
+    #[test]
+    fn a_schema_2_grant_is_refused_as_stale_naming_the_cure() {
+        let fx = grant_fixture();
+        fx.write_raw(&format!(
+            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{}\"\n\
+             public_key = \"ed25519:{}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\n\
+             label = \"old\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n",
+            fx.fingerprint, fx.public_key
+        ));
+        let error =
+            load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node).unwrap_err();
+        let typed = error.downcast_ref::<AuthorizedKeyError>().unwrap();
+        assert_eq!(typed.code(), "grant_schema_stale");
+        assert!(
+            matches!(
+                typed,
+                AuthorizedKeyError::StaleSchema {
+                    seen: 2,
+                    admitted: 3,
+                    ..
+                }
+            ),
+            "{typed}"
+        );
+        assert!(typed.to_string().contains("re-issue"), "{typed}");
+    }
+
+    #[test]
+    fn a_remote_operator_grant_is_refused_as_a_stale_class_naming_re_admission() {
+        let fx = grant_fixture();
+        fx.write_raw(&format!(
+            "schema_version = 2\nprincipal_class = \"remote_operator\"\n\
+             origin_site_id = \"site:source\"\nfingerprint = \"{}\"\n\
+             public_key = \"ed25519:{}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\n\
+             label = \"old\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n",
+            fx.fingerprint, fx.public_key
+        ));
+        let error =
+            load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node).unwrap_err();
+        let typed = error.downcast_ref::<AuthorizedKeyError>().unwrap();
+        assert_eq!(typed.code(), "grant_class_stale");
+        assert!(typed.to_string().contains("re-admit"), "{typed}");
+        let inspected = inspect_authorized_keys(&fx.auth_dir, &fx.node).unwrap();
+        assert!(matches!(
+            inspected[0].state,
+            GrantFileState::Stale(AuthorizedKeyError::StaleClass { .. })
+        ));
+    }
+
+    #[test]
+    fn renewal_by_the_granter_resigns_with_a_new_expiry() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(1_000));
+        let renewer = AuthorizedBy::principal_request(&granter_fingerprint(), Some("d".repeat(64)));
+        let renewed = renew_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &granter_fingerprint(),
+            false,
+            &GrantTerms {
+                expires_at: GrantExpiry::At(5_000),
+                authorized_by: renewer,
+            },
+            &fx.node,
+        )
+        .unwrap();
+        assert_eq!(renewed.previous_expires_at, GrantExpiry::At(1_000));
+        let grant = load_verified_authorized_key_at(&fx.fingerprint, &fx.auth_dir, &fx.node, 2_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(grant.expires_at, GrantExpiry::At(5_000));
+        assert_eq!(grant.granted_by, granter_fingerprint());
+        assert_eq!(grant.created_at, "2026-01-01T00:00:00Z");
+        assert_eq!(grant.scopes, ["ryeos.execute.service.vault/list"]);
+        assert_eq!(
+            grant.authorized_by.request_digest.as_deref(),
+            Some("d".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn renewal_is_refused_for_the_grantee_and_allowed_for_the_operator() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(1_000));
+        let new_terms = terms_expiring(5_000);
+        let grantee_principal = format!("fp:{}", fx.fingerprint);
+        let error = renew_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &grantee_principal,
+            false,
+            &new_terms,
+            &fx.node,
+        )
+        .unwrap_err();
+        let typed = error.downcast_ref::<AuthorizedKeyRenewError>().unwrap();
+        assert_eq!(typed.code(), "grant_renewal_not_permitted");
+        let stranger = format!("fp:{}", "e".repeat(64));
+        assert!(
+            renew_authorized_key_toml(
+                &fx.auth_dir,
+                &fx.fingerprint,
+                &stranger,
+                false,
+                &new_terms,
+                &fx.node,
+            )
+            .is_err()
+        );
+        renew_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &stranger,
+            true,
+            &new_terms,
+            &fx.node,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_operator_grant_is_not_renewed_and_a_missing_grant_is_not_found() {
+        let fx = grant_fixture();
+        let error = renew_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &granter_fingerprint(),
+            true,
+            &terms_expiring(5_000),
+            &fx.node,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<AuthorizedKeyRenewError>()
+                .unwrap()
+                .code(),
+            "grant_not_found"
+        );
+        fx.write_operator_grant();
+        let error = renew_authorized_key_toml(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            &format!("fp:{}", fx.fingerprint),
+            true,
+            &terms_expiring(5_000),
+            &fx.node,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<AuthorizedKeyRenewError>()
+                .unwrap()
+                .code(),
+            "grant_never_expires"
+        );
+    }
+
+    #[test]
+    fn grant_expiry_text_round_trips_and_refuses_other_spellings() {
+        for expiry in [GrantExpiry::Never, GrantExpiry::At(1_800_000_000)] {
+            assert_eq!(
+                GrantExpiry::from_grant_text(&expiry.to_grant_text()).unwrap(),
+                expiry
+            );
+        }
+        for text in [
+            "",
+            "tomorrow",
+            "2026-01-01",
+            "2026-01-01T00:00:00+13:00",
+            "Never",
+        ] {
+            assert!(GrantExpiry::from_grant_text(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn authorized_by_requires_a_fingerprint_principal_and_a_hex_digest() {
+        AuthorizedBy::principal_request(&"a".repeat(64), None)
+            .validate()
+            .unwrap();
+        assert!(
+            AuthorizedBy {
+                principal: "operator".to_owned(),
+                request_digest: None
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            AuthorizedBy::principal_request(&"a".repeat(64), Some("xyz".to_owned()))
+                .validate()
+                .is_err()
         );
     }
 }

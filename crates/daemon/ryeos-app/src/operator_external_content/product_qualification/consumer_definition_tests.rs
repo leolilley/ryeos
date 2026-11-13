@@ -493,6 +493,7 @@ product_qualification_policy:
         "fixture operator",
         "fixture",
         "2026-01-01T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
     )?;

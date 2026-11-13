@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:13Z:a927d7eefcf5fbaa6ba998ad8b6c7be0ab8157f32351a3f4d1737f4875aece80:s2cXpDZeCJHKUAP5bCmL+AKjNIxrGdxkBNoAwFYGZTf3icchiCu4AZWfYCOeaugpYueRjo9m7HmLZgY+TgndCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:cd58cad10ad98f108ccfd5f870d8ac824e620b2b16f3c8b78933fb5cb580bf4a:6IulmcnH5s0eSo61nt4zC3O9vaDObhPoIT/QksHe+PgpfYpq6gRNF7+i8cJsaDeDhKYiziMH0uZVcQKhlef9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -163,6 +163,14 @@ remote); until then, attribute and cap remote work per node.
      --label "dev-machine" \
      --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
    ```
+
+   Every grant expires. Without `--lifetime-secs` it lasts the class maximum
+   in the target's signed authorization policy (`remote_node` 90 days,
+   `remote_principal` 30 days, `local_client` 365 days in the shipped
+   profiles). When it lapses the key holder receives HTTP 401
+   `grant_expired`; the principal that granted it (or the target's operator)
+   renews it with `ryeos renew-key --fingerprint <fp>`. The grantee cannot
+   renew its own grant. See [Identity model](../identity-model.md).
 
 3. **Choose scopes by operation**. Do not mix local remote-service caps
    with remote authorized-key scopes. The complete matrix is in
