@@ -8,9 +8,14 @@ use anyhow::bail;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ryeos_node_runtime::registry::BundleRegistryMutationLock;
+
+use crate::bundle_publication::consumer::{
+    CatalogPosition, CatalogRollback, validate_catalog_namespace,
+};
 
 const JOURNAL_MAX_BYTES: u64 = 1024 * 1024;
 const COMPLETION_MAX_BYTES: usize = 256 * 1024;
@@ -93,18 +98,51 @@ pub struct ActiveBundleSelection {
     pub schema: u32,
     pub selection_hash: String,
     pub installed_set_digest: String,
+    /// Highest catalog publication this node has activated a selection from,
+    /// per catalog namespace. It changes only with the selection, in the same
+    /// transaction, and never moves down.
+    pub catalog_high_water: BTreeMap<String, CatalogPosition>,
 }
 
 impl ActiveBundleSelection {
-    pub const SCHEMA: u32 = 1;
+    pub const SCHEMA: u32 = 2;
 
     fn validate(&self) -> anyhow::Result<()> {
         if self.schema != Self::SCHEMA {
             bail!("unsupported active bundle-selection schema");
         }
         require_hash("active selection", &self.selection_hash)?;
-        require_hash("active installed set", &self.installed_set_digest)
+        require_hash("active installed set", &self.installed_set_digest)?;
+        validate_high_water("active catalog high-water", &self.catalog_high_water)
     }
+}
+
+/// An active bundle-selection record of any schema but the current one. There
+/// is no reader for older records: schema 1 predates the catalog high-water.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "active_bundle_selection_schema_refused: {path} has schema {found}, but this node reads only \
+     schema {expected}, which carries the catalog high-water; with the node stopped, remove that \
+     file, and the next bundle-set update re-adopts the installed set and records the high-water"
+)]
+pub struct ActiveBundleSelectionSchemaRefused {
+    pub path: String,
+    pub found: String,
+    pub expected: u32,
+}
+
+fn validate_high_water(
+    label: &str,
+    high_water: &BTreeMap<String, CatalogPosition>,
+) -> anyhow::Result<()> {
+    if high_water.len() > 64 {
+        bail!("{label} exceeds its namespace bound");
+    }
+    for (namespace, position) in high_water {
+        validate_catalog_namespace(namespace)?;
+        position.validate()?;
+    }
+    Ok(())
 }
 
 /// Durable compare-and-swap owner for the local active selection. Staging is
@@ -139,10 +177,18 @@ impl ActiveBundleSelectionStore {
         {
             bail!("active installed-set digest disagrees with transaction predecessor");
         }
+        let current_high_water = current
+            .as_ref()
+            .map(|value| value.catalog_high_water.clone())
+            .unwrap_or_default();
+        if current_high_water != journal.old_catalog_high_water {
+            bail!("active catalog high-water disagrees with transaction predecessor");
+        }
         let next = ActiveBundleSelection {
             schema: ActiveBundleSelection::SCHEMA,
             selection_hash: journal.selection_hash.clone(),
             installed_set_digest: journal.new_installed_set_digest.clone(),
+            catalog_high_water: journal.new_catalog_high_water.clone(),
         };
         next.validate()?;
         let path = staged_selection_path(&self.app_root, &journal.transaction_id);
@@ -160,6 +206,7 @@ impl ActiveBundleSelectionStore {
             schema: ActiveBundleSelection::SCHEMA,
             selection_hash: journal.selection_hash.clone(),
             installed_set_digest: journal.new_installed_set_digest.clone(),
+            catalog_high_water: journal.new_catalog_high_water.clone(),
         };
         if self.load()?.as_ref() == Some(&expected) {
             return Ok(());
@@ -190,18 +237,22 @@ impl ActiveBundleSelectionStore {
             bail!("active bundle selection is unrelated to either transaction generation");
         }
         if current_hash == journal.expected_active_selection.as_deref()
-            && current
-                .as_ref()
-                .is_some_and(|value| value.installed_set_digest != journal.old_installed_set_digest)
+            && current.as_ref().is_some_and(|value| {
+                value.installed_set_digest != journal.old_installed_set_digest
+                    || value.catalog_high_water != journal.old_catalog_high_water
+            })
         {
-            bail!("active predecessor installed-set digest disagrees with transaction");
+            bail!(
+                "active predecessor installed-set digest or high-water disagrees with transaction"
+            );
         }
         if current_hash == Some(journal.selection_hash.as_str())
-            && current
-                .as_ref()
-                .is_some_and(|value| value.installed_set_digest != journal.new_installed_set_digest)
+            && current.as_ref().is_some_and(|value| {
+                value.installed_set_digest != journal.new_installed_set_digest
+                    || value.catalog_high_water != journal.new_catalog_high_water
+            })
         {
-            bail!("active successor installed-set digest disagrees with transaction");
+            bail!("active successor installed-set digest or high-water disagrees with transaction");
         }
         match &journal.expected_active_selection {
             Some(selection_hash) => {
@@ -209,6 +260,7 @@ impl ActiveBundleSelectionStore {
                     schema: ActiveBundleSelection::SCHEMA,
                     selection_hash: selection_hash.clone(),
                     installed_set_digest: journal.old_installed_set_digest.clone(),
+                    catalog_high_water: journal.old_catalog_high_water.clone(),
                 };
                 lillux::atomic_write_private(
                     &active_selection_path(&self.app_root),
@@ -236,9 +288,20 @@ fn load_active_selection_file(path: &Path) -> anyhow::Result<Option<ActiveBundle
         }
         Ok(_) => {}
     }
-    let value: ActiveBundleSelection = serde_json::from_slice(
+    let raw: serde_json::Value = serde_json::from_slice(
         &lillux::read_regular_file_bounded_no_follow(path, 16 * 1024)?,
     )?;
+    let schema = raw.get("schema");
+    if schema.and_then(serde_json::Value::as_u64) != Some(u64::from(ActiveBundleSelection::SCHEMA))
+    {
+        return Err(ActiveBundleSelectionSchemaRefused {
+            path: path.display().to_string(),
+            found: schema.map_or_else(|| "none".to_owned(), ToString::to_string),
+            expected: ActiveBundleSelection::SCHEMA,
+        }
+        .into());
+    }
+    let value: ActiveBundleSelection = serde_json::from_value(raw)?;
     value.validate()?;
     Ok(Some(value))
 }
@@ -363,6 +426,14 @@ pub struct BundleSetJournal {
     pub new_completion_bytes_base64: String,
     pub old_installed_set_digest: String,
     pub new_installed_set_digest: String,
+    /// The active selection's catalog high-water before and after this
+    /// transaction. The new one is written with the new selection.
+    pub old_catalog_high_water: BTreeMap<String, CatalogPosition>,
+    pub new_catalog_high_water: BTreeMap<String, CatalogPosition>,
+    /// Set only when the operator explicitly allowed an exact coordinate
+    /// below the high-water.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub catalog_rollback: Option<CatalogRollback>,
     pub actions: Vec<BundleSetAction>,
     pub phase: BundleSetPhase,
     /// Set only after startup has been permitted to execute the new selection.
@@ -432,6 +503,9 @@ pub struct StoppedBundleSetApplyRequest {
     pub new_completion_bytes: Vec<u8>,
     pub old_installed_set_digest: String,
     pub new_installed_set_digest: String,
+    pub old_catalog_high_water: BTreeMap<String, CatalogPosition>,
+    pub new_catalog_high_water: BTreeMap<String, CatalogPosition>,
+    pub catalog_rollback: Option<CatalogRollback>,
     pub actions: Vec<PreparedBundleSetAction>,
 }
 
@@ -497,7 +571,7 @@ pub fn apply_stopped_bundle_set(
 }
 
 impl BundleSetJournal {
-    pub const SCHEMA: u32 = 2;
+    pub const SCHEMA: u32 = 3;
 
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != Self::SCHEMA {
@@ -518,6 +592,7 @@ impl BundleSetJournal {
         if let Some(expected) = &self.expected_active_selection {
             require_hash("expected active selection", expected)?;
         }
+        self.validate_catalog_high_water()?;
         if self.actions.is_empty() || self.actions.len() > 1024 {
             bail!("bundle-set transaction requires a bounded nonempty action manifest");
         }
@@ -589,6 +664,43 @@ impl BundleSetJournal {
         )?;
         if self.new_selection_may_have_executed && self.phase < BundleSetPhase::Complete {
             bail!("new selection execution is permitted only after committed completion");
+        }
+        Ok(())
+    }
+
+    /// The high-water moves only up. Every namespace the predecessor held is
+    /// kept at the same or a later sequence, an equal sequence keeps the same
+    /// publication, and an allowed rollback leaves its namespace's high-water
+    /// where it was.
+    fn validate_catalog_high_water(&self) -> anyhow::Result<()> {
+        validate_high_water("old catalog high-water", &self.old_catalog_high_water)?;
+        validate_high_water("new catalog high-water", &self.new_catalog_high_water)?;
+        if self.new_catalog_high_water.is_empty() {
+            bail!("bundle-set transaction must record the catalog high-water it activates");
+        }
+        if self.expected_active_selection.is_none() && !self.old_catalog_high_water.is_empty() {
+            bail!("a catalog high-water cannot precede the first active selection");
+        }
+        for (namespace, old) in &self.old_catalog_high_water {
+            let Some(new) = self.new_catalog_high_water.get(namespace) else {
+                bail!("bundle-set transaction drops the catalog high-water for `{namespace}`");
+            };
+            if new.sequence < old.sequence
+                || (new.sequence == old.sequence
+                    && new.publication_attestation_hash != old.publication_attestation_hash)
+            {
+                bail!("bundle-set transaction lowers the catalog high-water for `{namespace}`");
+            }
+        }
+        if let Some(rollback) = &self.catalog_rollback {
+            rollback.validate()?;
+            if self.old_catalog_high_water.get(&rollback.catalog_namespace)
+                != Some(&rollback.high_water)
+                || self.new_catalog_high_water.get(&rollback.catalog_namespace)
+                    != Some(&rollback.high_water)
+            {
+                bail!("catalog rollback must keep its namespace's recorded high-water");
+            }
         }
         Ok(())
     }
@@ -787,6 +899,9 @@ fn prepare_journal_layout(
             .encode(request.new_completion_bytes),
         old_installed_set_digest: request.old_installed_set_digest,
         new_installed_set_digest: request.new_installed_set_digest,
+        old_catalog_high_water: request.old_catalog_high_water,
+        new_catalog_high_water: request.new_catalog_high_water,
+        catalog_rollback: request.catalog_rollback,
         actions,
         phase: BundleSetPhase::Prepared,
         new_selection_may_have_executed: false,
@@ -1302,6 +1417,32 @@ mod tests {
         )
     }
 
+    fn position(sequence: u64, byte: char) -> CatalogPosition {
+        CatalogPosition {
+            sequence,
+            publication_attestation_hash: hash(byte),
+        }
+    }
+
+    fn high_water(sequence: u64, byte: char) -> BTreeMap<String, CatalogPosition> {
+        BTreeMap::from([("official".to_owned(), position(sequence, byte))])
+    }
+
+    fn write_active(app_root: &Path, value: &serde_json::Value) {
+        let path = active_selection_path(app_root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+
+    fn predecessor(journal: &BundleSetJournal) -> ActiveBundleSelection {
+        ActiveBundleSelection {
+            schema: ActiveBundleSelection::SCHEMA,
+            selection_hash: journal.expected_active_selection.clone().unwrap(),
+            installed_set_digest: journal.old_installed_set_digest.clone(),
+            catalog_high_water: journal.old_catalog_high_water.clone(),
+        }
+    }
+
     fn journal(phase: BundleSetPhase) -> BundleSetJournal {
         let (old_completion_bytes_hash, old_completion_bytes_base64) = completion(b"old");
         let (new_completion_bytes_hash, new_completion_bytes_base64) = completion(b"new");
@@ -1323,6 +1464,9 @@ mod tests {
             new_completion_bytes_base64,
             old_installed_set_digest: hash('2'),
             new_installed_set_digest: hash('3'),
+            old_catalog_high_water: high_water(5, '8'),
+            new_catalog_high_water: high_water(6, '9'),
+            catalog_rollback: None,
             actions: vec![BundleSetAction {
                 bundle_name: "knowledge".to_owned(),
                 kind: BundleSetActionKind::Replace,
@@ -1407,6 +1551,106 @@ mod tests {
         let mut value = journal(BundleSetPhase::Prepared);
         assert!(value.advance(BundleSetPhase::Admitted).is_err());
         value.advance(BundleSetPhase::Materialized).unwrap();
+    }
+
+    #[test]
+    fn schema_1_active_selection_is_refused_with_its_cure() {
+        let root = tempfile::tempdir().unwrap();
+        write_active(
+            root.path(),
+            &serde_json::json!({
+                "schema": 1,
+                "selection_hash": hash('c'),
+                "installed_set_digest": hash('2'),
+            }),
+        );
+        let error = ActiveBundleSelectionStore::new(root.path())
+            .load()
+            .unwrap_err();
+        let refusal = error
+            .downcast_ref::<ActiveBundleSelectionSchemaRefused>()
+            .expect("typed schema refusal");
+        assert_eq!(refusal.found, "1");
+        assert_eq!(refusal.expected, ActiveBundleSelection::SCHEMA);
+        let message = error.to_string();
+        assert!(message.starts_with("active_bundle_selection_schema_refused:"));
+        assert!(message.contains("remove that file"));
+    }
+
+    #[test]
+    fn apply_writes_high_water() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = journal(BundleSetPhase::Prepared);
+        journal.validate().unwrap();
+        write_active(
+            root.path(),
+            &serde_json::to_value(predecessor(&journal)).unwrap(),
+        );
+        let store = ActiveBundleSelectionStore::new(root.path());
+        store.stage(&journal).unwrap();
+        assert_eq!(
+            store.load().unwrap().unwrap().catalog_high_water,
+            high_water(5, '8'),
+            "staging must not publish the new high-water"
+        );
+        store.commit_new(&journal).unwrap();
+        let active = store.load().unwrap().unwrap();
+        assert_eq!(active.selection_hash, journal.selection_hash);
+        assert_eq!(active.catalog_high_water, high_water(6, '9'));
+
+        store.restore_old(&journal).unwrap();
+        assert_eq!(store.load().unwrap().unwrap(), predecessor(&journal));
+    }
+
+    #[test]
+    fn stage_refuses_a_predecessor_with_another_high_water() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = journal(BundleSetPhase::Prepared);
+        let mut current = predecessor(&journal);
+        current.catalog_high_water = high_water(7, '7');
+        write_active(root.path(), &serde_json::to_value(current).unwrap());
+        let error = ActiveBundleSelectionStore::new(root.path())
+            .stage(&journal)
+            .unwrap_err();
+        assert!(error.to_string().contains("high-water"));
+    }
+
+    #[test]
+    fn journal_never_lowers_a_high_water() {
+        let mut lower = journal(BundleSetPhase::Prepared);
+        lower.new_catalog_high_water = high_water(4, '9');
+        assert!(lower.validate().is_err());
+
+        let mut equivocal = journal(BundleSetPhase::Prepared);
+        equivocal.new_catalog_high_water = high_water(5, '9');
+        assert!(equivocal.validate().is_err());
+
+        let mut dropped = journal(BundleSetPhase::Prepared);
+        dropped.new_catalog_high_water = BTreeMap::from([("other".to_owned(), position(1, '9'))]);
+        assert!(dropped.validate().is_err());
+
+        let mut unrecorded = journal(BundleSetPhase::Prepared);
+        unrecorded.new_catalog_high_water.clear();
+        assert!(unrecorded.validate().is_err());
+    }
+
+    #[test]
+    fn journal_records_an_allowed_rollback_at_the_kept_high_water() {
+        let mut value = journal(BundleSetPhase::Prepared);
+        value.new_catalog_high_water = value.old_catalog_high_water.clone();
+        value.catalog_rollback = Some(CatalogRollback {
+            catalog_namespace: "official".into(),
+            high_water: position(5, '8'),
+            selected: position(3, '4'),
+        });
+        value.validate().unwrap();
+        let round_trip: BundleSetJournal =
+            serde_json::from_slice(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(round_trip, value);
+
+        let mut moved = value.clone();
+        moved.new_catalog_high_water = high_water(6, '9');
+        assert!(moved.validate().is_err());
     }
 
     #[test]

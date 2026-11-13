@@ -15,6 +15,7 @@ use ryeos_bundle_publication_contract::{
     MigrationDecision, MigrationRequirement, NodeBundleSelection, SubstrateRelease,
 };
 use ryeos_state::objects::Attestation;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -334,6 +335,179 @@ pub struct ResolvedSetCoordinate {
     pub set_hash: String,
 }
 
+/// One signed catalog publication's place in its namespace's sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPosition {
+    pub sequence: u64,
+    pub publication_attestation_hash: String,
+}
+
+impl CatalogPosition {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.publication_attestation_hash.len() != 64
+            || !self
+                .publication_attestation_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("catalog position publication attestation must be a lowercase 64-hex digest");
+        }
+        Ok(())
+    }
+}
+
+/// An exact catalog coordinate below the node's high-water that the operator
+/// explicitly allowed. It is recorded with the update, never inferred.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogRollback {
+    pub catalog_namespace: String,
+    pub high_water: CatalogPosition,
+    pub selected: CatalogPosition,
+}
+
+impl CatalogRollback {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_catalog_namespace(&self.catalog_namespace)?;
+        self.high_water.validate()?;
+        self.selected.validate()?;
+        if self.selected.sequence >= self.high_water.sequence {
+            bail!("catalog rollback must select a sequence below the high-water");
+        }
+        Ok(())
+    }
+
+    /// The refusal this move would have met without explicit permission.
+    pub fn refusal(&self) -> CatalogRollbackRefusal {
+        CatalogRollbackRefusal::Rollback {
+            catalog_namespace: self.catalog_namespace.clone(),
+            high_water_sequence: self.high_water.sequence,
+            high_water_publication_attestation_hash: self
+                .high_water
+                .publication_attestation_hash
+                .clone(),
+            served_sequence: self.selected.sequence,
+            served_publication_attestation_hash: self.selected.publication_attestation_hash.clone(),
+        }
+    }
+}
+
+pub fn validate_catalog_namespace(value: &str) -> anyhow::Result<()> {
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_whitespace) {
+        bail!("catalog namespace is empty, oversized, or contains whitespace");
+    }
+    Ok(())
+}
+
+/// Why a signed catalog publication was refused against the node's
+/// high-water for its namespace.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CatalogRollbackRefusal {
+    #[error(
+        "catalog_rollback_refused: catalog `{catalog_namespace}` served publication sequence \
+         {served_sequence} ({served_publication_attestation_hash}), below this node's \
+         high-water sequence {high_water_sequence} ({high_water_publication_attestation_hash}); \
+         update from a catalog source that serves sequence {high_water_sequence} or later, or \
+         deploy the older coordinate deliberately by naming it exactly with \
+         --allow-catalog-rollback"
+    )]
+    Rollback {
+        catalog_namespace: String,
+        high_water_sequence: u64,
+        high_water_publication_attestation_hash: String,
+        served_sequence: u64,
+        served_publication_attestation_hash: String,
+    },
+    #[error(
+        "catalog_equivocation_refused: catalog `{catalog_namespace}` served publication \
+         {served_publication_attestation_hash} at sequence {sequence}, but this node already \
+         activated publication {high_water_publication_attestation_hash} at that sequence; the \
+         publisher signed two publications for one sequence, so freeze the namespace in \
+         bundle-publication policy and review the publisher's trust before updating from it"
+    )]
+    Equivocation {
+        catalog_namespace: String,
+        sequence: u64,
+        high_water_publication_attestation_hash: String,
+        served_publication_attestation_hash: String,
+    },
+}
+
+impl CatalogRollbackRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Rollback { .. } => "catalog_rollback_refused",
+            Self::Equivocation { .. } => "catalog_equivocation_refused",
+        }
+    }
+}
+
+/// What activating one catalog publication does to its namespace's
+/// high-water. The high-water never moves down: an allowed rollback keeps it
+/// and records the move instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogAdmission {
+    pub high_water: CatalogPosition,
+    pub rollback: Option<CatalogRollback>,
+}
+
+/// Compare a served publication with the namespace's high-water. A lower
+/// sequence is admitted only with `allow_rollback`; the same sequence with a
+/// different publication is equivocation and is never admitted.
+pub fn admit_catalog_position(
+    catalog_namespace: &str,
+    high_water: Option<&CatalogPosition>,
+    served: CatalogPosition,
+    allow_rollback: bool,
+) -> Result<CatalogAdmission, CatalogRollbackRefusal> {
+    let Some(high_water) = high_water else {
+        return Ok(CatalogAdmission {
+            high_water: served,
+            rollback: None,
+        });
+    };
+    if served.sequence == high_water.sequence
+        && served.publication_attestation_hash != high_water.publication_attestation_hash
+    {
+        return Err(CatalogRollbackRefusal::Equivocation {
+            catalog_namespace: catalog_namespace.to_owned(),
+            sequence: served.sequence,
+            high_water_publication_attestation_hash: high_water
+                .publication_attestation_hash
+                .clone(),
+            served_publication_attestation_hash: served.publication_attestation_hash,
+        });
+    }
+    if served.sequence >= high_water.sequence {
+        return Ok(CatalogAdmission {
+            high_water: served,
+            rollback: None,
+        });
+    }
+    let rollback = CatalogRollback {
+        catalog_namespace: catalog_namespace.to_owned(),
+        high_water: high_water.clone(),
+        selected: served,
+    };
+    if !allow_rollback {
+        return Err(rollback.refusal());
+    }
+    Ok(CatalogAdmission {
+        high_water: high_water.clone(),
+        rollback: Some(rollback),
+    })
+}
+
+/// A verified set coordinate with its catalog publication's sequence and the
+/// high-water it leaves once activated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogResolution {
+    pub coordinate: ResolvedSetCoordinate,
+    pub catalog_publication_sequence: u64,
+    pub admission: CatalogAdmission,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleFetchRequest {
     pub bundle_name: String,
@@ -402,14 +576,18 @@ pub struct SelectionAdmissionContext<'a> {
     pub active_selection: Option<&'a str>,
 }
 
+/// Resolve one set channel from an authenticated catalog head. `high_water` is
+/// the node's high-water for this namespace; a head below it, or a different
+/// publication at the same sequence, is refused. A channel never rolls back.
 pub fn resolve_set_channel(
     publication_attestation_hash: &str,
     catalog_namespace: &str,
     set_name: &str,
     channel: &str,
+    high_water: Option<&CatalogPosition>,
     objects: &impl PublicationObjectReader,
     policy: &(impl ConsumerPublicationPolicy + ?Sized),
-) -> anyhow::Result<ResolvedSetCoordinate> {
+) -> anyhow::Result<CatalogResolution> {
     let publication_attestation = read_attestation(objects, publication_attestation_hash)?;
     verify_publisher_attestation(
         policy,
@@ -422,6 +600,15 @@ pub fn resolve_set_channel(
     if publication.catalog_namespace != catalog_namespace {
         bail!("catalog publication belongs to a different namespace");
     }
+    let admission = admit_catalog_position(
+        catalog_namespace,
+        high_water,
+        CatalogPosition {
+            sequence: publication.sequence,
+            publication_attestation_hash: publication_attestation_hash.to_owned(),
+        },
+        false,
+    )?;
     let snapshot = BundleCatalogSnapshot::from_current_value(&read_exact(
         objects,
         &publication.snapshot_hash,
@@ -439,24 +626,31 @@ pub fn resolve_set_channel(
     if set_attestation.issuer != snapshot.publisher {
         bail!("curated set issuer and catalog publisher disagree");
     }
-    Ok(ResolvedSetCoordinate {
-        catalog_publication_attestation_hash: publication_attestation_hash.into(),
-        catalog_publication_hash: publication_hash,
-        catalog_snapshot_hash: publication.snapshot_hash,
-        set_attestation_hash: selected.set_attestation_hash.clone(),
-        set_hash: set_attestation.subject_hash,
+    Ok(CatalogResolution {
+        coordinate: ResolvedSetCoordinate {
+            catalog_publication_attestation_hash: publication_attestation_hash.into(),
+            catalog_publication_hash: publication_hash,
+            catalog_snapshot_hash: publication.snapshot_hash,
+            set_attestation_hash: selected.set_attestation_hash.clone(),
+            set_hash: set_attestation.subject_hash,
+        },
+        catalog_publication_sequence: publication.sequence,
+        admission,
     })
 }
 
 /// Verify a caller-supplied immutable coordinate without reintroducing a
 /// mutable set/channel lookup. Every edge must be present in the exact signed
-/// catalog publication and snapshot.
+/// catalog publication and snapshot. A publication below `high_water` is
+/// admitted only with `allow_rollback`, and the admission records it.
 pub fn verify_exact_coordinate(
     coordinate: &ResolvedSetCoordinate,
     catalog_namespace: &str,
+    high_water: Option<&CatalogPosition>,
+    allow_rollback: bool,
     objects: &impl PublicationObjectReader,
     policy: &(impl ConsumerPublicationPolicy + ?Sized),
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CatalogResolution> {
     let publication_attestation =
         read_attestation(objects, &coordinate.catalog_publication_attestation_hash)?;
     verify_publisher_attestation(
@@ -476,6 +670,15 @@ pub fn verify_exact_coordinate(
     {
         bail!("exact catalog coordinate disagrees with publication");
     }
+    let admission = admit_catalog_position(
+        catalog_namespace,
+        high_water,
+        CatalogPosition {
+            sequence: publication.sequence,
+            publication_attestation_hash: coordinate.catalog_publication_attestation_hash.clone(),
+        },
+        allow_rollback,
+    )?;
     let snapshot = BundleCatalogSnapshot::from_current_value(&read_exact(
         objects,
         &coordinate.catalog_snapshot_hash,
@@ -495,7 +698,11 @@ pub fn verify_exact_coordinate(
     {
         bail!("exact curated-set coordinate disagrees with publisher attestation");
     }
-    Ok(())
+    Ok(CatalogResolution {
+        coordinate: coordinate.clone(),
+        catalog_publication_sequence: publication.sequence,
+        admission,
+    })
 }
 
 pub fn verify_curated_set(
@@ -911,6 +1118,98 @@ mod tests {
                 .to_string()
                 .contains("core")
         );
+    }
+
+    fn position(sequence: u64, byte: char) -> CatalogPosition {
+        CatalogPosition {
+            sequence,
+            publication_attestation_hash: hash(byte),
+        }
+    }
+
+    #[test]
+    fn first_resolution_records_the_served_position() {
+        let admission = admit_catalog_position("official", None, position(4, 'a'), false).unwrap();
+        assert_eq!(admission.high_water, position(4, 'a'));
+        assert_eq!(admission.rollback, None);
+    }
+
+    #[test]
+    fn channel_resolution_refuses_older_sequence() {
+        let refusal =
+            admit_catalog_position("official", Some(&position(5, 'a')), position(4, 'b'), false)
+                .unwrap_err();
+        assert_eq!(refusal.code(), "catalog_rollback_refused");
+        assert_eq!(
+            refusal,
+            CatalogRollbackRefusal::Rollback {
+                catalog_namespace: "official".into(),
+                high_water_sequence: 5,
+                high_water_publication_attestation_hash: hash('a'),
+                served_sequence: 4,
+                served_publication_attestation_hash: hash('b'),
+            }
+        );
+        let message = refusal.to_string();
+        assert!(message.starts_with("catalog_rollback_refused:"));
+        assert!(message.contains("--allow-catalog-rollback"));
+    }
+
+    #[test]
+    fn channel_resolution_refuses_equal_sequence_other_hash() {
+        for allow_rollback in [false, true] {
+            let refusal = admit_catalog_position(
+                "official",
+                Some(&position(5, 'a')),
+                position(5, 'b'),
+                allow_rollback,
+            )
+            .unwrap_err();
+            assert_eq!(refusal.code(), "catalog_equivocation_refused");
+            assert!(
+                refusal
+                    .to_string()
+                    .starts_with("catalog_equivocation_refused:")
+            );
+        }
+    }
+
+    #[test]
+    fn channel_resolution_accepts_newer_and_equal_same_hash() {
+        let newer =
+            admit_catalog_position("official", Some(&position(5, 'a')), position(6, 'b'), false)
+                .unwrap();
+        assert_eq!(newer.high_water, position(6, 'b'));
+        assert_eq!(newer.rollback, None);
+
+        let same =
+            admit_catalog_position("official", Some(&position(5, 'a')), position(5, 'a'), false)
+                .unwrap();
+        assert_eq!(same.high_water, position(5, 'a'));
+        assert_eq!(same.rollback, None);
+    }
+
+    #[test]
+    fn exact_coordinate_rollback_needs_explicit_allow() {
+        assert!(
+            admit_catalog_position("official", Some(&position(5, 'a')), position(3, 'b'), false)
+                .is_err()
+        );
+        let allowed =
+            admit_catalog_position("official", Some(&position(5, 'a')), position(3, 'b'), true)
+                .unwrap();
+        assert_eq!(allowed.high_water, position(5, 'a'));
+        let rollback = allowed.rollback.unwrap();
+        assert_eq!(
+            rollback,
+            CatalogRollback {
+                catalog_namespace: "official".into(),
+                high_water: position(5, 'a'),
+                selected: position(3, 'b'),
+            }
+        );
+        rollback.validate().unwrap();
+        assert_eq!(rollback.refusal().code(), "catalog_rollback_refused");
     }
 
     #[test]
