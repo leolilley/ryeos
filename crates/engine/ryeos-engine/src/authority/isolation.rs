@@ -12885,7 +12885,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("unsupported node isolation policy version 9"),
+            error.contains(&format!(
+                "unsupported node isolation policy version {}",
+                ISOLATION_POLICY_VERSION - 1
+            )),
             "{error}"
         );
     }

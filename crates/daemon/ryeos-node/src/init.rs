@@ -1948,9 +1948,9 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
         &ryeos_node_runtime::state_lock::default_lock_path(app_root),
     )?;
     state_lock.ensure_protects_app_root(app_root)?;
-    let config =
-        lillux::PinnedDirectory::open(&app_root.join(ryeos_engine::AI_DIR).join("config"))?
-            .context("test fixture operator configuration is absent")?;
+    let config = lillux::PinnedDirectory::open(&app_root.join(ryeos_engine::AI_DIR))?
+        .context("test fixture app state is absent")?
+        .open_or_create_child(OsStr::new("config"), 0o700)?;
     let onboarding = config.open_or_create_child(OsStr::new("onboarding"), 0o700)?;
     // An earlier completion is evidence of an existing fixture incarnation.
     // Absence of its issuance must refuse through the real issuer, not turn a
