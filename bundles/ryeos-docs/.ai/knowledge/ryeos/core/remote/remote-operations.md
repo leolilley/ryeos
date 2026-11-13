@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-10-22T05:18:30Z:c9facce46c2322fef77081b27eb3582594766d5179a082ca9ec0ff3b29aa5fde:HQbHoH8HoRO0HGhZxYI7COZ0dJqgGwudYMvU9Yv2/Buw6I5YehgIaiNIUjNkNUcSsTEQFWmyWxadgrQuMMb6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:33:54Z:f5f823711ee3c91fda13c0937c7df17cbbd84e0b60d8dfb46bdc9d36ad48b1f2:SWdQlBeQYYUfp3yK44/PwnCRwVKdOKNk7zrCqv/IFVIp4mzZYPWcN2Kxv0PHc9ZhlObg3XQ3Iria4aLAU5FNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.7.6"
+version: "3.7.7"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -40,6 +40,9 @@ untrusted tenants.
 - Granting the local `remote.admin` capability is operator-level access
   to high-impact remote orchestrators in v1. It does not replace
   target-node authorized-key scopes.
+- A remote's pinned identity (`signing_key`, `principal_id`,
+  `vault_fingerprint`) comes only from the node's own remotes file. A
+  project cannot supply or override it: see [Configuration](#configuration).
 
 ## Identity Requirements
 
@@ -655,3 +658,14 @@ remotes:
         - "target/"
         - "*.pyc"
 ```
+
+Only the node holds remotes. A project's own
+`<project>/.ai/config/remotes/remotes.yaml` can neither define a remote nor
+override one of the node's. If any entry in it names trust material
+(`signing_key`, `principal_id`, `fingerprint`, `vault_fingerprint` or
+`descriptor`), every remote operation that names that project is refused
+with `project_remote_trust_material` (HTTP 409). The refusal lists each
+entry and field it found, and names the cure: remove those entries from the
+project file and configure the remote on the node with
+`ryeos remote configure <name> --url <https-url>`. Other entries in a
+project remotes file are listed as invalid by `remote list` and never used.

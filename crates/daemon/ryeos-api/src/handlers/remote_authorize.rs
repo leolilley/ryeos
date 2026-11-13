@@ -17,9 +17,8 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// Optional local project path. When supplied, project-level remotes are
-    /// layered over user-level so a project can authorize against its own
-    /// configured remote.
+    /// Optional local project path. When supplied, the project's remotes
+    /// file is checked; it can neither define nor override a remote.
     #[serde(default, alias = "project")]
     pub project_path: Option<PathBuf>,
     /// Pass-through for the CLI's `--no-project` flag.

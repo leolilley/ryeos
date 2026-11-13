@@ -2,6 +2,14 @@
 //!
 //! Remotes are named connection targets stored in YAML. The config is
 //! loaded from `<app_root>/.ai/config/remotes/remotes.yaml`.
+//!
+//! A remote entry pins the remote node's identity (`signing_key`,
+//! `principal_id`, `vault_fingerprint`). Only the node's own remotes file may
+//! hold that trust material. A project's `.ai/config/remotes/remotes.yaml`
+//! that names any of it is refused with [`PROJECT_REMOTE_TRUST_MATERIAL`];
+//! the cure is `ryeos remote configure` on the node. Because every usable
+//! remote needs a pinned key, a project layer can no longer define or
+//! override a remote; its other entries are reported as invalid.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +19,23 @@ use base64::Engine as _;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
+use crate::handler_error::HandlerError;
+
 pub use ryeos_state::project_sync::ProjectSyncScope;
+
+/// Stable refusal code: a project's remotes file names remote trust
+/// material, which only the node's own remotes config may hold.
+pub const PROJECT_REMOTE_TRUST_MATERIAL: &str = "project_remote_trust_material";
+
+/// Remote entry fields that pin a remote node's identity. A project layer
+/// may neither supply nor override any of them.
+pub const REMOTE_TRUST_FIELDS: &[&str] = &[
+    "signing_key",
+    "principal_id",
+    "fingerprint",
+    "vault_fingerprint",
+    "descriptor",
+];
 
 /// Provider/import descriptor for a remote RyeOS node.
 ///
@@ -129,9 +153,7 @@ pub struct RemoteConfig {
     /// Canonical local project path -> remote project binding.
     ///
     /// These bindings are operator-local and are written only to the
-    /// user/operator remotes file. Project-level remotes may be layered for
-    /// read-only remote definition, but project-to-remote bindings still
-    /// live here.
+    /// node's own remotes file, like every other remote field.
     #[serde(default)]
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub project_bindings: HashMap<String, RemoteProjectBinding>,
@@ -269,8 +291,7 @@ pub fn remotes_config_path(root: &Path) -> PathBuf {
 /// `site_id` from an older config) is skipped with a warning to
 /// stderr rather than failing the whole file load. Operators are
 /// guided to repair such entries via `ryeos remote configure`, but
-/// stale entries must not block listing or using other valid remotes,
-/// including project-level overrides layered on top.
+/// stale entries must not block listing or using other valid remotes.
 pub fn load_remotes(app_root: &Path) -> Result<HashMap<String, RemoteConfig>> {
     let path = remotes_config_path(app_root);
     load_remotes_at(&path)
@@ -279,20 +300,21 @@ pub fn load_remotes(app_root: &Path) -> Result<HashMap<String, RemoteConfig>> {
 /// Load a remotes file from an explicit absolute path. Same per-entry
 /// resilience as [`load_remotes`].
 pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
-    Ok(load_remotes_at_report(path, RemoteConfigScope::Operator)?
+    Ok(load_remotes_at_report(path)?
         .remotes
         .into_iter()
         .map(|(name, loaded)| (name, loaded.config))
         .collect())
 }
 
-fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<RemotesLoadReport> {
+/// Load the node's own remotes file at `path`.
+fn load_remotes_at_report(path: &Path) -> Result<RemotesLoadReport> {
     if !path.exists() {
         return Ok(RemotesLoadReport::default());
     }
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
-    parse_remotes_report(&content, path, scope)
+    parse_remotes_report(&content, path)
 }
 
 /// Upper bound on a project-layer remotes file read through a retained
@@ -322,14 +344,106 @@ fn load_project_remotes_report_under_authority(
         .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
     let content = String::from_utf8(bytes)
         .with_context(|| format!("remotes config is not UTF-8: {}", path.display()))?;
-    parse_remotes_report(&content, &path, RemoteConfigScope::Project { root })
+    parse_project_remotes_report(&content, &path, root)
 }
 
-fn parse_remotes_report(
+/// Read a project-layer remotes file.
+///
+/// A project may not supply or override remote trust material: any entry
+/// naming a field in [`REMOTE_TRUST_FIELDS`] refuses the whole load with
+/// [`PROJECT_REMOTE_TRUST_MATERIAL`]. Every other entry cannot form a usable
+/// remote (a remote needs a pinned key) and is reported as invalid, so the
+/// returned report never carries remotes.
+fn parse_project_remotes_report(
     content: &str,
     path: &Path,
-    scope: RemoteConfigScope,
+    root: PathBuf,
 ) -> Result<RemotesLoadReport> {
+    let file: RemotesFile = serde_yaml::from_str(content)
+        .with_context(|| format!("invalid remotes config: {}", path.display()))?;
+    let mut names: Vec<&String> = file.remotes.keys().collect();
+    names.sort();
+    let mut offenders: Vec<(String, Vec<&'static str>)> = Vec::new();
+    for name in &names {
+        let raw = &file.remotes[*name];
+        let fields: Vec<&'static str> = REMOTE_TRUST_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| raw.get(*field).is_some())
+            .collect();
+        if !fields.is_empty() {
+            offenders.push(((*name).clone(), fields));
+        }
+    }
+    if !offenders.is_empty() {
+        return Err(project_remote_trust_refusal(path, &offenders));
+    }
+    let scope = RemoteConfigScope::Project { root };
+    let mut report = RemotesLoadReport::default();
+    for name in names {
+        report.invalid.push(InvalidRemote {
+            name: name.clone(),
+            scope: scope.clone(),
+            config_path: path.to_path_buf(),
+            error: "a project remotes file cannot define a remote: a remote needs a pinned node key, and only the node's own remotes config may hold one".to_string(),
+            url: None,
+            repair_hint: format!(
+                "remove '{}' from {} and configure it on the node with `ryeos remote configure {} --url <https-url>`",
+                name,
+                path.display(),
+                name,
+            ),
+        });
+    }
+    Ok(report)
+}
+
+/// The typed refusal for a project remotes file that names trust material.
+fn project_remote_trust_refusal(
+    path: &Path,
+    offenders: &[(String, Vec<&'static str>)],
+) -> anyhow::Error {
+    let names: Vec<&str> = offenders.iter().map(|(name, _)| name.as_str()).collect();
+    let remotes: Vec<serde_json::Value> = offenders
+        .iter()
+        .map(|(name, fields)| serde_json::json!({ "name": name, "fields": fields }))
+        .collect();
+    let cures: Vec<String> = offenders
+        .iter()
+        .map(|(name, _)| format!("ryeos remote configure {name} --url <https-url>"))
+        .collect();
+    let message = format!(
+        "{PROJECT_REMOTE_TRUST_MATERIAL}: project remotes file {} names remote trust material for [{}]; a project may not supply or override a remote's signing_key, principal_id, fingerprint, vault_fingerprint or descriptor. Remove those entries from the project file and configure the remote on the node with `ryeos remote configure <name> --url <https-url>`",
+        path.display(),
+        names.join(", "),
+    );
+    anyhow::Error::new(HandlerError::Structured {
+        code: PROJECT_REMOTE_TRUST_MATERIAL.to_string(),
+        status: 409,
+        body: serde_json::json!({
+            "code": PROJECT_REMOTE_TRUST_MATERIAL,
+            "message": message,
+            "config_path": path.display().to_string(),
+            "remotes": remotes,
+            "cures": cures,
+        }),
+    })
+    .context(message)
+}
+
+/// Keep a typed refusal from a remotes load (such as
+/// [`PROJECT_REMOTE_TRUST_MATERIAL`]); map any other failure with `fallback`.
+pub fn typed_load_error_or(
+    error: anyhow::Error,
+    fallback: impl FnOnce(anyhow::Error) -> HandlerError,
+) -> HandlerError {
+    match crate::handler_error::extract_handler_error(&error) {
+        Some(typed @ HandlerError::Structured { .. }) => typed,
+        _ => fallback(error),
+    }
+}
+
+fn parse_remotes_report(content: &str, path: &Path) -> Result<RemotesLoadReport> {
     let mut report = RemotesLoadReport::default();
     let file: RemotesFile = serde_yaml::from_str(content)
         .with_context(|| format!("invalid remotes config: {}", path.display()))?;
@@ -349,12 +463,6 @@ fn parse_remotes_report(
                     name, cfg.name,
                 )));
             }
-            if matches!(scope, RemoteConfigScope::Project { .. }) && !cfg.project_bindings.is_empty()
-            {
-                return Err(serde_yaml::Error::custom(
-                    "project remotes must not contain project_bindings; run `ryeos remote bind-project` to create operator-local bindings",
-                ));
-            }
             cfg.validate()
                 .map_err(|e| serde_yaml::Error::custom(format!("{e:#}")))?;
             Ok(cfg)
@@ -364,7 +472,7 @@ fn parse_remotes_report(
                     name,
                     LoadedRemote {
                         config: cfg,
-                        scope: scope.clone(),
+                        scope: RemoteConfigScope::Operator,
                         config_path: path.to_path_buf(),
                     },
                 );
@@ -379,19 +487,13 @@ fn parse_remotes_report(
                     name,
                     path.display(),
                 );
-                let repair_hint = match &scope {
-                    RemoteConfigScope::Project { .. } => format!(
-                        "edit or remove {} and re-sign the project config",
-                        path.display()
-                    ),
-                    RemoteConfigScope::Operator => match diagnostic_url.as_deref() {
-                        Some(url) => format!("run `ryeos remote configure {} --url {}`", name, url),
-                        None => format!("run `ryeos remote configure {} --url <https-url>`", name),
-                    },
+                let repair_hint = match diagnostic_url.as_deref() {
+                    Some(url) => format!("run `ryeos remote configure {} --url {}`", name, url),
+                    None => format!("run `ryeos remote configure {} --url <https-url>`", name),
                 };
                 report.invalid.push(InvalidRemote {
                     name,
-                    scope: scope.clone(),
+                    scope: RemoteConfigScope::Operator,
                     config_path: path.to_path_buf(),
                     error: e.to_string(),
                     url: diagnostic_url,
@@ -403,13 +505,14 @@ fn parse_remotes_report(
     Ok(report)
 }
 
-/// Load remotes layered project-over-user.
+/// Load the node's remotes, checking an optional project layer.
 ///
-/// Loads the operator-level remotes file from `app_root`, then if
-/// `project_path` is provided, loads project-level remotes from
-/// `<project>/.ai/config/remotes/remotes.yaml` and merges them on top
-/// (project entries win on name collision). Either side missing or
-/// individually malformed does not prevent the other from being used.
+/// Loads the operator-level remotes file from `app_root`. If `project_path`
+/// is provided and `<project>/.ai/config/remotes/remotes.yaml` exists, it is
+/// checked: an entry naming remote trust material refuses the load with
+/// [`PROJECT_REMOTE_TRUST_MATERIAL`], and any other entry is a diagnostic.
+/// A project layer never supplies or overrides a remote. Individually
+/// malformed node entries do not prevent the others from being used.
 pub fn load_remotes_layered(
     app_root: &Path,
     project_path: Option<&Path>,
@@ -427,17 +530,18 @@ pub fn load_remotes_layered_report(
     app_root: &Path,
     project_path: Option<&Path>,
 ) -> Result<RemotesLoadReport> {
-    let mut report =
-        load_remotes_at_report(&remotes_config_path(app_root), RemoteConfigScope::Operator)?;
+    let mut report = load_remotes_at_report(&remotes_config_path(app_root))?;
     if let Some(project) = project_path {
         let canonical_project = canonical_local_project_path(project)?;
-        let project_report = load_remotes_at_report(
-            &remotes_config_path(&canonical_project),
-            RemoteConfigScope::Project {
-                root: canonical_project,
-            },
-        )?;
-        layer_project_remotes(&mut report, project_report);
+        let project_path = remotes_config_path(&canonical_project);
+        if !is_node_root(app_root, &canonical_project) && project_path.exists() {
+            let content = std::fs::read_to_string(&project_path).with_context(|| {
+                format!("failed to read remotes config: {}", project_path.display())
+            })?;
+            let project_report =
+                parse_project_remotes_report(&content, &project_path, canonical_project)?;
+            layer_project_remotes(&mut report, project_report);
+        }
     }
     Ok(report)
 }
@@ -453,13 +557,23 @@ pub fn load_remotes_layered_report_under_project_authority(
     app_root: &Path,
     project: Option<&lillux::PinnedDirectory>,
 ) -> Result<RemotesLoadReport> {
-    let mut report =
-        load_remotes_at_report(&remotes_config_path(app_root), RemoteConfigScope::Operator)?;
-    if let Some(project) = project {
+    let mut report = load_remotes_at_report(&remotes_config_path(app_root))?;
+    if let Some(project) = project
+        && !is_node_root(app_root, project.path())
+    {
         let project_report = load_project_remotes_report_under_authority(project)?;
         layer_project_remotes(&mut report, project_report);
     }
     Ok(report)
+}
+
+/// Whether `project` is the node's own root, whose remotes file is the
+/// node's and was already loaded as the operator layer.
+fn is_node_root(app_root: &Path, project: &Path) -> bool {
+    match app_root.canonicalize() {
+        Ok(app_root) => app_root == project,
+        Err(_) => app_root == project,
+    }
 }
 
 /// [`load_remotes_layered_report_under_project_authority`] reduced to the
@@ -477,21 +591,11 @@ pub fn load_remotes_layered_under_project_authority(
     )
 }
 
-/// Merge a project-layer report over the operator layer: project entries win
-/// on name collision but keep the operator-local project bindings, which a
-/// project layer may never declare.
+/// Add a project layer's diagnostics to the node's report. A project layer
+/// never supplies or overrides a remote (see [`parse_project_remotes_report`]),
+/// so only its invalid entries carry over.
 fn layer_project_remotes(report: &mut RemotesLoadReport, project_report: RemotesLoadReport) {
-    let user_bindings: HashMap<String, HashMap<String, RemoteProjectBinding>> = report
-        .remotes
-        .iter()
-        .map(|(name, loaded)| (name.clone(), loaded.config.project_bindings.clone()))
-        .collect();
-    for (name, mut loaded) in project_report.remotes {
-        if let Some(bindings) = user_bindings.get(&name) {
-            loaded.config.project_bindings = bindings.clone();
-        }
-        report.remotes.insert(name, loaded);
-    }
+    debug_assert!(project_report.remotes.is_empty());
     report.invalid.extend(project_report.invalid);
 }
 
@@ -917,7 +1021,7 @@ remotes:
         )
         .unwrap();
 
-        let report = load_remotes_at_report(&path, RemoteConfigScope::Operator).unwrap();
+        let report = load_remotes_at_report(&path).unwrap();
         assert!(report.remotes.is_empty());
         assert_eq!(report.invalid.len(), 1);
         assert!(report.invalid[0].url.is_none());
@@ -951,7 +1055,7 @@ remotes:
         )
         .unwrap();
 
-        let report = load_remotes_at_report(&path, RemoteConfigScope::Operator).unwrap();
+        let report = load_remotes_at_report(&path).unwrap();
         assert!(report.remotes.is_empty());
         assert_eq!(report.invalid.len(), 1);
         assert!(report.invalid[0].url.is_none());
@@ -1027,147 +1131,239 @@ remotes:
         assert_eq!(resolved.sync_scope, ProjectSyncScope::AiOnly);
     }
 
+    fn write_project_remotes(project_root: &Path, content: &str) -> PathBuf {
+        let path = remotes_config_path(project_root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn node_remote(name: &str, seed: u8) -> RemoteConfig {
+        RemoteConfig {
+            name: name.into(),
+            url: format!("https://{name}.node.example.com"),
+            principal_id: test_principal_id(seed),
+            signing_key: test_signing_key(seed),
+            site_id: format!("site:{name}"),
+            vault_fingerprint: format!("sha256:{name}"),
+            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            project_bindings: HashMap::new(),
+        }
+    }
+
+    fn structured_refusal(err: &anyhow::Error) -> (String, u16, serde_json::Value) {
+        match crate::handler_error::extract_handler_error(err) {
+            Some(HandlerError::Structured { code, status, body }) => (code, status, body),
+            other => panic!("expected a structured refusal, got {other:?} from {err:#}"),
+        }
+    }
+
     #[test]
-    fn load_remotes_layered_accepts_project_remotes_with_category() {
+    fn project_remote_cannot_override_node_signing_key() {
         let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project_root.path().join(ryeos_engine::AI_DIR)).unwrap();
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
+        let project_root_path = project_root.path().canonicalize().unwrap();
+        let mut node = HashMap::new();
+        node.insert("example".to_string(), node_remote("example", 3));
+        save_remotes(app_root.path(), &node).unwrap();
+
+        let project_path = write_project_remotes(
+            &project_root_path,
+            &format!(
                 r#"
 category: remotes
 remotes:
   example:
     name: example
-    url: https://project-level.example.com
+    url: https://attacker.example.com
     principal_id: {}
     signing_key: {}
     site_id: site:example
-    vault_fingerprint: sha256:example
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(2),
-                test_signing_key(2),
-            ),
-        )
-        .unwrap();
-
-        let report =
-            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
-        assert_eq!(
-            report.remotes["example"].config.url,
-            "https://project-level.example.com"
-        );
-        assert!(matches!(
-            report.remotes["example"].scope,
-            RemoteConfigScope::Project { .. }
-        ));
-    }
-
-    #[test]
-    fn load_remotes_layered_preserves_operator_bindings_on_project_override() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project_root.path()).unwrap();
-        let project_root_path = project_root.path().canonicalize().unwrap();
-        let local_key = project_root_path.to_string_lossy().to_string();
-
-        let mut bindings = HashMap::new();
-        bindings.insert(
-            local_key.clone(),
-            RemoteProjectBinding {
-                remote_project_path: "/remote/project".into(),
-                sync_scope: ProjectSyncScope::FullProject,
-            },
-        );
-        let mut operator_remotes = HashMap::new();
-        operator_remotes.insert(
-            "example".into(),
-            RemoteConfig {
-                name: "example".into(),
-                url: "https://user.example.com".into(),
-                principal_id: test_principal_id(3),
-                signing_key: test_signing_key(3),
-                site_id: "site:user".into(),
-                vault_fingerprint: "sha256:user".into(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-                project_bindings: bindings,
-            },
-        );
-        save_remotes(app_root.path(), &operator_remotes).unwrap();
-
-        let project_path = remotes_config_path(&project_root_path);
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-remotes:
-  example:
-    name: example
-    url: https://project.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project
-    vault_fingerprint: sha256:project
+    vault_fingerprint: sha256:attacker
     ingest_ignore:
       patterns: []
 "#,
                 test_principal_id(4),
                 test_signing_key(4),
             ),
-        )
-        .unwrap();
+        );
 
-        let report =
-            load_remotes_layered_report(app_root.path(), Some(&project_root_path)).unwrap();
-        let loaded = &report.remotes["example"];
-        assert_eq!(loaded.config.url, "https://project.example.com");
-        let binding = resolve_loaded_project_binding(loaded, &project_root_path).unwrap();
-        assert_eq!(binding.remote_project_path, "/remote/project");
-        assert_eq!(binding.sync_scope, ProjectSyncScope::FullProject);
+        let err = load_remotes_layered_report(app_root.path(), Some(&project_root_path))
+            .expect_err("a project may not override a node remote's pinned key");
+        let (code, status, body) = structured_refusal(&err);
+        assert_eq!(code, PROJECT_REMOTE_TRUST_MATERIAL);
+        assert_eq!(status, 409);
+        assert_eq!(body["code"], PROJECT_REMOTE_TRUST_MATERIAL);
+        assert_eq!(body["config_path"], project_path.display().to_string());
+        assert_eq!(body["remotes"][0]["name"], "example");
+        assert_eq!(
+            body["remotes"][0]["fields"],
+            serde_json::json!(["signing_key", "principal_id", "vault_fingerprint"])
+        );
+        assert_eq!(
+            body["cures"][0],
+            "ryeos remote configure example --url <https-url>"
+        );
+        assert!(format!("{err:#}").contains("ryeos remote configure"));
+
+        // The by-name layered map refuses too, so no caller can fall back
+        // to the project's key.
+        assert!(load_remotes_layered(app_root.path(), Some(&project_root_path)).is_err());
+        // The node's own pin is untouched.
+        let node_only = load_remotes_layered(app_root.path(), None).unwrap();
+        assert_eq!(node_only["example"].signing_key, test_signing_key(3));
     }
 
     #[test]
-    fn load_remotes_layered_rejects_project_sourced_bindings() {
+    fn project_remote_cannot_supply_a_new_pinned_remote() {
         let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
+        write_project_remotes(
+            project_root.path(),
+            &format!(
                 r#"
 remotes:
-  example:
-    name: example
-    url: https://project.example.com
-    principal_id: {}
+  project-only:
+    name: project-only
+    url: https://project-only.example.com
     signing_key: {}
+"#,
+                test_signing_key(8),
+            ),
+        );
+        let err = load_remotes_layered_report(app_root.path(), Some(project_root.path()))
+            .expect_err("a project may not supply a remote's trust material");
+        let (code, _, body) = structured_refusal(&err);
+        assert_eq!(code, PROJECT_REMOTE_TRUST_MATERIAL);
+        assert_eq!(body["remotes"][0]["name"], "project-only");
+        assert_eq!(
+            body["remotes"][0]["fields"],
+            serde_json::json!(["signing_key"])
+        );
+    }
+
+    #[test]
+    fn project_remote_naming_a_descriptor_or_fingerprint_is_refused() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+        write_project_remotes(
+            project_root.path(),
+            &format!(
+                r#"
+remotes:
+  pinned:
+    descriptor: /tmp/remote.yaml
+  fingerprinted:
+    fingerprint: {}
+"#,
+                test_fingerprint(9),
+            ),
+        );
+        let err = load_remotes_layered_report(app_root.path(), Some(project_root.path()))
+            .expect_err("descriptor and fingerprint are trust material");
+        let (_, _, body) = structured_refusal(&err);
+        assert_eq!(
+            body["remotes"],
+            serde_json::json!([
+                { "name": "fingerprinted", "fields": ["fingerprint"] },
+                { "name": "pinned", "fields": ["descriptor"] },
+            ])
+        );
+    }
+
+    #[test]
+    fn project_remote_without_trust_fields_is_reported_not_loaded() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+        let mut node = HashMap::new();
+        node.insert("default".to_string(), node_remote("default", 2));
+        save_remotes(app_root.path(), &node).unwrap();
+        write_project_remotes(
+            project_root.path(),
+            r#"
+remotes:
+  default:
+    name: default
+    url: https://project-level.example.com
     site_id: site:project
-    vault_fingerprint: sha256:project
     ingest_ignore:
       patterns: []
-    project_bindings:
-      /tmp/local:
-        remote_project_path: /remote/project
-        sync_scope: full_project
 "#,
-                test_principal_id(5),
-                test_signing_key(5),
-            ),
-        )
-        .unwrap();
+        );
 
         let report =
             load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
-        assert!(!report.remotes.contains_key("example"));
+        let loaded = &report.remotes["default"];
+        assert_eq!(loaded.scope, RemoteConfigScope::Operator);
+        assert_eq!(loaded.config.url, "https://default.node.example.com");
         assert_eq!(report.invalid.len(), 1);
-        assert!(report.invalid[0].error.contains("project_bindings"));
+        assert_eq!(report.invalid[0].name, "default");
+        assert!(matches!(
+            report.invalid[0].scope,
+            RemoteConfigScope::Project { .. }
+        ));
+        assert!(report.invalid[0].error.contains("pinned node key"));
+        assert!(
+            report.invalid[0]
+                .repair_hint
+                .contains("ryeos remote configure default")
+        );
+    }
+
+    #[test]
+    fn node_root_as_project_reads_the_node_file_once() {
+        let app_root = tempfile::tempdir().unwrap();
+        let app_root_path = app_root.path().canonicalize().unwrap();
+        let mut node = HashMap::new();
+        node.insert("example".to_string(), node_remote("example", 3));
+        save_remotes(&app_root_path, &node).unwrap();
+
+        let report = load_remotes_layered_report(&app_root_path, Some(&app_root_path)).unwrap();
+        assert_eq!(report.remotes["example"].scope, RemoteConfigScope::Operator);
+        assert!(report.invalid.is_empty());
+    }
+
+    #[test]
+    fn retained_project_remote_cannot_override_node_signing_key() {
+        let app_root = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+        let mut node = HashMap::new();
+        node.insert("example".to_string(), node_remote("example", 3));
+        save_remotes(app_root.path(), &node).unwrap();
+        write_project_remotes(
+            project_root.path(),
+            &format!(
+                "remotes:\n  example:\n    signing_key: {}\n",
+                test_signing_key(4)
+            ),
+        );
+        let project = lillux::PinnedDirectory::open(project_root.path())
+            .unwrap()
+            .expect("project directory exists");
+
+        let err =
+            load_remotes_layered_report_under_project_authority(app_root.path(), Some(&project))
+                .expect_err("the retained project layer refuses trust material too");
+        let (code, _, _) = structured_refusal(&err);
+        assert_eq!(code, PROJECT_REMOTE_TRUST_MATERIAL);
+    }
+
+    #[test]
+    fn typed_load_error_keeps_the_project_refusal() {
+        let err = project_remote_trust_refusal(
+            Path::new("/p/.ai/config/remotes/remotes.yaml"),
+            &[("example".to_string(), vec!["signing_key"])],
+        );
+        match typed_load_error_or(err, |e| HandlerError::Internal(format!("{e:#}"))) {
+            HandlerError::Structured { code, .. } => {
+                assert_eq!(code, PROJECT_REMOTE_TRUST_MATERIAL)
+            }
+            other => panic!("typed refusal was flattened: {other:?}"),
+        }
+        let plain = typed_load_error_or(anyhow::anyhow!("disk"), |e| {
+            HandlerError::Internal(format!("{e:#}"))
+        });
+        assert!(matches!(plain, HandlerError::Internal(ref m) if m == "disk"));
     }
 
     #[test]
@@ -1189,38 +1385,6 @@ remotes:
         );
         let err = save_remotes(tmpdir.path(), &remotes).unwrap_err();
         assert!(err.to_string().contains("key must not be empty"));
-    }
-
-    #[test]
-    fn layered_report_includes_invalid_missing_signing_key() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project_root.path().join(ryeos_engine::AI_DIR)).unwrap();
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            r#"
-remotes:
-  default:
-    name: default
-    url: https://project-level.example.com
-    principal_id: fp:stale
-    site_id: site:stale
-    vault_fingerprint: sha256:stale
-    ingest_ignore:
-      patterns: []
-"#,
-        )
-        .unwrap();
-
-        let report =
-            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
-        assert!(!report.remotes.contains_key("default"));
-        assert_eq!(report.invalid.len(), 1);
-        assert_eq!(report.invalid[0].name, "default");
-        assert!(report.invalid[0].error.contains("signing_key"));
-        assert!(report.invalid[0].repair_hint.contains("re-sign"));
     }
 
     // ── resolve_remote_by_site_id tests ─────────────────────────
@@ -1340,145 +1504,6 @@ remotes:
         assert!(
             loaded.contains_key("good"),
             "valid entry must remain loadable, got: {loaded:?}"
-        );
-    }
-
-    #[test]
-    fn load_remotes_layered_merges_project_over_operator() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-
-        let operator_path = remotes_config_path(app_root.path());
-        std::fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &operator_path,
-            format!(
-                r#"
-remotes:
-  v2:
-    name: v2
-    url: https://user-level.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:user
-    vault_fingerprint: sha256:user
-    ingest_ignore:
-      patterns: []
-  user-only:
-    name: user-only
-    url: https://user-only.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:user-only
-    vault_fingerprint: sha256:user-only
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(5),
-                test_signing_key(5),
-                test_principal_id(6),
-                test_signing_key(6),
-            ),
-        )
-        .unwrap();
-
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-remotes:
-  v2:
-    name: v2
-    url: https://project-level.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project
-    vault_fingerprint: sha256:project
-    ingest_ignore:
-      patterns: []
-  project-only:
-    name: project-only
-    url: https://project-only.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project-only
-    vault_fingerprint: sha256:project-only
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(7),
-                test_signing_key(7),
-                test_principal_id(8),
-                test_signing_key(8),
-            ),
-        )
-        .unwrap();
-
-        let merged = load_remotes_layered(app_root.path(), Some(project_root.path())).unwrap();
-        assert_eq!(
-            merged["v2"].url, "https://project-level.example.com",
-            "project-level remotes must win on name collision"
-        );
-        assert!(merged.contains_key("user-only"));
-        assert!(merged.contains_key("project-only"));
-    }
-
-    #[test]
-    fn load_remotes_layered_survives_broken_operator_config() {
-        let app_root = tempfile::tempdir().unwrap();
-        let project_root = tempfile::tempdir().unwrap();
-
-        let operator_path = remotes_config_path(app_root.path());
-        std::fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &operator_path,
-            r#"
-remotes:
-  broken:
-    name: broken
-    url: https://broken.example.com
-    principal_id: fp:broken
-    vault_fingerprint: sha256:broken
-    ingest_ignore:
-      patterns: []
-"#,
-        )
-        .unwrap();
-
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            format!(
-                r#"
-remotes:
-  v2:
-    name: v2
-    url: https://project-level.example.com
-    principal_id: {}
-    signing_key: {}
-    site_id: site:project
-    vault_fingerprint: sha256:project
-    ingest_ignore:
-      patterns: []
-"#,
-                test_principal_id(9),
-                test_signing_key(9),
-            ),
-        )
-        .unwrap();
-
-        let merged = load_remotes_layered(app_root.path(), Some(project_root.path()))
-            .expect("layered load must not fail when only user-level config has a malformed entry");
-        assert!(
-            merged.contains_key("v2"),
-            "valid project-level remote must remain usable even when user-level entry is malformed: {merged:?}"
-        );
-        assert!(
-            !merged.contains_key("broken"),
-            "malformed user-level entry must be skipped"
         );
     }
 }

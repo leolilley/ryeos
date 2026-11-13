@@ -1899,7 +1899,24 @@ async fn admit_execution_with_publication(
                 project_for_layering,
             )
             .map(|report| report.remotes)
-            .map_err(|e| RouteDispatchError::Internal(format!("load remotes: {e:#}")))?,
+            .map_err(|e| {
+                match crate::remote::config::typed_load_error_or(e, |e| {
+                    crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                }) {
+                    crate::handler_error::HandlerError::Structured { code, status, body } => {
+                        RouteDispatchError::Structured {
+                            code,
+                            status,
+                            body,
+                            thread_id: None,
+                        }
+                    }
+                    crate::handler_error::HandlerError::Internal(message) => {
+                        RouteDispatchError::Internal(message)
+                    }
+                    other => RouteDispatchError::Internal(other.to_string()),
+                }
+            })?,
         )
     } else {
         None
