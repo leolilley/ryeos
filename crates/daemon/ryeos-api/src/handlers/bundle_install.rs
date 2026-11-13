@@ -43,6 +43,34 @@ pub struct Request {
     /// files always win when present.
     #[serde(default)]
     pub preserve_runtime_artifacts: bool,
+    /// Installed bindings (`<section>/<id>`) the replacement may leave
+    /// pinning artifacts it removes. A replacement that strands any other
+    /// binding is refused with `replacement_strands_bindings`; naming one it
+    /// does not strand is refused with `invalidated_binding_not_stranded`.
+    #[serde(default)]
+    pub invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
+}
+
+/// Refuse a staged bundle generation that strands an installed binding the
+/// operator did not name, as a typed HTTP 409.
+fn check_staged_bindings(
+    admitted: &AdmittedStaging,
+    node_trust_store: &TrustStore,
+    invalidate: &[ryeos_app::node_config::coherence::BindingRef],
+) -> Result<Vec<ryeos_app::node_config::coherence::BindingRef>> {
+    ryeos_app::node_config::coherence::check_bundle_replacement(
+        &admitted.snapshot,
+        &admitted.current,
+        &admitted.prospective,
+        node_trust_store,
+        invalidate,
+    )
+    .map_err(|error| {
+        match error.downcast_ref::<ryeos_app::node_config::coherence::ReplacementBindingRefusal>() {
+            Some(refusal) => refusal.handler_error().into(),
+            None => error,
+        }
+    })
 }
 
 pub fn validate_name(name: &str) -> Result<()> {
@@ -139,6 +167,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
     let registration = serde_json::json!({ "kind": "node", "path": target });
+    let mut invalidated_bindings = Vec::new();
     let activation = if replaced {
         replace_dir_atomic(
             &req.source_path,
@@ -147,7 +176,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &transaction,
             registration.clone(),
             |staging| {
-                admit_completed_staging(
+                let admitted = admit_completed_staging(
                     &state.config.app_root,
                     &req.name,
                     staging,
@@ -157,7 +186,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     &prospective_validator,
                     Arc::clone(&state.isolation),
                 )
-                .context("admission refused completed replacement staging tree")
+                .context("admission refused completed replacement staging tree")?;
+                invalidated_bindings = check_staged_bindings(
+                    &admitted,
+                    &state.engine.node_trust_store,
+                    &req.invalidate_bindings,
+                )?;
+                Ok(())
             },
         )
         .with_context(|| {
@@ -174,7 +209,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &transaction,
             registration.clone(),
             |staging| {
-                admit_completed_staging(
+                let admitted = admit_completed_staging(
                     &state.config.app_root,
                     &req.name,
                     staging,
@@ -184,7 +219,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                     &prospective_validator,
                     Arc::clone(&state.isolation),
                 )
-                .context("admission refused completed install staging tree")
+                .context("admission refused completed install staging tree")?;
+                invalidated_bindings = check_staged_bindings(
+                    &admitted,
+                    &state.engine.node_trust_store,
+                    &req.invalidate_bindings,
+                )?;
+                Ok(())
             },
         )
         .with_context(|| {
@@ -234,6 +275,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "config_item": config_item_path.display().to_string(),
         "replaced": replaced,
         "preserve_runtime_artifacts": req.preserve_runtime_artifacts,
+        "invalidated_bindings": invalidated_bindings,
     });
     Ok(report)
 }
@@ -308,6 +350,14 @@ pub(crate) fn verify_planned_candidate(
     }
 }
 
+/// What admission saw of a completed staging generation: the prospective
+/// node config, and the bundle sets before and after, by name and root.
+pub(crate) struct AdmittedStaging {
+    pub(crate) snapshot: ryeos_app::node_config::NodeConfigSnapshot,
+    pub(crate) current: Vec<(String, PathBuf)>,
+    pub(crate) prospective: Vec<(String, PathBuf)>,
+}
+
 /// Re-plan the completed staging generation, verify it with the exact closure,
 /// then run the same node-owned registry/executable admission used at boot.
 // This admission boundary deliberately keeps every verified authority explicit.
@@ -320,7 +370,7 @@ pub(crate) fn admit_completed_staging(
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
-) -> Result<()> {
+) -> Result<AdmittedStaging> {
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
     verify_planned_candidate(
         &plan,
@@ -345,6 +395,10 @@ pub(crate) fn admit_completed_staging(
         .context("load current node bundle registrations for prospective admission")?
         .into_iter()
         .map(|record| (record.name.clone(), record))
+        .collect();
+    let current: Vec<(String, PathBuf)> = current_records
+        .values()
+        .map(|record| (record.name.clone(), record.path.clone()))
         .collect();
     let prospective_records = plan
         .bundles
@@ -412,7 +466,15 @@ pub(crate) fn admit_completed_staging(
         policy_snapshot.generation_digest(),
     )
     .context("prospective bundle set failed node definition admission")?;
-    Ok(())
+    let prospective = prospective_records
+        .iter()
+        .map(|record| (record.name.clone(), record.path.clone()))
+        .collect();
+    Ok(AdmittedStaging {
+        snapshot,
+        current,
+        prospective,
+    })
 }
 
 fn install_dir_atomic<F>(
@@ -739,6 +801,60 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn staged_binding_refusal_is_a_typed_conflict() {
+        let admitted = AdmittedStaging {
+            snapshot: ryeos_app::node_config::NodeConfigSnapshot {
+                external_execution: Vec::new(),
+                runtime_snapshot_production: Vec::new(),
+                guest_runtime_materialization: Vec::new(),
+                runtime_snapshot_qualification: Vec::new(),
+                bundles: Vec::new(),
+                routes: Vec::new(),
+                commands: Vec::new(),
+            },
+            current: Vec::new(),
+            prospective: Vec::new(),
+        };
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "name": "adapters",
+            "source_path": "/nonexistent",
+            "replace": true,
+            "invalidate_bindings": ["runtime_snapshot_production/render-snapshot"],
+        }))
+        .unwrap();
+        let trust = TrustStore::empty();
+        // Nothing is pinned, so nothing is stranded: naming a binding is refused.
+        let error =
+            check_staged_bindings(&admitted, &trust, &request.invalidate_bindings).unwrap_err();
+        let Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) =
+            ryeos_app::handler_error::extract_handler_error(&error)
+        else {
+            panic!("typed refusal: {error:#}");
+        };
+        assert_eq!(
+            code,
+            ryeos_app::node_config::coherence::INVALIDATED_BINDING_NOT_STRANDED
+        );
+        assert_eq!(status, 409);
+        assert_eq!(
+            body["not_stranded"],
+            serde_json::json!(["runtime_snapshot_production/render-snapshot"])
+        );
+        assert!(
+            check_staged_bindings(&admitted, &trust, &[])
+                .unwrap()
+                .is_empty()
+        );
+
+        let malformed = serde_json::from_value::<Request>(serde_json::json!({
+            "name": "adapters",
+            "source_path": "/nonexistent",
+            "invalidate_bindings": ["bundles/core"],
+        }));
+        assert!(malformed.is_err());
     }
 
     #[test]

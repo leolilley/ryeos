@@ -74,6 +74,10 @@ pub struct PolicyReplaceArguments {
         skip_serializing_if = "ryeos_node_runtime::node_policy::generation::PolicyCarryChoices::is_empty"
     )]
     pub policy_carry: ryeos_node_runtime::node_policy::generation::PolicyCarryChoices,
+    /// Installed bindings the replacement may strand, each named
+    /// `<section>/<id>`. Absent when there are none, for the same reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
 }
 
 impl PolicyReplaceArguments {
@@ -403,6 +407,7 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
             policy_carry: arguments.policy_carry.clone(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: arguments.invalidate_bindings.clone(),
             skip_preflight: false,
         },
         ctx.state_lock,
@@ -417,6 +422,7 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
         "bundles": report.bundles_installed,
         "policy_generation": expected,
         "capacity_amendment": report.capacity_amendment,
+        "invalidated_bindings": report.invalidated_bindings,
     }))
 }
 
@@ -1046,6 +1052,7 @@ mod tests {
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         })
         .expect("initial generation");

@@ -533,6 +533,14 @@ struct NodePolicyGenerationResetArgs {
     #[arg(long = "reset-section", action = clap::ArgAction::Append)]
     reset_sections: Vec<String>,
 
+    /// Installed binding (`<section>/<id>`) the bundle replacement may leave
+    /// pinning an artifact it removes (repeatable). A replacement that
+    /// strands a binding is refused unless each one is named here, and naming
+    /// one it does not strand is refused too. The binding stays installed and
+    /// `ryeos node doctor` fails it until it is recomposed.
+    #[arg(long = "invalidate-binding", action = clap::ArgAction::Append, value_parser = parse_binding_ref)]
+    invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
+
     /// Required acknowledgement that the node's policy generation is
     /// replaced: profile sections are taken from the seed, operator-applied
     /// sections carry forward unless reset.
@@ -603,6 +611,7 @@ fn run_node_policy_generation_reset_command(
             substrate_image_digest: substrate_image_digest.clone(),
             trust_documents,
             policy_carry: policy_carry.clone(),
+            invalidate_bindings: args.invalidate_bindings.clone(),
         },
     )?;
     // The request pins the generation the seed will install; the operation
@@ -634,6 +643,7 @@ fn run_node_policy_generation_reset_command(
             "app_root": app_root,
             "node_fingerprint": applied.result["node_fingerprint"],
             "bundles": applied.result["bundles"],
+            "invalidated_bindings": applied.result["invalidated_bindings"],
             "receipt": applied.receipt.digest()?,
         }))?;
     } else {
@@ -1565,6 +1575,14 @@ struct InitArgs {
     #[arg(long, requires = "replace_substrate_identity")]
     confirm_substrate_identity_replacement: bool,
 
+    /// Installed binding (`<section>/<id>`) the bundle replacement may leave
+    /// pinning an artifact it removes (repeatable). A replacement that
+    /// strands a binding is refused unless each one is named here, and naming
+    /// one it does not strand is refused too. The binding stays installed and
+    /// `ryeos node doctor` fails it until it is recomposed.
+    #[arg(long = "invalidate-binding", action = clap::ArgAction::Append, value_parser = parse_binding_ref)]
+    invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
+
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
@@ -1605,6 +1623,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         policy_carry: policy_carry_choices(&args.keep_sections, &args.reset_sections),
         replace_substrate_identity: args.replace_substrate_identity,
         confirm_substrate_identity_replacement: args.confirm_substrate_identity_replacement,
+        invalidate_bindings: args.invalidate_bindings,
         skip_preflight: false,
     };
 
@@ -4080,6 +4099,10 @@ fn default_app_root() -> PathBuf {
         .expect("could not determine XDG data directory")
 }
 
+fn parse_binding_ref(value: &str) -> Result<ryeos_app::node_config::coherence::BindingRef> {
+    ryeos_app::node_config::coherence::BindingRef::parse(value)
+}
+
 fn policy_carry_choices(
     keep: &[String],
     reset: &[String],
@@ -4402,6 +4425,7 @@ mod tests {
             app_root: None,
             keep_sections: Vec::new(),
             reset_sections: Vec::new(),
+            invalidate_bindings: Vec::new(),
             confirm,
             json: false,
         }

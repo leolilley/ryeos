@@ -865,17 +865,32 @@ pub fn installed_artifact_hashes(
     bundle_roots: &[PathBuf],
     node_trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<crate::node_config::coherence::InstalledArtifactHashes> {
+    let named = bundle_roots
+        .iter()
+        .map(|root| {
+            root.file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| (name.to_owned(), root.clone()))
+                .context("registered bundle root has no UTF-8 name")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    named_bundle_artifact_hashes(&named, node_trust_store)
+}
+
+/// [`installed_artifact_hashes`] over bundles whose root directory is not
+/// named after the bundle, such as a completed replacement staging tree.
+pub fn named_bundle_artifact_hashes(
+    bundles: &[(String, PathBuf)],
+    node_trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<crate::node_config::coherence::InstalledArtifactHashes> {
     use crate::node_config::coherence::{
         InstalledArtifactHashes, InstalledLifecycleArtifactHashes, InstalledProviderArtifactHashes,
     };
 
     let target = lillux::platform::current_binary_target()?;
     let mut installed = InstalledArtifactHashes::default();
-    for root in bundle_roots {
-        let name = root
-            .file_name()
-            .and_then(|value| value.to_str())
-            .context("registered bundle root has no UTF-8 name")?;
+    for (name, root) in bundles {
+        let name = name.as_str();
         let verified = ryeos_bundle::manifest::load_verified_manifest(
             &root.join(ryeos_engine::AI_DIR),
             name,

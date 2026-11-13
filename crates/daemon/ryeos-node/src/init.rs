@@ -150,6 +150,12 @@ pub struct InitOptions {
     pub replace_substrate_identity: bool,
     /// Required acknowledgement for `replace_substrate_identity`.
     pub confirm_substrate_identity_replacement: bool,
+    /// Installed bindings (`<section>/<id>`) this initialization may leave
+    /// pinning artifacts its bundle replacement removes. A replacement that
+    /// strands any other binding is refused before anything changes; naming
+    /// a binding it does not strand is refused too. Named bindings stay
+    /// installed and fail `ryeos node doctor` until recomposed.
+    pub invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
     /// Skip preflight verification of source bundles (trust + signatures).
     /// Used in dev/test when source bundles are not yet signed and populated.
     /// DO NOT expose this as a CLI flag — production installs always verify.
@@ -203,6 +209,10 @@ pub struct InitReport {
     /// because its `native_capacity` policy differs from the one in force.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_amendment: Option<crate::native_capacity::CapacityPolicyAmendmentReport>,
+    /// Installed bindings this initialization's bundle replacement left
+    /// pinning artifacts it removed, as the operator named them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub invalidated_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
 }
@@ -1088,7 +1098,7 @@ fn run_init_under_lock_on_storage(
         app_root: &opts.app_root,
         trust_store: &seed_trust_store,
     };
-    prospective_loader
+    let prospective_config = prospective_loader
         .load_full(
             &config_table,
             &prospective_records,
@@ -1096,6 +1106,17 @@ fn run_init_under_lock_on_storage(
             &policy_table,
         )
         .context("prospective init source set has invalid node configuration")?;
+    // A replacement must not silently leave installed bindings pinning the
+    // payloads it removes: the first produce, qualify or launch through them
+    // would fail. Checked before any installed tree moves.
+    let invalidated_bindings = check_replacement_bindings(
+        &opts.app_root,
+        &plan,
+        selected_node_profile.is_some(),
+        &prospective_config,
+        &seed_trust_store,
+        &opts.invalidate_bindings,
+    )?;
     let isolation_policy =
         prospective_policy.require::<ryeos_engine::isolation::IsolationPolicy>()?;
     let prospective_isolation = ryeos_node_runtime::engine_init::admit_node_bundle_roots(
@@ -1509,8 +1530,56 @@ fn run_init_under_lock_on_storage(
         substrate_identity: load_substrate_identity_record(&opts.app_root)?,
         substrate_image_replacement,
         capacity_amendment,
+        invalidated_bindings,
         next_steps,
     })
+}
+
+/// The installed bindings an initialization's bundle set strands, admitted
+/// only when the operator named each one. The prospective set is the source
+/// plan, plus, when no profile selects the exact inventory, the installed
+/// bundles the plan leaves in place.
+fn check_replacement_bindings(
+    app_root: &Path,
+    plan: &ryeos_bundle::plan::BundlePlan,
+    profile_selects_inventory: bool,
+    prospective_config: &ryeos_app::node_config::NodeConfigSnapshot,
+    trust_store: &TrustStore,
+    invalidate: &[ryeos_app::node_config::coherence::BindingRef],
+) -> Result<Vec<ryeos_app::node_config::coherence::BindingRef>> {
+    if !ryeos_app::node_config::coherence::has_pinning_bindings(prospective_config)
+        && invalidate.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let bundles_dir = app_root.join(ryeos_engine::AI_DIR).join("bundles");
+    let current: Vec<(String, PathBuf)> = installed_bundle_names(app_root)?
+        .into_iter()
+        .map(|name| {
+            let root = bundles_dir.join(&name);
+            (name, root)
+        })
+        .collect();
+    let mut prospective: Vec<(String, PathBuf)> = plan
+        .bundles
+        .iter()
+        .map(|(name, bundle)| (name.clone(), bundle.source.root_path().clone()))
+        .collect();
+    if !profile_selects_inventory {
+        prospective.extend(
+            current
+                .iter()
+                .filter(|(name, _)| !plan.bundles.contains_key(name))
+                .cloned(),
+        );
+    }
+    ryeos_app::node_config::coherence::check_bundle_replacement(
+        prospective_config,
+        &current,
+        &prospective,
+        trust_store,
+        invalidate,
+    )
 }
 
 /// Whether the operator-signed capacity issuance exists. Its absence on an
@@ -2829,6 +2898,7 @@ mod tests {
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         }
     }
@@ -3216,6 +3286,7 @@ mod tests {
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
@@ -3314,6 +3385,44 @@ mod tests {
             fs::read(genesis_path).expect("operator genesis #2"),
             "reinitialization must not rewrite operator genesis"
         );
+    }
+
+    #[test]
+    fn reinit_refuses_to_invalidate_a_binding_it_does_not_strand() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let opts = make_opts(&state, &tmp.path().join("home"));
+        run_init(&opts).expect("init #1");
+        let completion = fs::read(init_completion_path(&state)).expect("completion #1");
+
+        // The node pins nothing, so no replacement strands anything: naming a
+        // binding to invalidate is refused before any installed tree moves.
+        let mut named = make_opts(&state, &tmp.path().join("home"));
+        named.invalidate_bindings = vec![
+            ryeos_app::node_config::coherence::BindingRef::parse(
+                "runtime_snapshot_production/render-snapshot",
+            )
+            .unwrap(),
+        ];
+        let error = run_init(&named).expect_err("unstranded override refused");
+        let refusal = error
+            .chain()
+            .find_map(|cause| {
+                cause.downcast_ref::<ryeos_app::node_config::coherence::ReplacementBindingRefusal>()
+            })
+            .unwrap_or_else(|| panic!("typed refusal: {error:#}"));
+        assert_eq!(
+            refusal.code,
+            ryeos_app::node_config::coherence::INVALIDATED_BINDING_NOT_STRANDED
+        );
+        assert_eq!(
+            fs::read(init_completion_path(&state)).expect("completion kept"),
+            completion,
+            "a refused replacement leaves the completion record in place"
+        );
+
+        let report = run_init(&opts).expect("init #2 without overrides");
+        assert!(report.invalidated_bindings.is_empty());
     }
 
     #[test]
@@ -3585,6 +3694,7 @@ mod tests {
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
         let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
@@ -3717,6 +3827,7 @@ mod tests {
             },
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         }
     }
@@ -3888,6 +3999,7 @@ mod tests {
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
         run_init(&replacement).expect("replace policy and exact bundle inventory");
@@ -4166,6 +4278,7 @@ mod tests {
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
@@ -4202,6 +4315,7 @@ mod tests {
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
@@ -4630,6 +4744,7 @@ typo_field: oops
             policy_carry: Default::default(),
             replace_substrate_identity: false,
             confirm_substrate_identity_replacement: false,
+            invalidate_bindings: Vec::new(),
             skip_preflight: true,
         };
 
