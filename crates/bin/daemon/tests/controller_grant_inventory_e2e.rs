@@ -14,8 +14,8 @@
 //! re-verifies it on every authenticated request.
 //!
 //! Every scenario runs on two lanes. The local lane signs as a local client.
-//! The forwarded lane is the remote-operator path: the grant has class
-//! `remote_operator` bound to an origin site, and each request carries the
+//! The forwarded lane is the remote-principal path: the grant has class
+//! `remote_principal` bound to an origin site, and each request carries the
 //! origin node's forwarding co-signature, exactly as an origin node's
 //! configured-operator client sends it, so the request passes through
 //! `require_admitted_operator` with its source-node forwarding proof.
@@ -56,18 +56,49 @@ const SESSION_CAPS: [&str; 3] = [
     "ryeos.runtime.dedicated_session.terminate",
 ];
 
-/// Service families the operator is granted whole, with the bundle-relative
-/// directory their items live in.
-const SERVICE_FAMILIES: [&str; 3] = ["credential-profiles", "worker-executions", "objects"];
+/// A remote grant carries no wildcard scope, so every service the operator
+/// uses is granted by its exact capability.
+///
+/// Every service the operator calls on the controller, by bundle-relative id.
+/// Project push reads `project/status`, then `objects/has` and `objects/put`,
+/// then publishes through `system/push-head`. Product push calls
+/// `external-content/product-offer`, `objects/stage-chunk` and
+/// `external-content/product-accept`. Credential and worker-execution services
+/// are listed individually; none outside this list is granted.
+const OPERATOR_SERVICES: [&str; 16] = [
+    "credential-profiles/abandon-login",
+    "credential-profiles/confirm",
+    "credential-profiles/create",
+    "credential-profiles/get",
+    "external-content/product-accept",
+    "external-content/product-offer",
+    "objects/has",
+    "objects/put",
+    "objects/stage-chunk",
+    "project/status",
+    "worker-executions/candidate-result",
+    "worker-executions/command",
+    "worker-executions/command-observation",
+    "worker-executions/discard",
+    "worker-executions/status",
+    "worker-executions/terminate",
+];
 
-/// Single services granted by exact reference.
+/// Services outside the lists above, also granted by exact reference.
 const SINGLE_SERVICES: [&str; 2] = [
     "system/push-head",
     "external-execution/admit-product-program",
 ];
 
+/// Operator vault access. The launch gate requires this fixed capability
+/// whenever the request's execution policy overlays the operator vault, which
+/// the live-project policy these launches use does. It is a property of the
+/// execution policy's environment, not of the trusted-lane environment config.
+const OPERATOR_VAULT_CAP: &str = "ryeos.use.vault.operator";
+const OPERATOR_VAULT_REFUSAL: &str = "operator_vault_capability_required";
+
 /// The publication service needs live-project write on top of its own execute
-/// capability, which no service-family wildcard covers. The operator does not
+/// capability, which no other grant covers. The operator does not
 /// publish, so the capability is outside the operator grant.
 const PUBLISH_SERVICE: &str = "worker-executions/publish";
 const LIVE_PROJECT_WRITE: &str = "ryeos.write.project.live";
@@ -81,39 +112,6 @@ fn service_cap(service: &str) -> String {
     format!("ryeos.execute.service.{service}")
 }
 
-fn family_cap(family: &str) -> String {
-    format!("ryeos.execute.service.{family}/*")
-}
-
-/// Every service item shipped in a family, as a `service:` reference.
-fn family_services(family: &str) -> Vec<String> {
-    let root: PathBuf = ryeos_engine::test_support::workspace_root()
-        .join("bundles/core/.ai/services")
-        .join(family);
-    let mut found = Vec::new();
-    let mut pending = vec![root.clone()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read service family") {
-            let path = entry.expect("service entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "yaml") {
-                let relative = path
-                    .strip_prefix(&root)
-                    .expect("under family")
-                    .with_extension("");
-                found.push(format!(
-                    "service:{family}/{}",
-                    relative.to_string_lossy().replace('\\', "/")
-                ));
-            }
-        }
-    }
-    found.sort();
-    assert!(!found.is_empty(), "family {family} ships no services");
-    found
-}
-
 /// The complete derived grant.
 fn derived_grant() -> Vec<String> {
     let mut grant = vec![
@@ -122,7 +120,8 @@ fn derived_grant() -> Vec<String> {
         LOGIN_EXECUTE_CAP.to_owned(),
     ];
     grant.extend(SESSION_CAPS.map(str::to_owned));
-    grant.extend(SERVICE_FAMILIES.map(family_cap));
+    grant.push(OPERATOR_VAULT_CAP.to_owned());
+    grant.extend(OPERATOR_SERVICES.map(service_cap));
     grant.extend(SINGLE_SERVICES.map(service_cap));
     grant
 }
@@ -153,6 +152,7 @@ fn is_capability_refusal(status: reqwest::StatusCode, body: &Value) -> bool {
             | "insufficient_caps"
             | "service_cap_denied"
             | "ref_binding_unauthorized"
+            | "operator_vault_capability_required"
     ) || body.to_string().contains("missing required capability")
 }
 
@@ -213,23 +213,24 @@ fn authorize_forwarding_node(
         "controller-grant-inventory-origin-node",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &site_of(remote_node),
         &local.node,
     )?;
     Ok(())
 }
 
-/// Admit (or re-grant) `remote_operator` as a remote operator bound to
+/// Admit (or re-grant) `remote_principal` as a remote principal bound to
 /// `remote_site_id`.
-fn authorize_remote_operator(
+fn authorize_remote_principal(
     state_path: &Path,
     local: &FastFixture,
-    remote_operator: &SigningKey,
+    remote_principal: &SigningKey,
     remote_site_id: &str,
     scopes: &[&str],
 ) -> Result<()> {
     let public_key = base64::engine::general_purpose::STANDARD
-        .encode(remote_operator.verifying_key().as_bytes());
+        .encode(remote_principal.verifying_key().as_bytes());
     let identity_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("node/identity/private_key.pem");
@@ -237,12 +238,13 @@ fn authorize_remote_operator(
         .with_context(|| format!("load daemon identity {}", identity_path.display()))?;
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &authorized_keys_dir(state_path),
-        &fingerprint(remote_operator),
+        &fingerprint(remote_principal),
         &public_key,
         &scope_strings(scopes),
         "controller-grant-inventory-operator",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &identity,
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,
@@ -332,7 +334,7 @@ impl Controller {
                         origin_node,
                     } => {
                         authorize_forwarding_node(state_path, fixture, origin_node)?;
-                        authorize_remote_operator(
+                        authorize_remote_principal(
                             state_path,
                             fixture,
                             operator,
@@ -378,7 +380,7 @@ impl Controller {
             Lane::Forwarded {
                 operator,
                 origin_node,
-            } => authorize_remote_operator(
+            } => authorize_remote_principal(
                 &self.harness.state_path,
                 &self.fixture,
                 operator,
@@ -474,6 +476,15 @@ async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps(
             "the refusal must name {dropped}: {body:#}"
         );
     }
+
+    controller.grant(&without(&grant, OPERATOR_VAULT_CAP));
+    let (status, body) = controller.launch_worker(TURN_ITEM, turn_bindings()).await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body:#}");
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some(OPERATOR_VAULT_REFUSAL),
+        "dropping {OPERATOR_VAULT_CAP} must refuse the hosted turn: {body:#}"
+    );
 }
 
 async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap(lane: Lane) {
@@ -515,65 +526,22 @@ async fn trusted_login_needs_exactly_its_execute_and_session_caps(lane: Lane) {
             "the refusal must name {dropped}: {body:#}"
         );
     }
-}
 
-async fn each_service_family_wildcard_covers_every_service_in_it(lane: Lane) {
-    let controller = Controller::start(lane).await;
-    let grant = derived_grant();
-
-    for family in SERVICE_FAMILIES {
-        let services = family_services(family);
-        controller.grant(&grant);
-        for service in &services {
-            let (status, body) = controller.call_service(service).await;
-            assert!(
-                !is_capability_refusal(status, &body),
-                "{service} must pass admission under {}: {status} {body:#}",
-                family_cap(family)
-            );
-        }
-
-        controller.grant(&without(&grant, &family_cap(family)));
-        for service in &services {
-            let (status, body) = controller.call_service(service).await;
-            assert!(
-                is_capability_refusal(status, &body),
-                "{service} must be refused without {}: {status} {body:#}",
-                family_cap(family)
-            );
-        }
-    }
-}
-
-async fn the_publication_service_also_needs_live_project_write(lane: Lane) {
-    let controller = Controller::start(lane).await;
-    let service = format!("service:{PUBLISH_SERVICE}");
-    let grant = derived_grant();
-
-    // The operator grant does not publish: the family wildcard alone is refused.
-    controller.grant_exact(&grant);
-    let (status, body) = controller.call_service(&service).await;
-    assert!(
-        is_capability_refusal(status, &body) && body.to_string().contains(LIVE_PROJECT_WRITE),
-        "the family wildcard alone must not publish: {status} {body:#}"
-    );
-
-    // Adding live-project write, outside the operator set, is the only change needed.
-    let mut with_write = grant.clone();
-    with_write.push(LIVE_PROJECT_WRITE.to_owned());
-    controller.grant_exact(&with_write);
-    let (status, body) = controller.call_service(&service).await;
-    assert!(
-        !is_capability_refusal(status, &body),
-        "live-project write completes the publication grant: {status} {body:#}"
+    controller.grant(&without(&grant, OPERATOR_VAULT_CAP));
+    let (status, body) = controller.launch_worker(LOGIN_ITEM, json!({})).await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body:#}");
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some(OPERATOR_VAULT_REFUSAL),
+        "dropping {OPERATOR_VAULT_CAP} must refuse the trusted login: {body:#}"
     );
 }
 
-async fn each_single_service_needs_exactly_its_own_execute_cap(lane: Lane) {
+async fn each_operator_service_needs_exactly_its_own_execute_cap(lane: Lane) {
     let controller = Controller::start(lane).await;
     let grant = derived_grant();
 
-    for service in SINGLE_SERVICES {
+    for service in OPERATOR_SERVICES.into_iter().chain(SINGLE_SERVICES) {
         let service_ref = format!("service:{service}");
         controller.grant(&grant);
         let (status, body) = controller.call_service(&service_ref).await;
@@ -596,13 +564,49 @@ async fn each_single_service_needs_exactly_its_own_execute_cap(lane: Lane) {
     }
 }
 
+/// Every granted service ships as a core service item.
+#[test]
+fn every_granted_service_ships_as_a_core_service_item() {
+    let root = ryeos_engine::test_support::workspace_root().join("bundles/core/.ai/services");
+    for service in OPERATOR_SERVICES.into_iter().chain(SINGLE_SERVICES) {
+        assert!(
+            root.join(format!("{service}.yaml")).is_file(),
+            "{service} is not a shipped core service"
+        );
+    }
+}
+
+async fn the_publication_service_also_needs_live_project_write(lane: Lane) {
+    let controller = Controller::start(lane).await;
+    let service = format!("service:{PUBLISH_SERVICE}");
+    let grant = derived_grant();
+
+    // The operator grant does not publish: its own execute cap alone is refused.
+    controller.grant_exact(&grant);
+    let (status, body) = controller.call_service(&service).await;
+    assert!(
+        is_capability_refusal(status, &body) && body.to_string().contains(LIVE_PROJECT_WRITE),
+        "its own execute cap alone must not publish: {status} {body:#}"
+    );
+
+    // Adding live-project write, outside the operator set, is the only change needed.
+    let mut with_write = grant.clone();
+    with_write.push(LIVE_PROJECT_WRITE.to_owned());
+    controller.grant_exact(&with_write);
+    let (status, body) = controller.call_service(&service).await;
+    assert!(
+        !is_capability_refusal(status, &body),
+        "live-project write completes the publication grant: {status} {body:#}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps_locally() {
     the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps(Lane::Local).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps_through_the_remote_operator_forwarding_path()
+async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps_through_the_remote_principal_forwarding_path()
  {
     the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps(Lane::forwarded()).await;
 }
@@ -613,7 +617,7 @@ async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap_locally() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap_through_the_remote_operator_forwarding_path()
+async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap_through_the_remote_principal_forwarding_path()
  {
     the_trusted_worker_is_resolved_data_and_needs_no_execute_cap(Lane::forwarded()).await;
 }
@@ -624,20 +628,9 @@ async fn trusted_login_needs_exactly_its_execute_and_session_caps_locally() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn trusted_login_needs_exactly_its_execute_and_session_caps_through_the_remote_operator_forwarding_path()
+async fn trusted_login_needs_exactly_its_execute_and_session_caps_through_the_remote_principal_forwarding_path()
  {
     trusted_login_needs_exactly_its_execute_and_session_caps(Lane::forwarded()).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn each_service_family_wildcard_covers_every_service_in_it_locally() {
-    each_service_family_wildcard_covers_every_service_in_it(Lane::Local).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn each_service_family_wildcard_covers_every_service_in_it_through_the_remote_operator_forwarding_path()
- {
-    each_service_family_wildcard_covers_every_service_in_it(Lane::forwarded()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -646,18 +639,18 @@ async fn the_publication_service_also_needs_live_project_write_locally() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_publication_service_also_needs_live_project_write_through_the_remote_operator_forwarding_path()
+async fn the_publication_service_also_needs_live_project_write_through_the_remote_principal_forwarding_path()
  {
     the_publication_service_also_needs_live_project_write(Lane::forwarded()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn each_single_service_needs_exactly_its_own_execute_cap_locally() {
-    each_single_service_needs_exactly_its_own_execute_cap(Lane::Local).await;
+async fn each_operator_service_needs_exactly_its_own_execute_cap_locally() {
+    each_operator_service_needs_exactly_its_own_execute_cap(Lane::Local).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn each_single_service_needs_exactly_its_own_execute_cap_through_the_remote_operator_forwarding_path()
+async fn each_operator_service_needs_exactly_its_own_execute_cap_through_the_remote_principal_forwarding_path()
  {
-    each_single_service_needs_exactly_its_own_execute_cap(Lane::forwarded()).await;
+    each_operator_service_needs_exactly_its_own_execute_cap(Lane::forwarded()).await;
 }
