@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-11-13T01:38:57Z:60b7b0750ec82e074e4c92e0000e7b93a18dca2eb5703eadf81dc3eb94ff5683:hle1QKMbs1gLk1caIZ/xzghDIWf67QoXBWI+tyoXi2taImUpiiE7uwnHXLLuZ28eccTVLzLPF6vXzcEJM/HfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:46:52Z:5d87fb6802f3f669384d3a30d56738421b6631a80358b850b83d8b176c528f4a:Nx39ZA//HKJ9PnpdsRRJwCwjrvw4eUmtBFfGkJxdbeii0AUFByOZ5xAGYbl0HDdA8EcULFklOpCbKROITUCFBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [fundamentals, signing, trust, integrity, compilation]
-version: "3.1.1"
+version: "3.1.2"
 description: >
   How signing and trust work in Rye OS — Ed25519 signatures,
   content hashing, path anchoring, the trust store, the signed
@@ -195,6 +195,13 @@ Runtimes read trust documents with the daemon's own parser and checks
 whose signature line names a key the store does not hold, is refused in a
 runtime exactly as it is in the daemon. A runtime has no trust reader of
 its own.
+
+**Pinned is not the same as allowed to sign node state.** Item
+verification accepts any pinned key, but node state does not: node
+policy, schedules, bundle registrations and app-root node config verify
+only under the node key, and the init completion record only under the
+local operator key. Anything else is refused as
+`node_document_wrong_signer`. See [Identity Model](identity-model.md#who-signs-node-state).
 
 **Bundles do NOT ship trust docs.** The operator must pin publisher
 keys explicitly via `ryeos init` (official) or `ryeos trust pin`

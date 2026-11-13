@@ -138,6 +138,55 @@ impl PublisherTrustDoc {
     }
 }
 
+// ── Node document signers ───────────────────────────────────────────
+
+/// Stable refusal code: a node document is signed by a key other than the
+/// one key allowed to sign that kind of node state.
+pub const NODE_DOCUMENT_WRONG_SIGNER: &str = "node_document_wrong_signer";
+
+/// A node document (node policy, schedules, node config, bundle
+/// registrations, the init completion record) signed by a key that may not
+/// sign it. Node state verifies against exactly one signer, never against
+/// every pinned key: a pinned third-party publisher key must not be able to
+/// sign node state.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "{NODE_DOCUMENT_WRONG_SIGNER}: {path} is signed by {signer}, but only the {role} key {expected} may sign it; {cure}"
+)]
+pub struct NodeDocumentWrongSigner {
+    pub path: String,
+    pub signer: String,
+    pub expected: String,
+    /// `node` or `operator`.
+    pub role: &'static str,
+    pub cure: String,
+}
+
+/// The cure named for node-key documents: they are written only by the node.
+pub const NODE_DOCUMENT_CURE: &str = "this is node state that only the node itself writes: remove the file and recreate it through the node's own command";
+
+/// Refuse a node document whose signature line names any signer but
+/// `expected`. Callers then verify the signature against
+/// [`TrustStore::restricted_to`]`(expected)`, never the whole store.
+pub fn require_document_signer(
+    path: &Path,
+    signer: &str,
+    expected: &str,
+    role: &'static str,
+    cure: &str,
+) -> Result<(), NodeDocumentWrongSigner> {
+    if signer == expected {
+        return Ok(());
+    }
+    Err(NodeDocumentWrongSigner {
+        path: path.display().to_string(),
+        signer: signer.to_string(),
+        expected: expected.to_string(),
+        role,
+        cure: cure.to_string(),
+    })
+}
+
 // ── Trusted signer entry ────────────────────────────────────────────
 
 /// A trusted signer loaded from the trust store.
@@ -440,6 +489,20 @@ impl TrustStore {
     /// Look up a signer's verifying key.
     pub fn get(&self, fingerprint: &str) -> Option<&TrustedSigner> {
         self.signers.get(fingerprint)
+    }
+
+    /// A store holding only `fingerprint`'s signer (empty when it is not
+    /// trusted here). Node documents verify against this, not the whole
+    /// store.
+    pub fn restricted_to(&self, fingerprint: &str) -> Self {
+        Self {
+            signers: self
+                .signers
+                .get(fingerprint)
+                .map(|signer| (signer.fingerprint.clone(), signer.clone()))
+                .into_iter()
+                .collect(),
+        }
     }
 
     /// Every trusted signer, in no particular order.

@@ -532,6 +532,7 @@ impl LiveNativeCapacityInputs {
         let verified = ryeos_node_runtime::node_document::verify_pinned_signed_yaml(
             &policy_file.file,
             &trust,
+            &report.node_fingerprint,
         )?;
         ensure!(
             verified.signer_fingerprint == report.node_fingerprint,

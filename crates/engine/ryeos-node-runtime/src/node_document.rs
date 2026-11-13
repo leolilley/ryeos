@@ -17,9 +17,14 @@ pub struct VerifiedNodeDocument {
     pub signer_fingerprint: String,
 }
 
+/// Verify a node-signed YAML document. `node_fingerprint` is the only signer
+/// accepted: a document signed by any other key, pinned or not, is refused
+/// with [`ryeos_engine::trust::NodeDocumentWrongSigner`] before its signature
+/// is checked, and the signature is checked against the node key alone.
 pub fn verify_pinned_signed_yaml(
     file: &lillux::PinnedRegularFile,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
 ) -> Result<VerifiedNodeDocument> {
     let content = file.read_bounded(MAX_ITEM_BYTES)?;
     let content = std::str::from_utf8(&content)
@@ -37,8 +42,19 @@ pub fn verify_pinned_signed_yaml(
             )
         })?;
     let signer_fingerprint = header.signer_fingerprint.clone();
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)?;
+    ryeos_engine::trust::require_document_signer(
+        file.path(),
+        &signer_fingerprint,
+        node_fingerprint,
+        "node",
+        ryeos_engine::trust::NODE_DOCUMENT_CURE,
+    )?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        content,
+        &header,
+        &envelope,
+        &trust_store.restricted_to(node_fingerprint),
+    )?;
     if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
         bail!(
             "node document at {} is not trusted (trust_class: {:?})",
@@ -171,5 +187,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(path, tmp.path().join("schedules/demo.yaml"));
+    }
+
+    fn trust_of(keys: &[&lillux::crypto::VerifyingKey]) -> ryeos_engine::trust::TrustStore {
+        ryeos_engine::trust::TrustStore::from_signers(
+            keys.iter()
+                .map(|key| ryeos_engine::trust::TrustedSigner {
+                    fingerprint: lillux::signature::compute_fingerprint(key),
+                    verifying_key: **key,
+                    label: None,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn node_document_signed_by_the_node_verifies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = identity();
+        let path = write_signed_item(
+            tmp.path(),
+            "schedules",
+            "demo",
+            &serde_json::json!({ "schedule_id": "demo" }),
+            &node,
+        )
+        .unwrap();
+        let file = lillux::open_pinned_regular_file_no_follow(&path).unwrap();
+        let verified = verify_pinned_signed_yaml(
+            &file,
+            &trust_of(&[node.verifying_key()]),
+            node.fingerprint(),
+        )
+        .unwrap();
+        assert_eq!(verified.signer_fingerprint, node.fingerprint());
+    }
+
+    /// A pinned third-party publisher key must not be able to sign node
+    /// state, even though it is trusted for items.
+    #[test]
+    fn node_document_signed_by_pinned_publisher_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node = identity();
+        let publisher = identity();
+        let path = write_signed_item(
+            tmp.path(),
+            "schedules",
+            "demo",
+            &serde_json::json!({ "schedule_id": "demo" }),
+            &publisher,
+        )
+        .unwrap();
+        let file = lillux::open_pinned_regular_file_no_follow(&path).unwrap();
+        let trust = trust_of(&[node.verifying_key(), publisher.verifying_key()]);
+        let error = match verify_pinned_signed_yaml(&file, &trust, node.fingerprint()) {
+            Ok(_) => panic!("a publisher-signed node document must be refused"),
+            Err(error) => error,
+        };
+        let refusal = error
+            .downcast_ref::<ryeos_engine::trust::NodeDocumentWrongSigner>()
+            .unwrap_or_else(|| panic!("expected node_document_wrong_signer, got {error:#}"));
+        assert_eq!(refusal.signer, publisher.fingerprint());
+        assert_eq!(refusal.expected, node.fingerprint());
+        assert_eq!(refusal.role, "node");
+        assert!(error.to_string().contains("remove the file"));
     }
 }

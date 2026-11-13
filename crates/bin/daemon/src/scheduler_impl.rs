@@ -229,6 +229,10 @@ impl SchedulerContext for AppSchedulerContext {
         self.1.trust_store()
     }
 
+    fn schedule_signer_fingerprint(&self) -> &str {
+        self.1.identity().fingerprint()
+    }
+
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {
         Ok(self
             .0

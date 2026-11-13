@@ -237,7 +237,7 @@ pub fn validate_profile_bundle_records(
         let body = node_bundle_record_body(bundle_name, &root)?;
         let expected_signed = lillux::signature::sign_content_at(
             &body,
-            &fixture.publisher,
+            &fixture.node,
             "#",
             None,
             FAST_FIXTURE_TIME,
@@ -583,7 +583,7 @@ pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body("core", &abs)?;
     let signed =
-        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+        lillux::signature::sign_content_at(&body, &fixture.node, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("core.yaml"), signed)?;
     Ok(())
 }
@@ -693,7 +693,7 @@ pub fn register_presigned_fixture_bundle(
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
     let signed =
-        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+        lillux::signature::sign_content_at(&body, &fixture.node, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join(format!("{bundle_name}.yaml")), signed)?;
     authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
     Ok(())
@@ -771,7 +771,7 @@ pub fn register_config_fixture_bundle(
     fs::create_dir_all(&registration_dir)?;
     let body = node_bundle_record_body(bundle_name, &absolute_root)?;
     let signed =
-        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+        lillux::signature::sign_content_at(&body, &fixture.node, "#", None, FAST_FIXTURE_TIME);
     fs::write(registration_dir.join(format!("{bundle_name}.yaml")), signed)?;
     authorize_fixture_bundle(state_path, bundle_name, &fixture.node)?;
     Ok(())
@@ -840,13 +840,13 @@ fn register_bundle_record(
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body(bundle_name, &abs)?;
     let signed =
-        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+        lillux::signature::sign_content_at(&body, &fixture.node, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join(format!("{bundle_name}.yaml")), signed)?;
     Ok(())
 }
 
 /// Write a `kind: node` bundle record pointing at
-/// `bundles/ryeos-ui`, signed with the publisher key. Use this when
+/// `bundles/ryeos-ui`, signed with the node key. Use this when
 /// a test needs the RyeOS UI bundle's UI routes and services.
 pub fn register_ryeos_ui_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
     let ryeos_ui = super::workspace_root().join("bundles/ryeos-ui");
@@ -858,7 +858,7 @@ pub fn register_ryeos_ui_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     fs::create_dir_all(&dir)?;
     let body = node_bundle_record_body("ryeos-ui", &abs)?;
     let signed =
-        lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
+        lillux::signature::sign_content_at(&body, &fixture.node, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("ryeos-ui.yaml"), signed)?;
     Ok(())
 }

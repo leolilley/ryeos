@@ -286,7 +286,11 @@ pub(super) fn load_existing_schedule_source(
                 .with_context(|| format!("inspect schedule source {}", source.display()));
         }
     }
-    let verified = projection::load_verified_schedule_source(&source, scheduler.trust_store())?;
+    let verified = projection::load_verified_schedule_source(
+        &source,
+        scheduler.trust_store(),
+        scheduler.identity().fingerprint(),
+    )?;
     if let Some(expected) = expected_spec_hash
         && verified.spec_hash != expected
     {
@@ -335,6 +339,7 @@ impl<'a> ScheduleSourceMutation<'a> {
                 &path,
                 &content,
                 scheduler.trust_store(),
+                scheduler.identity().fingerprint(),
             )?)
         } else {
             None
@@ -381,8 +386,12 @@ impl<'a> ScheduleSourceMutation<'a> {
             crate::API_TEMP_PURPOSE,
         )?;
         let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
-        let verified =
-            projection::verify_schedule_source_content(&self.path, &content, self.trust_store)?;
+        let verified = projection::verify_schedule_source_content(
+            &self.path,
+            &content,
+            self.trust_store,
+            identity.fingerprint(),
+        )?;
         Ok((self.path.clone(), verified))
     }
 }
