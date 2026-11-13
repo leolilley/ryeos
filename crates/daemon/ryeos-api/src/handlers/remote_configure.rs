@@ -306,14 +306,15 @@ mod tests {
 
     #[test]
     fn configure_with_wrong_fingerprint_is_refused() {
-        let (code, status, body) = code(resolve_pin("prod", None, Some(OTHER), LIVE).unwrap_err());
-        assert_eq!(code, REMOTE_KEY_PIN_MISMATCH);
+        let (refusal, status, body) =
+            code(resolve_pin("prod", None, Some(OTHER), LIVE).unwrap_err());
+        assert_eq!(refusal, REMOTE_KEY_PIN_MISMATCH);
         assert_eq!(status, 409);
         assert_eq!(body["expected_fingerprint"], OTHER);
         assert_eq!(body["seen_fingerprint"], LIVE);
         // A descriptor does not excuse a wrong expected fingerprint.
-        let (code, _, _) = code(resolve_pin("prod", Some(LIVE), Some(OTHER), LIVE).unwrap_err());
-        assert_eq!(code, REMOTE_KEY_PIN_MISMATCH);
+        let (refusal, _, _) = code(resolve_pin("prod", Some(LIVE), Some(OTHER), LIVE).unwrap_err());
+        assert_eq!(refusal, REMOTE_KEY_PIN_MISMATCH);
     }
 
     #[test]
