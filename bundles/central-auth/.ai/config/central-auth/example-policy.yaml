@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T21:49:53Z:16852ede52b05457d08cef2a12fec7704a4a9d194696c788a3cfb88085eb2891:egpec24nTgwfkXXfMp94js2nfDnuc6MiMfGbgm1SxzX8M5mY7096p5YjHqqo6Z3GTpjbpWPgMZ5Tfmo9DN3DAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:43:18Z:75e0fcedcaab2603f08253896e67deaf58291d2521bd71ce81762dcbb1cd16da:RxHyUB8evo2f5PII6WPk8OMnKR1fGxBCE6hfF8YUso0ce5Hd+rhJZsYQw/2b6LsYDQKDBD+7bSn4Zbk+CdMLDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "central-auth"
 version: "0.1.0"
 description: "Example central-auth policy for a sample application."
@@ -24,3 +24,7 @@ policy:
     - example-app.ratings.write
     - example-app.ai.chat
     - example-app.admin
+  login_throttle:
+    max_failures: 5
+    window_secs: 900
+    lockout_secs: 900
