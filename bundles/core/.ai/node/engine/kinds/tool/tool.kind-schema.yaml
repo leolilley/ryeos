@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-11T02:56:41Z:f486ba3af9b5236bc7eba80265ecb5dbf2e9a005c5ad9fa7926604ba905b2330:JhQAMc0VZ9GuJFK1LelrPrpn2un9GEYMSvjLmsGAtQjus1HVVi5N3S2EjojY8bCrPzctj3U6gVCO+ddYiQK9Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T01:40:10Z:7457c9d1465ab3e3d4a1f1257bac6b40621767b7a07ed6a6508dec67368e6e71:IoYpZp8xffKonb2uYm3kz3aZwrqni1TOZ/0i8UxCIWPfE38AEZJHEKxz/AVYuX549MauxjoWvgWTTvlI9n2pCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
-version: "1.3.0"
+version: "1.4.0"
 location:
   directory: tools
   excluded_directories: [lib]
@@ -25,9 +25,13 @@ execution:
     max_depth: 64
   # Kind-owned location of the author's durable-effect ceiling. Generic
   # dispatch consumes only this signed mechanical projection; it never names
-  # or interprets the tool document's `effects` field directly.
+  # or interprets the tool document's `effects` field directly. A tool's
+  # `effects` is the author's testimony: without qualification evidence it
+  # admits at most `recorded`, so a `sealed` request against a tool that
+  # declares `sealed` is refused (`durable_effect_sealed_unqualified`).
   effect_class_ceiling:
     path: [effects]
+    unproven_max: recorded
   # Generic shared-workspace relationship for workload-delegated children.
   # Absence on an item is deny-all for that surface. This is not inferred from
   # durable effects: replay semantics cannot grant workspace mutation.
@@ -151,7 +155,9 @@ composed_value_contract:
     # than the item declares here — a tool that writes outside its result
     # envelope declares `live`, and no graph node can then record it, because
     # replay serves the stored result and would silently skip the writes.
-    # Absent means live/ineligible. Durable replay is never inferred.
+    # Absent means live/ineligible. Durable replay is never inferred. A
+    # declared `sealed` is unproven: callers may claim at most `recorded`
+    # (see `effect_class_ceiling.unproven_max`).
     effects:
       type: single
       prim: string
