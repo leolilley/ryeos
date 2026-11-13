@@ -305,7 +305,10 @@ mod tests {
             "outbound_principal": "delegated"
         }))
         .unwrap();
-        assert_eq!(request.outbound_principal, Some(OutboundPrincipal::Delegated));
+        assert_eq!(
+            request.outbound_principal,
+            Some(OutboundPrincipal::Delegated)
+        );
         let defaulted: Request = serde_json::from_value(serde_json::json!({
             "remote": "hosted",
             "project": "/project"

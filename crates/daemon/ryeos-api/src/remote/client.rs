@@ -1885,7 +1885,11 @@ impl RemoteClient {
 
     /// POST /revoke-delegation (authenticated): ask the remote to tombstone one
     /// delegation digest.
-    pub async fn revoke_delegation(&self, delegator: &str, delegation_digest: &str) -> Result<Value> {
+    pub async fn revoke_delegation(
+        &self,
+        delegator: &str,
+        delegation_digest: &str,
+    ) -> Result<Value> {
         let body = serde_json::json!({
             "delegator": delegator,
             "delegation_digest": delegation_digest,
@@ -6217,7 +6221,9 @@ mod tests {
         );
         assert_eq!(error.code(), "remote_delegation_expired");
         assert!(
-            error.to_string().contains("ryeos remote delegate --remote hosted"),
+            error
+                .to_string()
+                .contains("ryeos remote delegate --remote hosted"),
             "{error}"
         );
     }
@@ -6226,8 +6232,7 @@ mod tests {
     fn delegated_client_presents_the_delegation_and_the_cosignature() {
         let (_tmp, _store, state, remote, key, context) = delegation_fixture();
         let stored = store_delegation(&state, &remote, &key, lillux::time::unix_secs_now() + 600);
-        let client =
-            RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context).unwrap();
+        let client = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &context).unwrap();
         assert_eq!(client.delegation_digest(), Some(stored.digest().unwrap()));
         let headers = client.sign_request("POST", "/execute", b"{}").unwrap();
         assert_eq!(headers.key_id, state.identity.principal_id());

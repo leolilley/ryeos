@@ -498,10 +498,9 @@ mod tests {
                 project_bindings: std::collections::HashMap::new(),
             };
             // The operator signs its own delegation; the daemon only stores it.
-            let operator = lillux::crypto::load_signing_key(
-                &fixture.state.config.operator_signing_key_path,
-            )
-            .unwrap();
+            let operator =
+                lillux::crypto::load_signing_key(&fixture.state.config.operator_signing_key_path)
+                    .unwrap();
             let body = ryeos_node_runtime::remote_delegation::DelegationBody::new(
                 &fixture.context.fingerprint,
                 ryeos_node_runtime::remote_delegation::DelegationParties {
@@ -600,7 +599,8 @@ mod tests {
                 assert!(error.to_string().contains("timeout"));
                 let sent = peer.state.requests.lock().unwrap().clone();
                 assert_eq!(sent.len(), 1);
-                assert_eq!(sent[0].0, fixture.context.fingerprint);
+                // The node signs; the operator's own delegation rides with the request.
+                assert_eq!(sent[0].0, fixture.state.identity.principal_id());
                 assert_eq!(
                     sent[0].1["required_origin_site_id"],
                     fixture.state.threads.site_id()

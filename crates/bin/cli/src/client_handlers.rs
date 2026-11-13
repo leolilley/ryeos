@@ -292,8 +292,13 @@ fn delegation_scopes(value: Option<&Value>) -> Result<Vec<String>, CliError> {
 async fn execute_service(
     app_root: &Path,
     signer: &crate::transport::signing::Signer,
-    body: Value,
+    mut body: Value,
 ) -> Result<Value, CliError> {
+    body["execution_policy"] =
+        serde_json::to_value(ryeos_app::execution_policy::ExecutionPolicy::projectless(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ))
+        .map_err(local_error)?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
     let body_bytes = serde_json::to_vec(&body).expect("JSON value serialization");

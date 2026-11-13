@@ -350,8 +350,9 @@ impl SignedDelegation {
         if bytes.len() as u64 > MAX_RECORD_BYTES {
             return Err(DelegationError::Malformed("header is too large".to_owned()));
         }
-        serde_json::from_slice(&bytes)
-            .map_err(|error| DelegationError::Malformed(format!("header is not a delegation: {error}")))
+        serde_json::from_slice(&bytes).map_err(|error| {
+            DelegationError::Malformed(format!("header is not a delegation: {error}"))
+        })
     }
 }
 
@@ -583,7 +584,9 @@ pub fn list_delegations(
     names.sort();
     let mut summaries = Vec::new();
     for remote in names {
-        if let Some(delegation) = load_delegation(delegations_dir, delegator_fingerprint, &remote, node)? {
+        if let Some(delegation) =
+            load_delegation(delegations_dir, delegator_fingerprint, &remote, node)?
+        {
             summaries.push(StoredDelegationSummary {
                 digest: delegation.digest()?,
                 not_after: delegation.body.not_after,
@@ -607,6 +610,10 @@ pub struct DelegationTombstone {
     pub revoked_at: u64,
     /// Principal that asked for the revocation.
     pub revoked_by: String,
+    /// Site of the node that forwarded the request, when the principal asked
+    /// through a delegation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_via: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_digest: Option<String>,
 }
@@ -618,6 +625,7 @@ pub fn write_tombstone(
     delegation_digest: &str,
     delegator: &str,
     revoked_by: &str,
+    delegated_via: Option<String>,
     request_digest: Option<String>,
     node: &NodeIdentity,
     now: u64,
@@ -639,6 +647,7 @@ pub fn write_tombstone(
         delegator: delegator.to_owned(),
         revoked_at: now,
         revoked_by: revoked_by.to_owned(),
+        delegated_via,
         request_digest,
     };
     let body = toml::to_string(&tombstone).context("serialize tombstone")?;
@@ -672,7 +681,10 @@ mod tests {
     }
 
     fn principal(seed: u8) -> String {
-        format!("fp:{}", lillux::signature::compute_fingerprint(&key(seed).verifying_key()))
+        format!(
+            "fp:{}",
+            lillux::signature::compute_fingerprint(&key(seed).verifying_key())
+        )
     }
 
     fn site(seed: u8) -> String {
@@ -764,7 +776,11 @@ mod tests {
         let delegation = signed(&parties, 2_000);
         assert!(delegation.body.covers("ryeos.execute.service.remote/run"));
         assert!(!delegation.body.covers("ryeos.execute.service.remote/push"));
-        assert!(!delegation.body.covers("ryeos.execute.service.remote/run/extra"));
+        assert!(
+            !delegation
+                .body
+                .covers("ryeos.execute.service.remote/run/extra")
+        );
     }
 
     #[test]
@@ -773,7 +789,10 @@ mod tests {
         let mut delegation = signed(&parties, 2_000);
         delegation.body.not_after = 9_999_999;
         assert_eq!(
-            delegation.verify(&key(5).verifying_key()).unwrap_err().code(),
+            delegation
+                .verify(&key(5).verifying_key())
+                .unwrap_err()
+                .code(),
             "remote_delegation_bad_signature"
         );
         let mut widened = signed(&parties, 2_000);
@@ -785,7 +804,10 @@ mod tests {
         // Another principal's key never verifies it, even with a good signature.
         let delegation = signed(&parties, 2_000);
         assert_eq!(
-            delegation.verify(&key(6).verifying_key()).unwrap_err().code(),
+            delegation
+                .verify(&key(6).verifying_key())
+                .unwrap_err()
+                .code(),
             "remote_delegation_bad_signature"
         );
     }
@@ -793,11 +815,15 @@ mod tests {
     #[test]
     fn delegation_refuses_non_canonical_scopes() {
         let parties = Parties::new();
-        let mut body = DelegationBody::new(&principal(5), parties.view(), &["a.b".to_owned()], 2_000);
+        let mut body =
+            DelegationBody::new(&principal(5), parties.view(), &["a.b".to_owned()], 2_000);
         body.scopes = vec!["b.c".to_owned(), "a.b".to_owned()];
         let delegation = SignedDelegation::sign(body, &key(5)).unwrap();
         assert_eq!(
-            delegation.verify(&key(5).verifying_key()).unwrap_err().code(),
+            delegation
+                .verify(&key(5).verifying_key())
+                .unwrap_err()
+                .code(),
             "remote_delegation_malformed"
         );
     }
@@ -845,16 +871,37 @@ mod tests {
         let parties = Parties::new();
         let first = signed(&parties, 2_000);
         let fingerprint = first.body.delegator_fingerprint().unwrap().to_owned();
-        assert!(load_delegation(&dir, &fingerprint, "b", &node).unwrap().is_none());
+        assert!(
+            load_delegation(&dir, &fingerprint, "b", &node)
+                .unwrap()
+                .is_none()
+        );
         store_delegation(&dir, "b", &first, &node, 1_000).unwrap();
-        assert_eq!(load_delegation(&dir, &fingerprint, "b", &node).unwrap().unwrap(), first);
+        assert_eq!(
+            load_delegation(&dir, &fingerprint, "b", &node)
+                .unwrap()
+                .unwrap(),
+            first
+        );
         let second = signed(&parties, 3_000);
         store_delegation(&dir, "b", &second, &node, 1_001).unwrap();
-        assert_eq!(load_delegation(&dir, &fingerprint, "b", &node).unwrap().unwrap(), second);
-        assert_eq!(list_delegations(&dir, &fingerprint, &node).unwrap().len(), 1);
+        assert_eq!(
+            load_delegation(&dir, &fingerprint, "b", &node)
+                .unwrap()
+                .unwrap(),
+            second
+        );
+        assert_eq!(
+            list_delegations(&dir, &fingerprint, &node).unwrap().len(),
+            1
+        );
         assert!(remove_delegation(&dir, &fingerprint, "b").unwrap());
         assert!(!remove_delegation(&dir, &fingerprint, "b").unwrap());
-        assert!(load_delegation(&dir, &fingerprint, "b", &node).unwrap().is_none());
+        assert!(
+            load_delegation(&dir, &fingerprint, "b", &node)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -881,9 +928,29 @@ mod tests {
         let other = signed(&parties, 2_000);
         let digest = revoked.digest().unwrap();
         assert!(!is_revoked(&dir, &digest, &node).unwrap());
-        write_tombstone(&dir, &digest, &revoked.body.delegator, &principal(5), None, &node, 1_000).unwrap();
+        write_tombstone(
+            &dir,
+            &digest,
+            &revoked.body.delegator,
+            &principal(5),
+            None,
+            None,
+            &node,
+            1_000,
+        )
+        .unwrap();
         // Writing again keeps the first tombstone.
-        let again = write_tombstone(&dir, &digest, &revoked.body.delegator, &principal(6), None, &node, 2_000).unwrap();
+        let again = write_tombstone(
+            &dir,
+            &digest,
+            &revoked.body.delegator,
+            &principal(6),
+            None,
+            None,
+            &node,
+            2_000,
+        )
+        .unwrap();
         assert_eq!(again.revoked_at, 1_000);
         assert!(is_revoked(&dir, &digest, &node).unwrap());
         assert!(!is_revoked(&dir, &other.digest().unwrap(), &node).unwrap());

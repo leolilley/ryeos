@@ -730,10 +730,7 @@ fn verify_delegated(
                 poisoned.into_inner()
             }
         };
-        let node_fingerprint = request
-            .key_id
-            .strip_prefix("fp:")
-            .unwrap_or(request.key_id);
+        let node_fingerprint = request.key_id.strip_prefix("fp:").unwrap_or(request.key_id);
         if !guard.check_and_record(node_fingerprint, request.nonce) {
             return Err("replayed request".into());
         }
@@ -1883,9 +1880,11 @@ mod tests {
     /// A node B holding one forwarding node admitted as `remote_node` for
     /// site A, and one principal admitted as `remote_principal` for site A.
     struct Delegated {
-        _tmp: TempDir,
-        _store_owner: ryeos_app::test_support::TestStateStore,
+        // The application drops before the store that owns its state, which
+        // drops before the directory that holds both.
         state: ryeos_app::state::AppState,
+        _store_owner: ryeos_app::test_support::TestStateStore,
+        _tmp: TempDir,
         user_key: SigningKey,
         node_key: SigningKey,
         node_fp: String,
@@ -1895,6 +1894,9 @@ mod tests {
     impl Delegated {
         fn new(seed: u8) -> Self {
             let (tmp, store_owner, state) = build_test_state();
+            // Request verification reads the configured operator's identity to
+            // refuse its key in a `remote_node` grant.
+            NodeIdentity::create(&state.config.operator_signing_key_path).unwrap();
             let user_key = SigningKey::from_bytes(&[seed; 32]);
             let node_key = SigningKey::from_bytes(&[seed + 1; 32]);
             let scopes: Vec<String> = GRANT_SCOPES.iter().map(|s| (*s).to_owned()).collect();
@@ -1902,9 +1904,9 @@ mod tests {
                 register_remote_principal_key_with_scopes(&state, &user_key, SITE_A, &scopes);
             let node_fp = register_remote_node_key(&state, &node_key, SITE_A);
             Self {
-                _tmp: tmp,
-                _store_owner: store_owner,
                 state,
+                _store_owner: store_owner,
+                _tmp: tmp,
                 user_key,
                 node_key,
                 node_fp,
@@ -2093,7 +2095,10 @@ mod tests {
             delegation.to_header_value().unwrap().parse().unwrap(),
         );
         let error = verify_request(&node.state, "POST", &uri, &headers, body).unwrap_err();
-        assert_eq!(refusal_code(&error), Some("remote_delegation_not_transitive"));
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_not_transitive")
+        );
     }
 
     #[test]
@@ -2107,7 +2112,10 @@ mod tests {
         let error = node
             .verify("nonce-delegated-audience", Some(&wrong_audience), true)
             .unwrap_err();
-        assert_eq!(refusal_code(&error), Some("remote_delegation_wrong_audience"));
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_wrong_audience")
+        );
 
         let expired = node.delegation(&["ryeos.execute.service.remote/run"], 1_000);
         let error = node
@@ -2120,7 +2128,10 @@ mod tests {
         let error = node
             .verify("nonce-delegated-tamper", Some(&tampered), true)
             .unwrap_err();
-        assert_eq!(refusal_code(&error), Some("remote_delegation_bad_signature"));
+        assert_eq!(
+            refusal_code(&error),
+            Some("remote_delegation_bad_signature")
+        );
     }
 
     #[test]
@@ -2198,6 +2209,7 @@ mod tests {
             &revoked.digest().unwrap(),
             &revoked.body.delegator,
             &revoked.body.delegator,
+            None,
             None,
             &node.state.identity,
             unix_now(),
