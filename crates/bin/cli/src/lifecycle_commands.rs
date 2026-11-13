@@ -572,11 +572,11 @@ fn run_node_host_retire_command(argv: &[String], console: &crate::tty::Console) 
             "this host has no native service directory readable without root; nothing to list",
         )?;
         if orphans.is_empty() {
-            println!("no orphaned host services");
+            console.text("no orphaned host services")?;
             return Ok(());
         }
         for service in &orphans {
-            println!(
+            console.text(&format!(
                 "orphaned host service {} (app root gone: {})",
                 service.name,
                 service
@@ -584,7 +584,7 @@ fn run_node_host_retire_command(argv: &[String], console: &crate::tty::Console) 
                     .as_deref()
                     .map(|root| root.display().to_string())
                     .unwrap_or_default()
-            );
+            ))?;
         }
     }
     let daemon = installed_daemon()?;

@@ -1365,8 +1365,7 @@ async fn rebind_refuses_a_consumer_that_no_longer_declares_the_manifest() {
         &changed,
     )
     .await
-    .err()
-    .expect("a consumer that dropped the manifest is not the same consumer");
+    .expect_err("a consumer that dropped the manifest is not the same consumer");
     assert_eq!(
         error.downcast_ref::<RebindRefused>().unwrap().code,
         RebindRefused::CONSUMER_CHANGED

@@ -760,12 +760,12 @@ mod tests {
         assert_eq!(section.source_scope(), NodeConfigSourceScope::AppRootOnly);
         let files = scan_yaml_files(&dir, false).unwrap();
         let verified = verify_and_parse(&files[0], &dir, SECTION_NAME, &trust).unwrap();
-        assert!(verify_section_signer(&section, &verified, &"f".repeat(64)).is_err());
-        let record = section.parse(verified.context(), verified.body()).unwrap();
-        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         let source = NodeConfigSource::Node {
             command_registration_caps: Vec::new(),
         };
+        assert!(verify_section_signer(&section, &verified, &"f".repeat(64), &source).is_err());
+        let record = section.parse(verified.context(), verified.body()).unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         builder.admit(record, &verified, &source).unwrap();
         assert!(
             builder

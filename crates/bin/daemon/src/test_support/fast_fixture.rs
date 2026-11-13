@@ -235,13 +235,8 @@ pub fn validate_profile_bundle_records(
             .canonicalize()
             .with_context(|| format!("resolve selected profile bundle {bundle_name}"))?;
         let body = node_bundle_record_body(bundle_name, &root)?;
-        let expected_signed = lillux::signature::sign_content_at(
-            &body,
-            &fixture.node,
-            "#",
-            None,
-            FAST_FIXTURE_TIME,
-        );
+        let expected_signed =
+            lillux::signature::sign_content_at(&body, &fixture.node, "#", None, FAST_FIXTURE_TIME);
         let record = records.join(format!("{bundle_name}.yaml"));
         let metadata = fs::symlink_metadata(&record)
             .with_context(|| format!("read selected profile registration {bundle_name}"))?;

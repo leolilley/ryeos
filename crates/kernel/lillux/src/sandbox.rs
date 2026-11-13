@@ -6562,8 +6562,9 @@ mod imp {
             let expected = unsafe { expected.assume_init() };
             assert_eq!(
                 read_overlay_symlink_at(descriptor.as_raw_fd(), c"link", &expected, "link")
-                    .unwrap(),
-                "first"
+                    .unwrap()
+                    .as_deref(),
+                Some("first")
             );
             // Keep the selected original inode alive under another name so
             // replacement cannot accidentally reuse its inode coordinate.
@@ -10923,13 +10924,13 @@ mod tests {
         std::fs::create_dir(
             state_path
                 .join("upper/.venv")
-                .join(OsStr::from_bytes(b"bad\xffdir")),
+                .join(std::ffi::OsStr::from_bytes(b"bad\xffdir")),
         )
         .unwrap();
         std::fs::write(
             state_path
                 .join("upper/.venv")
-                .join(OsStr::from_bytes(b"bad\xffdir"))
+                .join(std::ffi::OsStr::from_bytes(b"bad\xffdir"))
                 .join("hidden"),
             b"never scanned",
         )

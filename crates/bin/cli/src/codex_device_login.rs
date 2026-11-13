@@ -8,7 +8,7 @@
 //! that exact login epoch and account digest. The node keeps the two-step
 //! authority: observation by the login worker, confirmation by the operator.
 
-use std::io::{BufRead as _, IsTerminal as _, Write as _};
+use std::io::{BufRead as _, IsTerminal as _};
 use std::path::Path;
 use std::time::Duration;
 
@@ -342,7 +342,7 @@ async fn wait_for_ready_session<N: NodeCommands>(
     let deadline = node
         .now_ms()
         .saturating_add(duration_ms(timing.session_ready_timeout));
-    let mut last = String::from("no status yet");
+    let mut last: String;
     loop {
         match node
             .call(argv(&["codex", "session", "status", session]))
@@ -499,18 +499,17 @@ impl Operator for TerminalOperator<'_> {
     fn approve_account(&mut self, account: &Value, account_digest: &str) -> Result<bool, CliError> {
         let rendered = serde_json::to_string_pretty(account)
             .map_err(|error| local(format!("render observed account: {error}")))?;
-        let mut stderr = std::io::stderr().lock();
-        writeln!(
-            stderr,
-            "Observed account (digest {account_digest}):\n{}",
+        self.console.info(&crate::tty::Diagnostic::info(format!(
+            "Observed account (digest {account_digest}): {}",
             crate::tty::sanitize_terminal_inline(&rendered.replace('\n', " "))
-        )?;
+        )))?;
         if self.assume_yes {
-            writeln!(stderr, "Confirming it (--yes).")?;
+            self.console
+                .info(&crate::tty::Diagnostic::info("Confirming it (--yes)."))?;
             return Ok(true);
         }
-        write!(stderr, "Confirm this account for the profile? [y/N] ")?;
-        stderr.flush()?;
+        self.console
+            .prompt("Confirm this account for the profile? [y/N] ")?;
         let mut answer = String::new();
         std::io::stdin().lock().read_line(&mut answer)?;
         Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
