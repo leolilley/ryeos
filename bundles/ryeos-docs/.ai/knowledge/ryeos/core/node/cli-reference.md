@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:26:53Z:849b7e114cb3c75d6c1cc9b09c8923462ddc3aaefe670d273d8e65b538d8a0e1:3bN7IAlOg7cbLeDj4dZ/8UAVfd70Wvyb5BVicZCJnBdv+9jOOzuzvPJDFBB//hLQgxA6kqYY40fvIUghvHOLBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:27:14Z:d1abb2d2244de7dd963a0d92d218bb6ec96b437f7246f0161101ab0450ba4516:vnIZa5StHQTV99nXi81v33aJYCLBuisc7eqOZLidYVvTb2QTtnbp63rTWfjvLuzILv9GTQxHlIDnIkJtZWVlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -86,6 +86,13 @@ is an error and never falls back to direct spawning. The readiness timeout is
 15 minutes so verified projection recovery can finish. Interactive terminals
 show the daemon's typed startup phases and counters in one redrawn boot line;
 redirected output remains plain and deterministic.
+
+A stopped node whose native-capacity epoch has no incarnation left is refused
+before launch with `native_capacity_exhausted`, naming the epoch; no restart
+inhibition is recorded. The cure is the one `ryeos node doctor` names:
+`ryeos node capacity reissue --reason "..."`, then `ryeos start` (or, where the
+signed policy forbids re-issuance, re-provisioning). A start that uses the
+epoch's last incarnation warns that the next start will be refused.
 
 Endpoint arguments are durable stopped-node configuration, not transient
 process overrides. A differing value is published under the same lifecycle and
@@ -267,6 +274,17 @@ existed cannot say which sections were chosen: the cut lists every section
 that differs from the profile and needs each named with `--keep-section` or
 `--reset-section`. Nothing is reset silently. The pinned request digest
 covers the carried result, so a rerun after a crash reproduces it exactly.
+
+The capacity issuance pins the `native_capacity` policy it was granted under.
+When the resulting generation's `native_capacity` differs from the policy in
+force (the section was reset, or the profile changed one no operator applied),
+the cut amends the issuance in the same step, as `policy-apply
+native_capacity` does, and its report carries `capacity_amendment`. The
+amendment's checks run before the completion record is removed: while an
+incarnation debit is outstanding, or the account's image does not fit the new
+policy, the cut refuses with nothing changed; settle the account with
+`ryeos node capacity reissue --reason "..."` and rerun it. A rerun after a
+crash converges on the same amendment.
 
 ### `ryeos node external-execution compose`
 

@@ -275,6 +275,94 @@ async fn reissue_is_refused_while_the_daemon_runs() {
     drop(harness);
 }
 
+/// Rewrite the fixture's native-capacity allowance so an epoch funds exactly
+/// one incarnation (connection tickets bind first), re-signed by the fixture
+/// node key before the init completion seals the generation.
+fn fund_one_incarnation(state_path: &Path, node: &SigningKey) -> anyhow::Result<()> {
+    let path = state_path.join(".ai/node/policies/native_capacity.yaml");
+    let raw = std::fs::read_to_string(&path)?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    let tickets = policy["incarnation"]["units"]["connection_tickets"].clone();
+    anyhow::ensure!(tickets.is_u64(), "incarnation connection tickets");
+    policy["allowance"]
+        .as_mapping_mut()
+        .expect("allowance")
+        .insert("connection_tickets".into(), tickets);
+    let body = serde_yaml::to_string(&policy)?;
+    let signed =
+        lillux::signature::sign_content_at(&body, node, "#", None, fast_fixture::FAST_FIXTURE_TIME);
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// `ryeos start` on a spent epoch refuses before launch with
+/// `native_capacity_exhausted` and records no restart inhibition; the
+/// operator re-issues and the node starts again.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_refuses_a_spent_epoch_before_launch_until_reissue() {
+    let (mut harness, _fixture) = DaemonHarness::start_fast_with(
+        |state_path, _user_space, fixture| fund_one_incarnation(state_path, &fixture.node),
+        |_| {},
+    )
+    .await
+    .expect("start fast daemon on a one-incarnation epoch");
+    let app_root = harness.state_path.clone();
+    let running = inspect_capacity_account(&app_root).unwrap().unwrap();
+    assert_eq!(running.epoch, 1);
+    assert_eq!(
+        running.incarnations_remaining, 0,
+        "the running daemon holds the epoch's only incarnation"
+    );
+    harness.stop_gracefully().await.expect("orderly stop");
+
+    let output = tokio::process::Command::new(common::ryeos_binary())
+        .args(["start", "--app-root"])
+        .arg(&app_root)
+        .env("RYEOS_APP_ROOT", &app_root)
+        .env("HOME", harness.user_space.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .expect("run ryeos start");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "a spent epoch refuses the start; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(ryeos_node::start::NativeCapacityExhausted::CODE),
+        "the refusal carries its code; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("ryeos node capacity reissue"),
+        "the refusal names its cure; stderr:\n{stderr}"
+    );
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).state();
+    assert!(
+        !ryeos_node::lifecycle_marker::restart_inhibition_record(&state_dir).exists(),
+        "a refused start records no restart inhibition"
+    );
+    let unchanged = inspect_capacity_account(&app_root).unwrap().unwrap();
+    assert_eq!((unchanged.epoch, unchanged.incarnations_remaining), (1, 0));
+
+    let report = reissue(
+        &app_root,
+        &StateLock::acquire(&default_lock_path(&app_root)).unwrap(),
+        &operator_key(&app_root),
+        "e2e spent epoch",
+    )
+    .expect("operator re-issue");
+    assert_eq!(report.to_epoch, 2);
+    harness
+        .respawn_with(|_| {})
+        .await
+        .expect("the node starts after re-issue");
+    let restarted = inspect_capacity_account(&app_root).unwrap().unwrap();
+    assert_eq!(restarted.epoch, 2);
+    harness.stop_gracefully().await.expect("final stop");
+}
+
 /// Rewrite the fixture's native-capacity policy member with a short service
 /// window, re-signed by the fixture node key before the init completion seals
 /// the generation. The window must still exceed the drain margin plus the

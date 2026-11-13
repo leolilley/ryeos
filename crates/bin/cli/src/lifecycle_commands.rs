@@ -1690,6 +1690,16 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
                 ),
             ));
         }
+        if let Some(amendment) = &report.capacity_amendment {
+            status.rows.push(crate::tty::Row::key_value(
+                "capacity issuance",
+                if amendment.already_applied {
+                    format!("policy {} already in force", amendment.policy_digest)
+                } else {
+                    format!("amended to policy {}", amendment.policy_digest)
+                },
+            ));
+        }
         console.success(&status)?;
     }
     Ok(())
@@ -3644,6 +3654,7 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
         }
     }
     .context("ryeos start failed")?;
+    warn_if_last_capacity_incarnation(console, &report)?;
     if let Some(progress) = progress {
         progress.finish_start(&report)?;
         warn_if_stale_daemon(console, &report.status)?;
@@ -3658,6 +3669,36 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
         console.status(&status)?;
     }
     render_lifecycle_status(console, &report.status)?;
+    Ok(())
+}
+
+/// Warn when this start launched the node on its epoch's last native-capacity
+/// incarnation: the next start is refused until the operator re-issues.
+fn warn_if_last_capacity_incarnation(
+    console: &crate::tty::Console,
+    report: &ryeos_node::StartReport,
+) -> Result<()> {
+    if report.already_running {
+        return Ok(());
+    }
+    let LifecycleStatus::Running {
+        capacity: Some(capacity),
+        ..
+    } = &report.status
+    else {
+        return Ok(());
+    };
+    if capacity.incarnations_remaining != 0 {
+        return Ok(());
+    }
+    let mut diagnostic = crate::tty::Diagnostic::warning(format!(
+        "this start used the last native capacity incarnation of epoch {}",
+        capacity.epoch
+    ));
+    diagnostic.hint = Some(crate::tty::Hint::new(
+        "the next start is refused with native_capacity_exhausted; run `ryeos node capacity reissue --reason \"...\"` first",
+    ));
+    console.warning(&diagnostic)?;
     Ok(())
 }
 
