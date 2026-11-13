@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:22:04Z:6bca7fa6adcbb4f9ac3d4ec028fe2438763bcbe1270381e96dd91b6310b88b70:4RsxuF4vMJdwAkC2KCX7lbJ86LWrRou8A8JevVwdcudRNzg1XjBz45bMpWu6sl8VEztYvOBdV7Oqns5T1UwqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:42:10Z:21738bd580644273fb08d1d6cb01bafe6a6841e38e5c2fd30d9c636ea0651755:Hqnu3evLkPGCsVsxisDMMh5o44IMmlnvW4mMfn8CWcvKPxO8Q7NMMafEBUKhH77E6tyS8wzlWK4YxehxM831CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -139,7 +139,7 @@ for the full matrix.
 | `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
 | `remote/reconcile-project-head` | `remote.reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` |
-| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
+| `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
