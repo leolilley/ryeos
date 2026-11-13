@@ -18,6 +18,7 @@ const ECHO_PRINCIPAL_TOOL: &str = r#"#!/usr/bin/env python3
 #   category: principal
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/tool_callback"
 #   description: "echo the injected acting principal"
 
 import json, os
