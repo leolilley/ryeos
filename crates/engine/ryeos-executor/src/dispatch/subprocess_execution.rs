@@ -861,6 +861,22 @@ async fn dispatch_tool_subprocess(
                 .map_err(DispatchError::Internal)
         })
         .transpose()?;
+    // A root the execute route did not admit (a graph child, a schedule
+    // fire) is judged for host access here, before its root admission is
+    // sealed, so a granted one is sealed as what runs: unconfined on the host.
+    let provenance = if admitted_resolution.is_some() {
+        request.provenance.clone()
+    } else {
+        crate::execution::host_access_gate::host_direct_provenance_before_admission(
+            state,
+            &ctx.engine,
+            &ctx.plan_ctx,
+            current_ref,
+            request,
+            handler_context.as_ref(),
+        )?
+        .unwrap_or_else(|| request.provenance.clone())
+    };
     let resolution_engine = std::sync::Arc::clone(&ctx.engine);
     let resolution_item_ref = item_ref.clone();
     let resolution_plan_context = ctx.plan_ctx.clone();
@@ -868,7 +884,7 @@ async fn dispatch_tool_subprocess(
         ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
             &ctx.engine,
             &ctx.plan_ctx,
-            &request.provenance,
+            &provenance,
         )?;
     let node_history_policy = std::sync::Arc::new(state.node_history_policy()?.clone());
     let resolution_ref_bindings = request.ref_bindings.clone();
@@ -1060,14 +1076,14 @@ async fn dispatch_tool_subprocess(
         handler_context.as_ref(),
     )?;
     if host_access.is_some() {
-        crate::execution::host_access_gate::require_host_direct_project(&request.provenance)?;
+        crate::execution::host_access_gate::require_host_direct_project(&provenance)?;
     }
 
     if request.validate_only {
         let engine = ctx.engine.clone();
         let validation_engine = engine.clone();
         let resolved_clone = resolved.clone();
-        let workspace_lifeline = request.provenance.workspace_lifeline();
+        let workspace_lifeline = provenance.workspace_lifeline();
         let validated = tokio::task::spawn_blocking(move || {
             let _workspace_lifeline = workspace_lifeline;
             ryeos_app::thread_lifecycle::validate_item(&validation_engine, &resolved_clone)
@@ -1131,7 +1147,7 @@ async fn dispatch_tool_subprocess(
     let finalized_direct = crate::execution::runner::finalize_direct_effective_program(
         state,
         &resolved,
-        &request.provenance,
+        &provenance,
         parent_thread_id.as_deref(),
         handler_context.as_ref(),
     )
@@ -1157,7 +1173,7 @@ async fn dispatch_tool_subprocess(
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
-        provenance: request.provenance.clone(),
+        provenance,
         lifecycle_authority: request.lifecycle_authority,
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.

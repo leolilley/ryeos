@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:47:49Z:532155273fe99dff65be5364a9bbf0cc799312e65e00e49e24a2b70239602c16:ZAC2tefALtHjmconBtAWWyfenDlMr+bZtK05Ya1b2LAde67HWGYCyzGK0yB0V5gGqZ4az1oFPDlW4YlqtdqPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:49:01Z:812ead097354ece8e9de23efa05558ca97bae697a5d2cdc8af3b94e539bb19f8:tc97ZYLPdyiSlmEC3TGrZ+bgCJuXh3SLGLOTswBAAV4rCAGyFGwu0wHM50dfTY6Mj6ndT1rIH/kE2+lbzPG7Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, host-access, node-policy, operator]
@@ -80,11 +80,10 @@ host_access:
 - `origins` lists the launch roots that may reach the grant: `direct` (the
   operator runs it), `graph_child` (a node of a graph the operator rooted;
   the parent thread's profile must be one the tool kind lists) and `schedule`
-  (an operator schedule fire). `schedule` is never implied. A graph child
-  inherits its parent's sealed project authority; on an enforced lane that
-  authority is confined, so the child is refused
-  (`host_access_project_refused`) rather than recorded as confined while it
-  runs on the host.
+  (an operator schedule fire). `schedule` is never implied. A granted graph
+  child is judged before its own root admission is sealed and is sealed as
+  `unconfined_host`; its parent keeps its own confinement, so both records say
+  what ran.
 - `host_env` names come from the **daemon's own boot environment**, not the
   caller's shell. Nothing else is inherited. Site Configs should use absolute
   paths. Secrets still arrive only through `required_secrets`.
@@ -122,8 +121,10 @@ policies that can be true for it are a read-write live project
 policy is refused (`host_access_project_refused`). The thread's live project
 authority records `unconfined_host`.
 
-The execute route checks before anything runs, and the executor checks again
-right after launch trust, with the resolved runtime. A host-direct run is never
+The execute route checks a root before anything runs; a graph child or
+schedule fire is checked by the executor before its root admission is sealed;
+and the executor checks again right after launch trust, with the resolved
+runtime. A host-direct run is never
 reconstructed or recovered: after a restart it refuses rather than running
 again. Offline `ryeos` dispatch refuses host-authority tools.
 
@@ -181,7 +182,7 @@ Every refusal is a launch-policy error (HTTP 403) with a stable code:
 | `host_access_origin_not_granted` | The launch's origin is not in the grant's `origins` |
 | `host_access_containment_unavailable` | `scope_required`, but the lane has no qualified scope provider |
 | `host_access_signer_refused` | The item is unsigned or node-signed, or the grant's signer is not pinned |
-| `host_access_project_refused` | A pinned or read-only project policy, or a child whose inherited project authority is confined |
+| `host_access_project_refused` | A pinned or read-only project policy, or a launch whose sealed project authority is still confined |
 
 ## Existing nodes
 

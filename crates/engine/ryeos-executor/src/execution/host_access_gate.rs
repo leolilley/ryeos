@@ -105,12 +105,106 @@ pub(crate) fn enforce_host_access(
     .map_err(refusal)
 }
 
+/// For a root that was not admitted by the execute route (a graph child or a
+/// schedule fire), judge host access before its root admission is sealed and,
+/// when it is granted, return its provenance with the project authority
+/// converted to `unconfined_host`. The root admission is then sealed from that
+/// converted provenance, so the child's record says what runs while its parent
+/// keeps its own confinement. Returns `None` for every confined root, and for a
+/// root that does not resolve here: dispatch reports that itself, and the
+/// launch gate still refuses a host-direct launch sealed confined.
+pub(crate) fn host_direct_provenance_before_admission(
+    state: &ryeos_app::state::AppState,
+    engine: &ryeos_engine::engine::Engine,
+    plan_ctx: &ryeos_engine::contracts::PlanContext,
+    item: &ryeos_engine::canonical_ref::CanonicalRef,
+    request: &crate::dispatch::DispatchRequest<'_>,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+) -> Result<Option<ryeos_app::execution_provenance::ExecutionProvenance>, DispatchError> {
+    let Some(execution) = engine
+        .kinds
+        .get(&item.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .filter(|execution| execution.host_authority.is_some())
+    else {
+        return Ok(None);
+    };
+    let project_root = match &plan_ctx.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
+        _ => None,
+    };
+    let Ok((_, output)) =
+        engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            item_ref: item.clone(),
+            expected_kind: Some(item.kind.clone()),
+            project_root,
+            subject_resolution_authority: plan_ctx.subject_resolution_authority.clone(),
+        })
+    else {
+        return Ok(None);
+    };
+    let posture = execution
+        .project_execution_posture(&output.composed.composed)
+        .map_err(|error| DispatchError::SchemaMisconfigured {
+            kind: item.kind.clone(),
+            detail: error.to_string(),
+        })?;
+    if !posture.is_host_direct() {
+        return Ok(None);
+    }
+    let source_closure = ryeos_app::host_access::source_closure_digest(
+        output
+            .composed
+            .derived
+            .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY),
+    )
+    .map_err(DispatchError::Internal)?;
+    let subject = HostAccessSubject {
+        item: &output.root.resolved_ref,
+        signer: output.root.signer_fingerprint.as_deref(),
+        source_closure: source_closure.as_deref(),
+        runtime: None,
+    };
+    let current_site_id = state.threads.site_id();
+    ryeos_app::host_access::admit(
+        state,
+        engine,
+        &subject,
+        &HostAccessCaller {
+            acting_principal: request.acting_principal,
+            handler_context,
+            target_site_id: request
+                .target_site_id
+                .filter(|target| *target != current_site_id),
+            current_site_id,
+            origin_site_id: &plan_ctx.origin_site_id,
+            parent_thread_id: request
+                .parent_execution_context
+                .as_ref()
+                .map(|parent| parent.parent_thread_id.as_str()),
+            scheduled: plan_ctx.scheduled_fire.is_some(),
+        },
+    )
+    .map_err(refusal)?;
+    request
+        .provenance
+        .clone()
+        .into_host_direct()
+        .map(Some)
+        .map_err(|error| {
+            refusal(HostAccessRefusal::new(
+                HostAccessRefusal::PROJECT_REFUSED,
+                format!("{error:#}"),
+            ))
+        })
+}
+
 /// Require the sealed project authority to be true for a host process: a
 /// projectless execution, or a read-write live project sealed as
-/// `unconfined_host`. The execute route seals a host-direct root that way. A
-/// callback child inherits its parent's sealed authority, so on an enforced
-/// lane (a descriptor-rooted parent) a graph child is refused rather than run
-/// under a record that says it was confined.
+/// `unconfined_host`. The execute route seals a host-direct root that way, and
+/// [`host_direct_provenance_before_admission`] seals a graph child or schedule
+/// fire that way before its root admission. Anything else is refused rather
+/// than run under a record that says it was confined.
 pub(crate) fn require_host_direct_project(
     provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
 ) -> Result<(), DispatchError> {
@@ -130,7 +224,7 @@ pub(crate) fn require_host_direct_project(
     }
     Err(refusal(HostAccessRefusal::new(
         HostAccessRefusal::PROJECT_REFUSED,
-        "a host-direct launch runs unconfined on the host, but its sealed project authority is pinned, read-only or confined (a child of a launch on an enforced lane inherits its parent's confinement); run it directly with a read-write live or projectless policy",
+        "a host-direct launch runs unconfined on the host, but its sealed project authority is pinned, read-only or confined; run it with a read-write live or projectless policy",
     )))
 }
 
