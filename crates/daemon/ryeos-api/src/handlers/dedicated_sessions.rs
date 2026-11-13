@@ -6818,32 +6818,94 @@ async fn resolve_approval(
             )));
         }
     };
-    let exact_expiry = delivery.as_object().is_some_and(|object| {
-        object.len() == 4
-            && object.get("resolved").and_then(Value::as_bool) == Some(false)
-            && object.get("outcome").and_then(Value::as_str) == Some("expired")
-            && object.get("request_id") == Some(&request_id)
-            && object.get("request_digest").and_then(Value::as_str)
-                == Some(req.request_digest.as_str())
-    });
-    if exact_expiry {
-        let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
-            &state,
-            &placement_thread_id,
-            &req.approval_id,
-            approval.worker_boot_epoch,
-            &req.request_digest,
-            &reservation_token,
-            &decision_digest,
-            "expired",
-            lillux::time::Duration::from_secs(30),
-        )
-        .await
-        .map_err(internal)?;
-        if projected {
+    let unresolved_testimony = |outcome: &str| {
+        delivery.as_object().is_some_and(|object| {
+            object.len() == 4
+                && object.get("resolved").and_then(Value::as_bool) == Some(false)
+                && object.get("outcome").and_then(Value::as_str) == Some(outcome)
+                && object.get("request_id") == Some(&request_id)
+                && object.get("request_digest").and_then(Value::as_str)
+                    == Some(req.request_digest.as_str())
+        })
+    };
+    let exact_expiry = unresolved_testimony("expired");
+    let exact_absent = unresolved_testimony("absent");
+    if exact_absent {
+        // The worker forgets an expired approval once RyeOS acknowledges its
+        // expiry, so a decision reserved before that expiry was projected can
+        // arrive after it. Only this worker's own acknowledged expiry of this
+        // exact request explains the absence; it settles like a typed expiry.
+        if let Some(observed) =
+            ryeos_app::dedicated_session_service::observed_expiry_explaining_absent_delivery(
+                &state,
+                &session,
+                &req.approval_id,
+                approval.worker_boot_epoch,
+                &req.request_digest,
+                &reservation_token,
+                &decision_digest,
+                &request_id,
+            )
+            .map_err(internal)?
+        {
+            let expired_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
+                "schema":"ryeos.hosted_approval_delivery_fact.v1",
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":placement_thread_id,
+                "approval_id":req.approval_id,
+                "reservation_token":reservation_token,
+                "stage":"delivery_expired",
+            }))
+            .map_err(internal)?;
+            append_root_fact_once(
+                &state,
+                &session,
+                "hosted_approval.delivery_expired",
+                &expired_operation_id,
+                json!({
+                    "schema":1,
+                    "origin":"daemon_observed_io",
+                    "chain_root_id":session.chain_root_id,
+                    "placement_thread_id":placement_thread_id,
+                    "approval_id":req.approval_id,
+                    "worker_boot_epoch":approval.worker_boot_epoch,
+                    "request_digest":req.request_digest,
+                    "reservation_token":reservation_token,
+                    "decision_digest":decision_digest,
+                    "worker_answer":"absent",
+                    "expiry_observation":{
+                        "batch_digest":observed.batch_digest,
+                        "first_sequence":observed.first_sequence,
+                        "through_sequence":observed.through_sequence,
+                        "event_sequence":observed.event_sequence,
+                    },
+                }),
+            )?;
             return Err(HandlerError::BadRequest(
                 "approval expired before the owner decision reached the worker".into(),
             ));
+        }
+    }
+    if exact_expiry || exact_absent {
+        if exact_expiry {
+            let projected = ryeos_app::dedicated_session_service::wait_for_exact_approval_state(
+                &state,
+                &placement_thread_id,
+                &req.approval_id,
+                approval.worker_boot_epoch,
+                &req.request_digest,
+                &reservation_token,
+                &decision_digest,
+                "expired",
+                lillux::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(internal)?;
+            if projected {
+                return Err(HandlerError::BadRequest(
+                    "approval expired before the owner decision reached the worker".into(),
+                ));
+            }
         }
         let cleanup_state = match state
             .persistent_sessions
@@ -6908,7 +6970,12 @@ async fn resolve_approval(
             }),
         )?;
         return Err(HandlerError::BadRequest(
-            "worker reported approval expiry without durable expiry testimony; the worker was retired and delivery remains unknown".into(),
+            if exact_expiry {
+                "worker reported approval expiry without durable expiry testimony; the worker was retired and delivery remains unknown"
+            } else {
+                "worker reported the approval absent without its own acknowledged expiry of this exact request; the worker was retired and delivery remains unknown"
+            }
+            .into(),
         ));
     }
     let settled_operation_id = ryeos_state::objects::canonical_value_digest(&json!({
