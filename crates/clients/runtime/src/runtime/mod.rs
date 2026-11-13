@@ -787,6 +787,21 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         Ok(choice.start_mode(&self.prepared_presentation()?))
     }
 
+    /// [`ClientRuntime::reconnect_mode_without_core`] for a start that was
+    /// refused before it prepared anything (its seat was held): the choice
+    /// applies to `presentation_id`, the presentation the start asked for.
+    pub fn reconnect_mode_for(
+        &self,
+        choice: &ReconnectChoice,
+        presentation_id: &str,
+    ) -> Result<StartMode, RuntimeError> {
+        ensure_settled_without_core(&self.shared)?;
+        if matches!(choice, ReconnectChoice::Independent) {
+            return Ok(StartMode::Fresh);
+        }
+        Ok(choice.start_mode(presentation_id))
+    }
+
     fn prepared_presentation(&self) -> Result<String, RuntimeError> {
         self.shared
             .delivery

@@ -9,7 +9,9 @@ mod common;
 mod seat_support;
 
 use common::sim::{FakePlatform, Reply};
-use ryeos_client_base::ui::{SeatEventKind, UiSeatControlPredecessor, UiSeatProducerClaim};
+use ryeos_client_base::ui::{
+    SeatEventKind, UiObservedPresentationProducer, UiSeatControlPredecessor, UiSeatProducerClaim,
+};
 use ryeos_client_runtime::api::{
     SEAT_APPEND_PATH, SEAT_CLOSE_PATH, SEAT_OPEN_PATH, SEAT_REPLAY_PATH, SESSION_CURRENT_PATH,
 };
@@ -347,6 +349,96 @@ fn a_resume_claims_only_a_relinquished_writer_it_observed() {
         "a retained seat is left to its lease"
     );
     assert!(runtime.producer().is_none());
+}
+
+/// A reopened presentation (a reload of the page that showed it) claims what
+/// its seat shows: nobody's seat freshly, a relinquished writer back. A writer
+/// still active is reported with its observation and nothing is claimed: a
+/// takeover stays the operator's choice.
+#[test]
+fn a_reopen_claims_what_the_seat_shows_and_never_takes_over() {
+    // Active: the observation comes back, no claim is sent.
+    let platform = FakePlatform::new();
+    platform
+        .transport
+        .script(SEAT_OPEN_PATH, vec![active(&hex('c'))]);
+    let mut runtime = new_runtime(&platform);
+    let outcome = start_with(
+        &platform,
+        &mut runtime,
+        &session(Some(RETAINED_CREATION)),
+        retained(RetainedClaim::Reopen),
+    );
+    let Err(RuntimeError::WriterHeld(observation)) = outcome else {
+        panic!("expected the held writer, got {:?}", outcome.map(|_| ()));
+    };
+    assert_eq!(
+        observation.producer,
+        UiObservedPresentationProducer::Active {
+            producer_incarnation: hex('c')
+        }
+    );
+    assert_eq!(wire(&platform), ["open:observe"]);
+    assert!(runtime.producer().is_none());
+
+    // Relinquished: resumed from the observation.
+    let platform = FakePlatform::new();
+    let expected = claim_request(
+        &platform,
+        control(2),
+        UiSeatProducerClaim::Resume {
+            expected_producer_incarnation: hex('c'),
+        },
+    );
+    platform.transport.script(
+        SEAT_OPEN_PATH,
+        vec![relinquished(&hex('c')), claim_ack(&expected, &hex('d'), 1)],
+    );
+    platform.transport.script(
+        SESSION_CURRENT_PATH,
+        vec![session_reply(&session(Some(RETAINED_CREATION)))],
+    );
+    let mut runtime = new_runtime(&platform);
+    // No history is scripted, so the proof stops after the claim.
+    let _ = start_with(
+        &platform,
+        &mut runtime,
+        &session(Some(RETAINED_CREATION)),
+        retained(RetainedClaim::Reopen),
+    );
+    assert_eq!(
+        json_of(&open_bodies(&platform, "claim")[0]),
+        serde_json::to_value(&expected).unwrap()
+    );
+
+    // Unclaimed: a first claim against the initialization.
+    let platform = FakePlatform::new();
+    let expected = claim_request(
+        &platform,
+        UiSeatControlPredecessor::Initialization {
+            event_hash: hash(1),
+        },
+        UiSeatProducerClaim::Fresh,
+    );
+    platform.transport.script(
+        SEAT_OPEN_PATH,
+        vec![unclaimed(), claim_ack(&expected, &hex('d'), 1)],
+    );
+    platform.transport.script(
+        SESSION_CURRENT_PATH,
+        vec![session_reply(&session(Some(RETAINED_CREATION)))],
+    );
+    let mut runtime = new_runtime(&platform);
+    let _ = start_with(
+        &platform,
+        &mut runtime,
+        &session(Some(RETAINED_CREATION)),
+        retained(RetainedClaim::Reopen),
+    );
+    assert_eq!(
+        json_of(&open_bodies(&platform, "claim")[0]),
+        serde_json::to_value(&expected).unwrap()
+    );
 }
 
 /// A takeover that names the writer the operator saw claims with exactly that

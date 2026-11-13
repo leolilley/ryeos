@@ -62,6 +62,12 @@ pub enum RuntimeError {
         message: String,
     },
 
+    /// The presentation's seat is held: a writer is still active, or the seat
+    /// is closed. Carries the observation, whose replacement choices are the
+    /// operator's to make.
+    #[error("another writer holds this presentation")]
+    WriterHeld(Box<ryeos_client_base::ui::UiPresentationProducerObservation>),
+
     /// A request the runtime refused to build or send.
     #[error("UI binding request: {0}")]
     BindingRequest(String),

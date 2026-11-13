@@ -220,9 +220,16 @@ async fn act(wake: WakeFn, mut recovery: Box<Recovery>, action: RecoveryAction) 
         RecoveryAction::Choose(choice) => {
             let mode = match &recovery.held {
                 Held::Live(running) => running.runtime.reconnect_mode(&choice, &running.core),
-                Held::Unstarted(unstarted) => {
-                    unstarted.runtime.reconnect_mode_without_core(&choice)
-                }
+                Held::Unstarted(unstarted) => match &unstarted.mode {
+                    // Refused before preparing anything: the choice applies
+                    // to the presentation the start asked for.
+                    ryeos_client_runtime::runtime::StartMode::Retained {
+                        presentation_id, ..
+                    } if !unstarted.runtime.has_prepared_presentation() => unstarted
+                        .runtime
+                        .reconnect_mode_for(&choice, presentation_id),
+                    _ => unstarted.runtime.reconnect_mode_without_core(&choice),
+                },
                 Held::Nothing => return Outcome::Recovery(recovery),
             };
             let mode = match mode {
@@ -286,7 +293,7 @@ async fn establish(
             match prepared_presentation_selection(&established.current, &selections) {
                 Ok(Some(prepared)) => StartMode::Retained {
                     presentation_id: prepared.presentation.presentation_id,
-                    claim: RetainedClaim::Fresh,
+                    claim: RetainedClaim::Reopen,
                 },
                 Ok(None) => StartMode::Fresh,
                 Err(error) => return Outcome::Failed(error.to_string()),
@@ -333,6 +340,23 @@ async fn begin(
         .await;
     let (core, effects) = match started {
         Ok(started) => started,
+        // Another writer holds the seat: show it and its replacement choices
+        // at once. Nothing was claimed, so retry rechecks it as before.
+        Err(ryeos_client_runtime::RuntimeError::WriterHeld(observation)) => {
+            let choices = ryeos_client_runtime::recovery::replacement_choices(&observation);
+            return Outcome::Recovery(Box::new(Recovery {
+                message: "This presentation is open somewhere else.".to_owned(),
+                exact_retry: true,
+                can_inspect: false,
+                observed: Some((writer_label(&observation), choices)),
+                held: Held::Unstarted(Box::new(Unstarted {
+                    platform,
+                    runtime,
+                    session,
+                    mode,
+                })),
+            }));
+        }
         Err(error) => {
             let can_inspect = runtime.has_prepared_presentation();
             return Outcome::Recovery(Box::new(Recovery {
