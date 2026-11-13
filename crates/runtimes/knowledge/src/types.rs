@@ -1,6 +1,6 @@
 //! Knowledge request types, output types, and error types.
 
-use ryeos_runtime::method_wire::{GraphEdge, VerifiedItem};
+use ryeos_runtime::method_wire::{GraphEdge, TrustClass, VerifiedItem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -55,6 +55,12 @@ pub struct ComposeItem {
     pub role: ComposeRole,
     pub depth: usize,
     pub tokens: usize,
+    /// Set only for an item not signed by a pinned key (an operator-admitted
+    /// `untrusted_project` item), matching the trust note in its rendered
+    /// header. Pinned items omit it, so their composition metadata is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_class: Option<TrustClass>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

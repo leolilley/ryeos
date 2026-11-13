@@ -297,15 +297,42 @@ async fn e2e_directive_without_context_still_works() {
 enum ReferenceSigner {
     Pinned,
     Unpinned,
+    /// Signed by an unpinned key, with node `launch_trust` policy admitting
+    /// `untrusted_project` for the knowledge kind.
+    AdmittedUnpinned,
     Unsigned,
 }
 
+/// The trust note the knowledge runtime puts in the header of an
+/// operator-admitted `untrusted_project` item.
+const UNTRUSTED_PROJECT_NOTE: &str =
+    "(untrusted_project: signed by an unpinned key, admitted by node policy)";
+
+/// Replace the node-signed `launch_trust` policy section before the daemon
+/// starts, as `ryeos node policy-apply launch_trust` would.
+fn write_launch_trust_policy(
+    state_path: &Path,
+    node: &SigningKey,
+    body: &str,
+) -> anyhow::Result<()> {
+    let signed = lillux::signature::sign_content(body, node, "#", None);
+    std::fs::write(
+        state_path.join(".ai/node/policies/launch_trust.yaml"),
+        signed,
+    )?;
+    Ok(())
+}
+
 /// Run `directive:test/ref_dir`, whose context root `knowledge:test/ref_root`
-/// references `knowledge:test/referenced_note`. Returns the response and how
-/// many requests reached the model.
+/// references `knowledge:test/referenced_note`. Returns the response and the
+/// request bodies that reached the model.
 async fn execute_with_referenced_knowledge(
     reference: ReferenceSigner,
-) -> (reqwest::StatusCode, serde_json::Value, usize) {
+) -> (
+    reqwest::StatusCode,
+    serde_json::Value,
+    Vec<serde_json::Value>,
+) {
     let mock = MockProvider::start(vec![MockResponse::Text("Context was loaded.".into())]).await;
     let mock_url = mock.base_url.clone();
     let project = tempfile::tempdir().expect("temp project dir");
@@ -346,6 +373,20 @@ async fn execute_with_referenced_knowledge(
                 // A valid signature by a key no trust store pins.
                 &SigningKey::from_bytes(&[0x5a; 32]),
             )?,
+            ReferenceSigner::AdmittedUnpinned => {
+                write_launch_trust_policy(
+                    state_path,
+                    &fixture.node,
+                    "schema: 1\nadmit:\n  knowledge:\n    - untrusted_project\n",
+                )?;
+                plant_knowledge_item(
+                    &project_path,
+                    "test/referenced_note",
+                    "",
+                    note_body,
+                    &SigningKey::from_bytes(&[0x5a; 32]),
+                )?
+            }
             ReferenceSigner::Unsigned => {
                 let path = project_path.join(".ai/knowledge/test/referenced_note.md");
                 std::fs::create_dir_all(path.parent().expect("knowledge parent dir"))?;
@@ -388,14 +429,14 @@ async fn execute_with_referenced_knowledge(
             panic!("post_execute failed: {e:#}\n--- daemon stderr ---\n{stderr}");
         }
     };
-    let model_requests = mock.captured_bodies().await.len();
+    let model_requests = mock.captured_bodies().await;
     (status, body, model_requests)
 }
 
 fn assert_reference_refused(
     status: reqwest::StatusCode,
     body: &serde_json::Value,
-    model_requests: usize,
+    model_requests: &[serde_json::Value],
     code: &str,
 ) {
     assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "body={body:#}");
@@ -409,35 +450,69 @@ fn assert_reference_refused(
             .contains("referenced item `knowledge:test/referenced_note`"),
         "the refusal must name the referenced item: {body:#}"
     );
-    assert_eq!(
-        model_requests, 0,
+    assert!(
+        model_requests.is_empty(),
         "a refused launch must not reach the model"
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn e2e_a_pinned_reference_composes_into_the_context() {
-    let (status, body, model_requests) =
-        execute_with_referenced_knowledge(ReferenceSigner::Pinned).await;
+/// Assert the directive ran and return every model request body as text.
+fn assert_directive_ran(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+    model_requests: &[serde_json::Value],
+) -> String {
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     let success = body
         .get("result")
         .and_then(|result| result.get("success"))
         .and_then(serde_json::Value::as_bool);
     assert_eq!(success, Some(true), "body={body:#}");
-    assert!(model_requests > 0, "the directive must have run");
+    assert!(!model_requests.is_empty(), "the directive must have run");
+    let requests = serde_json::Value::Array(model_requests.to_vec()).to_string();
+    assert!(
+        requests.contains("The referenced note."),
+        "the referenced note must reach the provider request: {requests}"
+    );
+    requests
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_a_pinned_reference_composes_into_the_context() {
+    let (status, body, model_requests) =
+        execute_with_referenced_knowledge(ReferenceSigner::Pinned).await;
+    let requests = assert_directive_ran(status, &body, &model_requests);
+    assert!(
+        !requests.contains(UNTRUSTED_PROJECT_NOTE),
+        "pinned context must carry no trust note: {requests}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_an_admitted_unpinned_reference_reaches_the_model_labelled() {
+    let (status, body, model_requests) =
+        execute_with_referenced_knowledge(ReferenceSigner::AdmittedUnpinned).await;
+    let requests = assert_directive_ran(status, &body, &model_requests);
+    assert!(
+        requests.contains(&format!("test/referenced_note {UNTRUSTED_PROJECT_NOTE}")),
+        "the admitted reference's header must carry its trust note: {requests}"
+    );
+    assert!(
+        !requests.contains(&format!("test/ref_root {UNTRUSTED_PROJECT_NOTE}")),
+        "the pinned root must stay unlabelled: {requests}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_a_reference_from_an_unpinned_signer_is_refused_before_the_model() {
     let (status, body, model_requests) =
         execute_with_referenced_knowledge(ReferenceSigner::Unpinned).await;
-    assert_reference_refused(status, &body, model_requests, "effective_trust_refused");
+    assert_reference_refused(status, &body, &model_requests, "effective_trust_refused");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_an_unsigned_reference_is_refused_before_the_model() {
     let (status, body, model_requests) =
         execute_with_referenced_knowledge(ReferenceSigner::Unsigned).await;
-    assert_reference_refused(status, &body, model_requests, "effective_trust_unsigned");
+    assert_reference_refused(status, &body, &model_requests, "effective_trust_unsigned");
 }

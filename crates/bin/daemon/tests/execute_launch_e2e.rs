@@ -734,6 +734,67 @@ async fn execute_launch_admits_knowledge_query() {
     assert_completed(&thread, &thread_id);
 }
 
+/// A knowledge item whose frontmatter does not parse fails `query` with an
+/// error naming it, the same as `compose`; it is never indexed as raw text.
+#[tokio::test(flavor = "multi_thread")]
+async fn knowledge_query_refuses_malformed_frontmatter_item() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_knowledge_item(project.path(), "test/fact", &fixture.publisher).expect("plant knowledge");
+    // Signed by the pinned publisher, but the metadata fence never closes.
+    let broken = project.path().join(".ai/knowledge/test/broken.md");
+    let content = "```yaml\nname: broken\ncategory: \"test\"\n\nAn accepted fixture whose fence never closes.\n";
+    std::fs::write(
+        &broken,
+        lillux::signature::sign_content(content, &fixture.publisher, "<!--", Some("-->")),
+    )
+    .expect("plant malformed knowledge");
+
+    let (status, body) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "knowledge:test/fact",
+                "launch_id": TEST_LAUNCH_ID,
+                "ref_bindings": {},
+                "project_path": project.path().to_str().unwrap(),
+                "call": { "method": "query", "args": { "query": "accepted" } },
+                "execution_policy": accepted_policy(true)
+            }),
+        )
+        .await
+        .expect("post /execute/launch knowledge query");
+
+    let thread_id = unwrap_accepted(status, &body);
+    let thread = wait_for_terminal_thread(&h, &thread_id).await;
+    assert_eq!(
+        thread
+            .get("thread")
+            .and_then(|t| t.get("status"))
+            .and_then(Value::as_str),
+        Some("failed"),
+        "a query over a malformed item must fail: {thread}"
+    );
+    let detail = h
+        .get_thread(&thread_id)
+        .await
+        .expect("get thread detail")
+        .expect("thread detail exists");
+    assert!(
+        detail.to_string().contains("frontmatter parse failure for")
+            && detail.to_string().contains("test/broken"),
+        "the failure must name the malformed item: {detail:#}"
+    );
+}
+
 /// A method launch missing a required arg must fail in preflight — before a
 /// thread_id is minted (no phantom).
 #[tokio::test(flavor = "multi_thread")]

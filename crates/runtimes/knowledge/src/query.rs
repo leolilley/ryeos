@@ -6,6 +6,10 @@
 //! frontmatter fields (title, tags, category) so a query can match on
 //! metadata as well as prose.
 //!
+//! An item whose frontmatter does not parse fails the query with
+//! `FrontmatterParse` naming the item, as `compose` does; it is never
+//! indexed as raw content.
+//!
 //! NOTE: BM25 statistics (df, avgdl) are computed over the *filtered*
 //! candidate set, so this is "search within this scope". Scores are
 //! comparable within one filter set but NOT across different filters.
@@ -69,8 +73,7 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
         if !meta_filters_ok(&fm, &payload.args.filters) {
             continue;
         }
-        let body = strip_frontmatter(&item.raw_content, item_ref)
-            .unwrap_or_else(|_| item.raw_content.clone());
+        let body = strip_frontmatter(&item.raw_content, item_ref)?;
         let title = fm.get("title").and_then(|v| v.as_str()).map(str::to_string);
 
         // Searchable text: title + tags/category + body. Metadata terms
@@ -442,6 +445,23 @@ mod tests {
     fn empty_query_is_invalid() {
         let p = payload(&[("k/a", "x")], inputs("   "));
         assert!(query(&p).is_err());
+    }
+
+    #[test]
+    fn malformed_frontmatter_fails_query_naming_item() {
+        let p = payload(
+            &[
+                ("k/good", "---\ntitle: Good\n---\nCats purr."),
+                ("k/broken", "---\ntitle: x\nCats without a closing fence."),
+            ],
+            inputs("cats"),
+        );
+        match query(&p) {
+            Err(KnowledgeError::FrontmatterParse { item_id, .. }) => {
+                assert_eq!(item_id, "k/broken");
+            }
+            other => panic!("expected FrontmatterParse naming k/broken, got {other:?}"),
+        }
     }
 
     #[test]

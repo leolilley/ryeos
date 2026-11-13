@@ -25,17 +25,14 @@ pub async fn handle(
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
 
-    let deleted = state
-        .vault
-        .delete_secret(&ctx.fingerprint, &req.name)
-        .map_err(|e| {
-            let msg = format!("{e:#}");
-            if msg.starts_with("vault: key name") {
-                HandlerError::BadRequest(msg)
-            } else {
-                HandlerError::Internal(msg)
-            }
-        })?;
+    let deleted = state.vault.delete_secret(&req.name).map_err(|e| {
+        let msg = format!("{e:#}");
+        if msg.starts_with("vault: key name") {
+            HandlerError::BadRequest(msg)
+        } else {
+            HandlerError::Internal(msg)
+        }
+    })?;
 
     Ok(serde_json::json!({
         "name": req.name,

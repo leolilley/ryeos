@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:aef684b68c611e82fb47d0f0d344bddfbc5e1eb1cfc363dcd7ce1594bf9a41be:tGGhFMqX86c6ncTk8geX+211xpPX1Mb4uG9pB29nazVyaILaFIp9LGpd/QjFgcS8xiH20/NCLRWB/cKti1OmDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:04:15Z:2750abc2b63c54263a86a6a187490b325e20d0c78842e524c8ec5cd763a18047:2ri+ztCW2ls8B/Hdd5gEee7u42yHNxUI+83Rl6l5btZT4EPTm4Gv6TaVA4bMX0LPc8kJ3bgSnHlcBA8MpMKUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -119,9 +119,17 @@ Request params:
 - `content` — the **unsigned** item body. It must not contain a signature line or
   a `ryeos:authored:` provenance marker; both are daemon-owned.
 - `mode` — `create` (default; fails if the item already exists) or `upsert`
-  (replaces the existing file).
+  (replaces the existing file, or creates it when there is none).
 - `format_ext` — the file extension (e.g. `.md`); required when creating a new
   item.
+- `expected_digest` — compare-and-swap guard for `upsert`. **Required when the
+  item already exists**: the upsert commits only if the incumbent's authored
+  `content_digest` (from its provenance, and from the response that wrote it)
+  equals this value, and fails with an `author_item conflict` otherwise. An
+  upsert without it over an existing item is refused with code
+  `author_item_expected_digest_required`, naming the incumbent's
+  `content_digest` to resend with. An item with no runtime provenance (one the
+  operator signed) cannot be replaced through `author_item` at all.
 
 On success the daemon:
 
@@ -139,12 +147,25 @@ required_capability }`.
 
 v1 supports live-filesystem project provenance only.
 
+### How authored items resolve and show up
+
+An authored item is signed by the **node** key, which the node trusts, so it
+resolves as `trusted_project` and launches wherever `trusted_project` is
+admitted, exactly like an operator-signed item. Launch trust does not tell them
+apart. Inspection does: `items.effective` returns an `authorship` row for the
+root, each extends ancestor and each referenced item, with
+`signer_fingerprint`, `signer_role` (`node` for this node's key, `other` for
+any other key, `none` when unsigned) and `runtime_authored`, which is true only
+when the node key signed the item and its signed bytes carry the
+`ryeos:authored:` provenance line.
+
 ## Invoking it: the `author-item` tool
 
 The callback is driven by the `ryeos-core-tools author-item` subcommand — a
 capability-bounded callback client. When the daemon dispatches it as a tool it
 reads the callback token, thread-auth token, and thread id from the env, sends
-`runtime.author_item` with `{item_ref, content, mode, format_ext}` on stdin, and
+`runtime.author_item` with `{item_ref, content, mode, format_ext,
+expected_digest}` on stdin, and
 prints the daemon's response. It never touches project state directly.
 
 ### Authority lives on the wrapper tool — scope it tightly
@@ -206,6 +227,7 @@ config_schema:
     content:    { type: string }
     mode:       { type: string, enum: [create, upsert], default: create }
     format_ext: { type: string }
+    expected_digest: { type: string }   # required by upsert over an existing item
   required: [item_ref, content]
 requires:
   capabilities:
