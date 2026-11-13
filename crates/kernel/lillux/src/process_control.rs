@@ -847,12 +847,17 @@ impl ExactProcessIdentity {
             match capture_exact_process_identity(self.target_pid, Some(self.group_leader_pid)) {
                 Ok(current) => Ok(current != *self),
                 Err(error) => {
-                    if std::path::PathBuf::from(format!("/proc/{}", self.target_pid)).exists() {
-                        Err(format!(
+                    // A recorded incarnation is always a thread-group leader.
+                    // `/proc/<n>` also answers for a non-leader thread, which
+                    // pidfd_open refuses: such a coordinate holds no process,
+                    // so the recorded one has ended (a later container's
+                    // threads routinely reuse a dead daemon's number).
+                    match linux::thread_group_of(self.target_pid) {
+                        None => Ok(true),
+                        Some(Ok(group)) if group != self.target_pid => Ok(true),
+                        _ => Err(format!(
                             "cannot classify exact process incarnation: {error}"
-                        ))
-                    } else {
-                        Ok(true)
+                        )),
                     }
                 }
             }
@@ -1439,6 +1444,28 @@ mod linux {
         })
     }
 
+    /// The thread group a `/proc/<n>` coordinate belongs to: `None` when no
+    /// task answers there, else its `Tgid` (equal to `n` only for a process).
+    pub(super) fn thread_group_of(pid: u32) -> Option<Result<u32, String>> {
+        let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => return Some(Err(format!("read /proc/{pid}/status: {error}"))),
+        };
+        Some(
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Tgid:"))
+                .ok_or_else(|| format!("/proc/{pid}/status has no Tgid"))
+                .and_then(|value| {
+                    value
+                        .trim()
+                        .parse::<u32>()
+                        .map_err(|error| format!("parse /proc/{pid}/status Tgid: {error}"))
+                }),
+        )
+    }
+
     pub(super) fn open_pidfd(pid: u32) -> Result<OwnedFd, String> {
         let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) } as i32;
         if raw < 0 {
@@ -1645,6 +1672,30 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(identity.has_ended().unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_coordinate_held_by_another_process_thread_is_an_ended_incarnation() {
+        let own = capture_exact_process_identity(std::process::id(), None).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            sender.send(unsafe { libc::gettid() } as u32).unwrap();
+            held.recv().unwrap();
+        });
+        let tid = receiver.recv().unwrap();
+        assert!(std::path::Path::new(&format!("/proc/{tid}")).exists());
+        // The incarnation recorded at that number is gone; the number now
+        // names a thread of this process, which is no process at all.
+        let recorded = ExactProcessIdentity {
+            target_pid: tid,
+            ..own.clone()
+        };
+        assert!(recorded.has_ended().unwrap());
+        assert!(!own.has_ended().unwrap());
+        release.send(()).unwrap();
+        thread.join().unwrap();
     }
 
     #[cfg(target_os = "linux")]
