@@ -962,6 +962,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire predecessor external-content bindings",
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--json] [--app-root <DIR>]",
         ),
+        "node large-objects purge-quarantine" => (
+            "ryeos node large-objects purge-quarantine",
+            "Discard the damaged large objects scrub quarantined",
+            "ryeos node large-objects purge-quarantine [--dry-run | --confirm] [--json] [--app-root <DIR>]",
+        ),
         "node reset policy-generation" => (
             "ryeos node reset policy-generation",
             "Replace an obsolete node-policy generation",
