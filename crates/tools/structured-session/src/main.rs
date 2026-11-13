@@ -563,11 +563,6 @@ struct ServerRequestCorrelation {
 #[serde(deny_unknown_fields)]
 struct ApprovalResponses {
     accept: ValueTemplate,
-    /// Parsed for profile compatibility only: RyeOS records `accept` and
-    /// `decline`, so the bridge refuses a `cancel` decision and never renders
-    /// this template. Remove it at the next profile `schema_version` bump.
-    #[allow(dead_code)]
-    cancel: ValueTemplate,
     decline: ValueTemplate,
     expire: ValueTemplate,
 }
@@ -1169,8 +1164,13 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         .map(std::path::PathBuf::from)
         .ok_or_else(|| anyhow!("structured-session bridge requires an admitted profile"))?;
     let profile_bytes = read_admitted_profile_bytes(&profile_path)?;
-    let profile: StructuredSessionProfile =
+    let profile_value: Value =
         serde_json::from_slice(&profile_bytes).context("decode structured-session profile")?;
+    // The version is checked before the typed decode, so an older profile is
+    // refused by its schema rather than by a field the current one dropped.
+    require_current_profile_schema(&profile_value)?;
+    let profile: StructuredSessionProfile =
+        serde_json::from_value(profile_value).context("decode structured-session profile")?;
     if profile.schema_version
         != ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
     {
@@ -1723,6 +1723,19 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
             _ => bail!("daemon sent a non-request frame"),
         }
     }
+}
+
+fn require_current_profile_schema(profile: &Value) -> Result<()> {
+    use ryeos_engine::structured_session_profile::{
+        STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, StructuredSessionProfileSchemaRefusal,
+    };
+    let found = profile.get("schema_version").and_then(Value::as_u64);
+    if found != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION)) {
+        return Err(anyhow::Error::new(StructuredSessionProfileSchemaRefusal {
+            found,
+        }));
+    }
+    Ok(())
 }
 
 fn read_admitted_profile_bytes(path: &std::path::Path) -> Result<Vec<u8>> {
@@ -5439,7 +5452,6 @@ mod tests {
                 },
                 "responses":{
                     "accept":{"op":"literal","value":{"decision":"accept"}},
-                    "cancel":{"op":"literal","value":{"decision":"cancel"}},
                     "decline":{"op":"literal","value":{"decision":"decline"}},
                     "expire":{"op":"literal","value":{"decision":"decline"}}
                 },
@@ -5796,6 +5808,24 @@ mod tests {
                 .to_string()
                 .contains("approval decision `cancel` is not a RyeOS-recorded decision")
         );
+    }
+
+    #[test]
+    fn retired_profile_schema_is_refused_before_decode() {
+        use ryeos_engine::structured_session_profile::StructuredSessionProfileSchemaRefusal;
+        let mut profile = json!({"schema_version":11,"server_requests":[{
+            "responses":{"cancel":{"op":"literal","value":null}}
+        }]});
+        let refusal = require_current_profile_schema(&profile).unwrap_err();
+        assert_eq!(
+            refusal.downcast_ref::<StructuredSessionProfileSchemaRefusal>(),
+            Some(&StructuredSessionProfileSchemaRefusal { found: Some(11) })
+        );
+        assert!(refusal.to_string().contains("Cure: migrate the profile"));
+        profile["schema_version"] = json!(
+            ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
+        );
+        require_current_profile_schema(&profile).unwrap();
     }
 
     #[test]
@@ -6498,7 +6528,6 @@ server.serve_forever()
             },
             responses: ApprovalResponses {
                 accept: ValueTemplate::Literal { value: Value::Null },
-                cancel: ValueTemplate::Literal { value: Value::Null },
                 decline: ValueTemplate::Literal { value: Value::Null },
                 expire: ValueTemplate::Literal { value: Value::Null },
             },
@@ -6533,7 +6562,6 @@ server.serve_forever()
             },
             responses: ApprovalResponses {
                 accept: ValueTemplate::Literal { value: Value::Null },
-                cancel: ValueTemplate::Literal { value: Value::Null },
                 decline: ValueTemplate::Literal { value: Value::Null },
                 expire: ValueTemplate::Literal { value: Value::Null },
             },

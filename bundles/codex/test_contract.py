@@ -730,7 +730,7 @@ class CodexContractTests(unittest.TestCase):
         self.assertIn("workload_client: null", environment)
 
     def test_minimal_profile_has_no_workload_ingress_or_socket_allowance(self) -> None:
-        self.assertEqual(self.profile["schema_version"], 11)
+        self.assertEqual(self.profile["schema_version"], 12)
         self.assertIsNone(self.profile["external_candidate"])
         self.assertEqual(self.profile["auxiliary_configs"], [])
         self.assertEqual(self.profile["runtime_configs"], [])
@@ -1098,7 +1098,7 @@ class CodexContractTests(unittest.TestCase):
         for request in self.profile["server_requests"]:
             self.assertNotIn("response_style", request)
             self.assertEqual(
-                set(request["responses"]), {"accept", "cancel", "decline", "expire"}
+                set(request["responses"]), {"accept", "decline", "expire"}
             )
             self.assertEqual(
                 set(request["correlation"]),
@@ -1238,7 +1238,7 @@ class CodexContractTests(unittest.TestCase):
 
     def test_external_original_config_initialization_uses_pinned_rpc_shapes(self) -> None:
         profile = json.loads((SOURCE / "external-authoring.profile.json").read_text())
-        self.assertEqual(profile["schema_version"], 11)
+        self.assertEqual(profile["schema_version"], 12)
         self.assertEqual(profile["configuration_absence"], {
             "absolute_paths": ["/etc/codex/config.toml", "/etc/codex/managed_config.toml",
                                "/etc/codex/requirements.toml"],
@@ -1247,7 +1247,7 @@ class CodexContractTests(unittest.TestCase):
         })
         for name in ("structured-session.profile.json", "authoring.profile.json"):
             ordinary = json.loads((SOURCE / name).read_text())
-            self.assertEqual(ordinary["schema_version"], 11)
+            self.assertEqual(ordinary["schema_version"], 12)
             self.assertEqual(ordinary["configuration_absence"], {
                 "absolute_paths": [], "startup_ancestor_paths": [], "route_ancestor_paths": [],
             })
