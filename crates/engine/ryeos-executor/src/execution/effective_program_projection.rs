@@ -89,7 +89,9 @@ impl<'a> EffectiveProgramProjectionSession<'a> {
         project_content: Option<&'a dyn AuthoritativeProjectContent>,
     ) -> Result<Self, DispatchError> {
         validate_projection_authority(plan_context, project_root)?;
-        let roots = engine.resolution_roots(project_root.map(PathBuf::from));
+        let roots = engine
+            .resolution_roots(project_root.map(PathBuf::from))
+            .with_logical_project_root(plan_context.effective_logical_project_root(project_root));
         let request_snapshot = match (project_root, project_content) {
             (Some(root), Some(content)) => engine
                 .effective_request_snapshot_under_project_authority(

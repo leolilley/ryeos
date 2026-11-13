@@ -308,6 +308,138 @@ pub struct SchemaCutArguments {
     pub to: u32,
 }
 
+/// The principal class a delegated grant writes. Only the remote classes:
+/// a local-client grant carries no origin binding, so it is never written on
+/// a remote signer's authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantClass {
+    /// The node key of a remote RyeOS node, bound to its site.
+    RemoteNode,
+    /// An operator key forwarded by a remote RyeOS node of one origin site.
+    RemotePrincipal,
+}
+
+/// Most scopes one grant operation may name.
+pub const MAX_GRANT_SCOPES: usize = 64;
+
+/// Reconcile one node-signed grant for a remote node or a remote operator,
+/// with the same core `ryeos authorize-client` uses.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizeClientArguments {
+    /// The raw 32-byte Ed25519 public key, base64.
+    pub public_key: String,
+    pub scopes: Vec<String>,
+    pub label: String,
+    pub class: GrantClass,
+    /// The site the grant is bound to: the remote node's own site, or the
+    /// site whose node forwards the operator.
+    pub origin_site_id: String,
+    /// Union the scopes with the grant already on disk instead of replacing
+    /// them.
+    #[serde(default)]
+    pub merge_scopes: bool,
+    /// Allow changing an existing grant's class or origin site. The node is
+    /// stopped while the operation applies, which that change requires.
+    #[serde(default)]
+    pub allow_semantic_conversion: bool,
+    /// Requested grant lifetime in seconds. Absent: the class maximum of the
+    /// node's signed authorization policy. Above that maximum: refused.
+    #[serde(default)]
+    pub lifetime_secs: Option<u64>,
+}
+
+impl AuthorizeClientArguments {
+    pub fn validate(&self) -> Result<()> {
+        self.verifying_key()?;
+        ensure!(!self.scopes.is_empty(), "scopes must not be empty");
+        ensure!(
+            self.scopes.len() <= MAX_GRANT_SCOPES,
+            "more than {MAX_GRANT_SCOPES} scopes"
+        );
+        ensure!(
+            !self.label.trim().is_empty() && self.label.len() <= 128,
+            "the label must be 1 to 128 bytes"
+        );
+        ensure!(
+            !self.scopes.iter().any(|scope| scope.contains('*')),
+            "a delegated grant names exact scopes; wildcards are refused"
+        );
+        // Offline-operation scopes are granted only by the node's local
+        // operator: a delegated grant cannot widen who may sign them.
+        ryeos_node_runtime::identity::reject_offline_scopes(&self.scopes)?;
+        ryeos_node_runtime::identity::validate_canonical_site_id(&self.origin_site_id)
+            .context("origin site id is not canonical")?;
+        Ok(())
+    }
+
+    fn verifying_key(&self) -> Result<lillux::crypto::VerifyingKey> {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.public_key)
+            .context("the public key is not base64")?;
+        let bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .context("the public key is not 32 bytes (Ed25519)")?;
+        lillux::crypto::VerifyingKey::from_bytes(&bytes).context("the public key is not Ed25519")
+    }
+}
+
+/// Pin a remote node as a trust anchor from its descriptor (the `descriptor`
+/// input), without contacting it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemotePinArguments {
+    /// The name the remote is pinned under.
+    pub name: String,
+}
+
+impl RemotePinArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.name.is_empty()
+                && self.name.len() <= 64
+                && self
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.'),
+            "remote name `{}` is not a plain name",
+            self.name
+        );
+        Ok(())
+    }
+}
+
+/// Install a bundle from an archive (the `archive` input), replacing the
+/// installed bundle of that name when there is one.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleReplaceArguments {
+    pub name: String,
+    /// Keep the installed `.ai/bin`, `.ai/objects` and `.ai/refs` when the
+    /// archive omits them.
+    #[serde(default)]
+    pub preserve_runtime_artifacts: bool,
+}
+
+impl BundleReplaceArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.name.is_empty()
+                && self.name.len() <= 64
+                && self.name.bytes().all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b == b'_'
+                    || b == b'-'),
+            "bundle name `{}` is not 1-64 lowercase letters, digits, `_` or `-`",
+            self.name
+        );
+        Ok(())
+    }
+}
+
 // ── Shared pieces ────────────────────────────────────────────────────────
 
 fn config(ctx: &HandlerContext<'_>) -> Result<Config> {
@@ -357,6 +489,251 @@ fn utf8<'a>(bytes: &'a [u8], what: &str) -> Result<&'a str> {
 pub fn derived_credential_generation(request_digest: &str) -> String {
     lillux::sha256_hex(
         format!("ryeos/offline-operation-credential-generation/v1:{request_digest}").as_bytes(),
+    )
+}
+
+// ── Trust ────────────────────────────────────────────────────────────────
+
+/// Role and scope a signer is pinned with. Absent lists mean the role's
+/// default.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustPinArguments {
+    pub role: String,
+    #[serde(default)]
+    pub spaces: Vec<String>,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustScopeArguments {
+    pub fingerprint: String,
+    pub spaces: Vec<String>,
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustFingerprintArguments {
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustSucceedArguments {
+    pub old_fingerprint: String,
+}
+
+fn trust_scope(
+    role: ryeos_engine::trust::SignerRole,
+    spaces: &[String],
+    kinds: &[String],
+    projects: &[String],
+) -> Result<ryeos_engine::trust::SignerScope> {
+    use ryeos_engine::trust::{SignerRole, SignerScope, SignerSpace};
+    let mut scope = match role {
+        SignerRole::Publisher => SignerScope::publisher_default(),
+        SignerRole::Operator => SignerScope::operator_default(),
+        SignerRole::ProjectAuthor => SignerScope {
+            spaces: vec![SignerSpace::Project],
+            kinds: vec![ryeos_engine::trust::ALL_KINDS.to_string()],
+            projects: Vec::new(),
+        },
+    };
+    if !spaces.is_empty() {
+        scope.spaces = spaces
+            .iter()
+            .map(|space| {
+                SignerSpace::parse(space).with_context(|| {
+                    format!("`{space}` is not a signer space (bundle, project, node)")
+                })
+            })
+            .collect::<Result<_>>()?;
+    }
+    if !kinds.is_empty() {
+        scope.kinds = kinds.to_vec();
+    }
+    scope.projects = projects.to_vec();
+    scope
+        .validate()
+        .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))?;
+    Ok(scope)
+}
+
+fn validate_trust_scope_lists(
+    spaces: &[String],
+    kinds: &[String],
+    projects: &[String],
+) -> Result<()> {
+    ensure!(
+        spaces.len() <= 3 && kinds.len() <= 64 && projects.len() <= 256,
+        "scope lists are too long"
+    );
+    Ok(())
+}
+
+impl TrustPinArguments {
+    pub fn validate(&self) -> Result<()> {
+        let role = ryeos_engine::trust::SignerRole::parse(&self.role)
+            .with_context(|| format!("`{}` is not a signer role", self.role))?;
+        validate_trust_scope_lists(&self.spaces, &self.kinds, &self.projects)?;
+        trust_scope(role, &self.spaces, &self.kinds, &self.projects).map(|_| ())
+    }
+}
+
+impl TrustScopeArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(is_digest(&self.fingerprint), "fingerprint is not a digest");
+        validate_trust_scope_lists(&self.spaces, &self.kinds, &self.projects)?;
+        let scope = ryeos_engine::trust::SignerScope {
+            spaces: self
+                .spaces
+                .iter()
+                .map(|s| {
+                    ryeos_engine::trust::SignerSpace::parse(s)
+                        .with_context(|| format!("`{s}` is not a signer space"))
+                })
+                .collect::<Result<_>>()?,
+            kinds: self.kinds.clone(),
+            projects: self.projects.clone(),
+        };
+        scope
+            .validate()
+            .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))
+    }
+}
+
+impl TrustFingerprintArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(is_digest(&self.fingerprint), "fingerprint is not a digest");
+        Ok(())
+    }
+}
+
+fn trust_actor<'a>(
+    ctx: &'a HandlerContext<'_>,
+    operator: &'a str,
+) -> crate::trust_registry::Actor<'a> {
+    crate::trust_registry::Actor {
+        node_key: ctx.node.signing_key(),
+        operator,
+        request_digest: ctx.request_digest,
+    }
+}
+
+fn run_trust_change(
+    ctx: &HandlerContext<'_>,
+    change: crate::trust_registry::Change,
+) -> Result<Value> {
+    let operator = operator_key(ctx)?;
+    let operator_fp = ryeos_engine::trust::compute_fingerprint(&operator.verifying_key());
+    let outcome = crate::trust_registry::apply_change(
+        ctx.app_root,
+        ctx.state_lock,
+        &trust_actor(ctx, &operator_fp),
+        &change,
+    )?;
+    Ok(json!({
+        "records": outcome.records,
+        "events_written": outcome.events_written,
+        "registry_digest": outcome.registry_digest,
+    }))
+}
+
+pub(super) fn trust_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustPinArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let role = ryeos_engine::trust::SignerRole::parse(&arguments.role).context("signer role")?;
+    let scope = trust_scope(
+        role,
+        &arguments.spaces,
+        &arguments.kinds,
+        &arguments.projects,
+    )?;
+    let doc = ryeos_engine::trust::PublisherTrustDoc::parse(utf8(
+        ctx.inputs.require("signer")?,
+        "signer trust document",
+    )?)
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let key = doc
+        .decode_verifying_key()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Pin {
+            key,
+            label: doc.owner,
+            role,
+            scope,
+        },
+    )
+}
+
+pub(super) fn trust_scope_change(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustScopeArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let scope = ryeos_engine::trust::SignerScope {
+        spaces: arguments
+            .spaces
+            .iter()
+            .map(|s| {
+                ryeos_engine::trust::SignerSpace::parse(s)
+                    .with_context(|| format!("`{s}` is not a signer space"))
+            })
+            .collect::<Result<_>>()?,
+        kinds: arguments.kinds,
+        projects: arguments.projects,
+    };
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Scope {
+            fingerprint: arguments.fingerprint,
+            scope,
+        },
+    )
+}
+
+pub(super) fn trust_retire(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustFingerprintArguments = ctx.arguments()?;
+    arguments.validate()?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Retire {
+            fingerprint: arguments.fingerprint,
+        },
+    )
+}
+
+pub(super) fn trust_revoke(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustFingerprintArguments = ctx.arguments()?;
+    arguments.validate()?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Revoke {
+            fingerprint: arguments.fingerprint,
+        },
+    )
+}
+
+pub(super) fn trust_succeed(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustSucceedArguments = ctx.arguments()?;
+    ensure!(
+        is_digest(&arguments.old_fingerprint),
+        "old fingerprint is not a digest"
+    );
+    let statement = utf8(ctx.inputs.require("succession")?, "succession statement")?.to_owned();
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Succeed {
+            old_fingerprint: arguments.old_fingerprint,
+            statement,
+        },
     )
 }
 
@@ -443,9 +820,11 @@ fn plan_policy_apply(
             "node policy input declares path-owned field `{forbidden}`"
         );
     }
-    let root = RuntimeRoot::new(app_root.to_path_buf());
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .context("load trust store for current node policies")?;
+    if section == ryeos_node_runtime::node_policy::sections::host_access::SECTION_NAME {
+        check_host_access_signers(app_root, &trust_store, &body)?;
+    }
     // The replacement generation must stay the isolation policy of the host
     // class the node's signed substrate identity binds.
     let substrate = crate::load_verified_substrate_identity(app_root)
@@ -460,6 +839,36 @@ fn plan_policy_apply(
         Path::new("offline-operation-input/policy"),
     )?;
     Ok((trust_store, update))
+}
+
+/// A host-access grant hands its item operator-equivalent authority, so its
+/// signer must be pinned in the node trust store and must not be the node's
+/// own key: runtime-authored items are node-signed and never gain host access.
+fn check_host_access_signers(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    body: &Value,
+) -> Result<()> {
+    let policy: ryeos_node_runtime::node_policy::sections::host_access::NodeHostAccessPolicy =
+        serde_json::from_value(body.clone()).context("parse node host_access policy input")?;
+    let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
+    for grant in &policy.grants {
+        ensure!(
+            grant.signer != node_key,
+            "{}: host_access grant `{}` names this node's own key {} as signer; runtime-authored items never gain host access",
+            ryeos_node_runtime::node_policy::sections::host_access::HostAccessRefusal::SIGNER_REFUSED,
+            grant.id,
+            grant.signer
+        );
+        ensure!(
+            trust_store.is_trusted(&grant.signer),
+            "{}: host_access grant `{}` names signer {}, which is not pinned in this node's trust store",
+            ryeos_node_runtime::node_policy::sections::host_access::HostAccessRefusal::SIGNER_REFUSED,
+            grant.id,
+            grant.signer
+        );
+    }
+    Ok(())
 }
 
 /// The digest of the policy generation that replacing `section` with
@@ -869,6 +1278,122 @@ pub(super) fn purge_quarantined_large_objects(ctx: &HandlerContext<'_>) -> Resul
     Ok(serde_json::to_value(purged)?)
 }
 
+// ── Grants, remotes and bundles ──────────────────────────────────────────
+
+pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: AuthorizeClientArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let public_key = arguments.verifying_key()?;
+    let fingerprint = lillux::crypto::fingerprint(&public_key);
+    // The configured operator's grant never lapses and is managed by init and
+    // the authorization reset; a delegated grant must not rewrite it.
+    let operator = NodeIdentity::load(
+        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
+    )
+    .context("load operator identity to guard the operator grant")?;
+    ensure!(
+        fingerprint != operator.fingerprint(),
+        "grant_is_operator: the configured operator's grant is managed by `ryeos init` and \
+         `ryeos node reset authorization`; it cannot be written through node.authorize-client"
+    );
+    let class = match arguments.class {
+        GrantClass::RemoteNode => {
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode
+        }
+        GrantClass::RemotePrincipal => {
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal
+        }
+    };
+    // The grant's lifetime is bounded by the node's signed policy; the
+    // request's signer and digest are the evidence of who asked.
+    let policy =
+        ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy::load_offline(
+            ctx.app_root,
+            ctx.node,
+        )?;
+    let terms = ryeos_node_runtime::identity::GrantTerms {
+        expires_at: policy
+            .expiry_for(
+                class,
+                arguments.lifetime_secs,
+                lillux::time::unix_secs_now(),
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {error}", error.code()))?,
+        authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+            &ctx.request.signer_fingerprint,
+            Some(ctx.request_digest.to_owned()),
+        ),
+    };
+    let subject = match arguments.class {
+        GrantClass::RemoteNode => ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode {
+            origin_site_id: &arguments.origin_site_id,
+        },
+        GrantClass::RemotePrincipal => {
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemotePrincipal {
+                origin_site_id: &arguments.origin_site_id,
+            }
+        }
+    };
+    // The canonical reconciliation, under the state lock the application
+    // holds: the node is stopped, so a class or origin change is allowed
+    // when the request asks for it.
+    let (path, dropped_scopes, transition) =
+        ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes_for_subject(
+            &super::envelope::authorized_keys_dir(ctx.app_root),
+            &fingerprint,
+            &arguments.public_key,
+            &arguments.scopes,
+            &arguments.label,
+            &ctx.command_label(),
+            &lillux::time::iso8601_now(),
+            &terms,
+            ctx.node,
+            ryeos_node_runtime::identity::WildcardPolicy::Reject,
+            arguments.merge_scopes,
+            subject,
+            arguments.allow_semantic_conversion,
+        )
+        .context("reconcile the authorized-key grant")?;
+    Ok(json!({
+        "fingerprint": fingerprint,
+        "path": path,
+        "principal_class": transition.principal_class.as_str(),
+        "origin_site_id": transition.origin_site_id,
+        "previous_principal_class": transition
+            .previous_principal_class
+            .map(|class| class.as_str().to_owned()),
+        "previous_origin_site_id": transition.previous_origin_site_id,
+        "dropped_scopes": dropped_scopes,
+        "merged": arguments.merge_scopes,
+        "expires_at": terms.expires_at.to_grant_text(),
+    }))
+}
+
+pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: RemotePinArguments = ctx.arguments()?;
+    arguments.validate()?;
+    ctx.host.pin_remote(super::host::RemotePin {
+        app_root: ctx.app_root,
+        state_lock: ctx.state_lock,
+        node: ctx.node,
+        name: &arguments.name,
+        descriptor: ctx.inputs.require("descriptor")?,
+    })
+}
+
+pub(super) fn bundle_replace(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: BundleReplaceArguments = ctx.arguments()?;
+    arguments.validate()?;
+    ctx.host.replace_bundle(super::host::BundleReplace {
+        app_root: ctx.app_root,
+        state_lock: ctx.state_lock,
+        node: ctx.node,
+        name: &arguments.name,
+        archive: ctx.inputs.require("archive")?,
+        preserve_runtime_artifacts: arguments.preserve_runtime_artifacts,
+    })
+}
+
 // ── Authorization reset ──────────────────────────────────────────────────
 
 /// Grants a receipt can list; a node with more refuses the reset rather than
@@ -947,9 +1472,17 @@ pub(super) fn authorization_reset_effect(ctx: &HandlerContext<'_>) -> Result<Val
         operator.fingerprint(),
         &operator_key,
         &["*".to_string()],
-        "bootstrap-authorized-user",
+        "operator",
         operator.fingerprint(),
         &lillux::time::iso8601_now(),
+        // The operator asked for this reset through the signed offline request
+        // whose digest the receipt records; the grant never lapses.
+        &ryeos_node_runtime::identity::GrantTerms::operator(
+            ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+                &ctx.request.signer_fingerprint,
+                Some(ctx.request_digest.to_owned()),
+            ),
+        ),
         node.signing_key(),
         ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;

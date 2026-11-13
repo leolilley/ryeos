@@ -9,6 +9,7 @@ pub mod limits;
 pub mod matcher;
 pub mod parsed_ref;
 pub mod response_modes;
+pub mod route_authority;
 pub mod stream_envelope;
 pub mod webhook_dedupe;
 use std::collections::HashMap;
@@ -160,6 +161,11 @@ pub fn build_route_table_with_extensions(
         // data-driven routes served through the route table, so no path
         // reservation is needed.
 
+        if let Err(e) = route_authority::validate_route_authority(raw) {
+            errors.push(e);
+            continue;
+        }
+
         // Compile auth invoker (no registry lookup).
         let auth_invoker = match invokers::compile_auth_invoker_with_registry(
             &raw.auth,
@@ -304,6 +310,7 @@ mod tests {
                 body: RawRequestBody::None,
             },
             source_file: std::path::PathBuf::from(format!("/test/{id}.yaml")),
+            authority: None,
         }
     }
 

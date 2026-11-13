@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:46:00Z:b92548a27035786be24806b8616580c2ef9b15a0256846397ad4cd96e878a1a4:e3XK/Y6eaijJbyyMASQ0OWbzgjP222yNpn6NhSOElbn59Tp2A7jtxZpd4fcp2FPPONXQBUKeX5gZBQ4SKiQzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:49:28Z:b4542bea916344e49051489719c7d252598764b564b74d9b954886ea890b83eb:gUcWqEHikYocwNNUhLzBbPKPOhtMZ8I/EWk1+7taYHUXX/XM/AlGksu5YDpvt7TqlB4cXbUqEiCDgCbFbh7RCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -28,7 +28,9 @@ or `RYEOS_APP_ROOT`. Every fresh initialization requires
 `--node-profile full --host-class local`; each lean distribution uses its exact
 same-named profile. `--host-class <class>` names which of the profile's
 declared host classes the node runs under (`local` on a host the operator
-runs, `hosted` in a hosting provider's container); the node holds that class's
+runs, with enforced isolation; `local_unconfined` on that host with no
+sandbox, an explicit opt-out init never selects for you; `hosted` in a hosting
+provider's container); the node holds that class's
 signed capability floor and isolation lane, and keeps the class for life.
 Neither selection is inferred from the bundles present in the source or from
 what the host proves, and absence fails rather than manufacturing an implicit
@@ -40,9 +42,12 @@ default.
 2. Create the app-root layout (`<app_root>/.ai/{node,state,bundles,config}`).
 3. Load-or-create the operator Ed25519 signing key.
 4. Load-or-create the node Ed25519 signing key.
-5. Write self-trust docs for both keys into the node trust store.
+5. Initialize the signer registry under `<app_root>/.ai/node/trust/` and
+   write the node-signed signer record for the operator key (the node key is
+   the implicit root and needs no record).
 6. Pin the official publisher key from hardcoded public key bytes.
-7. Pin any additional `--trust-file` publisher docs.
+7. Pin any additional `--trust-file` publisher docs (role publisher, space
+   bundle).
 8. Discover bundles in the source directory.
 9. Build the bundle plan and verify manifest dependency policy.
 10. If a node init profile was selected, verify its publisher signature, use
@@ -104,6 +109,8 @@ publishers enter the node trust store only through an explicit trust
 choice:
 
 - `ryeos init --trust-file <PUBLISHER_TRUST.toml>` pins a named publisher;
+- on an existing node, `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role
+  publisher` pins one while the node is stopped;
 - development/custom containers may opt in to their baked publisher set with
   `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
 - the local source installer may opt in with `--trust-source-publishers`.
@@ -136,6 +143,13 @@ bundle generation is absent but the app root holds a node identity or a
 completed init, the entrypoint refuses instead of initializing it again under
 the image's profile. Signed offline operations on a hosted container are
 described in `deploy/composition-images.md`.
+
+A remote operator may sign only the offline operations the node's signed
+profile delegates (`maintenance.remote_offline_operations`); every other
+authority-bearing operation is refused `not_delegable`. Only the
+`hosted-controller` profile delegates any: `node.external-execution.compose`,
+`node.authorize-client`, `node.remote.pin` and `node.bundle.replace`. See
+"Wiring a hosted node without a shell" in `remote/remote-operations.md`.
 
 Release containers pass no packaged trust documents to `ryeos init`.
 Development opt-ins trust every publisher document in the selected source

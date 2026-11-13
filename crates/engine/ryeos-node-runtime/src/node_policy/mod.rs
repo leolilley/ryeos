@@ -65,11 +65,13 @@ impl NodePolicyTable {
     pub fn new() -> Self {
         Self::from_sections(vec![
             Box::new(sections::accounting::NodeAccountingPolicySection),
+            Box::new(sections::authorization::NodeAuthorizationPolicySection),
             Box::new(sections::bundle_publication::BundlePublicationPolicySection),
             Box::new(sections::command_registration::CommandRegistrationPolicySection),
             Box::new(sections::event_storage::EventStoragePolicySection),
             Box::new(sections::execution::NodeExecutionPolicySection),
             Box::new(sections::external_content::ExternalContentImportPolicySection),
+            Box::new(sections::host_access::NodeHostAccessPolicySection),
             Box::new(sections::hosted::HostedNodePolicySection),
             Box::new(sections::ingest_ignore::IngestIgnorePolicySection),
             Box::new(sections::isolation::IsolationPolicySection),
@@ -186,6 +188,12 @@ pub fn default_launch_trust_record() -> Arc<dyn ErasedNodePolicy> {
 #[cfg(any(test, feature = "test-support"))]
 pub fn shipped_event_storage_record() -> Arc<dyn ErasedNodePolicy> {
     Arc::new(sections::event_storage::EventStoragePolicy::as_shipped())
+}
+
+/// The shipped `authorization` policy record with the standard grant
+/// lifetimes. Exact test snapshots include it wherever a grant is issued.
+pub fn default_authorization_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::authorization::NodeAuthorizationPolicy::standard())
 }
 
 /// Compile one already validated raw generation through every registered

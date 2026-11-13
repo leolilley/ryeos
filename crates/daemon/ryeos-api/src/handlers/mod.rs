@@ -56,11 +56,13 @@ pub mod external_content_scrub;
 pub mod external_execution_candidate_program;
 pub mod external_execution_channel;
 pub mod external_execution_product_program;
+pub mod external_execution_provider_inventory;
 pub mod external_execution_settle_unknown_allocation;
 pub mod external_execution_status;
 pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
+pub(crate) mod grant_terms;
 pub mod health_status;
 pub mod identity_public_key;
 pub mod ingest_ignore;
@@ -90,11 +92,14 @@ pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
 pub mod remote_configure;
+pub mod remote_delegation;
+pub mod remote_descriptor;
 pub mod remote_doctor;
 pub mod remote_execute;
 pub mod remote_import_admitted_head;
 pub mod remote_import_admitted_root;
 pub mod remote_list;
+pub mod remote_pin;
 pub mod remote_project_status;
 pub mod remote_pull;
 pub mod remote_pull_worker_result;
@@ -110,6 +115,7 @@ pub mod remote_vault_delete;
 pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
+pub mod renew_key;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;
 #[cfg(feature = "scheduling")]
@@ -142,6 +148,7 @@ pub mod threads_tail;
 pub mod tool_env_check;
 pub mod trace_branch;
 pub mod trace_inspect;
+pub mod trust_list;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
@@ -218,6 +225,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     external_content_products::OBSERVE_RUNTIME_SNAPSHOT_READINESS_DESCRIPTOR,
     external_content_products::CREATE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
     external_content_products::VERIFY_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
+    external_content_products::OBSERVE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
     external_content_products::RUN_PRODUCT_QUALIFICATION_WORKER_DESCRIPTOR,
     external_content_products::TERMINATE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
     external_content_products::GET_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR,
@@ -276,6 +284,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
+    trust_list::LIST_DESCRIPTOR,
+    trust_list::SHOW_DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,
     bundle_catalog::UPLOAD,
@@ -309,12 +319,18 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_release::STATUS,
     bundle_smoke::DESCRIPTOR,
     bundle_verify::DESCRIPTOR,
+    external_execution_provider_inventory::DESCRIPTOR,
     external_execution_settle_unknown_allocation::DESCRIPTOR,
     external_execution_status::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
     rebuild::VERIFY_DESCRIPTOR,
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
+    renew_key::DESCRIPTOR,
+    remote_delegation::DELEGATE,
+    remote_delegation::LIST,
+    remote_delegation::REVOKE,
+    remote_delegation::TOMBSTONE,
     authorize_client::DESCRIPTOR,
     offline_operations::SUBMIT,
     offline_operations::FACTS,
@@ -338,6 +354,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     sync_jobs_list::DESCRIPTOR,
     sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
+    remote_pin::DESCRIPTOR,
+    remote_descriptor::DESCRIPTOR,
     remote_bind_project::DESCRIPTOR,
     remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,

@@ -839,3 +839,20 @@ followed this correction. Before use, the integration must
 establish provider-authoritative lifecycle evidence, proxy validation, RyeOS
 bootstrap and network-route semantics, and joined cancellation behavior. Any
 authenticated Render call requires separate approval.
+
+## Provider inventory (`list-provider-resources`)
+
+A read-only invocation lists what one Render owner scope holds, for the node's
+`ryeos node external-execution inventory`. It receives the binding's sealed
+settings (only `owner_id` and `tls_roots_der_base64` are read), credential,
+network inputs and provider spec, runs with process creation denied like the
+relay, and issues GETs only: `GET /v1/sandboxes?ownerId=…&limit=100[&cursor=…]`
+and `GET /v1/sandbox-snapshots?ownerId=…&limit=100[&cursor=…]`, at most 16
+pages each and 256 rows in all. A listing cut by either bound is reported
+`complete: false`. A row that names another owner refuses the whole listing.
+Each row is `{kind: sandbox|snapshot, provider_id, state, created_at}`; the
+adapter attaches no meaning to them and never deletes anything. The page shape
+(`[{sandbox|snapshot: {...}, cursor}]`) follows the terminated-sandbox list the
+bootstrap cleanup reads; the snapshot list path is not in the signed provider
+spec and neither list has been exercised against the live API yet. The unit
+tests use recorded fixture pages only.

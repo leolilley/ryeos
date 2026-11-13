@@ -89,6 +89,13 @@ fn build_test_state_at(
         ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
             .unwrap();
     }
+    // Node-signed records (remote pins, registry records) verify against the
+    // node public identity document.
+    if create_identity {
+        identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(root))
+            .unwrap();
+    }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -197,6 +204,7 @@ fn build_test_state_with_hosted_policy_choices(
     state.node_policy = Arc::new(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             ryeos_node_runtime::node_policy::default_launch_trust_record(),
+            ryeos_node_runtime::node_policy::default_authorization_record(),
             ryeos_node_runtime::node_policy::shipped_event_storage_record(),
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(test_object_closure_policy()),
@@ -278,6 +286,7 @@ fn build_app_state(
         node_policy: Arc::new(
             ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                 ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                ryeos_node_runtime::node_policy::default_authorization_record(),
                 ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),

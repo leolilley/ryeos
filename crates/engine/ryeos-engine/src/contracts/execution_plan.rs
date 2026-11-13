@@ -164,6 +164,15 @@ pub struct PlanContext {
     /// a materialization; this field states whether its bytes are live,
     /// immutable pinned content, or a writable COW generation.
     pub subject_resolution_authority: SubjectResolutionAuthority,
+    /// The project this plan belongs to, as the node knows it: the absolute
+    /// canonical project path. For a live project it equals the
+    /// materialized root. For a pinned generation or COW workspace the
+    /// materialized root is a per-generation checkout path, so the daemon
+    /// states the original project path here. Signer scopes that name
+    /// projects are matched against this, never against a checkout path.
+    /// `None` means the logical project is unknown, and a signer scoped to
+    /// specific projects then admits nothing.
+    pub logical_project_root: Option<PathBuf>,
     pub current_site_id: String,
     pub origin_site_id: String,
     pub execution_hints: ExecutionHints,
@@ -174,6 +183,27 @@ pub struct PlanContext {
     /// `build_plan` succeeds. The engine does not enforce this — it is
     /// safe structurally because `PlanContext` does not carry thread IDs.
     pub validate_only: bool,
+}
+
+impl PlanContext {
+    /// The logical project of this plan for signer project scopes: the stated
+    /// `logical_project_root`, or the materialized root itself when the plan
+    /// resolves against the live project (which is its own logical root).
+    pub fn effective_logical_project_root(
+        &self,
+        materialized_project_root: Option<&std::path::Path>,
+    ) -> Option<PathBuf> {
+        match (
+            &self.logical_project_root,
+            &self.subject_resolution_authority,
+        ) {
+            (Some(logical), _) => Some(logical.clone()),
+            (None, SubjectResolutionAuthority::LiveFs) => {
+                materialized_project_root.map(std::path::Path::to_path_buf)
+            }
+            (None, _) => None,
+        }
+    }
 }
 
 // ── Engine context (execute_plan) ────────────────────────────────────
@@ -212,7 +242,6 @@ pub struct EngineContext {
     /// callback; only that fact lets a captured launch carry it.
     pub isolation_captured_callback_socket: bool,
     pub isolation_bundle_roots: Vec<PathBuf>,
-    pub isolation_node_trusted_keys_dir: Option<PathBuf>,
     pub isolation_verified_code: Vec<crate::isolation::IsolationVerifiedCode>,
     /// Exact already-open command authority for an admitted direct plan.
     /// It is either standalone immutable bytes or one member paired with its
@@ -564,6 +593,41 @@ impl PlanNode {
     }
 }
 
+/// The one value an item authors to declare host authority.
+pub const HOST_AUTHORITY_REQUIRED: &str = "required";
+
+/// How a launch runs relative to the node's isolation lane.
+///
+/// `Confined` is every ordinary launch: the lane's isolation, enforced or not.
+/// `HostDirect` is a tool that declared `host_authority: required`; when the
+/// node lane offers it and the operator granted that exact item, it runs on
+/// the host, unconfined, as the daemon user, whatever the lane's mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPosture {
+    /// Every launch is confined unless its signed root declares otherwise.
+    #[default]
+    Confined,
+    HostDirect,
+}
+
+impl ExecutionPosture {
+    pub fn is_host_direct(self) -> bool {
+        self == Self::HostDirect
+    }
+
+    pub fn is_confined(&self) -> bool {
+        *self == Self::Confined
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Confined => "confined",
+            Self::HostDirect => "host_direct",
+        }
+    }
+}
+
 /// Normalized execution plan — the engine's output from `build_plan`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "ExecutionPlanWire")]
@@ -583,6 +647,14 @@ pub struct ExecutionPlan {
     /// Signed filesystem projection, frozen alongside networking. This is
     /// required in serialized authority; predecessor plans are not reinterpreted.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// Signed execution posture projected from the root item's declared host
+    /// authority. Omitted when confined, so every confined plan keeps its
+    /// exact serialized identity; no plan could be host-direct before this
+    /// field existed, so absence is the true value, not a fallback.
+    /// `host_direct` is a claim the launch admits only under the node lane,
+    /// the operator's exact grant and the configured local operator.
+    #[serde(default, skip_serializing_if = "ExecutionPosture::is_confined")]
+    pub execution_posture: ExecutionPosture,
     /// Signed process suitability/resource request. Required explicit null
     /// distinguishes a workload with no target requirement from a predecessor
     /// plan that predates the current execution contract.
@@ -646,6 +718,14 @@ struct ExecutionPlanWire {
     /// Signed filesystem projection, frozen alongside networking. This is
     /// required in serialized authority; predecessor plans are not reinterpreted.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// Signed execution posture projected from the root item's declared host
+    /// authority. Omitted when confined, so every confined plan keeps its
+    /// exact serialized identity; no plan could be host-direct before this
+    /// field existed, so absence is the true value, not a fallback.
+    /// `host_direct` is a claim the launch admits only under the node lane,
+    /// the operator's exact grant and the configured local operator.
+    #[serde(default, skip_serializing_if = "ExecutionPosture::is_confined")]
+    pub execution_posture: ExecutionPosture,
     /// Signed process suitability/resource request. Required explicit null
     /// distinguishes a workload with no target requirement from a predecessor
     /// plan that predates the current execution contract.
@@ -710,6 +790,7 @@ impl TryFrom<ExecutionPlanWire> for ExecutionPlan {
             materialization_requirements: wire.materialization_requirements,
             network_authority_ceiling: wire.network_authority_ceiling,
             filesystem_authority_ceiling: wire.filesystem_authority_ceiling,
+            execution_posture: wire.execution_posture,
             target_requirement: wire.target_requirement,
             current_target_request: wire.current_target_request,
             endpoint_requirement: wire.endpoint_requirement,
@@ -823,6 +904,58 @@ impl ExecutionPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan_context(
+        authority: SubjectResolutionAuthority,
+        logical_project_root: Option<&str>,
+    ) -> PlanContext {
+        PlanContext {
+            logical_project_root: logical_project_root.map(PathBuf::from),
+            requested_by: EffectivePrincipal::Local(crate::contracts::Principal {
+                fingerprint: "fp:test".to_owned(),
+                scopes: Vec::new(),
+            }),
+            project_context: ProjectContext::None,
+            subject_resolution_authority: authority,
+            current_site_id: "site:test".to_owned(),
+            origin_site_id: "site:test".to_owned(),
+            execution_hints: Default::default(),
+            scheduled_fire: None,
+            validate_only: false,
+        }
+    }
+
+    #[test]
+    fn logical_project_root_is_the_stated_one_never_the_checkout() {
+        let checkout = std::path::Path::new("/cache/pinned/ab12/project");
+        let pinned = SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        // A pinned checkout with no stated logical project has none: the
+        // checkout path is never offered as project identity.
+        assert_eq!(
+            plan_context(pinned.clone(), None).effective_logical_project_root(Some(checkout)),
+            None
+        );
+        // A stated logical project wins over the checkout.
+        assert_eq!(
+            plan_context(pinned, Some("/srv/projects/alpha"))
+                .effective_logical_project_root(Some(checkout)),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A live project is its own logical root.
+        let live = std::path::Path::new("/srv/projects/alpha");
+        assert_eq!(
+            plan_context(SubjectResolutionAuthority::LiveFs, None)
+                .effective_logical_project_root(Some(live)),
+            Some(live.to_path_buf())
+        );
+        assert_eq!(
+            plan_context(SubjectResolutionAuthority::Projectless, None)
+                .effective_logical_project_root(None),
+            None
+        );
+    }
 
     #[test]
     fn subprocess_defaults_and_plan_node_wire_shape_are_stable() {
@@ -1008,6 +1141,25 @@ mod current_plan_data_controls {
             "external_endpoint_binding":null,"resource_authority_ceiling":"node_policy","subprocess_limits":null,
             "cache_key":"data","executor_authorities":[]})
     }
+    #[test]
+    fn confined_plans_keep_their_bytes_and_host_direct_is_explicit() {
+        let confined: ExecutionPlan = serde_json::from_value(wire()).unwrap();
+        assert_eq!(confined.execution_posture, ExecutionPosture::Confined);
+        let value = serde_json::to_value(&confined).unwrap();
+        assert!(value.get("execution_posture").is_none());
+        let mut host = wire();
+        host["execution_posture"] = "host_direct".into();
+        let host: ExecutionPlan = serde_json::from_value(host).unwrap();
+        assert!(host.execution_posture.is_host_direct());
+        assert_eq!(
+            serde_json::to_value(&host).unwrap()["execution_posture"],
+            "host_direct"
+        );
+        let mut unknown = wire();
+        unknown["execution_posture"] = "sandboxed".into();
+        assert!(serde_json::from_value::<ExecutionPlan>(unknown).is_err());
+    }
+
     #[test]
     fn absent_extension_keeps_bytes_outer_null_refuses_and_current_sealing_refuses() {
         let ordinary: ExecutionPlan = serde_json::from_value(wire()).unwrap();

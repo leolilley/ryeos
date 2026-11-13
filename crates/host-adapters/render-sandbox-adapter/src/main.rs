@@ -5,6 +5,7 @@
 mod activation_contact;
 mod contact_failure;
 mod fail_class;
+mod inventory;
 mod lease;
 mod provider_spec;
 mod proxy_route;
@@ -434,12 +435,16 @@ fn run() -> Result<()> {
             snapshot_qualification::create_restored_sandbox(&adapter)
         }
         Some("qualify-snapshot-verify") => snapshot_qualification::run_restored_verifier(&adapter),
+        Some("qualify-snapshot-observe") => {
+            snapshot_qualification::observe_restored_sandbox(&adapter)
+        }
         Some("qualify-snapshot-terminate") => {
             snapshot_qualification::terminate_restored_sandbox(&adapter, true)
         }
         Some("observe-snapshot-termination") => {
             snapshot_qualification::terminate_restored_sandbox(&adapter, false)
         }
+        Some("list-provider-resources") => inventory::list_provider_resources(&adapter),
         _ => anyhow::bail!("unsupported lifecycle invocation"),
     }
 }
@@ -1674,7 +1679,8 @@ fn send_api_request<S: RenderApiSettings>(
             && url.username().is_empty()
             && url.password().is_none()
             && url.fragment().is_none()
-            && url.path().starts_with("/v1/sandboxes"),
+            && (url.path().starts_with("/v1/sandboxes")
+                || (method == "GET" && url.path() == "/v1/sandbox-snapshots")),
         "Render API origin or route changed"
     );
     let mut authorization = Zeroizing::new(b"Bearer ".to_vec());

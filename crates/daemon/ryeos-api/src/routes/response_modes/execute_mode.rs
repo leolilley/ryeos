@@ -552,6 +552,34 @@ pub fn resolve_execution_contract(
     caller_scopes: &[String],
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<ResolvedExecutionContract> {
+    resolve_execution_contract_with_posture(
+        policy,
+        project_source,
+        project_ctx,
+        workspace_lifeline,
+        state_root,
+        acting_principal,
+        caller_scopes,
+        state,
+        ryeos_engine::contracts::ExecutionPosture::Confined,
+    )
+}
+
+/// [`resolve_execution_contract`] for an admitted execution posture. A
+/// host-direct launch seals its live project as `unconfined_host`, because
+/// that is what runs; only read-write live and projectless policies can be
+/// true for it.
+pub fn resolve_execution_contract_with_posture(
+    policy: &ExecutionPolicy,
+    project_source: &ProjectSource,
+    project_ctx: &project_source::ResolvedProjectContext,
+    workspace_lifeline: Option<Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    state_root: Option<PathBuf>,
+    acting_principal: &str,
+    caller_scopes: &[String],
+    state: &ryeos_app::state::AppState,
+    posture: ryeos_engine::contracts::ExecutionPosture,
+) -> anyhow::Result<ResolvedExecutionContract> {
     policy.validate()?;
     ryeos_app::execution_policy::authorize_operator_vault_exposure(
         state.authorizer.as_ref(),
@@ -628,6 +656,11 @@ pub fn resolve_execution_contract(
             principal: acting_principal,
         },
     )?;
+    let authority = if posture.is_host_direct() {
+        authority.into_unconfined_host()?
+    } else {
+        authority
+    };
     authorize_terminal_publication(
         policy,
         &project_ctx.original_path,
@@ -686,6 +719,120 @@ pub fn resolve_execution_contract(
         provenance,
         lifecycle_authority,
     })
+}
+
+/// Admission-time check of a root that declares host authority.
+///
+/// Returns `None` for every ordinary root (its kind has no host-authority
+/// projection, or the item does not declare it). For a host-direct root it
+/// refuses, with a typed code, any project policy a host process cannot honour
+/// and any caller other than the configured local operator, then admits the
+/// item against the operator's grant. The runtime pin is checked at launch,
+/// where the executor chain is resolved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn admit_host_direct_execution(
+    state: &ryeos_app::state::AppState,
+    policy: &ExecutionPolicy,
+    root: &ryeos_engine::canonical_ref::CanonicalRef,
+    no_project_requested: bool,
+    project_ctx: &project_source::ResolvedProjectContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    principal: &crate::handler_context::HandlerContext,
+    target_site_id: Option<&str>,
+    origin_site_id: &str,
+) -> Result<
+    Option<ryeos_app::host_access::AdmittedHostAccess>,
+    ryeos_executor::dispatch_error::DispatchError,
+> {
+    use ryeos_app::host_access::{HostAccessCaller, HostAccessRefusal, HostAccessSubject};
+    let refused = |refusal: HostAccessRefusal| {
+        ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+            code: refusal.code.to_owned(),
+            message: refusal.message,
+            binding: None,
+        }
+    };
+    let engine = project_ctx.request_engine.clone();
+    let Some(execution) = engine
+        .kinds
+        .get(&root.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .filter(|execution| execution.host_authority.is_some())
+    else {
+        return Ok(None);
+    };
+    // A root that does not resolve here is left to dispatch, which reports
+    // its own error and re-judges host access at launch. That stays fail
+    // closed: a host-direct launch whose authority was sealed confined is
+    // refused by the launch-time gate or the disabled-shape compile.
+    let Ok((_, output)) =
+        engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: provenance.logical_project_root(),
+            item_ref: root.clone(),
+            expected_kind: Some(root.kind.clone()),
+            project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
+            subject_resolution_authority: provenance.subject_resolution_authority(),
+        })
+    else {
+        return Ok(None);
+    };
+    let posture = execution
+        .project_execution_posture(&output.composed.composed)
+        .map_err(
+            |error| ryeos_executor::dispatch_error::DispatchError::SchemaMisconfigured {
+                kind: root.kind.clone(),
+                detail: error.to_string(),
+            },
+        )?;
+    if !posture.is_host_direct() {
+        return Ok(None);
+    }
+    let honourable = match &policy.project {
+        ProjectExecutionPolicy::Projectless => true,
+        ProjectExecutionPolicy::LiveDirect { access, .. } => {
+            *access == ryeos_app::execution_policy::LiveAccess::ReadWrite
+        }
+        ProjectExecutionPolicy::Pinned { .. } => false,
+    };
+    if !honourable {
+        return Err(refused(HostAccessRefusal::new(
+            HostAccessRefusal::PROJECT_REFUSED,
+            format!(
+                "`{}` runs unconfined on the host, so only a read-write live project or a projectless execution can be true for it; this request's project policy cannot be enforced",
+                output.root.resolved_ref
+            ),
+        )));
+    }
+    let source_closure = ryeos_app::host_access::source_closure_digest(
+        output
+            .composed
+            .derived
+            .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY),
+    )
+    .map_err(ryeos_executor::dispatch_error::DispatchError::Internal)?;
+    let subject = HostAccessSubject {
+        item: &output.root.resolved_ref,
+        signer: output.root.signer_fingerprint.as_deref(),
+        source_closure: source_closure.as_deref(),
+        runtime: None,
+    };
+    let current_site_id = state.threads.site_id();
+    ryeos_app::host_access::admit(
+        state,
+        &engine,
+        &subject,
+        &HostAccessCaller {
+            acting_principal: &principal.fingerprint,
+            handler_context: Some(principal),
+            target_site_id: target_site_id.filter(|target| *target != current_site_id),
+            current_site_id,
+            origin_site_id,
+            parent_thread_id: None,
+            scheduled: false,
+        },
+    )
+    .map(Some)
+    .map_err(refused)
 }
 
 /// Project capture and checkout perform blocking filesystem/CAS work. Keep
@@ -1633,6 +1780,40 @@ async fn admit_execution_with_publication(
         &state,
     )
     .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+    // A tool that declares host authority is admitted here, before anything
+    // runs: the node lane, the operator's exact grant and the configured
+    // local operator. Its project authority is then sealed as what actually
+    // runs (`unconfined_host`). The executor checks again at launch.
+    let host_access = match admit_host_direct_execution(
+        &state,
+        &request.execution_policy,
+        &root_canonical,
+        no_project_requested,
+        &project_ctx,
+        &resolved_contract.provenance,
+        &principal,
+        request.target_site_id.as_deref(),
+        &execution_origin_site_id,
+    ) {
+        Ok(admitted) => admitted,
+        Err(error) => return Ok(dispatch_error_response(error)),
+    };
+    let resolved_contract = if host_access.is_some() {
+        resolve_execution_contract_with_posture(
+            &request.execution_policy,
+            &project_source,
+            &project_ctx,
+            no_project_lifeline.clone(),
+            state_root.clone(),
+            &caller_principal_id,
+            &caller_scopes,
+            &state,
+            ryeos_engine::contracts::ExecutionPosture::HostDirect,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?
+    } else {
+        resolved_contract
+    };
     let ResolvedExecutionContract {
         provenance,
         lifecycle_authority,
@@ -1642,6 +1823,7 @@ async fn admit_execution_with_publication(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
     let plan_ctx = PlanContext {
+        logical_project_root: provenance.logical_project_root(),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),
@@ -1777,7 +1959,9 @@ async fn admit_execution_with_publication(
             let _preflight_work_timer = preflight_timings
                 .as_ref()
                 .map(|timings| timings.nested("preflight_admission", "preflight_blocking_work"));
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            // The caller must cover what the item declares; an accepted launch
+            // refuses that here, before a thread id exists.
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -1789,7 +1973,12 @@ async fn admit_execution_with_publication(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -1960,35 +2149,27 @@ async fn admit_execution_with_publication(
         && request.method().is_none()
         && request.args().is_none();
     let remotes = if remote_target_requested && request_can_need_remote_config {
-        let project_for_layering: Option<&std::path::Path> = if no_project_requested {
-            None
-        } else {
-            Some(project_ctx.original_path.as_ref())
-        };
         Some(
-            crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                project_for_layering,
-            )
-            .map(|report| report.remotes)
-            .map_err(|e| {
-                match crate::remote::config::typed_load_error_or(e, |e| {
-                    crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
-                }) {
-                    crate::handler_error::HandlerError::Structured { code, status, body } => {
-                        RouteDispatchError::Structured {
-                            code,
-                            status,
-                            body,
-                            thread_id: None,
+            crate::remote::config::load_remotes_report(&state.config.app_root)
+                .map(|report| report.remotes)
+                .map_err(|e| {
+                    match crate::remote::config::typed_load_error_or(e, |e| {
+                        crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                    }) {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
                         }
+                        crate::handler_error::HandlerError::Internal(message) => {
+                            RouteDispatchError::Internal(message)
+                        }
+                        other => RouteDispatchError::Internal(other.to_string()),
                     }
-                    crate::handler_error::HandlerError::Internal(message) => {
-                        RouteDispatchError::Internal(message)
-                    }
-                    other => RouteDispatchError::Internal(other.to_string()),
-                }
-            })?,
+                })?,
         )
     } else {
         None
@@ -2054,11 +2235,37 @@ async fn admit_execution_with_publication(
                 return Ok(dispatch_error_response(error));
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote);
-            let remote_ignore = IgnoreMatcher::from_config(&plan.remote.remote.ingest_ignore)
-                .map_err(|e| {
-                    RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+                crate::handlers::remote_push::OutboundPrincipal::resolve(None, &state, &principal)
+                    .client(&state, &plan.remote.remote, &principal)
+                    .map_err(|error| match error {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
+                        }
+                        other => RouteDispatchError::Forbidden(other.to_string()),
+                    })?;
+            let rules = plan
+                .remote
+                .remote
+                .ingest_rules()
+                .map_err(|refusal| match refusal {
+                    crate::handler_error::HandlerError::Structured { code, status, body } => {
+                        RouteDispatchError::Structured {
+                            code,
+                            status,
+                            body,
+                            thread_id: None,
+                        }
+                    }
+                    other => RouteDispatchError::Internal(other.to_string()),
                 })?;
+            let remote_ignore = IgnoreMatcher::from_config(rules).map_err(|e| {
+                RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+            })?;
             let state_arc = Arc::new(state.clone());
             let mut destination_policy = request.execution_policy.clone();
             destination_policy.target = ExecutionTarget::Here;
@@ -2124,7 +2331,7 @@ async fn admit_execution_with_publication(
         let preflight_state = state.clone();
         let preflight_timings = launch_timings.clone();
         let preflight = tokio::task::spawn_blocking(move || {
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -2136,7 +2343,12 @@ async fn admit_execution_with_publication(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -3482,6 +3694,7 @@ mod tests {
             execute: None,
             request: RawRequest { body },
             source_file: std::path::PathBuf::from("/test/execute.yaml"),
+            authority: None,
         }
     }
 
@@ -3668,7 +3881,8 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         crate::remote::config::RemoteConfig {
             name: name.to_string(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
             signing_key: format!(
                 "ed25519:{}",
@@ -3676,7 +3890,7 @@ mod tests {
             ),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".into(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }
@@ -3684,8 +3898,9 @@ mod tests {
     fn loaded(remote: crate::remote::config::RemoteConfig) -> LoadedRemote {
         LoadedRemote {
             config: remote,
-            scope: crate::remote::config::RemoteConfigScope::Operator,
             config_path: PathBuf::new(),
+            pin_source: crate::remote::config::PinSource::ExpectedFingerprint,
+            pinned_at: String::new(),
         }
     }
 

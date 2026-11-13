@@ -2474,11 +2474,7 @@ impl RootExecutionAdmission {
         })
         .transpose()?;
         self.request_engine()
-            .effective_trust_store_for_current_policy(
-                project_root,
-                subject_authority,
-                resolution_binding.pinned_materialization_proof(),
-            )
+            .effective_trust_store_for_current_policy(project_root, subject_authority)
             .map_err(anyhow::Error::new)
     }
 
@@ -7141,7 +7137,9 @@ pub fn resolve_thread_history_policy(
         }
         ProjectContext::None => None,
     };
-    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
+    let roots = engine
+        .resolution_roots(project_root.map(Path::to_path_buf))
+        .with_logical_project_root(verified.resolved.logical_project_root.clone());
     let request_snapshot = engine
         .effective_request_snapshot(project_root, &resolved_item.subject_resolution_authority)
         .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
@@ -7178,7 +7176,9 @@ fn resolve_thread_history_policy_under_project_authority(
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
 ) -> Result<ResolvedThreadHistoryPolicy> {
     let resolved_item = &verified.resolved;
-    let roots = engine.resolution_roots(Some(project_root.to_path_buf()));
+    let roots = engine
+        .resolution_roots(Some(project_root.to_path_buf()))
+        .with_logical_project_root(resolved_item.logical_project_root.clone());
     let request_snapshot = engine
         .effective_request_snapshot_under_project_authority(
             project_root,
@@ -7891,6 +7891,7 @@ fn live_non_execution_root_context(
         capability_ceiling,
     )?;
     let plan_context = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: requested_by.to_string(),
             scopes: caller_scopes,
@@ -8173,6 +8174,7 @@ pub fn resolve_direct_terminator_protocol<'a>(
     let protocol_ref = match terminator {
         ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => {
             let effective = engine.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: resolved.resolved_item.canonical_ref.clone(),
                 expected_kind: Some(kind.clone()),
                 project_root: resolved.resolved_item.materialized_project_root.clone(),
@@ -8297,6 +8299,7 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
         }?
     };
     plan.network_authority_ceiling = project_execution_network_authority_ceiling(engine, resolved)?;
+    plan.execution_posture = project_execution_posture(engine, resolved)?;
     plan.filesystem_authority_ceiling = plan
         .filesystem_authority_ceiling
         .intersect(filesystem_ceiling);
@@ -8351,6 +8354,33 @@ pub(super) fn project_execution_network_authority_ceiling(
     execution
         .project_network_authority_ceiling(&admission.resolution_output().composed.composed)
         .map_err(|error| anyhow!("compile execution network-authority ceiling: {error}"))
+}
+
+/// Compile the kind-owned execution-posture projection from the same complete
+/// composed subject already admitted for this root, as the network projection
+/// does. Extensions may have changed `host_authority`; the raw root carrier
+/// is not the authority.
+pub fn project_execution_posture(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+) -> Result<ryeos_engine::contracts::ExecutionPosture> {
+    let kind = &resolved.resolved_item.kind;
+    let execution = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .ok_or_else(|| anyhow!("execution kind `{kind}` has no execution schema"))?;
+    if execution.host_authority.is_none() {
+        return Ok(ryeos_engine::contracts::ExecutionPosture::Confined);
+    }
+    let admission = resolved.root_admission.as_ref().ok_or_else(|| {
+        anyhow!(
+            "execution kind `{kind}` declares a host-authority projection but the request has no admitted composed subject"
+        )
+    })?;
+    execution
+        .project_execution_posture(&admission.resolution_output().composed.composed)
+        .map_err(|error| anyhow!("compile execution posture: {error}"))
 }
 
 /// Run verify → trust → build_plan without spawning.
@@ -8636,6 +8666,7 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:bundle-subject-test".to_string(),
                 scopes: Vec::new(),
@@ -8673,6 +8704,7 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:projectless-resolution-test".to_string(),
                 scopes: Vec::new(),
@@ -8792,6 +8824,7 @@ mod tests {
             current_operational_generation: generation_b,
         };
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),
@@ -8841,6 +8874,7 @@ mod tests {
             current_operational_generation: active_base,
         };
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),
@@ -8881,6 +8915,7 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:project-binding-test".to_string(),
                 scopes: Vec::new(),
@@ -8977,6 +9012,7 @@ mod tests {
     ) -> VerifiedItem {
         VerifiedItem {
             resolved: ResolvedItem {
+                logical_project_root: None,
                 canonical_ref: CanonicalRef::parse("service:items/effective").unwrap(),
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/items/effective.yaml"),

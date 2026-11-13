@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:07:35Z:ec4c872898849b6a683093a26d255f4c813106ddb3f639435f9d92f52c48c5ae:dY2QkCqeh+OCBPoMyZ5fXRGU3zjPKqsov1yZUpbXvOOSioRECfAWd6HEyN6CCNJ87R38R9+3TrU0uzB/le/6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:15:40Z:0e4e16d7f02fb191f3a631a9e677643aa77e1b636f2dcbad5bccd093c2cde0fd:32LF2bHzslcXgka9Oa9nfZFn3QouE7hJdvNoyTsmyPxEA0DQIOLAcwmcXrLTuk3FdExGx9ke+F/+NVpad9KtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -13,7 +13,7 @@ description: >
 The `ryeos` CLI has two execution paths:
 
 1. Local verbs that run without daemon dispatch: `init`, `start`, `stop`,
-   `node status`, `node doctor`, the `node reset ...` family, `trust pin`,
+   `node status`, `node doctor`, the `node reset ...` family, the `trust ...` verbs,
    `authorize-key`, `publish`, and local vault maintenance verbs.
 2. Daemon-backed verbs declared by signed bundle YAML and dispatched over
    HTTP to a running daemon.
@@ -65,7 +65,12 @@ ryeos init --node-profile full --host-class local
 
 Fresh init refuses an absent selector; bundle presence never implies one.
 `--host-class` is given exactly when `--node-profile` is, and names one of the
-profile's declared host classes (`full` declares only `local`).
+profile's declared host classes (`full` declares `local` and
+`local_unconfined`). `local` enforces the sandbox lane: init refuses when the
+host's sandbox probe cannot prove it, and the refusal names
+`--host-class local_unconfined`, the explicit opt-out that runs jobs as the
+daemon user. Init never selects the opt-out for you, and `ryeos node doctor`
+warns while a node runs it.
 Development usage:
 
 ```bash
@@ -199,6 +204,34 @@ bootstrap configuration cannot be decoded, status may report retained terminal
 startup-failure testimony for the selected app root, but it does not infer a
 TCP or UDS endpoint from defaults or stale process metadata.
 
+A running node on a native-capacity issuance also reports its **service
+window**: what remains of this incarnation before its planned rollover. The
+rollover is an orderly stop that begins at whichever comes first: the signed
+`rollover_drain_margin_ms` ahead of the service edge (the edge itself is
+`maximum_occupancy_ms − cleanup_occupancy_ms` after the window opened, on
+`CLOCK_BOOTTIME`), or the signed `rollover_work_margin_steps` before the
+prepaid service work runs out. The JSON report carries it as
+`Running.service_window`:
+
+| Field | Meaning |
+|---|---|
+| `seconds_until_rollover` | seconds until the drain margin is reached |
+| `work_steps_until_rollover` | native work (SQL VM steps) left before the work margin |
+| `rolls_at` | wall-clock (UTC) estimate of `seconds_until_rollover`; the daemon schedules on `CLOCK_BOOTTIME`, not on this |
+
+The text report shows one row, for example `service window: 73 min / 61000000
+work steps until rollover (about 2026-11-13T02:05:00Z)`. A script that is about
+to run a chain of placements compares these numbers with the sum of the chain's
+declared needs (each placement's `timeout_seconds + cleanup_timeout_seconds`
+and `native_work_steps`), and waits for the rollover when they do not fit. Do
+not derive the window from `daemon.json` `started_at`: that is wall-clock time
+and ignores both margins. The node admits each fresh external placement against
+the same numbers and refuses one that does not fit with
+`native_headroom_insufficient`, carrying `dimension` (`service_seconds` or
+`work_steps`), `declared` and `remaining`. To open a fresh window on purpose,
+`ryeos stop && ryeos start`; that costs one incarnation of the epoch, while an
+orderly rollover renews it.
+
 ### `ryeos node doctor`
 
 ```bash
@@ -206,7 +239,8 @@ ryeos node doctor [--json] [--no-bundles] [--app-root <dir>]
 ```
 
 Runs the offline node checklist. Its isolation row uses the production strict
-loader: disabled is a healthy inactive opt-out, while enforced mode resolves
+loader: disabled is a warning (runs are unconfined; re-init or cut a policy
+with an enforce lane), while enforced mode resolves
 and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md). Its `process_quarantine` row
@@ -215,6 +249,30 @@ from the report the daemon writes after each recovery pass. Its
 `stale_publication` row lists `publish_ready` hosted candidates whose base HEAD
 has moved (session, candidate, base and current HEAD); each settles to
 `base_superseded` on its owner's next publish.
+
+The `service_window` row reports the running node's service window (see
+`ryeos node status`) as read for this doctor run: `ok` with
+`seconds_until_rollover`, `work_steps_until_rollover` and `rolls_at` while the
+node runs, and `n/a` while it is stopped or reports no window. It judges
+nothing; the caller compares it with what it is about to run.
+
+The `authorized_keys` row reads every node-signed grant without starting the
+node. It fails for a grant of a retired schema or class (`grant_schema_stale`,
+`grant_class_stale`, which also stop the daemon from starting) or one that
+cannot be read, and warns for a grant that has expired or will within the
+policy's `warn_before_secs`. Each entry names the grant and its cure: renew a
+lapsed grant with `ryeos renew-key --fingerprint <fp>` (the principal that
+granted it, or the node operator); re-issue a stale one.
+
+The `remote_pins` row verifies every node-signed remote pin record under
+`.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
+cure, for a record that is unsigned (`remote_pin_unsigned`), signed by a key
+other than the node key (`remote_pin_wrong_signer`), edited after signing
+(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`), and for
+an unsigned remotes config file this node no longer reads
+(`remote_config_file_unsupported`): re-pin each remote with
+`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`,
+then delete the file.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and
@@ -284,6 +342,11 @@ records without root. It warns when a RyeOS node service records an app root
 that no longer exists, and names the fix,
 `ryeos node host retire --orphaned --confirm`. It reports `n/a` where no native
 service directory is readable without root.
+
+Its `ui_browser_sessions` row checks that the signed browser-session policy is
+present and valid (schema 5: session lifetime, idle timeout, launch-token
+lifetime and the `session_scopes` ceiling). The live session count needs the
+running node, so the row reports it as not available offline.
 
 ### `ryeos node reset execution-history`
 
@@ -390,6 +453,25 @@ sign the same `node.reset.policy-generation` operation against the
 `RYEOS_INIT_NODE_PROFILE=hosted-controller` wherever the deployment overrides
 the image's value.
 
+### `ryeos node host-access grant|revoke|list`
+
+```bash
+ryeos node host-access grant <item_ref> --project <dir> [--id <id>] \
+  [--origin direct|graph_child|schedule]... [--env <NAME>]... \
+  [--containment scope_required|group_allowed] [--app-root <dir>] [--json]
+ryeos node host-access revoke <id> [--app-root <dir>] [--json]
+ryeos node host-access list [--project <dir>] [--app-root <dir>] [--json]
+```
+
+The operator's grants of host-direct execution, in the `host_access`
+node-policy section. `grant` resolves the item in the project, computes its
+signer, source-closure and runtime digests, and installs the edited section
+through the operator-signed `node.policy-apply`; re-running it replaces the
+grant for that item. `revoke` removes one grant. `list --project` reports each
+grant as `current` or `stale` against the item's bytes there. The node must be
+stopped; grants take effect at the next start. A granted item runs on the host
+with the operator's authority: see `ryeos/core/node/host-access`.
+
 ### `ryeos node external-execution compose`
 
 ```bash
@@ -432,13 +514,71 @@ no-op and a different secret for an existing generation is refused; a new
 secret needs a newly composed binding. Reports never carry the secret or the
 physical vault key.
 
+### `ryeos external-content runtime-snapshot-run`
+
+```bash
+ryeos external-content runtime-snapshot-run '{"production_binding":"render-snapshot","qualification_binding":"render-snapshot-qualification","source":{"kind":"captured_product","witness_hash":"<witness>","witness_source":{"kind":"local_capture"}},"maximum_lifetime_seconds":600}'
+```
+
+Produces and qualifies one runtime snapshot on a running node through the
+node's own services, in order: `bootstrap-runtime-source` (the node creates the
+source sandbox, for a captured product or a bundle materialization),
+`observe-bootstrap-runtime-source` until it runs, `produce-runtime-snapshot`
+joined to that bootstrap operation, `observe-runtime-snapshot-readiness`,
+`terminate-bootstrap-runtime-source`, `create-runtime-snapshot-qualification`,
+`observe-runtime-snapshot-qualification` until the restored occurrence runs,
+`verify-runtime-snapshot-qualification`, and
+`terminate-runtime-snapshot-qualification` unless `keep_occurrence` is true
+(the report then gives the occurrence's deadline from the qualification
+binding's `maximum_lifetime_seconds` and the terminate verb).
+
+Before any provider contact it refuses if `ryeos node doctor`'s binding check
+fails either named binding. It keeps no state file: every step's operation id
+derives from its coordinates, so rerunning the same input reads the node's
+journals and continues. A step the node has not settled (an attempt pending,
+quarantined, late or rejected) stops the run with `stopped` naming the step,
+its phase and the read verb for its record; the run never repeats provider
+contact. The provider credential is only the production binding's, in the node
+vault.
+
+`verify-runtime-snapshot-qualification` observes the restored occurrence first
+and refuses with HTTP 409 `occurrence_not_running` (status `creating`,
+`terminated`, `absent`, ...) before claiming its one verifier attempt, so a
+verify against a sandbox the provider is still creating no longer spends it.
+`produce-runtime-snapshot` still accepts a captured product with an
+operator-named `source_occurrence_id` instead of a `bootstrap_operation_id`
+until the external snapshot driver is retired.
+
 ## Other local operator verbs
 
-- `ryeos trust pin --from <PUBLISHER_TRUST.toml>` — pin publisher trust.
+- `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
-- `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's remote descriptor trust pin.
+- `ryeos remote-descriptor --name <name> --url <url>` — ask the running daemon for this node's signed remote descriptor (a trust pin signed by the node key inside the daemon). The reply carries the descriptor and its signed `yaml`.
 - `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
+
+## Trust verbs
+
+The signer registry lives in `<app_root>/.ai/node/trust/`. See
+[Signing and Trust](../signing.md) for roles, scopes and statuses.
+
+| Verb | Effect |
+|---|---|
+| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
+| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope |
+| `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
+| `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
+| `ryeos trust succeed --from <succession.toml>` | Apply a signed succession statement |
+| `ryeos trust list` | List signer records (read-only) |
+| `ryeos trust show <fp>` | Show one signer record and its key events (read-only) |
+
+`list` and `show` work on a running or stopped node. The five mutating
+verbs are signed offline operations (`node.trust.pin`, `node.trust.scope`,
+`node.trust.retire`, `node.trust.revoke`, `node.trust.succeed`; local signer
+only). On a running node they refuse with `node_running_trust_change`; cure
+by stopping the node, or by `ryeos node offline-operation submit --stop`.
+Each change appends a node-signed, hash-chained key event under
+`<app_root>/.ai/node/trust/events/`.
 
 ## Core daemon-backed verbs
 
@@ -452,11 +592,43 @@ physical vault key.
 - `ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash]`
   — list a consumer's content bindings and whether each still authorizes it at
   that generation; read only, local operator.
+- `ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>]`
+  — produce, capture, admit and optionally push one product, as one client
+  composite over the verified commands; see
+  [Retained products](../execution/retained-products.md).
+- `ryeos admission submit <subject-hash> [--policy <id>] [--claim accepted]` —
+  admit a local CAS root under the node's local admission policy (idempotent
+  per subject and policy).
+- `ryeos external-content push-product <remote> <witness-hash> <admission-hash> [maximum-bytes]`
+  — push an admitted product; the bound defaults to the declaration's.
 - `ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash>` —
   renew a pinned-project content binding for a new snapshot or re-signed
   consumer; local operator, refused with a typed code when the consumer changed.
 - `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
 - `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
+- `ryeos external-execution inventory <section>/<binding-id>` — list, read
+  only, the sandboxes and snapshots the provider holds for one installed
+  `external_execution` or `runtime_snapshot_production` binding's owner scope,
+  through its adapter and vault credential. Each row is joined with the node's
+  allocation, bootstrap-source, qualification-occurrence and snapshot journals
+  of the same backend and classed `known_live`, `leaked` (the node's record
+  ended, the provider still runs it), `unknown` (no node record: another node,
+  a hand-made resource, or a quarantined allocation's lost answer) or `gone`
+  (the node holds it open, the provider no longer runs it; only from a
+  complete listing, and a record of another account of the same backend can
+  show here). Nothing is deleted. The result is a node-signed CAS receipt;
+  the reply carries its digest, the rows and the counts. Listing is bounded
+  (256 rows); a cut listing is `complete: false`.
+- `ryeos external-execution settle-unknown-allocation <placement> <reason> <inventory-receipt>`
+  — release one quarantined allocation that never bound an occurrence, citing
+  an inventory receipt by digest. Refused with `settle_inventory_refused`
+  (409) unless the receipt is this node's signed, complete listing of the
+  allocation's provider backend and account, taken after the allocation's
+  last possible contact, with no `unknown` running sandbox created inside the
+  allocation's contact window (two minutes of clock skew either side). The
+  reason stays free text; the receipt digest is recorded with it. A receipt is
+  an unreferenced CAS object, so `ryeos maintenance gc` may collect it; take a
+  fresh inventory then.
 - `ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` — verify one or more items' signatures, trust, and path anchoring.
 
 When the daemon refuses a buffered request with the typed
@@ -483,6 +655,16 @@ verbs such as `thread list`, `thread get`, `events replay`,
 Remote verbs cover cross-node configure/status, push/pull, execute,
 threads, token-based admission, remote authorization, live bundle
 install, and vault proxying.
+
+- `ryeos remote pin <name> --descriptor <file>` — pin a remote from its
+  signed v2 descriptor without contacting it, as a node-signed pin record; a
+  descriptor without a URL pins an inbound-only remote (outbound commands
+  refuse it with `remote_inbound_only`).
+- `ryeos node offline-operation sign --operation node.authorize-client|node.remote.pin|node.bundle.replace ...`
+  — wire a hosted node that delegates these operations: a remote grant, a
+  remote pin (`--input descriptor=<file>`) or a bundle installed from an
+  archive (`--input archive=<file.tar.gz>`). See "Wiring a hosted node
+  without a shell" in [Remote Operations](../remote/remote-operations.md).
 See [Remote Command Reference](../remote/remote-command-reference.md).
 
 ## Aliases Quick Reference

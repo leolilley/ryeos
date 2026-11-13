@@ -80,6 +80,7 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
         caller_scopes: principal.scopes.clone(),
         engine: state.engine.clone(),
         plan_ctx: PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(principal),
             project_context: ProjectContext::None,
             subject_resolution_authority:
@@ -255,6 +256,7 @@ async fn recorded_route_http_response_exposes_the_persisted_thread_identity() {
             body: RawRequestBody::None,
         },
         source_file: "/test/identity-public-key.yaml".into(),
+        authority: None,
     };
     let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
     let table = ryeos_api::routes::build_route_table(&[raw], &modes)
@@ -324,6 +326,7 @@ async fn failed_recorded_route_http_response_exposes_the_failed_thread_identity(
             body: RawRequestBody::None,
         },
         source_file: "/test/identity-public-key-failure.yaml".into(),
+        authority: None,
     };
     let modes = ResponseModeRegistry::with_builtins(Arc::new(state.engine.kinds.clone()));
     let table = ryeos_api::routes::build_route_table(&[raw], &modes)

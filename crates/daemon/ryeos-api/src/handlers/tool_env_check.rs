@@ -103,6 +103,7 @@ pub async fn handle(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let site_id = state.threads.site_id().to_string();
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),
@@ -248,7 +249,6 @@ pub async fn handle(
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &isolation_verified_code,
                     verified_command: None,
                     external_read_only_mounts: &[],

@@ -57,12 +57,12 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     }
     // This is node-owned receipt, not project-selected trust or a caller key
     // override. Recovery later retains the authenticated key in local testimony.
-    let remotes = crate::remote::config::load_remotes_layered(&state.config.app_root, None)?;
+    let remotes = crate::remote::config::load_remotes(&state.config.app_root)?;
     let remote = crate::remote::config::get_remote(&remotes, &req.remote)?;
     let key = remote
         .pinned_signing_key()
         .context("product origin has no pinned signing key")?;
-    let client = RemoteClient::from_remote_cfg(&state, &remote);
+    let client = RemoteClient::from_remote_cfg(&state, &remote)?;
     let imported = import_admitted_root_with_job(
         &state,
         &client,

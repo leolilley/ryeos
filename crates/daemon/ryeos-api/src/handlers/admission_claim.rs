@@ -77,6 +77,8 @@ pub struct Response {
     pub granted_by: String,
     pub created_at: String,
     pub origin_site_id: String,
+    /// RFC 3339 UTC time at which the admitted grant stops authenticating.
+    pub expires_at: String,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
@@ -138,7 +140,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     let scopes = normalize_scopes(&req.scopes, "admission claim requests")?;
     let allowed_scopes = normalize_scopes(&token.scopes, "admission token files")?;
     ensure_scope_subset(&scopes, &allowed_scopes, &state)?;
-    verify_claim_signature(&req, &token_hash, &scopes, &verifying_key, &state)?;
+    let claim_digest = verify_claim_signature(&req, &token_hash, &scopes, &verifying_key, &state)?;
 
     let label = req
         .label
@@ -153,6 +155,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     if label.trim().is_empty() {
         return Err(HandlerError::BadRequest("label must not be empty".into()));
     }
+
+    // The admitted key asked for this grant by signing its claim; the token it
+    // redeemed is the authority that lets the claim through. A remote node's
+    // grant lives for the remote_node class maximum.
+    let terms = super::grant_terms::issuance_terms(
+        &state,
+        ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
+        None,
+        ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+            &fingerprint,
+            Some(claim_digest),
+        ),
+    )?;
 
     consume_token_file(&token_path)?;
 
@@ -169,6 +184,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             token_hash.chars().take(12).collect::<String>()
         ),
         &created_at,
+        &terms,
         &req.origin_site_id,
         state.identity.signing_key(),
     );
@@ -204,6 +220,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         ),
         created_at,
         origin_site_id: req.origin_site_id,
+        expires_at: super::grant_terms::expiry_text(terms.expires_at),
     };
     serde_json::to_value(response).map_err(|e| HandlerError::Internal(e.to_string()))
 }
@@ -382,7 +399,7 @@ fn verify_claim_signature(
     scopes: &[String],
     verifying_key: &VerifyingKey,
     state: &AppState,
-) -> HandlerResult<()> {
+) -> HandlerResult<String> {
     let claim = claim_string(
         &state.identity.principal_id(),
         token_hash,
@@ -400,7 +417,8 @@ fn verify_claim_signature(
         .map_err(|_| HandlerError::BadRequest("invalid signature".into()))?;
     verifying_key
         .verify(content_hash.as_bytes(), &signature)
-        .map_err(|_| HandlerError::Forbidden("invalid admission claim signature".into()))
+        .map_err(|_| HandlerError::Forbidden("invalid admission claim signature".into()))?;
+    Ok(content_hash)
 }
 
 fn claim_string(

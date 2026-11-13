@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:41:47Z:426ffa115e1722988e562d2652c4b58ae08169795aebee0704b0986ea56b2afa:xuyvH6xOZMmLMjbaOpe00PNca11i1GLkwPB6kMwdu+F5wkEfexycWGV0lxD7CCmIGF3vvhnXtpWkaE/YbJ+gAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:cee3c04d72a1218b66e57e89bd8cff822f7efed251eeb8830f42d0f35cd9449b:NvmmJwA7Sl81LFmR+VBF+gRquz2rm2M5iGKGwQpyVT1HfEjlziWSM56qROqLGYYwXs46wBadPqeRsuJo+quXAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -352,12 +352,12 @@ ryeos remote vault-list prod
 ## 11. Remote setup and diagnostics
 
 Remote commands are local daemon services that call another Rye daemon
-with signed HTTP requests. They normally use the caller's **node key**. The
-generic push/run services also have a narrow configured-operator mode for
-durable operator-owned workflows; selecting it requires the incoming request
-itself to authenticate locally as the source node's exact configured operator.
-That private key stays at the source. The hosted target must authorize its
-public key with a node-signed `remote_operator` grant carrying the source
+with signed HTTP requests. Each request is signed by the **node key** and,
+when a principal asked for it, carries that principal's own signed delegation
+(`ryeos remote delegate`). The generic push/run services act as the caller by
+default, which is how a durable operator-owned workflow keeps its principal.
+The principal's private key stays with its owner. The hosted target must
+authorize its public key with a node-signed `remote_principal` grant carrying the source
 `site:` ID and concrete scopes. The target must separately admit the
 source node key with `ryeos.attest.request.forwarded-operator`; that node key
 co-signs the exact operator request and proves remote origin.

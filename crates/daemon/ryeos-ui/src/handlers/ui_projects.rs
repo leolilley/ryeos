@@ -319,6 +319,7 @@ fn compile_saved_surface_context(
         root_ref: origin.surface_ref.clone(),
         project_path: canonical.as_ref().map(|path| path.display().to_string()),
         user_principal_id: None,
+        scopes: None,
     };
     let context = HandlerContext::new(
         session.principal_id.clone(),
@@ -874,6 +875,7 @@ pub async fn handle_projects_open(
         root_ref: surface_ref,
         project_path: Some(root.clone()),
         user_principal_id: None,
+        scopes: None,
     };
     let (compiled_binding, presentation) = super::ui_launch_mint::compile_session_binding(
         &compile_request,
@@ -1152,6 +1154,7 @@ pub async fn handle_particular_view_set_resume(
             .as_ref()
             .map(|root| root.display().to_string()),
         user_principal_id: None,
+        scopes: None,
     };
     let compile_context = HandlerContext::new(
         session.principal_id.clone(),

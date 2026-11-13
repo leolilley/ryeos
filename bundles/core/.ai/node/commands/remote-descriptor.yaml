@@ -1,7 +1,7 @@
-# ryeos:signed:2026-08-11T02:28:08Z:e2bf8284284f0a538b4c305777b7649bae72d9382570e610f77cc8553e6f8cf7:OAKBOhvOeYKwrPiAY9EQnowwV0C5BoWuBxHGEipuBFV21chJkAHLhCZJYzO8d+TtGQbX3m5LCPVZ25x4vmK6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T11:31:32Z:2a86b1f77d53193a6643e53b34c69c6f3999ff152c9d6be94bb8d3513093f5f9:0jGec4y54EpaI0rKGlMD7MiXnwjRv5DIce3KHwdSd8sv0KEf++vxLBq1RfMpeXk+Fdy7qZ6Hu/kua1yFZ8uODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote-descriptor
-description: Export a remote descriptor trust pin for this node
+description: Export this node's signed remote descriptor (a trust pin signed by the node key)
 dispatch:
   kind: execute_ref
-  execute: tool:ryeos/core/remote-descriptor
+  execute: service:remote/descriptor

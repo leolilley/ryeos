@@ -52,7 +52,7 @@ pub use account::{CapacityAccountSummary, inspect_capacity_account};
 pub use factory::{
     LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPreparationFailure,
     LiveNativeProducerPublicationFailure, LiveProducerControlCensus, PlannedMarginWake,
-    ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
+    ServiceHeadroom, ServiceRefusalLatch, ServiceRefusalWake, service_refusal,
 };
 #[cfg(target_os = "linux")]
 pub use reservation::OperatorLockCustody;
@@ -512,7 +512,7 @@ impl LiveNativeCapacityInputs {
             lillux::sha256_hex(&completion.bytes) == report.completion_digest,
             "initialization verifier did not select the retained fence"
         );
-        let trust = TrustStore::load(None, &roots.config())?;
+        let trust = TrustStore::load_node_registry(app_root)?;
         let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
             app_root,
             &trust,
@@ -531,10 +531,11 @@ impl LiveNativeCapacityInputs {
             OsStr::new("native_capacity.yaml"),
             ryeos_node_runtime::node_document::MAX_ITEM_BYTES,
         )?;
-        let verified = ryeos_node_runtime::node_document::verify_pinned_signed_yaml(
+        let verified = ryeos_node_runtime::node_document::verify_node_signed_document_file(
             &policy_file.file,
-            &trust,
-            &report.node_fingerprint,
+            trust
+                .node_verifying_key()
+                .context("trust store carries no node key")?,
         )?;
         ensure!(
             verified.signer_fingerprint == report.node_fingerprint,

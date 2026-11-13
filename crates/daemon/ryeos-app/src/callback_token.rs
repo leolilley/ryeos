@@ -2193,13 +2193,13 @@ mod tests {
     }
 
     #[test]
-    fn thread_auth_preserves_and_narrows_remote_operator_authority() {
+    fn thread_auth_preserves_and_narrows_remote_principal_authority() {
         let store = ThreadAuthStore::new();
         let context = crate::handler_context::HandlerContext::new_with_authority(
             "fp:operator".to_string(),
             vec!["cap:a".to_string(), "cap:b".to_string()],
             true,
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         );
         let state = store
@@ -2221,7 +2221,7 @@ mod tests {
         assert_eq!(narrowed.scopes, vec!["cap:a"]);
         assert_eq!(
             narrowed.authorized_key_class,
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal)
         );
         assert_eq!(
             narrowed.authenticated_origin_site_id.as_deref(),

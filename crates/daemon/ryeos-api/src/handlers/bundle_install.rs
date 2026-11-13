@@ -61,7 +61,53 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// What a bundle install acts under. The live or standalone service takes it
+/// from its state; the daemon's startup, applying a signed
+/// `node.bundle.replace`, composes it from the stopped node's configuration.
+pub struct InstallAuthority<'a> {
+    pub app_root: &'a Path,
+    /// The node's signing key, which signs the bundle registration.
+    pub node_signing_key: &'a lillux::crypto::SigningKey,
+    pub node_trust_store: &'a TrustStore,
+    pub prospective_validator: &'a ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
+    pub isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    /// The state lock the registration reseal is published under.
+    pub state_lock: &'a ryeos_node_runtime::state_lock::StateLockLease,
+    /// Called whenever a new bundle generation may be visible, so a process
+    /// that caches engines drops them.
+    pub generation_changed: &'a dyn Fn(&str),
+}
+
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+    let prospective_validator = state
+        .extensions
+        .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
+        .context("prospective node-config validator is not installed at the composition root")?;
+    let bump = |reason: &str| {
+        let new_gen = state.engine_cache.bump_system_install_generation();
+        tracing::info!(
+            bundle = %req.name,
+            engine_cache_generation = new_gen,
+            reason,
+            "bumped engine cache generation"
+        );
+    };
+    install(
+        &req,
+        &InstallAuthority {
+            app_root: &state.config.app_root,
+            node_signing_key: state.identity.signing_key(),
+            node_trust_store: &state.engine.node_trust_store,
+            prospective_validator: &prospective_validator,
+            isolation: Arc::clone(&state.isolation),
+            state_lock: &state.controller_lifetime,
+            generation_changed: &bump,
+        },
+    )
+}
+
+/// Install or replace one bundle from a source directory under `authority`.
+pub fn install(req: &Request, authority: &InstallAuthority<'_>) -> Result<Value> {
     validate_name(&req.name)?;
 
     if !req.source_path.is_dir() {
@@ -71,36 +117,31 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    let bundles_root = state.config.app_root.join(".ai").join("bundles");
+    let app_root = authority.app_root;
+    let bundles_root = app_root.join(".ai").join("bundles");
     let target = bundles_root.join(&req.name);
     // Keep the exact installed-set read, admission, and namespace mutation in
     // one node-wide critical section. The registry lock always precedes the
     // per-name transaction lock.
     let registry_lock =
-        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&state.config.app_root)?;
+        ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(app_root)?;
     let transaction = ryeos_app::bundle_transaction::BundleMutationTransaction::acquire(
         &registry_lock,
         &req.name,
     )?;
-    let recovered = match transaction.reconcile(state.identity.signing_key()) {
+    let recovered = match transaction.reconcile(authority.node_signing_key) {
         Ok(recovered) => recovered,
         Err(error) => {
             // Reconciliation may finish the tree/registration mutation and
             // then fail while durably removing its journal. Invalidate before
             // returning so a namespace-visible repair never leaves old engines
             // cached in this daemon process.
-            state.engine_cache.bump_system_install_generation();
+            (authority.generation_changed)("reconcile failed");
             return Err(error).context("reconcile interrupted bundle transaction");
         }
     };
     if recovered.is_some() {
-        let new_gen = state.engine_cache.bump_system_install_generation();
-        tracing::info!(
-            bundle = %req.name,
-            engine_cache_generation = new_gen,
-            operation = ?recovered,
-            "reconciled bundle transaction: bumped engine cache generation"
-        );
+        (authority.generation_changed)("reconciled bundle transaction");
     }
     if matches!(
         recovered,
@@ -129,15 +170,21 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Trust comes only from the node's persistent trust store. Admission runs
     // against the completed staging tree below, never the mutable source tree.
-    let node_config_root = state.config.runtime_root().config();
-    let prospective_validator = state
-        .extensions
-        .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
-        .context("prospective node-config validator is not installed at the composition root")?;
 
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
+    let admit = |staging: &Path, replace: bool| {
+        admit_completed_staging(
+            app_root,
+            &req.name,
+            staging,
+            replace,
+            authority.node_trust_store,
+            authority.prospective_validator,
+            Arc::clone(&authority.isolation),
+        )
+    };
     let registration = serde_json::json!({ "kind": "node", "path": target });
     let activation = if replaced {
         replace_dir_atomic(
@@ -147,17 +194,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &transaction,
             registration.clone(),
             |staging| {
-                admit_completed_staging(
-                    &state.config.app_root,
-                    &req.name,
-                    staging,
-                    true,
-                    &node_config_root,
-                    &state.engine.node_trust_store,
-                    &prospective_validator,
-                    Arc::clone(&state.isolation),
-                )
-                .context("admission refused completed replacement staging tree")
+                admit(staging, true).context("admission refused completed replacement staging tree")
             },
         )
         .with_context(|| {
@@ -174,17 +211,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             &transaction,
             registration.clone(),
             |staging| {
-                admit_completed_staging(
-                    &state.config.app_root,
-                    &req.name,
-                    staging,
-                    false,
-                    &node_config_root,
-                    &state.engine.node_trust_store,
-                    &prospective_validator,
-                    Arc::clone(&state.isolation),
-                )
-                .context("admission refused completed install staging tree")
+                admit(staging, false).context("admission refused completed install staging tree")
             },
         )
         .with_context(|| {
@@ -202,12 +229,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // journal write fails. A conservative bump for a failed replacement that
     // left the old target unchanged is harmless.
     if target.is_dir() {
-        let new_gen = state.engine_cache.bump_system_install_generation();
-        tracing::info!(
-            bundle = %req.name,
-            engine_cache_generation = new_gen,
-            "bundle namespace observed after activation attempt: bumped engine cache generation"
-        );
+        (authority.generation_changed)("bundle namespace observed after activation attempt");
     }
     activation?;
 
@@ -217,14 +239,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Write signed kind: node bundle registration
     let config_item_path = transaction
-        .commit_present(state.identity.signing_key())
+        .commit_present(authority.node_signing_key)
         .context("commit bundle registration")?;
     // The registration set is pinned by the signed init completion record;
     // reseal it so the node with this bundle is startable and the next
     // stopped-node operation is admitted.
     ryeos_node::seal_init_completion_after_bundle_registration_change(
-        &state.config.app_root,
-        &state.controller_lifetime,
+        app_root,
+        authority.state_lock,
     )
     .context("commit bundle registration into initialized state")?;
 
@@ -236,6 +258,148 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "preserve_runtime_artifacts": req.preserve_runtime_artifacts,
     });
     Ok(report)
+}
+
+/// Most bytes one bundle archive may expand to.
+pub const MAX_ARCHIVE_EXPANDED_BYTES: u64 = 64 * 1024 * 1024;
+/// Most entries one bundle archive may hold.
+pub const MAX_ARCHIVE_ENTRIES: usize = 8192;
+
+/// Install the bundle a gzip-compressed tar holds under `name`, replacing the
+/// installed bundle of that name, with the same verification as
+/// `bundle install --replace`. The archive holds one top-level directory
+/// named after the bundle (`tar czf site.tgz site`), and only directories and
+/// regular files below it.
+pub fn replace_from_archive(
+    name: &str,
+    archive: &[u8],
+    preserve_runtime_artifacts: bool,
+    authority: &InstallAuthority<'_>,
+) -> Result<Value> {
+    validate_name(name)?;
+    let bundles_root = authority
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("bundles");
+    fs::create_dir_all(&bundles_root)
+        .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
+    let extraction = bundles_root.join(format!(".{name}.archive-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&extraction)
+        .with_context(|| format!("create archive extraction {}", extraction.display()))?;
+    let result = extract_bundle_archive(archive, name, &extraction).and_then(|()| {
+        install(
+            &Request {
+                name: name.to_owned(),
+                source_path: extraction.join(name),
+                replace: true,
+                preserve_runtime_artifacts,
+            },
+            authority,
+        )
+    });
+    if let Err(error) = fs::remove_dir_all(&extraction) {
+        tracing::warn!(
+            path = %extraction.display(),
+            %error,
+            "bundle archive extraction was not removed"
+        );
+    }
+    result
+}
+
+/// Extract a bundle archive below `into`, refusing anything but directories
+/// and regular files at plain relative paths under one top-level directory
+/// named `name`, and anything past the entry and size bounds.
+pub fn extract_bundle_archive(archive: &[u8], name: &str, into: &Path) -> Result<()> {
+    use std::io::Read as _;
+    let decoder = flate2::read::GzDecoder::new(archive);
+    let mut tar = tar::Archive::new(decoder.take(MAX_ARCHIVE_EXPANDED_BYTES + 1));
+    let mut entries = 0usize;
+    let mut expanded = 0u64;
+    let mut saw_root = false;
+    for entry in tar
+        .entries()
+        .context("bundle archive is not a gzip-compressed tar")?
+    {
+        let mut entry = entry.context("read a bundle archive entry")?;
+        entries += 1;
+        if entries > MAX_ARCHIVE_ENTRIES {
+            bail!("bundle archive holds more than {MAX_ARCHIVE_ENTRIES} entries");
+        }
+        let path = entry
+            .path()
+            .context("bundle archive entry path is not valid")?
+            .into_owned();
+        let mut components = Vec::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::Normal(part) => components.push(part.to_owned()),
+                std::path::Component::CurDir if components.is_empty() => {}
+                _ => bail!(
+                    "bundle archive entry `{}` is not a plain relative path",
+                    path.display()
+                ),
+            }
+        }
+        if components.first().and_then(|first| first.to_str()) != Some(name) {
+            bail!(
+                "bundle archive entry `{}` is not under the top-level directory `{name}`",
+                path.display()
+            );
+        }
+        let relative: PathBuf = components.iter().collect();
+        let destination = into.join(&relative);
+        let kind = entry.header().entry_type();
+        if kind.is_dir() {
+            saw_root |= components.len() == 1;
+            fs::create_dir_all(&destination)
+                .with_context(|| format!("create {}", destination.display()))?;
+        } else if kind.is_file() {
+            if components.len() == 1 {
+                bail!("bundle archive top-level entry `{name}` is not a directory");
+            }
+            let size = entry.header().size().context("bundle archive entry size")?;
+            expanded = expanded.saturating_add(size);
+            if expanded > MAX_ARCHIVE_EXPANDED_BYTES {
+                bail!("bundle archive expands past {MAX_ARCHIVE_EXPANDED_BYTES} bytes");
+            }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)
+                .with_context(|| {
+                    format!(
+                        "bundle archive names `{}` twice or it cannot be written",
+                        relative.display()
+                    )
+                })?;
+            let copied = std::io::copy(&mut (&mut entry).take(size), &mut file)
+                .with_context(|| format!("write {}", destination.display()))?;
+            if copied != size {
+                bail!("bundle archive entry `{}` is truncated", relative.display());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = entry.header().mode().unwrap_or(0o644);
+                let mode = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+                fs::set_permissions(&destination, fs::Permissions::from_mode(mode))?;
+            }
+        } else {
+            bail!(
+                "bundle archive entry `{}` is a link or special file; a bundle archive holds only directories and regular files",
+                path.display()
+            );
+        }
+    }
+    if !saw_root && !into.join(name).is_dir() {
+        bail!("bundle archive holds no top-level directory `{name}`");
+    }
+    Ok(())
 }
 
 /// Build the exact post-operation bundle graph used for dependency closure and
@@ -271,7 +435,7 @@ pub(crate) fn build_prospective_bundle_plan(
 pub(crate) fn verify_planned_candidate(
     plan: &BundlePlan,
     bundle_name: &str,
-    node_config_root: &Path,
+    app_root: &Path,
     completed_staging: bool,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
@@ -294,7 +458,7 @@ pub(crate) fn verify_planned_candidate(
             &job.subject_root,
             bundle_name,
             &job.dependency_roots,
-            node_config_root,
+            app_root,
             isolation,
         )
     } else {
@@ -302,7 +466,7 @@ pub(crate) fn verify_planned_candidate(
             &job.subject_root,
             bundle_name,
             &job.dependency_roots,
-            node_config_root,
+            app_root,
             isolation,
         )
     }
@@ -316,19 +480,12 @@ pub(crate) fn admit_completed_staging(
     bundle_name: &str,
     staging: &Path,
     replace: bool,
-    node_config_root: &Path,
     node_trust_store: &TrustStore,
     prospective_validator: &ryeos_app::prospective_admission::ProspectiveNodeConfigValidator,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<()> {
     let plan = build_prospective_bundle_plan(app_root, bundle_name, staging, replace)?;
-    verify_planned_candidate(
-        &plan,
-        bundle_name,
-        node_config_root,
-        true,
-        Arc::clone(&isolation),
-    )?;
+    verify_planned_candidate(&plan, bundle_name, app_root, true, Arc::clone(&isolation))?;
     // Exercise the second boot phase too: bundle-contributed node config is
     // scanned from the prospective roots and policy-directory collisions are
     // rejected before activation. Command grants come only from the exact
@@ -766,6 +923,81 @@ mod tests {
             |_| Ok(()),
         )
         .unwrap();
+    }
+
+    fn tar_gz(entries: &[(&str, Option<&[u8]>, tar::EntryType)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        for (path, content, kind) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(*kind);
+            header.set_mode(0o644);
+            let bytes = content.unwrap_or_default();
+            header.set_size(bytes.len() as u64);
+            if *kind == tar::EntryType::Symlink {
+                header.set_link_name("../../etc/passwd").unwrap();
+            }
+            // Written raw so a hostile path reaches the extractor unchanged.
+            let name = path.as_bytes();
+            header.as_old_mut().name[..name.len()].copy_from_slice(name);
+            header.set_cksum();
+            builder.append(&header, bytes).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn a_bundle_archive_extracts_its_one_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tar_gz(&[
+            ("site/", None, tar::EntryType::Directory),
+            (
+                "site/.ai/manifest.yaml",
+                Some(b"name: site\n"),
+                tar::EntryType::Regular,
+            ),
+        ]);
+        extract_bundle_archive(&archive, "site", tmp.path()).unwrap();
+        assert_eq!(
+            fs::read(tmp.path().join("site/.ai/manifest.yaml")).unwrap(),
+            b"name: site\n"
+        );
+    }
+
+    #[test]
+    fn bundle_replace_operation_refuses_unverified_archive() {
+        for (entries, needle) in [
+            (
+                vec![("site/../escape", Some(&b"x"[..]), tar::EntryType::Regular)],
+                "not a plain relative path",
+            ),
+            (
+                vec![("/etc/site", Some(&b"x"[..]), tar::EntryType::Regular)],
+                "not a plain relative path",
+            ),
+            (
+                vec![("other/file", Some(&b"x"[..]), tar::EntryType::Regular)],
+                "not under the top-level directory",
+            ),
+            (
+                vec![("site/link", None, tar::EntryType::Symlink)],
+                "link or special file",
+            ),
+            (
+                vec![("site", Some(&b"x"[..]), tar::EntryType::Regular)],
+                "not a directory",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let error = extract_bundle_archive(&tar_gz(&entries), "site", tmp.path()).unwrap_err();
+            assert!(format!("{error:#}").contains(needle), "{error:#}");
+            assert!(!tmp.path().join("escape").exists());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let error = extract_bundle_archive(b"not gzip", "site", tmp.path()).unwrap_err();
+        assert!(format!("{error:#}").contains("bundle archive"), "{error:#}");
     }
 
     #[test]

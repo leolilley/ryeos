@@ -2,7 +2,9 @@
 //!
 //! The UI session store enforces this compiled policy when it admits retained
 //! binding attachments, and the seat history stream takes its frame bounds and
-//! the seat thread kind from it. The policy has no daemon fallback:
+//! the seat thread kind from it. Session lifetime, idle timeout, launch-token
+//! lifetime and the capability ceiling of every browser session are signed
+//! data here as well. The policy has no daemon fallback:
 //! registration makes the section a required member of every complete
 //! node-policy generation.
 
@@ -25,10 +27,29 @@ pub const MAX_REPLAY_FRAME_EVENTS_CEILING: u32 = 64;
 /// envelope and string escaping around the records.
 pub const MAX_REPLAY_FRAME_BYTES_CEILING: u64 = 8 * 1024 * 1024;
 
+/// Longest browser session lifetime the policy may declare.
+pub const SESSION_TTL_SECS_CEILING: u64 = 24 * 60 * 60;
+
+/// Longest launch-token lifetime the policy may declare.
+pub const LAUNCH_TOKEN_TTL_SECS_CEILING: u64 = 300;
+
+/// The only schema this section accepts.
+pub const CURRENT_SCHEMA: u32 = 5;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiBrowserSessionPolicy {
     pub schema: u32,
+    /// Absolute lifetime of one browser session, from activation.
+    pub session_ttl_secs: u64,
+    /// A session with no request for this long is expired.
+    pub session_idle_secs: u64,
+    /// Lifetime of the single-use launch token a mint returns.
+    pub launch_token_ttl_secs: u64,
+    /// Capability patterns: the most any browser session on this node may
+    /// ever hold. A session's grant is the minter's scopes intersected with
+    /// this set.
+    pub session_scopes: Vec<String>,
     pub max_session_bootstrap_bytes: u64,
     pub max_live_binding_attachments_per_session: u32,
     pub max_presentations_per_session: u32,
@@ -61,8 +82,49 @@ pub struct SharedPresentationPolicyLimits {
 
 impl UiBrowserSessionPolicy {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 4 {
-            bail!("UI browser-session node policy schema is not current");
+        if self.schema != CURRENT_SCHEMA {
+            bail!(
+                "UI browser-session node policy schema {} is not current ({CURRENT_SCHEMA}); \
+                 re-issue the ui_browser_sessions section at schema {CURRENT_SCHEMA} with \
+                 session_ttl_secs, session_idle_secs, launch_token_ttl_secs and session_scopes",
+                self.schema
+            );
+        }
+        for (name, value, ceiling) in [
+            (
+                "session_ttl_secs",
+                self.session_ttl_secs,
+                SESSION_TTL_SECS_CEILING,
+            ),
+            (
+                "launch_token_ttl_secs",
+                self.launch_token_ttl_secs,
+                LAUNCH_TOKEN_TTL_SECS_CEILING,
+            ),
+        ] {
+            if value == 0 {
+                bail!("UI browser-session {name} must be non-zero");
+            }
+            if value > ceiling {
+                bail!("UI browser-session {name} exceeds the ceiling of {ceiling} seconds");
+            }
+        }
+        if self.session_idle_secs == 0 {
+            bail!("UI browser-session session_idle_secs must be non-zero");
+        }
+        if self.session_idle_secs > self.session_ttl_secs {
+            bail!("UI browser-session session_idle_secs must not exceed session_ttl_secs");
+        }
+        if self.session_scopes.is_empty() {
+            bail!(
+                "UI browser-session session_scopes must list at least one capability pattern; \
+                 an empty ceiling would leave every browser session with no authority"
+            );
+        }
+        for scope in &self.session_scopes {
+            ryeos_runtime::authorizer::validate_scope_pattern(scope).map_err(|reason| {
+                anyhow::anyhow!("UI browser-session session_scopes entry is invalid: {reason}")
+            })?;
         }
         if self.max_live_binding_attachments_per_session == 0 {
             bail!("UI browser-session max_live_binding_attachments_per_session must be non-zero");
@@ -207,7 +269,11 @@ mod tests {
 
     fn current_body() -> Value {
         serde_json::json!({
-            "schema": 4,
+            "schema": 5,
+            "session_ttl_secs": 28800,
+            "session_idle_secs": 3600,
+            "launch_token_ttl_secs": 60,
+            "session_scopes": ["ryeos.execute.service.ui/*"],
             "max_session_bootstrap_bytes": 4194304,
             "max_live_binding_attachments_per_session": 16,
             "max_presentations_per_session": 16,
@@ -233,6 +299,10 @@ mod tests {
         let mut bad = Vec::new();
         for name in [
             "schema",
+            "session_ttl_secs",
+            "session_idle_secs",
+            "launch_token_ttl_secs",
+            "session_scopes",
             "max_session_bootstrap_bytes",
             "max_live_binding_attachments_per_session",
             "max_presentations_per_session",
@@ -291,7 +361,7 @@ mod tests {
         let mut seat_unknown = original.clone();
         seat_unknown["seat"]["fallback"] = serde_json::json!(1);
         bad.push(seat_unknown);
-        for predecessor in [1, 2, 3] {
+        for predecessor in [1, 2, 3, 4] {
             let mut stale = original.clone();
             stale["schema"] = serde_json::json!(predecessor);
             bad.push(stale);
@@ -312,6 +382,101 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn session_policy_requires_ttls() {
+        for name in [
+            "session_ttl_secs",
+            "session_idle_secs",
+            "launch_token_ttl_secs",
+            "session_scopes",
+        ] {
+            let mut body = current_body();
+            body.as_object_mut().unwrap().remove(name);
+            assert!(
+                UiBrowserSessionPolicySection
+                    .parse(&context(), &body)
+                    .is_err(),
+                "{name} has no code default"
+            );
+        }
+        for name in [
+            "session_ttl_secs",
+            "session_idle_secs",
+            "launch_token_ttl_secs",
+        ] {
+            let mut zero = current_body();
+            zero[name] = serde_json::json!(0);
+            assert!(
+                UiBrowserSessionPolicySection
+                    .parse(&context(), &zero)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn session_ttl_ceiling_enforced() {
+        let mut body = current_body();
+        body["session_ttl_secs"] = serde_json::json!(SESSION_TTL_SECS_CEILING);
+        assert!(
+            UiBrowserSessionPolicySection
+                .parse(&context(), &body)
+                .is_ok()
+        );
+        body["session_ttl_secs"] = serde_json::json!(SESSION_TTL_SECS_CEILING + 1);
+        let error = UiBrowserSessionPolicySection
+            .parse(&context(), &body)
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}").contains("session_ttl_secs"),
+            "{error:#}"
+        );
+        let mut body = current_body();
+        body["launch_token_ttl_secs"] = serde_json::json!(LAUNCH_TOKEN_TTL_SECS_CEILING + 1);
+        assert!(
+            UiBrowserSessionPolicySection
+                .parse(&context(), &body)
+                .is_err()
+        );
+        let mut body = current_body();
+        body["session_idle_secs"] = serde_json::json!(28801);
+        assert!(
+            UiBrowserSessionPolicySection
+                .parse(&context(), &body)
+                .is_err(),
+            "idle timeout longer than the session lifetime is meaningless"
+        );
+    }
+
+    #[test]
+    fn session_scopes_must_be_non_empty_canonical_patterns() {
+        for scopes in [
+            serde_json::json!([]),
+            serde_json::json!(["ui.read"]),
+            serde_json::json!([""]),
+        ] {
+            let mut body = current_body();
+            body["session_scopes"] = scopes;
+            assert!(
+                UiBrowserSessionPolicySection
+                    .parse(&context(), &body)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn schema_four_is_refused_with_the_cure() {
+        let mut body = current_body();
+        body["schema"] = serde_json::json!(4);
+        let error = UiBrowserSessionPolicySection
+            .parse(&context(), &body)
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains("schema 5"), "{error:#}");
     }
 
     #[test]

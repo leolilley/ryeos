@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:53:50Z:a80ddb8d9fefe1bb5bcff2ae1baaa375e75d395d81b99ff6fa60b7529fd47a83:QUQpnGxIZVX/6AbJBJZMgtSgWKmaEj3QtnjeAlrHk4tSfjmM2NM8vIZqnqvBHolPIE5h3h2XINaxyIFO2zqZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:16:10Z:c302b5ab72f3a657909eef93b785b287a096582940d98174e609f5cfd41eee81:Opxs1FTVFhu/tpyaVPOwjAQ3PNB57xWpl2ry0D3tNMoGjth3mqwTLJwhQlZj12HEIYZkb+A6axBlu/cDDKHtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -82,7 +82,7 @@ Built-in modes, each a trait implementation:
 | `event_stream` | SSE stream (gateway or subscription) | `dispatch_launch` or `thread_events` |
 | `launch` | Fire-and-forget dispatch, returns 202 | `response.source_config` |
 | `handler` | Calls a fixed route handler with a request envelope; the handler returns an HTTP response envelope | `tool:<bundle>/<path>` |
-| `browser_launch` | UI-specific session-cookie + redirect adapter | `service:ui/launch` |
+| `browser_launch` | UI-specific session-cookie + redirect adapter; a `max_age` of 0 in the cookie envelope clears the cookie | `service:ui/launch`, `service:ui/session/end` |
 
 The `accepted` key is a legacy alias for `launch`; new route descriptors
 should use `launch`.
@@ -354,6 +354,63 @@ Tracking pixel response example:
 }
 ```
 
+## Route authority
+
+A request authenticated as `auth: none` or `auth: hmac` has no human caller,
+yet a `launch` or `dispatch_launch` route can birth a thread. A thread never
+holds authority its caller did not lend, so the route is the caller and states
+the authority it lends in its signed data:
+
+```yaml
+id: arc/ingest
+path: /arc/ingest
+methods: [POST]
+auth: hmac
+request:
+  body: json
+response:
+  mode: launch
+  source_config:
+    item_ref: directive:arc/ingest
+    ref_bindings: {}
+    project_path: /srv/arc
+authority:
+  capabilities:
+    - ryeos.read.project.live
+    - ryeos.write.project.live
+    - ryeos.use.vault.operator
+    - ryeos.execute.tool.arc/*
+```
+
+The route bundle's signed manifest is the upper bound:
+
+```yaml
+runtime_authority:
+  operator_vault: true            # bounds ryeos.use.vault.operator
+  route_capabilities:             # bounds every other capability
+    - ryeos.read.project.live
+    - ryeos.write.project.live
+    - ryeos.execute.tool.arc/*
+```
+
+Per request, after the verifier runs, the route's principal receives exactly
+its declared capabilities if the verified manifest backs every one; otherwise
+the request is refused with 403 `route_authority_not_backed`, naming the
+unbacked capabilities and the cure. Root admission then requires those
+capabilities to cover every capability the launched item declares; a route
+that declares nothing lends nothing and is refused with
+`caller_capability_not_covered`. The launched thread records the route
+principal as its covering authority.
+
+Compile-time rules: `authority` is valid only on `auth: none` or `auth: hmac`
+(a `ryeos_signed` route runs with its caller's authority), is refused on
+handler routes (a tool declares no caps; handler operator-vault access stays
+under `response.source_config.authority`), must list at least one canonical
+capability once, and may not list capabilities in the manifest runtime-authority
+namespace other than the operator-vault capability. `route_capabilities`
+patterns obey the same grammar and are refused when they overlap that
+namespace.
+
 ## Invokers
 
 The `CompiledRouteInvocation` trait unifies auth, services, streaming,
@@ -400,6 +457,8 @@ significant:
 - **Undeclared path captures** — `${path.unknown}` in `source_config`
   when `unknown` is not in the route path
 - **Auth-mode coupling** — `execute` mode requires `auth: ryeos_signed`
+- **Route authority** — `authority` only on `auth: none`/`hmac` routes, never
+  on handler routes, with canonical, non-reserved, unique capabilities
 - **HMAC config validation** — secret env var must exist, replay
   protection must be configured, header validation, signature encoding
 

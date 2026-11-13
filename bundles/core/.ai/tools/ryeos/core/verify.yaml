@@ -1,9 +1,8 @@
-# ryeos:signed:2026-09-05T00:45:21Z:92a2832cc40bba13635e8d4508c7a535b359238920aa64c3559164981f30a18e:KvctbUJVvgK6N4BeL0QkE9T6C/WOtA5/SAlBtxDc6FO1AooA28/g6CEPreInyjlc+bY4F56Ub8NsVA7T3RfyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T04:34:21Z:a30a53f053e098ad22614271f9b88b5ff73594d763ed11dc25f928a92bc3eaa9:syInq33guTnAdUd0FdKfq8HnPt4JiX04e6NNYLWZ37rkNai2DfvaHJ8lPgHmaxGlqupIyjwr1w0IX6BkV2rbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core"
 name: "verify"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
-required_caps: ["bundle.read"]
 description: "Resolve and trust-verify one or more items via the engine"
 
 config:

@@ -253,7 +253,7 @@ async fn accepted_command_requires_caller_retained_launch_before_effects() {
 async fn forwarded_operator_keeps_verified_authority_without_second_wire_assertion() {
     let (_root, _store_owner, mut state, mut context) = setup(&["execute"]);
     let origin = format!("site:{}", "a".repeat(64));
-    context.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    context.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemotePrincipal);
     context.authenticated_origin_site_id = Some(origin.clone());
     context.authenticated_grant_authority = Some(
         ryeos_engine::principal_contract::AuthenticatedGrantAuthority {
@@ -262,6 +262,7 @@ async fn forwarded_operator_keeps_verified_authority_without_second_wire_asserti
                 ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                     source_node_fingerprint: "c".repeat(64),
                     source_node_grant_hash: "d".repeat(64),
+                    delegation_digest: None,
                 },
             ),
         },

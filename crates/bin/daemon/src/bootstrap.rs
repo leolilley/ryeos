@@ -94,10 +94,6 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 2. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
 
-    // Discover operator trust directory early — needed for stale-entry cleanup
-    // during node-key regeneration. Operator config is folded into the app root.
-    let trust_dir = config.runtime_root().trusted_keys_dir();
-
     // 4. Generate or load the NODE signing key (daemon-internal state)
     let node_key_path = &config.node_signing_key_path;
     let node_identity = if options.force && node_key_path.exists() {
@@ -121,22 +117,6 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
             );
         }
 
-        // Before regenerating, clean up stale trust entries from old keys.
-        // The trust entry path includes the fingerprint, so old entries become
-        // orphans. We remove the known file; any other orphan cleanup is
-        // deferred to explicit operator action.
-        let old_identity = NodeIdentity::load(node_key_path)?;
-        let old_trust = trust_dir.join(format!("{}.toml", old_identity.fingerprint()));
-        if old_trust.exists() {
-            tracing::info!(
-                path = %old_trust.display(),
-                old_fingerprint = %old_identity.fingerprint(),
-                "removing stale node trust entry before regeneration"
-            );
-            fs::remove_file(&old_trust).with_context(|| {
-                format!("failed to remove stale trust entry {}", old_trust.display())
-            })?;
-        }
         tracing::info!(path = %node_key_path.display(), "regenerating node signing key (--force)");
         fs::remove_file(node_key_path).with_context(|| {
             format!("failed to remove old node key {}", node_key_path.display())
@@ -212,7 +192,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 
     // 7. Authorize the operator key so the local CLI can authenticate to
     // the local daemon. The CLI signs requests with the operator's persistent
-    // identity at <app_root>/.ai/config/keys/signing/.
+    // identity at <app_root>/.ai/node/operator/signing/.
     // The authorized-key TOML must be signed by the node key per
     // auth::load_authorized_key().
     let user_auth_entry = config
@@ -226,88 +206,14 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         )?;
     }
 
-    // 8. Bootstrap self-trust: write verifying keys as trusted key docs
-    // (trust_dir computed above, before node-key regeneration)
-
-    // Node key trust doc
-    let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
-    if options.force || !node_trust_entry.exists() {
-        write_self_trust(
-            &trust_dir,
-            &node_trust_entry,
-            node_identity.verifying_key(),
-            node_identity.signing_key(),
-        )?;
-    }
-
-    // User key trust doc
-    let user_trust_entry = trust_dir.join(format!("{}.toml", user_identity.fingerprint()));
-    if options.force || !user_trust_entry.exists() {
-        write_self_trust(
-            &trust_dir,
-            &user_trust_entry,
-            user_identity.verifying_key(),
-            user_identity.signing_key(),
-        )?;
-    }
+    // The node key is the implicit root of the signer registry and needs no
+    // record. Operator signer records are written by the `ryeos init`
+    // transaction and the trust operations, never by daemon bootstrap.
 
     // NOTE: Bundle registrations are written by `ryeos init` (ryeos-core-tools),
     // not by daemon bootstrap. The daemon only reads registrations during
     // `load_node_config_two_phase`. Any bundles discovered by init are
     // registered at `app_root/.ai/node/bundles/{name}.yaml`.
-
-    Ok(())
-}
-
-/// Write a self-signed trusted-key TOML entry so the key's own signed items verify.
-///
-/// The document is signed by the key it declares (self-signature), using the
-/// `# ryeos:signed:...` envelope format consumed by `TrustStore::load`.
-fn write_self_trust(
-    trust_dir: &Path,
-    trust_entry: &Path,
-    verifying_key: &lillux::crypto::VerifyingKey,
-    signing_key: &lillux::crypto::SigningKey,
-) -> Result<()> {
-    fs::create_dir_all(trust_dir)
-        .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
-
-    let fingerprint = lillux::cas::sha256_hex(verifying_key.as_bytes());
-    let key_b64 = base64::engine::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        verifying_key.as_bytes(),
-    );
-
-    let body = format!(
-        r#"fingerprint = "{fingerprint}"
-owner = "self"
-version = "1.0.0"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-
-    // Self-sign using the `# ryeos:signed:...` envelope
-    let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
-
-    let tmp = trust_entry.with_extension("tmp");
-    fs::write(&tmp, signed.as_bytes())
-        .with_context(|| format!("failed to write trust entry {}", trust_entry.display()))?;
-    fs::rename(&tmp, trust_entry).with_context(|| {
-        format!(
-            "failed to rename {} → {}",
-            tmp.display(),
-            trust_entry.display()
-        )
-    })?;
-
-    tracing::info!(
-        path = %trust_entry.display(),
-        fingerprint = %fingerprint,
-        "wrote self-signed trust entry"
-    );
 
     Ok(())
 }
@@ -340,9 +246,14 @@ fn write_operator_authorized(
         &fp,
         &key_b64,
         &["*".to_string()],
-        "bootstrap-authorized-user",
+        "operator",
         &fp,
         &now,
+        // Initialization has no signed request: the operator who runs it is
+        // the principal that asks for their own grant, which never lapses.
+        &ryeos_node_runtime::identity::GrantTerms::operator(
+            ryeos_node_runtime::identity::AuthorizedBy::principal_request(&fp, None),
+        ),
         node_signing_key,
         ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;
@@ -440,7 +351,7 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 /// Repair daemon-local artifacts after init-state verification.
 ///
 /// `ryeos init` is the single authoritative path for operator artifacts
-/// (operator signing key, user/node trust docs, official-publisher pinning,
+/// (operator signing key, operator signer record, official-publisher pinning,
 /// bundle install + registration). Daemon startup must NOT recreate or
 /// partially substitute for any of those.
 ///
@@ -449,42 +360,27 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 ///      completion. Daemon startup never requires the operator private key.
 ///   2. Verifies the node signing key exists. Missing → fail (we cannot
 ///      safely regenerate the node key here because doing so would
-///      invalidate the existing node trust doc in operator config).
+///      invalidate every record the existing node key signed in the signer
+///      registry).
 ///   3. Repairs daemon-local artifacts only: daemon-local directory
 ///      layout, default config, vault X25519 keypair, public identity
 ///      document, node-signed authorized-key entry for the user key.
 ///
-/// Trust docs in operator config are NEVER written here.
+/// Signer registry records are NEVER written here.
 pub fn repair_daemon_local(config: &Config) -> Result<()> {
     let completion = ryeos_node::verify_init_completion(&config.app_root)?
         .context("node has no complete signed initialization transaction")?;
-    let trust_dir = config.app_root.join(AI_DIR).join("config/keys/trusted");
 
     if !config.node_signing_key_path.exists() {
         bail!(
             "node signing key missing at {} — run: ryeos init\n\
              (daemon refuses to regenerate the node key automatically because doing so \
-             would invalidate the node trust doc already pinned in app root)",
+             would invalidate the signer registry records it signed in the app root)",
             config.node_signing_key_path.display()
         );
     }
 
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
-
-    let operator_trust_entry = trust_dir.join(format!("{}.toml", completion.operator_fingerprint));
-    if !operator_trust_entry.exists() {
-        bail!(
-            "pinned operator trust document missing at {} — run: ryeos init",
-            operator_trust_entry.display()
-        );
-    }
-    let node_trust_entry = trust_dir.join(format!("{}.toml", node_identity.fingerprint()));
-    if !node_trust_entry.exists() {
-        bail!(
-            "node trust doc missing at {} — run: ryeos init",
-            node_trust_entry.display()
-        );
-    }
 
     // ── 2. Daemon-local layout (idempotent) ──
     create_directory_layout(config)?;
@@ -512,6 +408,21 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
     if !identity_path.exists() {
         node_identity.write_public_identity(&identity_path)?;
         tracing::info!(path = %identity_path.display(), "wrote node public identity");
+    }
+
+    // ── 4b. Signer registry. A bad record refuses startup with its typed
+    //    code. The pinned operator must have a record in it. ──
+    let trust_store = TrustStore::load_node_registry(&config.app_root)
+        .map_err(|e| anyhow::anyhow!("node signer registry refused ({}): {e}", e.code()))?;
+    if trust_store
+        .signer(&completion.operator_fingerprint)
+        .is_none()
+    {
+        bail!(
+            "pinned operator {} has no signer record in the node registry at {} — run: ryeos init",
+            completion.operator_fingerprint,
+            ryeos_engine::trust::signers_dir(&config.app_root).display()
+        );
     }
 
     // ── 5. Vault X25519 keypair (daemon-local). Decoupled from node
@@ -549,8 +460,6 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
     if !user_auth_entry.exists() {
         // Repair authenticates the operator from pinned public trust, never
         // by loading operator private custody or substituting the node key.
-        let trust_store = TrustStore::load(None, &config.runtime_config_dir())
-            .context("load pinned operator public authority for authorization repair")?;
         let operator = trust_store
             .get(&completion.operator_fingerprint)
             .context("init completion operator is absent from pinned trust")?;
@@ -576,11 +485,9 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 /// 3. Phase 2: full node-config scan across all sections → snapshot.
 ///
 /// Trust continuity: the trust store used for node-config verification is
-/// loaded via the engine's `TrustStore::load`, which sources trust
-/// from operator tiers ONLY (project + operator config). The daemon's identity must
-/// have its trust doc pinned in the operator tier (created by `ryeos init` /
-/// daemon bootstrap) for daemon-written `kind: node` items to verify on
-/// next boot.
+/// the node signer registry (`TrustStore::load_node_registry`). The node key
+/// is its implicit root, so daemon-written `kind: node` items verify on next
+/// boot without a record; a bad registry record refuses startup.
 ///
 /// Returns the engine, node-config snapshot, and the immutable isolation snapshot
 /// selected after runtime admission. A mandatory launch preparer may cause the
@@ -705,10 +612,10 @@ fn load_node_config_two_phase_with_socket(
             .context("acquire bundle-generation lock for node bootstrap")?;
 
     // ── Phase 1: bootstrap trust store + bundle section ──
-    // Use operator config trust so daemon-written items verify.
-    let operator_config_root = config.runtime_root().config();
-    let bootstrap_trust_store = TrustStore::load(None, &operator_config_root)
-        .context("failed to load bootstrap trust store for node-config verification")?;
+    // The node signer registry; the node key is its implicit root so
+    // daemon-written items verify.
+    let bootstrap_trust_store = TrustStore::load_node_registry(app_root)
+        .map_err(|e| anyhow::anyhow!("failed to load node signer registry ({}): {e}", e.code()))?;
 
     let bootstrap_loader = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
@@ -1074,20 +981,6 @@ mod tests {
             config.operator_signing_key_path.exists(),
             "user key should be created"
         );
-
-        // Trust entries for both keys live under the runtime root's trusted-keys
-        // dir — the same path init() writes to.
-        let trust_dir = config.runtime_root().trusted_keys_dir();
-        let node_fp = fingerprint_at(&config.node_signing_key_path);
-        let user_fp = fingerprint_at(&config.operator_signing_key_path);
-        assert!(
-            trust_dir.join(format!("{}.toml", node_fp)).exists(),
-            "node trust entry"
-        );
-        assert!(
-            trust_dir.join(format!("{}.toml", user_fp)).exists(),
-            "user trust entry"
-        );
     }
 
     #[test]
@@ -1135,20 +1028,6 @@ mod tests {
         assert_eq!(
             user_fp_before, user_fp_after,
             "user key MUST NOT change with --force"
-        );
-
-        // Trust dir — where init() writes trusted-key entries.
-        let trust_dir = config.runtime_root().trusted_keys_dir();
-
-        // Old node trust entry should be cleaned up
-        assert!(
-            !trust_dir.join(format!("{}.toml", node_fp_before)).exists(),
-            "stale node trust entry should be removed after force regeneration"
-        );
-        // New node trust entry should exist
-        assert!(
-            trust_dir.join(format!("{}.toml", node_fp_after)).exists(),
-            "new node trust entry should exist after force regeneration"
         );
     }
 
@@ -1238,24 +1117,6 @@ mod tests {
         let items = find_signed_node_config_items(tmp.path()).unwrap();
         assert_eq!(items.len(), 1);
         assert!(items[0].ends_with("nested.yaml"));
-    }
-
-    /// Daemon verification derives public trust from the app-root authority
-    /// namespace, never from the operator private-key location.
-    #[test]
-    fn repair_daemon_local_uses_app_root_public_trust_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let app_root = tmp.path().join("home");
-        let expected_trust_dir = app_root
-            .join(".ai")
-            .join("config")
-            .join("keys")
-            .join("trusted");
-
-        assert_eq!(
-            app_root.join(AI_DIR).join("config/keys/trusted"),
-            expected_trust_dir
-        );
     }
 }
 

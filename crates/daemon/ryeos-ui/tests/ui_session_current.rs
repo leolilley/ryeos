@@ -78,13 +78,16 @@ async fn session_current_without_session_rejected() {
 
 #[tokio::test]
 async fn session_current_with_expired_session_rejected() {
-    let short_store = ryeos_ui::BrowserSessionStore::new_with_short_ttl(
+    let short_store = ryeos_ui::BrowserSessionStore::new();
+    let mut context = test_context();
+    context.timing = ryeos_ui::SessionTiming::new(
+        std::time::Duration::from_millis(1),
         std::time::Duration::from_millis(1),
         std::time::Duration::from_millis(1),
     );
 
     let (session_id, _token, _) = short_store
-        .mint_token(test_context(), 16, &"22".repeat(32))
+        .mint_token(context, 16, &"22".repeat(32))
         .expect("mint short-lived session");
 
     std::thread::sleep(std::time::Duration::from_millis(5));

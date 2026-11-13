@@ -27,11 +27,37 @@ pub mod surface_opening;
 pub mod transfer_reservation;
 pub use transfer_reservation::HiddenTransferReservationOutcome;
 
-/// Default session TTL: 8 hours.
-const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(8 * 3600);
+/// Lifetimes of one minted session, read from the node's signed UI
+/// browser-session policy at mint time. There is no compiled-in default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionTiming {
+    /// Absolute lifetime of the session.
+    pub session_ttl: Duration,
+    /// A session unused for this long expires, within the absolute lifetime.
+    pub idle: Duration,
+    /// Lifetime of the launch token that activates the session.
+    pub launch_token_ttl: Duration,
+}
 
-/// Default launch token TTL: 60 seconds.
-const DEFAULT_LAUNCH_TOKEN_TTL: Duration = Duration::from_secs(60);
+impl SessionTiming {
+    pub fn new(session_ttl: Duration, idle: Duration, launch_token_ttl: Duration) -> Self {
+        Self {
+            session_ttl,
+            idle,
+            launch_token_ttl,
+        }
+    }
+
+    pub fn from_policy(
+        policy: &ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
+    ) -> Self {
+        Self::new(
+            Duration::from_secs(policy.session_ttl_secs),
+            Duration::from_secs(policy.session_idle_secs),
+            Duration::from_secs(policy.launch_token_ttl_secs),
+        )
+    }
+}
 
 /// Admission bounds for presentations, Surfaces and retained attachments.
 /// Every value is taken from the node's signed UI browser-session policy; the
@@ -63,9 +89,11 @@ impl PresentationLimits {
 pub struct LaunchContext {
     pub compiled_binding: Arc<crate::compiled_binding::SessionCompiledUiBinding>,
     pub presentation: ryeos_client_base::presentation::UiCompositionPresentation,
-    /// Authenticated caller authority retained only for exact binding-entry
-    /// revalidation. It is never returned to the browser as its grant.
+    /// The authority this session holds: the minter's scopes already reduced
+    /// by the node's session ceiling. Every later admission, stream and
+    /// binding compile reads this set and never the minter's own scopes.
     pub granted_caps: Vec<String>,
+    pub timing: SessionTiming,
     pub user_principal_id: Option<String>,
     /// Exact live project directory selected while the signed caller's
     /// project authority was checked. The browser retains no filesystem
@@ -637,7 +665,13 @@ impl PresentationMembership {
 pub struct BrowserSession {
     pub session_id: String,
     pub created_at: Instant,
+    /// Effective expiry: the earlier of the absolute lifetime and the idle
+    /// deadline. Every use moves the idle deadline forward.
     pub expires_at: Instant,
+    /// Hard end of the session's life regardless of use.
+    pub absolute_expires_at: Instant,
+    /// How long the session may sit unused.
+    pub idle_timeout: Duration,
     pub principal_id: String,
     pub granted_caps: Vec<String>,
     pub user_principal_id: Option<String>,
@@ -668,8 +702,21 @@ struct LaunchToken {
 pub struct BrowserSessionStore {
     sessions: Mutex<HashMap<String, BrowserSession>>,
     launch_tokens: Mutex<HashMap<String, LaunchToken>>,
-    session_ttl: Duration,
-    launch_token_ttl: Duration,
+    /// Sessions an operator revoked, kept until their absolute lifetime ends so
+    /// the next request carrying the cookie is told it was revoked.
+    revoked: Mutex<HashMap<String, Instant>>,
+}
+
+/// One live session as an operator sees it. It never carries a cookie value
+/// or a launch token.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub principal_id: String,
+    pub user_principal_id: Option<String>,
+    pub granted_caps: Vec<String>,
+    pub age_secs: u64,
+    pub expires_in_secs: u64,
 }
 
 /// Exact result of one launch-token activation.
@@ -689,18 +736,7 @@ impl BrowserSessionStore {
         Self {
             sessions: Mutex::new(HashMap::new()),
             launch_tokens: Mutex::new(HashMap::new()),
-            session_ttl: DEFAULT_SESSION_TTL,
-            launch_token_ttl: DEFAULT_LAUNCH_TOKEN_TTL,
-        }
-    }
-
-    /// Create a store with very short TTLs for testing.
-    pub fn new_with_short_ttl(session_ttl: Duration, launch_token_ttl: Duration) -> Self {
-        Self {
-            sessions: Mutex::new(HashMap::new()),
-            launch_tokens: Mutex::new(HashMap::new()),
-            session_ttl,
-            launch_token_ttl,
+            revoked: Mutex::new(HashMap::new()),
         }
     }
 
@@ -725,6 +761,7 @@ impl BrowserSessionStore {
     ) -> Result<(String, String, Arc<AdmittedBindingAttachment>), AttachmentStoreError> {
         let session_id = uuid::Uuid::new_v4().to_string();
         let now = Instant::now();
+        let timing = ctx.timing;
         let principal_id = ctx.compiled_binding.binding.principal_id.clone();
         let attachment_id = uuid::Uuid::new_v4().to_string();
         let attachment = build_attachment(
@@ -743,7 +780,9 @@ impl BrowserSessionStore {
         let session = BrowserSession {
             session_id: session_id.clone(),
             created_at: now,
-            expires_at: now + self.session_ttl,
+            expires_at: now + timing.session_ttl.min(timing.idle),
+            absolute_expires_at: now + timing.session_ttl,
+            idle_timeout: timing.idle,
             principal_id,
             granted_caps: ctx.granted_caps,
             user_principal_id: ctx.user_principal_id,
@@ -760,7 +799,7 @@ impl BrowserSessionStore {
         let launch_token = LaunchToken {
             session,
             activated: false,
-            expires_at: now + self.launch_token_ttl,
+            expires_at: now + timing.launch_token_ttl,
         };
 
         self.launch_tokens
@@ -792,7 +831,8 @@ impl BrowserSessionStore {
             });
         }
 
-        let successor = launch.session.clone();
+        let mut successor = launch.session.clone();
+        successor.touch(Instant::now());
         let successor_id = successor.session_id.clone();
         let mut sessions = self.sessions.lock().unwrap();
         sessions.insert(successor_id.clone(), successor);
@@ -818,13 +858,95 @@ impl BrowserSessionStore {
 
     pub fn get_session(&self, session_id: &str) -> Option<BrowserSession> {
         let mut sessions = self.sessions.lock().unwrap();
-        let session = sessions.get(session_id)?;
-        if session.expires_at < Instant::now() {
+        let now = Instant::now();
+        let session = sessions.get_mut(session_id)?;
+        if session.expires_at < now {
             sessions.remove(session_id);
             None
         } else {
+            session.touch(now);
             Some(session.clone())
         }
+    }
+
+    /// End one session on its own request. Its pending launch token, if any,
+    /// dies with it. Returns whether a session or pending token was removed.
+    pub fn end_session(&self, session_id: &str) -> bool {
+        // Same lock order as activation: launch tokens, then sessions.
+        let mut launch_tokens = self.launch_tokens.lock().unwrap();
+        let mut sessions = self.sessions.lock().unwrap();
+        let tokens_before = launch_tokens.len();
+        launch_tokens.retain(|_, launch| launch.session.session_id != session_id);
+        let ended_token = launch_tokens.len() != tokens_before;
+        sessions.remove(session_id).is_some() || ended_token
+    }
+
+    /// Revoke one session by id on an operator's request. The id is
+    /// remembered until the session's absolute lifetime would have ended, so
+    /// its next request is answered as revoked rather than merely unknown.
+    /// Returns whether a live session or pending token was revoked.
+    pub fn revoke_session(&self, session_id: &str) -> bool {
+        let mut launch_tokens = self.launch_tokens.lock().unwrap();
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut revoked = self.revoked.lock().unwrap();
+        let now = Instant::now();
+        revoked.retain(|_, until| *until > now);
+        let mut until = sessions
+            .remove(session_id)
+            .map(|session| session.absolute_expires_at);
+        launch_tokens.retain(|_, launch| {
+            if launch.session.session_id == session_id {
+                until = until.max(Some(launch.session.absolute_expires_at));
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(until) = until {
+            revoked.insert(session_id.to_owned(), until);
+        }
+        until.is_some()
+    }
+
+    /// Whether an operator revoked this session and its lifetime has not yet
+    /// run out.
+    pub fn is_revoked(&self, session_id: &str) -> bool {
+        let mut revoked = self.revoked.lock().unwrap();
+        let now = Instant::now();
+        revoked.retain(|_, until| *until > now);
+        revoked.contains_key(session_id)
+    }
+
+    /// Operator view of the live sessions, oldest first. Never carries
+    /// cookie values or launch tokens.
+    pub fn list_sessions(&self) -> Vec<SessionSummary> {
+        let now = Instant::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        sessions.retain(|_, session| session.expires_at > now);
+        let mut listed = sessions
+            .values()
+            .map(|session| {
+                (
+                    session.created_at,
+                    SessionSummary {
+                        session_id: session.session_id.clone(),
+                        principal_id: session.principal_id.clone(),
+                        user_principal_id: session.user_principal_id.clone(),
+                        granted_caps: session.granted_caps.clone(),
+                        age_secs: now.saturating_duration_since(session.created_at).as_secs(),
+                        expires_in_secs: session
+                            .expires_at
+                            .saturating_duration_since(now)
+                            .as_secs(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        listed.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.session_id.cmp(&b.1.session_id))
+        });
+        listed.into_iter().map(|(_, summary)| summary).collect()
     }
 
     /// Hold the existing session owner across a bounded, read-only disclosure.
@@ -2118,6 +2240,15 @@ impl BrowserSessionStore {
             .lock()
             .unwrap()
             .retain(|_, t| t.expires_at > now);
+        self.revoked.lock().unwrap().retain(|_, until| *until > now);
+    }
+}
+
+impl BrowserSession {
+    /// Record a use: the idle deadline moves forward, never past the
+    /// absolute end of the session.
+    fn touch(&mut self, now: Instant) {
+        self.expires_at = self.absolute_expires_at.min(now + self.idle_timeout);
     }
 }
 
@@ -3690,10 +3821,19 @@ pub(crate) mod tests {
             ),
             presentation: test_presentation(),
             granted_caps: vec!["ui.read".into()],
+            timing: test_timing(),
             user_principal_id: None,
             project_authority: None,
             registered_project_id: None,
         }
+    }
+
+    pub(crate) fn test_timing() -> SessionTiming {
+        SessionTiming::new(
+            Duration::from_secs(8 * 3600),
+            Duration::from_secs(3600),
+            Duration::from_secs(60),
+        )
     }
 
     fn mint(store: &BrowserSessionStore, context: LaunchContext) -> (String, String) {
@@ -4742,6 +4882,7 @@ pub(crate) mod tests {
             ),
             presentation: test_presentation(),
             granted_caps: vec![],
+            timing: test_timing(),
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
             project_authority: None,
             registered_project_id: None,
@@ -4784,14 +4925,15 @@ pub(crate) mod tests {
 
     #[test]
     fn expired_token_rejected() {
-        let store = BrowserSessionStore {
-            sessions: Mutex::new(HashMap::new()),
-            launch_tokens: Mutex::new(HashMap::new()),
-            session_ttl: Duration::from_millis(1),
-            launch_token_ttl: Duration::from_millis(1),
-        };
+        let store = BrowserSessionStore::new();
+        let mut context = test_context();
+        context.timing = SessionTiming::new(
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
 
-        let (_, token) = mint(&store, test_context());
+        let (_, token) = mint(&store, context);
 
         std::thread::sleep(Duration::from_millis(5));
 
@@ -4815,12 +4957,15 @@ pub(crate) mod tests {
 
     #[test]
     fn evict_removes_expired() {
-        let store = BrowserSessionStore::new_with_short_ttl(
+        let store = BrowserSessionStore::new();
+        let mut context = test_context();
+        context.timing = SessionTiming::new(
+            Duration::from_millis(1),
             Duration::from_millis(1),
             Duration::from_millis(1),
         );
 
-        let (session_id, _token) = mint(&store, test_context());
+        let (session_id, _token) = mint(&store, context);
 
         std::thread::sleep(Duration::from_millis(5));
 
@@ -4830,6 +4975,108 @@ pub(crate) mod tests {
             store.get_session(&session_id).is_none(),
             "expired session should be evicted"
         );
+    }
+
+    fn activated(store: &BrowserSessionStore, timing: SessionTiming) -> String {
+        let mut context = test_context();
+        context.timing = timing;
+        let (session_id, token) = mint(store, context);
+        store.consume_launch_token(&token).expect("activate");
+        session_id
+    }
+
+    #[test]
+    fn session_expires_at_policy_ttl() {
+        let store = BrowserSessionStore::new();
+        let session_id = activated(
+            &store,
+            SessionTiming::new(
+                Duration::from_millis(400),
+                Duration::from_secs(3600),
+                Duration::from_secs(60),
+            ),
+        );
+        let session = store.get_session(&session_id).expect("live before ttl");
+        assert!(session.absolute_expires_at > Instant::now());
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            store.get_session(&session_id).is_none(),
+            "the policy lifetime ends the session even though it was just used"
+        );
+    }
+
+    #[test]
+    fn session_idle_expiry() {
+        let store = BrowserSessionStore::new();
+        let session_id = activated(
+            &store,
+            SessionTiming::new(
+                Duration::from_secs(3600),
+                Duration::from_millis(600),
+                Duration::from_secs(60),
+            ),
+        );
+        // Use keeps the session alive past one idle window.
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(store.get_session(&session_id).is_some());
+        }
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            store.get_session(&session_id).is_none(),
+            "an unused session expires at the idle timeout"
+        );
+    }
+
+    #[test]
+    fn ended_session_refused() {
+        let store = BrowserSessionStore::new();
+        let session_id = activated(&store, test_timing());
+        assert!(store.end_session(&session_id));
+        assert!(store.get_session(&session_id).is_none());
+        assert!(
+            !store.is_revoked(&session_id),
+            "ending your own session is not an operator revocation"
+        );
+        assert!(!store.end_session(&session_id));
+    }
+
+    #[test]
+    fn revoked_session_is_refused_and_remembered() {
+        let store = BrowserSessionStore::new();
+        let session_id = activated(&store, test_timing());
+        assert!(store.revoke_session(&session_id));
+        assert!(store.get_session(&session_id).is_none());
+        assert!(store.is_revoked(&session_id));
+        assert!(!store.is_revoked("another-session"));
+        assert!(!store.revoke_session("another-session"));
+    }
+
+    #[test]
+    fn revoking_a_pending_session_kills_its_launch_token() {
+        let store = BrowserSessionStore::new();
+        let (session_id, token) = mint(&store, test_context());
+        assert!(store.revoke_session(&session_id));
+        assert!(store.consume_launch_token(&token).is_none());
+        assert!(store.is_revoked(&session_id));
+    }
+
+    #[test]
+    fn list_sessions_never_returns_tokens() {
+        let store = BrowserSessionStore::new();
+        let (session_id, token) = mint(&store, test_context());
+        assert!(
+            store.list_sessions().is_empty(),
+            "pending sessions are not live"
+        );
+        store.consume_launch_token(&token).expect("activate");
+        let listed = store.list_sessions();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, session_id);
+        assert_eq!(listed[0].principal_id, "fp:test");
+        assert_eq!(listed[0].granted_caps, vec!["ui.read"]);
+        let rendered = serde_json::to_string(&listed).unwrap();
+        assert!(!rendered.contains(&token), "{rendered}");
     }
 
     #[test]

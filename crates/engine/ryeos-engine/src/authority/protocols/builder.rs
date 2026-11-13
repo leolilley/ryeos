@@ -453,11 +453,7 @@ mod tests {
             schema_version: crate::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION,
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test-thread".to_string(),
-            roots: EnvelopeRoots {
-                project_root: PathBuf::from("/project"),
-                bundle_roots: vec![],
-                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
-            },
+            roots: EnvelopeRoots::new(PathBuf::from("/project"), vec![], vec![]),
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
                 previous_thread_id: None,

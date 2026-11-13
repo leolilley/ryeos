@@ -15,8 +15,10 @@ use tokio::net::TcpListener;
 use ryeos_api::handlers::{
     remote_admit, remote_bind_project, remote_configure, remote_doctor, remote_list, remote_status,
 };
-use ryeos_api::remote::config::{self, RemoteConfig, RemoteProjectBinding};
+use ryeos_api::remote::config::{self, PinSource, RemoteConfig, RemoteProjectBinding};
+use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(Clone)]
@@ -95,12 +97,14 @@ async fn start_mock_remote(public_key: Value) -> Result<(String, MockContacts)> 
 }
 
 #[tokio::test]
-async fn remote_configure_descriptor_match_writes_config() {
+async fn remote_configure_descriptor_match_writes_signed_pin() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let (url, _claims) = start_mock_remote(public_key.clone()).await.unwrap();
-    let descriptor_path = write_descriptor(&local_state, "prod", &url, &public_key);
+    let descriptor_path = write_descriptor(&local_state, &remote_state, "prod", &url, &public_key);
+    let context = operator_context(&local_state);
+    let app_root = local_state.config.app_root.clone();
 
     let result = remote_configure::handle(
         remote_configure::Request {
@@ -109,6 +113,7 @@ async fn remote_configure_descriptor_match_writes_config() {
             descriptor: Some(descriptor_path),
             expect_fingerprint: None,
         },
+        context,
         Arc::new(local_state),
     )
     .await
@@ -116,6 +121,12 @@ async fn remote_configure_descriptor_match_writes_config() {
 
     assert_eq!(result["configured"], "prod");
     assert_eq!(result["descriptor_verified"], true);
+    assert_eq!(result["pin_source"], "descriptor");
+    let report = config::load_remotes_report(&app_root).unwrap();
+    assert!(report.invalid.is_empty());
+    assert_eq!(report.remotes["prod"].pin_source, PinSource::Descriptor);
+    let record = std::fs::read_to_string(config::remote_pin_path(&app_root, "prod")).unwrap();
+    assert!(record.starts_with("# ryeos:signed:"), "{record}");
 }
 
 #[tokio::test]
@@ -126,7 +137,9 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
     let live_public_key = public_key_response(&remote_state);
     let pinned_public_key = public_key_response(&wrong_state);
     let (url, _claims) = start_mock_remote(live_public_key).await.unwrap();
-    let descriptor_path = write_descriptor(&local_state, "prod", &url, &pinned_public_key);
+    let descriptor_path =
+        write_descriptor(&local_state, &wrong_state, "prod", &url, &pinned_public_key);
+    let context = operator_context(&local_state);
 
     let app_root = local_state.config.app_root.clone();
     let result = remote_configure::handle(
@@ -136,6 +149,7 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
             descriptor: Some(descriptor_path),
             expect_fingerprint: None,
         },
+        context,
         Arc::new(local_state),
     )
     .await;
@@ -146,9 +160,116 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
 }
 
 #[tokio::test]
+async fn remote_configure_refuses_unsigned_v1_descriptor() {
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
+    let public_key = public_key_response(&remote_state);
+    let (url, _claims) = start_mock_remote(public_key.clone()).await.unwrap();
+    let path = local_state.config.app_root.join("v1.remote.yaml");
+    std::fs::write(
+        &path,
+        serde_yaml::to_string(&json!({
+            "version": 1,
+            "name": "prod",
+            "url": url,
+            "node": {
+                "public_key": public_key["signing_key"].as_str().unwrap(),
+                "fingerprint": public_key["fingerprint"].as_str().unwrap(),
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let context = operator_context(&local_state);
+    let app_root = local_state.config.app_root.clone();
+
+    let error = remote_configure::handle(
+        remote_configure::Request {
+            remote: None,
+            url: None,
+            descriptor: Some(path),
+            expect_fingerprint: None,
+        },
+        context,
+        Arc::new(local_state),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("remote_descriptor_unsigned"),
+        "{error:#}"
+    );
+    assert!(config::load_remotes(&app_root).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn remote_configure_refuses_descriptor_signed_by_another_key() {
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
+    let forger = remote_identity();
+    let public_key = public_key_response(&remote_state);
+    let (url, _claims) = start_mock_remote(public_key.clone()).await.unwrap();
+    // The descriptor pins the remote's key but the forger signed it.
+    let path = write_descriptor_signed_by(&local_state, &forger, "prod", &url, &public_key);
+    let context = operator_context(&local_state);
+    let app_root = local_state.config.app_root.clone();
+
+    let error = remote_configure::handle(
+        remote_configure::Request {
+            remote: None,
+            url: None,
+            descriptor: Some(path),
+            expect_fingerprint: None,
+        },
+        context,
+        Arc::new(local_state),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("remote_descriptor_wrong_signer"),
+        "{error:#}"
+    );
+    assert!(config::load_remotes(&app_root).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn remote_configure_requires_the_local_operator() {
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
+    let public_key = public_key_response(&remote_state);
+    let fingerprint = public_key["fingerprint"].as_str().unwrap().to_owned();
+    let (url, contacts) = start_mock_remote(public_key).await.unwrap();
+    let app_root = local_state.config.app_root.clone();
+
+    let error = remote_configure::handle(
+        remote_configure::Request {
+            remote: Some("prod".to_owned()),
+            url: Some(url),
+            descriptor: None,
+            expect_fingerprint: Some(fingerprint),
+        },
+        other_context(),
+        Arc::new(local_state),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("configured local operator"),
+        "{error:#}"
+    );
+    assert_eq!(contacts.claim_count.load(Ordering::SeqCst), 0);
+    assert!(config::load_remotes(&app_root).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn remote_configure_rejects_credential_url_before_contact_or_persistence() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let app_root = local_state.config.app_root.clone();
+    let context = operator_context(&local_state);
 
     let error = remote_configure::handle(
         remote_configure::Request {
@@ -157,6 +278,7 @@ async fn remote_configure_rejects_credential_url_before_contact_or_persistence()
             descriptor: None,
             expect_fingerprint: None,
         },
+        context,
         Arc::new(local_state),
     )
     .await
@@ -168,7 +290,7 @@ async fn remote_configure_rejects_credential_url_before_contact_or_persistence()
 }
 
 #[tokio::test]
-async fn remote_configure_normalizes_direct_url_before_persistence() {
+async fn remote_configure_normalizes_direct_url_and_stores_pin_source() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
@@ -176,6 +298,7 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
     let fingerprint = public_key["fingerprint"].as_str().unwrap().to_owned();
     let (url, _contacts) = start_mock_remote(public_key).await.unwrap();
     let app_root = local_state.config.app_root.clone();
+    let context = operator_context(&local_state);
 
     let result = remote_configure::handle(
         remote_configure::Request {
@@ -184,15 +307,21 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
             descriptor: None,
             expect_fingerprint: Some(fingerprint),
         },
+        context,
         Arc::new(local_state),
     )
     .await
     .unwrap();
 
     assert_eq!(result["url"], url);
+    let report = config::load_remotes_report(&app_root).unwrap();
     assert_eq!(
-        config::load_remotes(&app_root).unwrap()["normalized"].url,
-        url
+        report.remotes["normalized"].config.url.as_deref(),
+        Some(url.as_str())
+    );
+    assert_eq!(
+        report.remotes["normalized"].pin_source,
+        PinSource::ExpectedFingerprint
     );
 }
 
@@ -205,12 +334,10 @@ async fn remote_admit_refuses_to_send_token_on_live_identity_mismatch() {
     let (url, contacts) = start_mock_remote(live_public_key).await.unwrap();
 
     let pinned_public_key = public_key_response(&pinned_state);
-    let mut remotes = HashMap::new();
-    remotes.insert(
-        "prod".to_string(),
-        remote_config("prod", &url, &pinned_public_key),
+    install_remote(
+        &local_state,
+        &remote_config("prod", &url, &pinned_public_key),
     );
-    config::save_remotes(&local_state.config.app_root, &remotes).unwrap();
 
     let result = remote_admit::handle(
         remote_admit::Request {
@@ -236,9 +363,7 @@ async fn remote_admit_refuses_to_send_token_on_live_vault_mismatch() {
 
     let mut stale = remote_config("prod", &url, &live_public_key);
     stale.vault_fingerprint = "vault-stale-fingerprint".to_string();
-    let mut remotes = HashMap::new();
-    remotes.insert("prod".to_string(), stale);
-    config::save_remotes(&local_state.config.app_root, &remotes).unwrap();
+    install_remote(&local_state, &stale);
 
     let result = remote_admit::handle(
         remote_admit::Request {
@@ -256,33 +381,76 @@ async fn remote_admit_refuses_to_send_token_on_live_vault_mismatch() {
 }
 
 #[tokio::test]
-async fn remote_admit_ignores_project_shadow_before_releasing_token() {
+async fn remote_admit_refuses_while_the_unsigned_config_file_exists() {
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let operator_state = remote_identity();
+    let operator_public_key = public_key_response(&operator_state);
+    let (operator_url, operator_contacts) = start_mock_remote(operator_public_key.clone())
+        .await
+        .unwrap();
+    install_remote(
+        &local_state,
+        &remote_config("prod", &operator_url, &operator_public_key),
+    );
+
+    // An unsigned remotes file naming another key for the same remote.
+    let attacker_state = remote_identity();
+    let attacker_public_key = public_key_response(&attacker_state);
+    let stale = config::unsupported_config_file_path(&local_state.config.app_root);
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(
+        &stale,
+        serde_yaml::to_string(&json!({
+            "remotes": { "prod": remote_config_json("prod", &operator_url, &attacker_public_key) }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = remote_admit::handle(
+        remote_admit::Request {
+            remote: "prod".to_string(),
+            token: "secret-token".to_string(),
+            label: Some("dev-machine".to_string()),
+            scopes: vec!["ryeos.execute.service.objects/has".to_string()],
+        },
+        Arc::new(local_state),
+    )
+    .await
+    .unwrap_err();
+
+    let typed = error
+        .downcast_ref::<config::RemotePinError>()
+        .expect("typed refusal");
+    assert_eq!(typed.code(), "remote_config_file_unsupported");
+    assert!(typed.to_string().contains("ryeos remote configure"));
+    assert_eq!(operator_contacts.claim_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn remote_admit_refuses_an_edited_pin_before_releasing_token() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let operator_state = remote_identity();
     let attacker_state = remote_identity();
     let operator_public_key = public_key_response(&operator_state);
     let attacker_public_key = public_key_response(&attacker_state);
-    let (operator_url, operator_contacts) = start_mock_remote(operator_public_key.clone())
+    let (url, contacts) = start_mock_remote(attacker_public_key.clone())
         .await
         .unwrap();
-    let (attacker_url, attacker_contacts) = start_mock_remote(attacker_public_key.clone())
-        .await
-        .unwrap();
-
-    let mut operator_remotes = HashMap::new();
-    operator_remotes.insert(
-        "prod".to_string(),
-        remote_config("prod", &operator_url, &operator_public_key),
+    install_remote(
+        &local_state,
+        &remote_config("prod", &url, &operator_public_key),
     );
-    config::save_remotes(&local_state.config.app_root, &operator_remotes).unwrap();
 
-    let project_root = tempfile::tempdir().unwrap();
-    let mut project_remotes = HashMap::new();
-    project_remotes.insert(
-        "prod".to_string(),
-        remote_config("prod", &attacker_url, &attacker_public_key),
+    // Swap the pinned key in place without re-signing.
+    let path = config::remote_pin_path(&local_state.config.app_root, "prod");
+    let record = std::fs::read_to_string(&path).unwrap();
+    let edited = record.replace(
+        operator_public_key["signing_key"].as_str().unwrap(),
+        attacker_public_key["signing_key"].as_str().unwrap(),
     );
-    config::save_remotes(project_root.path(), &project_remotes).unwrap();
+    assert_ne!(record, edited);
+    std::fs::write(&path, edited).unwrap();
 
     let result = remote_admit::handle(
         remote_admit::Request {
@@ -293,72 +461,105 @@ async fn remote_admit_ignores_project_shadow_before_releasing_token() {
         },
         Arc::new(local_state),
     )
-    .await
-    .unwrap();
+    .await;
 
-    assert_eq!(result["url"], operator_url);
-    assert_eq!(operator_contacts.claim_count.load(Ordering::SeqCst), 1);
-    assert_eq!(attacker_contacts.claim_count.load(Ordering::SeqCst), 0);
+    assert!(result.is_err());
+    assert_eq!(contacts.claim_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn remote_bind_project_refuses_project_remote_trust_material() {
+async fn remote_bind_project_records_binding_in_the_signed_pin() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
     let project_root = tempfile::tempdir().unwrap();
     let project_root = project_root.path().canonicalize().unwrap();
-
-    let mut project_remotes = HashMap::new();
-    project_remotes.insert(
-        "prod".to_string(),
-        remote_config("prod", "https://project.example.com", &public_key),
+    install_remote(
+        &local_state,
+        &remote_config("prod", "https://project.example.com", &public_key),
     );
-    config::save_remotes(&project_root, &project_remotes).unwrap();
+    let before = config::load_remotes_report(&local_state.config.app_root)
+        .unwrap()
+        .remotes["prod"]
+        .pinned_at
+        .clone();
+    let context = operator_context(&local_state);
 
-    let err = remote_bind_project::handle(
+    let result = remote_bind_project::handle(
         remote_bind_project::Request {
             remote: "prod".to_string(),
             project: project_root.clone(),
             remote_project: "/srv/project".to_string(),
             sync_scope: ProjectSyncScope::FullProject,
         },
+        context,
+        Arc::new(local_state.clone()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result["scope"], "operator");
+    assert_eq!(result["remote_project_path"], "/srv/project");
+
+    let report = config::load_remotes_report(&local_state.config.app_root).unwrap();
+    assert!(report.invalid.is_empty());
+    let operator_remote = &report.remotes["prod"];
+    assert_eq!(operator_remote.pinned_at, before);
+    assert_eq!(
+        operator_remote.config.url.as_deref(),
+        Some("https://project.example.com")
+    );
+    let local_key = project_root.to_string_lossy().to_string();
+    assert_eq!(
+        operator_remote
+            .config
+            .project_bindings
+            .get(&local_key)
+            .unwrap()
+            .remote_project_path,
+        "/srv/project"
+    );
+}
+
+#[tokio::test]
+async fn remote_bind_project_refuses_an_unpinned_remote_and_a_non_operator() {
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let remote_state = remote_identity();
+    let public_key = public_key_response(&remote_state);
+    let project_root = tempfile::tempdir().unwrap();
+    let project_root = project_root.path().canonicalize().unwrap();
+    let request = || remote_bind_project::Request {
+        remote: "prod".to_string(),
+        project: project_root.clone(),
+        remote_project: "/srv/project".to_string(),
+        sync_scope: ProjectSyncScope::FullProject,
+    };
+
+    let error = remote_bind_project::handle(
+        request(),
+        operator_context(&local_state),
         Arc::new(local_state.clone()),
     )
     .await
     .unwrap_err();
+    assert!(format!("{error:#}").contains("is not pinned"), "{error:#}");
 
-    match ryeos_app::handler_error::extract_handler_error(&err) {
-        Some(ryeos_app::handler_error::HandlerError::Structured { code, .. }) => {
-            assert_eq!(code, config::PROJECT_REMOTE_TRUST_MATERIAL)
-        }
-        other => panic!("expected project_remote_trust_material, got {other:?}: {err:#}"),
-    }
-    // The project's remote was not copied into node config.
-    let operator_remotes = config::load_remotes(&local_state.config.app_root).unwrap();
-    assert!(!operator_remotes.contains_key("prod"));
-}
-
-#[tokio::test]
-async fn remote_bind_project_requires_a_node_remote() {
-    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
-    let project_root = tempfile::tempdir().unwrap();
-    let project_root = project_root.path().canonicalize().unwrap();
-
-    let err = remote_bind_project::handle(
-        remote_bind_project::Request {
-            remote: "prod".to_string(),
-            project: project_root,
-            remote_project: "/srv/project".to_string(),
-            sync_scope: ProjectSyncScope::FullProject,
-        },
-        Arc::new(local_state),
-    )
-    .await
-    .unwrap_err();
+    install_remote(
+        &local_state,
+        &remote_config("prod", "https://project.example.com", &public_key),
+    );
+    let error =
+        remote_bind_project::handle(request(), other_context(), Arc::new(local_state.clone()))
+            .await
+            .unwrap_err();
     assert!(
-        format!("{err:#}").contains("ryeos remote configure prod --url <https-url>"),
-        "unexpected error: {err:#}"
+        format!("{error:#}").contains("configured local operator"),
+        "{error:#}"
+    );
+    assert!(
+        config::load_remotes(&local_state.config.app_root).unwrap()["prod"]
+            .project_bindings
+            .is_empty()
     );
 }
 
@@ -367,12 +568,10 @@ async fn remote_list_retains_configured_site_coordinate() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
-    let mut remotes = HashMap::new();
-    remotes.insert(
-        "prod".to_string(),
-        remote_config("prod", "https://target.example", &public_key),
+    install_remote(
+        &local_state,
+        &remote_config("prod", "https://target.example", &public_key),
     );
-    config::save_remotes(&local_state.config.app_root, &remotes).unwrap();
 
     let result = remote_list::handle(
         remote_list::Request {
@@ -385,6 +584,7 @@ async fn remote_list_retains_configured_site_coordinate() {
     .unwrap();
 
     assert_eq!(result["remotes"][0]["site_id"], public_key["site_id"]);
+    assert_eq!(result["remotes"][0]["pin_source"], "expected_fingerprint");
 }
 
 #[tokio::test]
@@ -404,9 +604,7 @@ async fn remote_doctor_rejects_stale_configured_site_coordinate() {
             sync_scope: ProjectSyncScope::FullProject,
         },
     );
-    let mut remotes = HashMap::new();
-    remotes.insert("prod".to_string(), stale);
-    config::save_remotes(&local_state.config.app_root, &remotes).unwrap();
+    install_remote(&local_state, &stale);
     let local_state = Arc::new(local_state);
 
     let result = remote_doctor::handle(
@@ -454,9 +652,7 @@ async fn remote_doctor_and_status_reject_stale_configured_vault_without_signed_c
     let (url, contacts) = start_mock_remote(public_key.clone()).await.unwrap();
     let mut stale = remote_config("prod", &url, &public_key);
     stale.vault_fingerprint = "vault-stale-fingerprint".to_string();
-    let mut remotes = HashMap::new();
-    remotes.insert("prod".to_string(), stale);
-    config::save_remotes(&local_state.config.app_root, &remotes).unwrap();
+    install_remote(&local_state, &stale);
     let local_state = Arc::new(local_state);
 
     let result = remote_doctor::handle(
@@ -531,31 +727,98 @@ fn public_key_response(remote: &RemoteIdentity) -> Value {
     })
 }
 
-fn write_descriptor(
+/// The configured local operator's request context.
+fn operator_context(state: &AppState) -> HandlerContext {
+    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    HandlerContext::new_with_authority(
+        operator.principal_id(),
+        vec!["*".into()],
+        true,
+        Some(AuthorizedKeyPrincipalClass::LocalClient),
+        None,
+    )
+}
+
+/// A verified local client that is not the configured local operator.
+fn other_context() -> HandlerContext {
+    HandlerContext::new_with_authority(
+        "fp:not-the-operator".to_string(),
+        vec!["*".into()],
+        true,
+        Some(AuthorizedKeyPrincipalClass::LocalClient),
+        None,
+    )
+}
+
+/// Pin a remote as `remote configure` would, signed by the local node key.
+fn install_remote(state: &AppState, config: &RemoteConfig) {
+    config::write_remote_pin(
+        &state.config.app_root,
+        state.identity.signing_key(),
+        config,
+        PinSource::ExpectedFingerprint,
+        None,
+    )
+    .unwrap();
+}
+
+/// Write the descriptor of `public_key` signed by `signer`'s node key.
+fn write_descriptor_signed_by(
     state: &AppState,
+    signer: &RemoteIdentity,
     name: &str,
     url: &str,
     public_key: &Value,
 ) -> std::path::PathBuf {
     let path = state.config.app_root.join(format!("{name}.remote.yaml"));
-    let body = serde_yaml::to_string(&json!({
-        "version": 1,
-        "name": name,
-        "url": url,
-        "node": {
-            "public_key": public_key["signing_key"].as_str().unwrap(),
-            "fingerprint": public_key["fingerprint"].as_str().unwrap(),
-        }
-    }))
+    let descriptor = config::RemoteDescriptor {
+        version: 2,
+        name: name.to_string(),
+        url: Some(url.to_string()),
+        ingest_ignore: None,
+        site_id: public_key["site_id"].as_str().unwrap().to_string(),
+        vault_fingerprint: public_key["vault_fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        node: config::RemoteDescriptorNode {
+            public_key: public_key["signing_key"].as_str().unwrap().to_string(),
+            fingerprint: public_key["fingerprint"].as_str().unwrap().to_string(),
+        },
+        capabilities: vec![],
+        admission: None,
+        provider: None,
+    };
+    std::fs::write(
+        &path,
+        descriptor
+            .render_signed(signer.identity.signing_key())
+            .unwrap(),
+    )
     .unwrap();
-    std::fs::write(&path, body).unwrap();
     path
+}
+
+/// A descriptor of `public_key`, signed by the remote's own node key.
+fn write_descriptor(
+    state: &AppState,
+    remote: &RemoteIdentity,
+    name: &str,
+    url: &str,
+    public_key: &Value,
+) -> std::path::PathBuf {
+    write_descriptor_signed_by(state, remote, name, url, public_key)
+}
+
+fn remote_config_json(name: &str, url: &str, public_key: &Value) -> Value {
+    serde_json::to_value(remote_config(name, url, public_key)).unwrap()
 }
 
 fn remote_config(name: &str, url: &str, public_key: &Value) -> RemoteConfig {
     RemoteConfig {
         name: name.to_string(),
-        url: url.to_string(),
+        url: Some(url.to_string()),
+        reachability: Default::default(),
         principal_id: public_key["principal_id"].as_str().unwrap().to_string(),
         signing_key: public_key["signing_key"].as_str().unwrap().to_string(),
         site_id: public_key["site_id"].as_str().unwrap().to_string(),
@@ -563,7 +826,7 @@ fn remote_config(name: &str, url: &str, public_key: &Value) -> RemoteConfig {
             .as_str()
             .unwrap()
             .to_string(),
-        ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
         project_bindings: HashMap::new(),
     }
 }

@@ -183,6 +183,7 @@ fn build_fixture(
         "product test operator",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -195,7 +196,7 @@ fn build_fixture(
         scopes,
         true,
         Some(if remote_owner {
-            AuthorizedKeyPrincipalClass::RemoteOperator
+            AuthorizedKeyPrincipalClass::RemotePrincipal
         } else {
             AuthorizedKeyPrincipalClass::LocalClient
         }),
@@ -474,7 +475,7 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
     let mut foreign = fixture.context.clone();
     foreign.fingerprint = format!("fp:{}", "f".repeat(64));
     let mut remote = fixture.context.clone();
-    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemotePrincipal);
     remote.authenticated_origin_site_id = None;
     let mut unverified = fixture.context.clone();
     unverified.verified = false;
@@ -706,7 +707,7 @@ async fn admitted_remote_owner_reads_and_stages_own_product_without_ambient_auth
     .unwrap();
     assert_eq!(
         admitted.principal_class,
-        AuthorizedKeyPrincipalClass::RemoteOperator
+        AuthorizedKeyPrincipalClass::RemotePrincipal
     );
     assert!(
         ryeos_app::operator_authority::retained_admitted_operator_authority(
@@ -820,7 +821,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
     assert_eq!(product_authority.origin_site_id, REMOTE_ORIGIN);
     assert_eq!(
         product_authority.principal_class,
-        AuthorizedKeyPrincipalClass::RemoteOperator
+        AuthorizedKeyPrincipalClass::RemotePrincipal
     );
     assert_eq!(product_authority.grant_digest, grant.source_file_hash);
     let consumer = ExternalContentConsumerAuthority::installed_bundle(
@@ -875,6 +876,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
         "narrowed remote operator",
         fixture.state.identity.fingerprint(),
         "2026-09-10T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &fixture.state.identity,
         WildcardPolicy::Reject,
         false,
@@ -902,7 +904,7 @@ fn remote_owned_product_binding_requires_unchanged_current_grant() {
 }
 
 #[test]
-fn selected_launch_is_target_local_without_erasing_remote_operator_origin() {
+fn selected_launch_is_target_local_without_erasing_remote_principal_origin() {
     use ryeos_app::operator_external_content::product_composition::admit_root_product_selections;
     use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace, SubjectResolutionAuthority};
     use ryeos_engine::resolution::{

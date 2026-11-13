@@ -78,6 +78,9 @@ struct RuntimeSourceAuthorityDecls {
     /// Handler-route operator-vault bound; judged by route dispatch, not here.
     #[serde(default, rename = "operator_vault")]
     _operator_vault: bool,
+    /// Route-principal authority bound; judged by route dispatch, not here.
+    #[serde(default, rename = "route_capabilities")]
+    _route_capabilities: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -288,15 +291,19 @@ pub fn capture_signed_bundle_source_manifest(
                 manifest_path.display()
             ))
         })?;
-    let (trust_class, _) =
-        crate::trust::verify_item_signature(raw, &signature, &envelope, node_trust_store).map_err(
-            |error| {
-                EngineError::Internal(format!(
-                    "verify runtime source-bundle manifest {}: {error}",
-                    manifest_path.display()
-                ))
-            },
-        )?;
+    let (trust_class, _) = crate::trust::verify_item_signature(
+        raw,
+        &signature,
+        &envelope,
+        node_trust_store,
+        &crate::trust::SignerContext::bundle("runtime_source_bundle_manifest"),
+    )
+    .map_err(|error| {
+        EngineError::Internal(format!(
+            "verify runtime source-bundle manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
     if trust_class != ContractTrustClass::Trusted {
         return Err(EngineError::Internal(format!(
             "runtime source-bundle manifest signer {} is not node-trusted",
@@ -679,6 +686,15 @@ fn resolve_executor_chain(
                     header,
                     &source_format.signature,
                     trust_store,
+                    &crate::trust::SignerContext::new(
+                        source_space,
+                        &ref_.kind,
+                        roots
+                            .logical_project_root
+                            .as_deref()
+                            .or_else(|| project_authority.map(|(root, _)| root))
+                            .or_else(|| roots.project_root()),
+                    ),
                 )
                 .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
                 (trust_class, signer.map(|signer| signer.0))
@@ -1366,6 +1382,7 @@ fn build_plan_with_execution_root(
         .project_filesystem_authority_ceiling(root_value)?
         .intersect(admitted_filesystem_ceiling);
     let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
+    let execution_posture = execution.project_execution_posture(root_value)?;
     let (target_requirement, current_target_request) = execution.project_target_data(root_value)?;
     let endpoint_requirement = execution.project_endpoint_requirement(root_value)?;
     let resource_authority_ceiling = execution.project_resource_authority_ceiling(root_value)?;
@@ -1479,6 +1496,7 @@ fn build_plan_with_execution_root(
         materialization_requirements: Vec::new(),
         network_authority_ceiling,
         filesystem_authority_ceiling,
+        execution_posture,
         target_requirement,
         current_target_request,
         endpoint_requirement,
@@ -1958,6 +1976,7 @@ metadata:
         let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
+            logical_project_root: None,
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
             kind: kind.to_string(),
             source_path,
@@ -1998,6 +2017,7 @@ metadata:
             crate::contracts::SubjectResolutionAuthority::Projectless
         };
         PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

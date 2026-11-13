@@ -281,23 +281,27 @@ for profile_name in "${node_init_profiles[@]}"; do
   # composition profiles a strict local class and a hosted class, the hosted
   # workflow profiles only a hosted class, every other profile only its
   # local class. Initialization selects one, named by the deployment.
-  grep -Fxq '      version: 10' "$node_init_profile"
+  grep -Fxq '      version: 11' "$node_init_profile"
   grep -Fxq '      host_classes:' "$node_init_profile"
   declared_host_classes="$(
     sed -n '/^      host_classes:$/,/^      [a-z_]*:/p' "$node_init_profile" \
       | sed -nE 's/^        ([a-z][a-z0-9_]*):$/\1/p' | tr '\n' ' '
   )"
   case "$profile_name" in
-    core|core-scheduling|core-workflow|core-knowledge|standard)
+    core|core-scheduling|core-workflow|core-knowledge)
       [[ "$declared_host_classes" == "hosted local " ]] ;;
+    standard)
+      [[ "$declared_host_classes" == "hosted local local_unconfined " ]] ;;
     hosted-controller)
       [[ "$declared_host_classes" == "hosted local hosted_enforced " ]] ;;
     hosted-node|hosted-workflow)
       [[ "$declared_host_classes" == "hosted " ]] ;;
     development)
       [[ "$declared_host_classes" == "local local_direct " ]] ;;
-    *)
+    contained-workflow|release-authority)
       [[ "$declared_host_classes" == "local " ]] ;;
+    *)
+      [[ "$declared_host_classes" == "local local_unconfined " ]] ;;
   esac
   # Trusted process-group settlement is admitted per host class: the hosted
   # workflow profiles and the composition controller admit it on every class,

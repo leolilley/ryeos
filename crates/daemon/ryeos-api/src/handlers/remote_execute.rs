@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::handler_error::{HandlerError, HandlerResult};
+use crate::handlers::remote_push::OutboundPrincipal;
 use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
 use crate::remote::config::{self, ResolvedRemote};
@@ -115,23 +116,41 @@ pub async fn handle(
         }
     };
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote, abs_project_path.as_deref())
-        .map_err(|e| {
-            config::typed_load_error_or(e, |e| {
-                HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote))
-            })
-        })?;
+    let principal = OutboundPrincipal::resolve(None, &state, &ctx);
+    let node_client = match principal {
+        OutboundPrincipal::Node => Some(
+            RemoteClient::from_named_remote(&state, &req.remote).map_err(|e| {
+                config::typed_load_error_or(e, |e| {
+                    HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote))
+                })
+            })?,
+        ),
+        OutboundPrincipal::Delegated => None,
+    };
 
     // Load remote config for project binding and ignore rules.
-    let report =
-        config::load_remotes_layered_report(&state.config.app_root, abs_project_path.as_deref())
-            .map_err(|e| {
-                config::typed_load_error_or(e, |e| {
-                    HandlerError::Internal(format!("load remotes: {e:#}"))
-                })
-            })?;
+    let report = config::load_remotes_report(&state.config.app_root).map_err(|e| {
+        config::typed_load_error_or(e, |e| {
+            HandlerError::Internal(format!("load remotes: {e:#}"))
+        })
+    })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
+
+    // The client acts as the caller under its signed delegation, or as the node
+    // when the caller is the node itself.
+    let client = match node_client {
+        Some(client) => client,
+        None => {
+            let cfg = remote_cfg.as_ref().ok_or_else(|| {
+                HandlerError::BadRequest(format!(
+                    "remote '{}' is not configured; run `ryeos remote configure {}` first",
+                    req.remote, req.remote
+                ))
+            })?;
+            principal.client(&state, cfg, &ctx)?
+        }
+    };
 
     // Resolve project binding if present.
     if let (Some(proj_path), Some(loaded)) = (abs_project_path.as_ref(), loaded_remote.as_ref()) {
@@ -165,7 +184,7 @@ pub async fn handle(
     // Load remote's cached ignore rules (required). Inline fetch on cache miss,
     // without persisting partial/invalid remote configs.
     let remote_ignore = match remote_cfg.as_ref() {
-        Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)
+        Some(cfg) => IgnoreMatcher::from_config(cfg.ingest_rules()?)
             .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?,
         None => {
             let fetched = client.get_ingest_ignore().await.map_err(|e| {
@@ -194,8 +213,8 @@ pub async fn handle(
 
     // Delegate to the shared unary forward helper.
     let execution_policy = destination_execution_policy(&req.execution_policy)?;
-    // The destination admits this request under this node's identity, not the
-    // local caller's. A caller may ask a remote to expose its operator vault
+    // The destination admits this request as the caller under its delegation,
+    // or as the node. A caller may ask a remote to expose its operator vault
     // only if it holds that authority itself.
     ryeos_app::execution_policy::authorize_operator_vault_exposure(
         state.authorizer.as_ref(),

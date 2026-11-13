@@ -154,8 +154,14 @@ async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
         .authorized_keys_dir
         .join(format!("{fingerprint}.toml"));
     let grant = std::fs::read_to_string(grant_path).unwrap();
-    assert!(grant.contains("schema_version = 2"));
+    assert!(grant.contains("schema_version = 3"));
     assert!(grant.contains("principal_class = \"remote_node\""));
+    // The admitted key asked for the grant by signing its claim; the grant
+    // records that key and the digest of the signed claim, and it ends.
+    assert!(grant.contains("expires_at = \""));
+    assert!(grant.contains("[authorized_by]"));
+    assert!(grant.contains(&format!("principal = \"fp:{fingerprint}\"")));
+    assert!(grant.contains("request_digest = \""));
     assert!(grant.contains(&format!("origin_site_id = \"{}\"", state.threads.site_id())));
 
     let reused = admission_claim::handle(

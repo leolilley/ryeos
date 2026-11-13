@@ -1130,6 +1130,60 @@ pub(crate) fn terminate_snapshot_qualification(
     crate::write_response(&terminate_core(&context.root, &request, first_contact)?)
 }
 
+/// Read-only: is the fake restored sandbox running? A terminated one is
+/// `terminated`, one never created is `absent`.
+pub(crate) fn observe_snapshot_qualification(
+    adapter: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    let request: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest =
+        read_request(MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES)?;
+    request.validate()?;
+    crate::verify_artifact(
+        adapter,
+        &request.qualification_intent.adapter_artifact_hash,
+        None,
+        "adapter",
+    )?;
+    let context = load_context(
+        &request.qualification_intent.settings_digest,
+        &request.provider_spec_digest,
+    )?;
+    crate::write_response(&observe_core(&context.root, &request)?)
+}
+
+pub(crate) fn observe_core(
+    root: &lillux::PinnedDirectory,
+    request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+) -> Result<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>{
+    use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse as Response;
+    request.validate()?;
+    let id = &request.occurrence.occurrence_id;
+    let not_running = |status: &str| Response::NotRunning {
+        operation_id: request.qualification_intent.operation_id.clone(),
+        occurrence_id: id.clone(),
+        status: status.to_owned(),
+    };
+    let response = if open_or_create(root, TERMINATIONS_DIR, 0o700)?
+        .open_pinned_regular(OsStr::new(&format!("{id}.json")), false)?
+        .is_some()
+    {
+        not_running("terminated")
+    } else if open_or_create(root, SANDBOXES_DIR, 0o700)?
+        .open_child_directory(OsStr::new(id))?
+        .is_some()
+    {
+        Response::Running {
+            operation_id: request.qualification_intent.operation_id.clone(),
+            occurrence_id: id.clone(),
+            provider_response_sha256: lillux::sha256_hex(id.as_bytes()),
+        }
+    } else {
+        not_running("absent")
+    };
+    response.validate_for(request)?;
+    Ok(response)
+}
+
 /// Retained run records by operation, for tests and diagnostics.
 #[cfg(test)]
 fn read_run_records(
@@ -1143,6 +1197,63 @@ fn read_run_records(
         records.insert(record.operation_id.clone(), record);
     }
     Ok(records)
+}
+
+// ---------------------------------------------------------------------------
+// Provider inventory.
+
+/// The fixture list a test placed in the fake provider: `provider-inventory.json`
+/// under the state root, a JSON array of provider resources. Absent, the fake
+/// provider holds nothing. Listing reads only.
+pub(crate) const PROVIDER_INVENTORY_FILE: &str = "provider-inventory.json";
+
+pub(crate) fn inventory_core(
+    root: &lillux::PinnedDirectory,
+    request: &ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterRequest,
+) -> Result<ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterResponse>
+{
+    use ryeos_external_execution_contract::provider_inventory::{
+        PROVIDER_INVENTORY_PROTOCOL, ProviderInventoryAdapterResponse, ProviderResource,
+    };
+    request.validate()?;
+    let resources: Vec<ProviderResource> = match root
+        .open_regular(std::ffi::OsStr::new(PROVIDER_INVENTORY_FILE), false)?
+    {
+        Some(file) => {
+            use std::io::Read as _;
+            let maximum = ryeos_external_execution_contract::MAX_LIFECYCLE_RESPONSE_BYTES as u64;
+            let mut bytes = Vec::new();
+            file.take(maximum + 1).read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() as u64 <= maximum,
+                "synthetic provider inventory fixture exceeds its bound"
+            );
+            serde_json::from_slice(&bytes)?
+        }
+        None => Vec::new(),
+    };
+    let response = ProviderInventoryAdapterResponse {
+        protocol: PROVIDER_INVENTORY_PROTOCOL.into(),
+        provider_id: request.provider_id.clone(),
+        owner_scope: "synthetic".into(),
+        complete: true,
+        resources,
+    };
+    response.validate_for(request)?;
+    Ok(response)
+}
+
+pub(crate) fn list_provider_resources(
+    adapter: &lillux::InheritedDescriptorAuthority,
+) -> Result<()> {
+    let request: ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterRequest =
+        read_request(
+            ryeos_external_execution_contract::provider_inventory::MAX_PROVIDER_INVENTORY_REQUEST_BYTES,
+        )?;
+    request.validate()?;
+    crate::verify_artifact(adapter, &request.adapter_artifact_hash, None, "adapter")?;
+    let context = load_context(&request.settings_digest, &request.provider_spec_digest)?;
+    crate::write_response(&inventory_core(&context.root, &request)?)
 }
 
 #[cfg(test)]

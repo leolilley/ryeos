@@ -21,6 +21,8 @@ pub mod engine_init;
 
 pub mod identity;
 
+pub mod remote_delegation;
+
 pub mod node_policy;
 
 pub mod state_lock;

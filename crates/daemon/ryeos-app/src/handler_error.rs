@@ -99,6 +99,22 @@ pub fn extract_handler_error(err: &anyhow::Error) -> Option<HandlerError> {
     None
 }
 
+/// The structured response for a refused remote delegation: the stable code,
+/// the message naming the cure, and 403 because the caller is known but not
+/// authorized to act this way.
+pub fn delegation_handler_error(
+    refusal: &ryeos_node_runtime::remote_delegation::DelegationError,
+) -> HandlerError {
+    HandlerError::Structured {
+        code: refusal.code().to_owned(),
+        status: 403,
+        body: serde_json::json!({
+            "code": refusal.code(),
+            "error": refusal.to_string(),
+        }),
+    }
+}
+
 /// Operator-correctable refusals raised deep in app code keep their own
 /// type (and their full message for non-HTTP callers); this is the single
 /// place they become a structured response.
@@ -112,6 +128,11 @@ fn typed_operator_refusal(error: &(dyn std::error::Error + 'static)) -> Option<H
         error.downcast_ref::<crate::operator_external_content::rebind::RebindRefused>()
     {
         return Some(refused.handler_error());
+    }
+    if let Some(refusal) =
+        error.downcast_ref::<ryeos_node_runtime::remote_delegation::DelegationError>()
+    {
+        return Some(delegation_handler_error(refusal));
     }
     None
 }

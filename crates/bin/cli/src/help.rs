@@ -981,6 +981,21 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Replace an obsolete node-policy generation",
             "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--json] [--app-root <DIR>]",
         ),
+        "node host-access grant" => (
+            "ryeos node host-access grant",
+            "Grant one exact host-authority tool host-direct execution: it runs on the host with the operator's authority",
+            "ryeos node host-access grant <item_ref> --project <DIR> [--id <ID>] [--origin direct|graph_child|schedule]... [--env <NAME>]... [--containment scope_required|group_allowed] [--json] [--app-root <DIR>]",
+        ),
+        "node host-access revoke" => (
+            "ryeos node host-access revoke",
+            "Remove one host_access grant",
+            "ryeos node host-access revoke <id> [--json] [--app-root <DIR>]",
+        ),
+        "node host-access list" => (
+            "ryeos node host-access list",
+            "List host_access grants; with --project, report each as current or stale",
+            "ryeos node host-access list [--project <DIR>] [--json] [--app-root <DIR>]",
+        ),
         "start" => (
             "ryeos start",
             "Bring the local node runtime online",
@@ -1000,6 +1015,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "ryeos sign",
             "Sign RyeOS items by canonical ref, glob, or .ai path",
             "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
+        ),
+        "external-content product publish" => (
+            "ryeos external-content product publish",
+            "Produce a named product and ship it: activate, execute the producer, wait, capture, admit the witness, and push it when asked",
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
         ),
         "codex login device" => (
             "ryeos codex login device",
@@ -1049,12 +1069,39 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             ),
             (
                 "--host-class <NAME>",
-                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile",
+                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile. `local` enforces the sandbox and init refuses if the host cannot prove it; `local_unconfined` is the explicit opt-out that runs jobs as the daemon user",
             ),
             ("--app-root <DIR>", "Application root"),
         ],
         #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "external-content product publish" => &[
+            (
+                "--activation <config-ref>",
+                "Activate this external-content recipe online first and wait for it",
+            ),
+            (
+                "--from-thread <thread-id>",
+                "Resume from a completed producer thread instead of executing again",
+            ),
+            (
+                "--push-to <remote>",
+                "Push the admitted product to this remote under the declared byte bound",
+            ),
+            (
+                "--project-snapshot <hash>",
+                "Execute the producer from this published project snapshot",
+            ),
+            (
+                "--current-head",
+                "Execute the producer from the current principal project HEAD",
+            ),
+            (
+                "--timeout-secs <n>",
+                "Give up waiting after this many seconds",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
         "codex login device" => &[
             (
                 "--create",

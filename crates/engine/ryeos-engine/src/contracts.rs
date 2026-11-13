@@ -21,10 +21,11 @@ mod subprocess_limits;
 pub use crate::scheduled_fire_context::ScheduledFireContext;
 pub use execution_endpoint::{ExecutionEndpointRequirement, ExternalEndpointBindingIdentity};
 pub use execution_plan::{
-    EngineContext, ExecutionPlan, MaterializationRequirement, PlanArgument,
-    PlanBundleExecutorIdentity, PlanCapabilities, PlanContext, PlanExecutionProjectFileInput,
-    PlanNode, PlanNodeId, PlanRuntimeBinarySelection, PlanRuntimeIdentity, PlanStdin,
-    PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand, SubjectResolutionAuthority,
+    EngineContext, ExecutionPlan, ExecutionPosture, HOST_AUTHORITY_REQUIRED,
+    MaterializationRequirement, PlanArgument, PlanBundleExecutorIdentity, PlanCapabilities,
+    PlanContext, PlanExecutionProjectFileInput, PlanNode, PlanNodeId, PlanRuntimeBinarySelection,
+    PlanRuntimeIdentity, PlanStdin, PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand,
+    SubjectResolutionAuthority,
 };
 pub use execution_target::{
     CurrentExecutionTargetRequest, ExecutionResourceAccess, ExecutionResourceAdmissionPolicy,
@@ -3108,6 +3109,10 @@ pub struct ResolvedItem {
     /// adding any one of them can change which source wins.
     pub probed_absent: Vec<ProbedAbsence>,
     pub materialized_project_root: Option<PathBuf>,
+    /// The logical project the item belongs to (see
+    /// `PlanContext::logical_project_root`). Signer project scopes are judged
+    /// against this value.
+    pub logical_project_root: Option<PathBuf>,
     /// Engine-bound authority under which this exact item was resolved.
     /// Verification rejects a context carrying a different authority even
     /// when both happen to name the same local materialization path.

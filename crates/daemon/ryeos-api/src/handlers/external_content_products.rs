@@ -24,10 +24,17 @@ pub struct ProduceRuntimeSnapshotRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RuntimeSnapshotSourceRequest {
+    /// Exactly one of `bootstrap_operation_id` (the node's own ready source
+    /// sandbox for this product) or `source_occurrence_id` (a sandbox the
+    /// operator created outside the node, kept until the external snapshot
+    /// driver is retired).
     CapturedProduct {
         witness_hash: String,
         witness_source: ProductWitnessSource,
-        source_occurrence_id: String,
+        #[serde(default)]
+        bootstrap_operation_id: Option<String>,
+        #[serde(default)]
+        source_occurrence_id: Option<String>,
     },
     BundleMaterialization {
         materialization_binding_id: String,
@@ -47,10 +54,69 @@ pub struct GetRuntimeSnapshotRequest {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapRuntimeSourceRequest {
     binding_id: String,
-    materialization_binding_id: String,
-    coordinate_digest: String,
-    attestation_hash: String,
+    source: BootstrapSourceRequest,
     maximum_lifetime_seconds: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum BootstrapSourceRequest {
+    CapturedProduct {
+        witness_hash: String,
+        witness_source: ProductWitnessSource,
+    },
+    BundleMaterialization {
+        materialization_binding_id: String,
+        coordinate_digest: String,
+        attestation_hash: String,
+    },
+}
+
+impl From<BootstrapSourceRequest>
+    for ryeos_app::operator_runtime_snapshot::SnapshotBootstrapSource
+{
+    fn from(source: BootstrapSourceRequest) -> Self {
+        match source {
+            BootstrapSourceRequest::CapturedProduct {
+                witness_hash,
+                witness_source,
+            } => Self::CapturedProduct {
+                witness_hash,
+                source: witness_source,
+            },
+            BootstrapSourceRequest::BundleMaterialization {
+                materialization_binding_id,
+                coordinate_digest,
+                attestation_hash,
+            } => Self::BundleMaterialization {
+                materialization_binding_id,
+                coordinate_digest,
+                attestation_hash,
+            },
+        }
+    }
+}
+
+/// The source sandbox a captured product is uploaded into, named exactly once.
+fn captured_source_occurrence(
+    bootstrap_operation_id: Option<String>,
+    source_occurrence_id: Option<String>,
+) -> Result<ryeos_app::operator_runtime_snapshot::CapturedSourceOccurrence> {
+    use ryeos_app::operator_runtime_snapshot::CapturedSourceOccurrence;
+    match (bootstrap_operation_id, source_occurrence_id) {
+        (Some(bootstrap_operation_id), None) => Ok(CapturedSourceOccurrence::Bootstrap {
+            bootstrap_operation_id,
+        }),
+        (None, Some(source_occurrence_id)) => Ok(CapturedSourceOccurrence::OperatorNamed {
+            source_occurrence_id,
+        }),
+        _ => Err(ryeos_app::handler_error::HandlerError::BadRequest(
+            "a captured-product source names exactly one of bootstrap_operation_id or \
+             source_occurrence_id"
+                .to_owned(),
+        )
+        .into()),
+    }
 }
 
 pub async fn bootstrap_runtime_source(
@@ -64,9 +130,7 @@ pub async fn bootstrap_runtime_source(
             &ctx,
             ryeos_app::operator_runtime_snapshot::SnapshotBootstrapRequest {
                 binding_id: req.binding_id,
-                materialization_binding_id: req.materialization_binding_id,
-                coordinate_digest: req.coordinate_digest,
-                attestation_hash: req.attestation_hash,
+                source: req.source.into(),
                 maximum_lifetime_seconds: req.maximum_lifetime_seconds,
             },
         )
@@ -221,6 +285,23 @@ pub async fn verify_runtime_snapshot_qualification(
     Ok(serde_json::to_value(result)?)
 }
 
+pub async fn observe_runtime_snapshot_qualification(
+    req: RuntimeSnapshotQualificationRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let result = tokio::task::spawn_blocking(move || {
+        ryeos_app::operator_runtime_snapshot::observe_qualification_occurrence(
+            &state,
+            &ctx,
+            &req.qualification_operation_id,
+        )
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("qualification observation join failed: {error}"))??;
+    Ok(serde_json::to_value(result)?)
+}
+
 pub async fn terminate_runtime_snapshot_qualification(
     req: RuntimeSnapshotQualificationRequest,
     ctx: HandlerContext,
@@ -323,8 +404,11 @@ pub async fn produce_runtime_snapshot(
             RuntimeSnapshotSourceRequest::CapturedProduct {
                 witness_hash,
                 witness_source,
+                bootstrap_operation_id,
                 source_occurrence_id,
             } => {
+                let occurrence =
+                    captured_source_occurrence(bootstrap_operation_id, source_occurrence_id)?;
                 let staged = ryeos_executor::execution::external_guest_runtime_product::stage_current_guest_owner_runtime_product(
                     &state, &ctx, &witness_hash, &witness_source, ceiling,
                     stage.root(), stage.product_name(),
@@ -336,7 +420,7 @@ pub async fn produce_runtime_snapshot(
                     ryeos_app::operator_runtime_snapshot::SnapshotProductionSource::CapturedProduct {
                         witness_hash,
                         source: witness_source,
-                        source_occurrence_id,
+                        occurrence,
                     },
                 )
             }
@@ -661,6 +745,26 @@ pub const VERIFY_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR: ServiceDescriptor = 
         })
     },
 };
+
+pub const OBSERVE_RUNTIME_SNAPSHOT_QUALIFICATION_DESCRIPTOR: ServiceDescriptor =
+    ServiceDescriptor {
+        service_ref: "service:external-content/observe-runtime-snapshot-qualification",
+        endpoint: "external-content.observe-runtime-snapshot-qualification",
+        availability: ServiceAvailability::DaemonOnly,
+        required_caps: &[
+            "ryeos.execute.service.external-content/observe-runtime-snapshot-qualification",
+        ],
+        handler: |params, ctx, state| {
+            Box::pin(async move {
+                observe_runtime_snapshot_qualification(
+                    crate::handler_error::parse_request(params)?,
+                    ctx,
+                    state,
+                )
+                .await
+            })
+        },
+    };
 
 pub const RUN_PRODUCT_QUALIFICATION_WORKER_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:external-content/run-product-qualification-worker",

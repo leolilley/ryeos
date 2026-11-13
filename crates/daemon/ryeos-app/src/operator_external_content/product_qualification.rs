@@ -2638,6 +2638,7 @@ pub(super) fn resolve_consumer_definition_in_generation(
     }
     let resolution =
         generation.effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: canonical,
             expected_kind: Some(kind.into()),
             project_root: None,
@@ -4715,6 +4716,7 @@ fn resolve_current_bundle_verifier_identity_in_generation(
         // fixtures only. Production evidence paths always carry a sealed
         // capsule and cannot invent project authority here.
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: context.fingerprint.clone(),
                 scopes: context.scopes.clone(),

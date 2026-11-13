@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
-use ryeos_engine::trust::TrustStore;
+use ryeos_engine::trust::{SignerContext, TrustStore};
 use serde::Deserialize;
 
 use crate::manifest::{derive_provides_kinds, parse_manifest};
@@ -45,9 +45,7 @@ struct BundleRegistrationBody {
 
 /// Load installed bundles from signed node bundle registrations.
 pub fn load_installed_bundle_records(app_root: &Path) -> Result<Vec<InstalledBundleRecord>> {
-    let operator_config_root =
-        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
-    let trust_store = TrustStore::load(None, &operator_config_root)
+    let trust_store = TrustStore::load_node_registry(app_root)
         .context("installed bundles: load node trust store")?;
     load_installed_bundle_records_with_trust(app_root, &trust_store)
 }
@@ -95,8 +93,14 @@ pub fn load_installed_bundle_records_with_trust(
 
         let content = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        verify_signed_trusted_yaml(&content, &path, trust_store, &envelope)
-            .with_context(|| format!("verify node bundle registration {}", path.display()))?;
+        verify_signed_trusted_yaml(
+            &content,
+            &path,
+            trust_store,
+            &envelope,
+            &SignerContext::node("node"),
+        )
+        .with_context(|| format!("verify node bundle registration {}", path.display()))?;
 
         let body: BundleRegistrationBody = serde_yaml::from_str(&strip_signature(&content))
             .with_context(|| format!("failed to parse YAML body of {}", path.display()))?;
@@ -189,7 +193,13 @@ fn verify_installed_manifest(
     let envelope = yaml_signature_envelope();
     let content = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    verify_signed_trusted_yaml(&content, &manifest_path, trust_store, &envelope)?;
+    verify_signed_trusted_yaml(
+        &content,
+        &manifest_path,
+        trust_store,
+        &envelope,
+        &SignerContext::bundle("bundle_manifest"),
+    )?;
     let manifest = parse_manifest(bundle_root, name)
         .with_context(|| format!("parse installed bundle '{}' manifest", name))?;
     let mut expected_provides = derive_provides_kinds(&bundle_root.join(ryeos_engine::AI_DIR))?;
@@ -212,11 +222,12 @@ fn verify_signed_trusted_yaml(
     path: &Path,
     trust_store: &TrustStore,
     envelope: &SignatureEnvelope,
+    ctx: &SignerContext,
 ) -> Result<()> {
     let header = ryeos_engine::item_resolution::parse_signature_header(content, envelope)
         .context(format!("{} has no valid signature line", path.display()))?;
     let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(content, &header, envelope, trust_store)
+        ryeos_engine::trust::verify_item_signature(content, &header, envelope, trust_store, ctx)
             .with_context(|| format!("signature verification failed for {}", path.display()))?;
     if trust_class != TrustClass::Trusted {
         bail!(
@@ -294,10 +305,15 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let system = tmp.path().join("system");
             let user = tmp.path().join("user");
-            let trust_dir = user.join(".ai/config/keys/trusted");
-            fs::create_dir_all(&trust_dir).unwrap();
+            fs::create_dir_all(&user).unwrap();
             let key = SigningKey::generate(&mut OsRng);
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            ryeos_engine::test_support::pin_signer(
+                &user,
+                &key.verifying_key(),
+                "test",
+                ryeos_engine::trust::SignerRole::Operator,
+                ryeos_engine::trust::SignerScope::everywhere(),
+            );
             Self {
                 _tmp: tmp,
                 system,
@@ -307,7 +323,7 @@ mod tests {
         }
 
         fn trust_store(&self) -> TrustStore {
-            TrustStore::load(None, &self.user.join(".ai/config")).unwrap()
+            TrustStore::load_node_registry(&self.user).unwrap()
         }
 
         fn write_bundle(&self, name: &str) -> PathBuf {

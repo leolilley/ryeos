@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -30,7 +29,26 @@ pub struct EffectiveItemRequest {
     pub item_ref: CanonicalRef,
     pub expected_kind: Option<String>,
     pub project_root: Option<PathBuf>,
+    /// The logical project of `project_root` (see
+    /// `PlanContext::logical_project_root`); `None` means the root is its
+    /// own logical project when the authority is live.
+    pub logical_project_root: Option<PathBuf>,
     pub subject_resolution_authority: SubjectResolutionAuthority,
+}
+
+impl EffectiveItemRequest {
+    /// The logical project for signer scopes: the stated one, or the project
+    /// root itself when the authority is the live project.
+    pub fn effective_logical_project_root(&self) -> Option<PathBuf> {
+        match (
+            &self.logical_project_root,
+            &self.subject_resolution_authority,
+        ) {
+            (Some(logical), _) => Some(logical.clone()),
+            (None, SubjectResolutionAuthority::LiveFs) => self.project_root.clone(),
+            (None, _) => None,
+        }
+    }
 }
 
 /// Source metadata for an effective item.
@@ -938,15 +956,6 @@ pub struct Engine {
     /// directly-constructed test engines and active for node engines.
     isolation_generation: std::sync::Arc<crate::isolation::IsolationRuntime>,
 
-    /// Base item trust for a project-scoped engine, excluding the project's
-    /// mutable trust directory. This lets every request re-read project trust
-    /// and observe both additions and removals.
-    request_trust_base: Option<TrustStore>,
-
-    /// Distinguishes caller-supplied trust authority even when every supplied
-    /// signer was already present in the persistent trust base.
-    request_trust_overlay_identity: Option<String>,
-
     /// Shared only by clones of this admitted engine generation. Cache keys
     /// also include the effective generation/trust identities.
     parser_overlay_cache: std::sync::Arc<crate::parser_overlay_cache::ParserOverlayCache>,
@@ -1519,8 +1528,6 @@ impl Engine {
             isolation_generation: std::sync::Arc::new(
                 crate::isolation::IsolationRuntime::disabled_for_authoring(),
             ),
-            request_trust_base: None,
-            request_trust_overlay_identity: None,
             parser_overlay_cache: std::sync::Arc::new(
                 crate::parser_overlay_cache::ParserOverlayCache::default(),
             ),
@@ -1714,8 +1721,6 @@ impl Engine {
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.trust_store = trust_store;
-        self.request_trust_base = None;
-        self.request_trust_overlay_identity = None;
         self
     }
 
@@ -1724,56 +1729,10 @@ impl Engine {
         self
     }
 
-    /// Derive a project-scoped engine from this already-admitted node
-    /// generation.
-    ///
-    /// Installed schemas, handlers, runtimes, protocols, host bindings, and
-    /// the isolation generation are immutable for a daemon generation and are
-    /// cloned from the admitted engine. Only item trust is rebuilt from the
-    /// pinned project root plus an optional caller-scoped overlay. This avoids
-    /// re-admitting node executors while serving a request and guarantees the
-    /// project engine cannot observe a different installed-bundle generation.
-    pub fn for_project_root(
-        &self,
-        project_root: &Path,
-        trust_overlay: Option<&TrustStore>,
-    ) -> Result<Self, EngineError> {
-        let mut request_trust_base = self.node_trust_store.clone();
-        if let Some(overlay) = trust_overlay {
-            request_trust_base.extend_from(overlay);
-        }
-        let trust_store = request_trust_base
-            .with_project_keys(project_root)?
-            .into_owned();
-        let mut engine = self.clone();
-        engine.trust_store = trust_store;
-        engine.request_trust_base = Some(request_trust_base);
-        engine.request_trust_overlay_identity = trust_overlay.map(TrustStore::fingerprint);
-        Ok(engine)
-    }
-
-    fn effective_trust_store(
-        &self,
-        project_root: Option<&Path>,
-    ) -> Result<Cow<'_, TrustStore>, EngineError> {
-        match project_root {
-            Some(root) => {
-                let base = self
-                    .request_trust_base
-                    .as_ref()
-                    .unwrap_or(&self.trust_store);
-                Ok(base.with_project_keys(root)?)
-            }
-            // A project-derived request Engine's `trust_store` is the merged
-            // project view. A projectless lookup must fall back to its pinned
-            // request base (node trust plus any caller-scoped overlay), never
-            // carry local project keys into Bundle authority.
-            None => Ok(Cow::Borrowed(
-                self.request_trust_base
-                    .as_ref()
-                    .unwrap_or(&self.trust_store),
-            )),
-        }
+    /// Item trust for a request. Trust is node state: it never depends on
+    /// the project, so every request sees the node's signer registry.
+    fn effective_trust_store(&self) -> &TrustStore {
+        &self.trust_store
     }
 
     /// Reconstruct only the current trust-policy view for an already-admitted
@@ -1781,59 +1740,18 @@ impl Engine {
     ///
     /// Recovery consumes sealed parser/kind/runtime semantics and must not
     /// rebuild a complete request snapshot from today's registries. This
-    /// method therefore reloads only operator/project signer authority. For a
-    /// content-addressed project, project keys come from the exact admitted
-    /// materialization rather than its disposable pathname.
+    /// method therefore reloads only the node's signer authority, and still
+    /// validates that the subject resolution authority matches the root.
     pub fn effective_trust_store_for_current_policy(
         &self,
         project_root: Option<&Path>,
         subject_resolution_authority: &SubjectResolutionAuthority,
-        materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
     ) -> Result<TrustStore, EngineError> {
         self.checked_bundle_generation(|| {
             subject_resolution_authority
                 .validate_for_materialized_root(project_root)
                 .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
-            match subject_resolution_authority.operational_generation() {
-                Some(generation) => {
-                    let root = project_root.ok_or_else(|| {
-                        EngineError::Internal(
-                            "content-addressed trust policy has no project root".to_string(),
-                        )
-                    })?;
-                    let materialization = materialization.ok_or_else(|| {
-                        EngineError::Internal(
-                            "content-addressed trust policy has no admitted materialization"
-                                .to_string(),
-                        )
-                    })?;
-                    if materialization.snapshot_hash() != generation
-                        || !materialization
-                            .owns_path(root)
-                            .map_err(|error| EngineError::Internal(format!("{error:#}")))?
-                    {
-                        return Err(EngineError::Internal(
-                            "content-addressed trust policy materialization contradicts its authority"
-                                .to_string(),
-                        ));
-                    }
-                    let trust_base = self
-                        .request_trust_base
-                        .as_ref()
-                        .unwrap_or(&self.trust_store);
-                    trust_base.with_project_keys_from_content(materialization)
-                }
-                None => {
-                    if materialization.is_some() {
-                        return Err(EngineError::Internal(
-                            "non-content-addressed trust policy received a pinned materialization"
-                                .to_string(),
-                        ));
-                    }
-                    self.effective_trust_store(project_root)
-                        .map(Cow::into_owned)
-                }
-            }
+            Ok(self.effective_trust_store().clone())
         })
     }
 
@@ -1913,25 +1831,13 @@ impl Engine {
         &self,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<String, EngineError> {
-        let base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store)
-            .fingerprint();
+        let base = self.trust_store.fingerprint();
         let authority = serde_json::to_string(subject_resolution_authority).map_err(|error| {
             EngineError::Internal(format!(
                 "serialize admitted request subject authority: {error}"
             ))
         })?;
-        Ok([
-            self.request_engine_generation_identity(),
-            authority,
-            base,
-            self.request_trust_overlay_identity
-                .clone()
-                .unwrap_or_else(|| "-".to_string()),
-        ]
-        .join("\u{1f}"))
+        Ok([self.request_engine_generation_identity(), authority, base].join("\u{1f}"))
     }
 
     /// Admit one immutable request snapshot into the warm authority cache.
@@ -2161,7 +2067,7 @@ impl Engine {
         subject_resolution_authority
             .validate_for_materialized_root(project_root)
             .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
-        let trust_store = self.effective_trust_store(project_root)?.into_owned();
+        let trust_store = self.effective_trust_store().clone();
         let parser_dispatcher =
             self.effective_parser_dispatcher_with_trust(project_root, &trust_store)?;
         let registry_fingerprint =
@@ -2191,11 +2097,7 @@ impl Engine {
             .validate_for_materialized_root(Some(materialization.path()))
             .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
 
-        let trust_base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store);
-        let trust_store = trust_base.with_project_keys_from_content(materialization)?;
+        let trust_store = self.trust_store.clone();
         let parser_tools = self
             .parser_dispatcher
             .parser_tools
@@ -2224,11 +2126,7 @@ impl Engine {
         subject_resolution_authority
             .validate_for_materialized_root(Some(project_root))
             .map_err(|error| EngineError::Internal(format!("{error:#}")))?;
-        let trust_base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store);
-        let trust_store = trust_base.with_project_keys_from_content(project_content)?;
+        let trust_store = self.trust_store.clone();
         let parser_tools = self
             .parser_dispatcher
             .parser_tools
@@ -2248,20 +2146,9 @@ impl Engine {
     }
 
     fn effective_trust_identity(&self, effective: &TrustStore) -> String {
-        let base = self
-            .request_trust_base
-            .as_ref()
-            .unwrap_or(&self.trust_store);
         let mut identity = Vec::new();
         append_identity_field(&mut identity, effective.fingerprint().as_bytes());
-        append_identity_field(&mut identity, base.fingerprint().as_bytes());
-        match &self.request_trust_overlay_identity {
-            Some(overlay) => {
-                identity.push(1);
-                append_identity_field(&mut identity, overlay.as_bytes());
-            }
-            None => identity.push(0),
-        }
+        append_identity_field(&mut identity, self.trust_store.fingerprint().as_bytes());
         lillux::cas::sha256_hex(&identity)
     }
 
@@ -2534,6 +2421,7 @@ impl Engine {
         );
 
         let resolved = ResolvedItem {
+            logical_project_root: ctx.effective_logical_project_root(project_root.as_deref()),
             canonical_ref: item_ref.clone(),
             kind: item_ref.kind.clone(),
             source_path: result.winner_path,
@@ -3156,7 +3044,11 @@ impl Engine {
             materialized_project_root.as_deref(),
             subject_resolution_authority,
         )?;
-        let roots = self.resolution_roots(materialized_project_root.clone());
+        let roots = self
+            .resolution_roots(materialized_project_root.clone())
+            .with_logical_project_root(
+                ctx.effective_logical_project_root(materialized_project_root.as_deref()),
+            );
         let (output, probed_absent) = crate::resolution::run_resolution_pipeline_with_probes(
             &verified_root.resolved.canonical_ref,
             &self.kinds,
@@ -3216,7 +3108,11 @@ impl Engine {
             &materialized_project_root,
             admitted,
         )?;
-        let roots = self.resolution_roots(Some(materialized_project_root.clone()));
+        let roots = self
+            .resolution_roots(Some(materialized_project_root.clone()))
+            .with_logical_project_root(
+                ctx.effective_logical_project_root(Some(materialized_project_root.as_path())),
+            );
         let project_content = admitted.project_content_for_root(&materialized_project_root)?;
         let (output, probed_absent) =
             crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
@@ -3349,10 +3245,11 @@ impl Engine {
         }
         let subject_digest = self.resolved_subject_digest(&item, project_root)?;
         let key_material = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "engine_generation_identity": self.request_engine_generation_identity(),
             "trust_identity": &request_authority.effective_trust_identity,
             "subject_digest": subject_digest,
+            "signer_project_root": project_root.map(|root| root.display().to_string()),
         });
         let key = lillux::canonical_json(&key_material)
             .map(|canonical| lillux::sha256_hex(canonical.as_bytes()))
@@ -3847,6 +3744,20 @@ impl Engine {
         self.checked_bundle_generation(|| self.effective_item_current(request))
     }
 
+    /// Resolve once and return the effective item together with the verified
+    /// resolution it was projected from. See
+    /// [`CheckedEngineGeneration::effective_item_with_resolution`].
+    pub fn effective_item_with_resolution(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<(EffectiveItem, crate::resolution::ResolutionOutput), EngineError> {
+        self.checked_bundle_generation(|| {
+            let output = self.effective_resolution_output_current(&request)?;
+            let item = self.effective_item_from_output(request, output.clone())?;
+            Ok((item, output))
+        })
+    }
+
     /// Resolve and compose an exact item closure for a downstream admission
     /// boundary. Unlike [`EffectiveItem`], this retains the complete verified
     /// root/ancestor/reference bytes and provenance required to seal and later
@@ -3872,7 +3783,9 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self.resolution_roots(request.project_root.clone());
+        let roots = self
+            .resolution_roots(request.project_root.clone())
+            .with_logical_project_root(request.effective_logical_project_root());
         let request_snapshot = self.effective_request_snapshot_current(
             request.project_root.as_deref(),
             &request.subject_resolution_authority,
@@ -3905,7 +3818,9 @@ impl Engine {
                 found: request.item_ref.kind.clone(),
             });
         }
-        let roots = self.resolution_roots(request.project_root.clone());
+        let roots = self
+            .resolution_roots(request.project_root.clone())
+            .with_logical_project_root(request.effective_logical_project_root());
         let snapshot = self.effective_request_snapshot_from_project_content(
             project_root,
             project_content,
@@ -4087,7 +4002,9 @@ impl Engine {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
             _ => None,
         };
-        let roots = self.resolution_roots(project_root.clone());
+        let roots = self
+            .resolution_roots(project_root.clone())
+            .with_logical_project_root(ctx.effective_logical_project_root(project_root.as_deref()));
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             &ctx.subject_resolution_authority,
@@ -4134,7 +4051,11 @@ impl Engine {
                 crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
                 _ => None,
             };
-            let roots = self.resolution_roots(project_root.clone());
+            let roots = self
+                .resolution_roots(project_root.clone())
+                .with_logical_project_root(
+                    ctx.effective_logical_project_root(project_root.as_deref()),
+                );
             let request_snapshot = self.effective_request_snapshot_current(
                 project_root.as_deref(),
                 &ctx.subject_resolution_authority,
@@ -4257,7 +4178,9 @@ impl Engine {
             }
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let roots = self
+                .resolution_roots(Some(project_root.to_path_buf()))
+                .with_logical_project_root(ctx.effective_logical_project_root(Some(project_root)));
             let project_content = admitted.project_content_for_root(project_root)?;
             let plan = crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
                 item,
@@ -4293,6 +4216,7 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        logical_project_root: Option<PathBuf>,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
@@ -4301,6 +4225,7 @@ impl Engine {
                 root_executor_id,
                 root_kind,
                 project_root,
+                logical_project_root,
                 subject_resolution_authority,
             )
         })
@@ -4313,13 +4238,16 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: &Path,
+        logical_project_root: Option<PathBuf>,
         admitted: &AdmittedRequestAuthoritySnapshot,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
             admitted.validate_root_binding(project_root)?;
             let request_snapshot =
                 self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
-            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let roots = self
+                .resolution_roots(Some(project_root.to_path_buf()))
+                .with_logical_project_root(logical_project_root);
             let project_content = admitted.project_content_for_root(project_root)?;
             crate::plan_builder::resolve_terminal_executor_under_project_authority(
                 root_executor_id,
@@ -4341,9 +4269,12 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        logical_project_root: Option<PathBuf>,
         subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
-        let roots = self.resolution_roots(project_root.clone());
+        let roots = self
+            .resolution_roots(project_root.clone())
+            .with_logical_project_root(logical_project_root);
         let request_snapshot = self.effective_request_snapshot_current(
             project_root.as_deref(),
             subject_resolution_authority,
@@ -4488,6 +4419,7 @@ impl Engine {
         let mut ordered = roots.ordered.clone();
         let Some(node_config_root) = &self.node_config_root else {
             return ResolutionRoots {
+                logical_project_root: None,
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4498,6 +4430,7 @@ impl Engine {
             .any(|root| root.ai_root == node_config_ai_root)
         {
             return ResolutionRoots {
+                logical_project_root: None,
                 owned_namespaces: roots.owned_namespaces.clone(),
                 ordered,
             };
@@ -4517,6 +4450,7 @@ impl Engine {
             },
         );
         ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: roots.owned_namespaces.clone(),
             ordered,
         }
@@ -4627,16 +4561,12 @@ impl Engine {
 
                 let metadata =
                     crate::parser_overlay_cache::fingerprint_parser_overlay(&overlay_root)?;
-                let base_trust = self
-                    .request_trust_base
-                    .as_ref()
-                    .unwrap_or(&self.trust_store);
+                let base_trust = &self.trust_store;
                 let key = crate::parser_overlay_cache::ParserOverlayCacheKey {
                     project_root: path.to_path_buf(),
                     overlay_fingerprint: metadata.fingerprint,
                     effective_trust_fingerprint: trust_store.fingerprint(),
                     base_trust_fingerprint: base_trust.fingerprint(),
-                    caller_overlay_identity: self.request_trust_overlay_identity.clone(),
                     generation_fingerprint: self.request_engine_generation_identity(),
                 };
                 self.parser_overlay_cache.get_or_build(
@@ -4785,20 +4715,6 @@ mod tests {
         SigningKey::from_bytes(&[42u8; 32])
     }
 
-    /// A project trust document for `key`, cross-signed by the test node key
-    /// (`test_signing_key`), as project trust documents must be.
-    fn node_vouched_project_trust_doc(key: &lillux::crypto::VerifyingKey) -> String {
-        let body = crate::trust::TrustedKeyDoc {
-            fingerprint: crate::trust::compute_fingerprint(key),
-            owner: "project".to_owned(),
-            version: "1.0.0".to_owned(),
-            attestation: None,
-            verifying_key: *key,
-        }
-        .to_toml();
-        lillux::signature::sign_content(&body, &test_signing_key(), "#", None)
-    }
-
     fn test_trust_store() -> TrustStore {
         let sk = test_signing_key();
         let vk = sk.verifying_key();
@@ -4878,6 +4794,7 @@ formats:
 
     fn test_plan_context() -> PlanContext {
         PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5077,6 +4994,7 @@ formats:
             assert_eq!(verified.trust_class, TrustClass::Trusted);
             let resolution = selected
                 .effective_resolution_output(EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: hook.clone(),
                     expected_kind: Some("tool".to_owned()),
                     project_root: None,
@@ -5173,6 +5091,7 @@ formats:
         engine
             .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
                 let resolution = generation.effective_resolution_output(EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: CanonicalRef::parse("tool:hello")?,
                     expected_kind: Some("tool".to_owned()),
                     project_root: None,
@@ -5419,6 +5338,7 @@ formats:
                 assert!(
                     generation
                         .effective_resolution_output(EffectiveItemRequest {
+                            logical_project_root: None,
                             item_ref: CanonicalRef::parse("worker:missing").unwrap(),
                             expected_kind: Some("worker".to_string()),
                             project_root: None,
@@ -5548,6 +5468,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5644,6 +5565,7 @@ formats:
         .with_trust_store(trust_store);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5689,6 +5611,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5731,6 +5654,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5778,6 +5702,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5842,6 +5767,7 @@ formats:
             vec![],
         );
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5890,6 +5816,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -5958,6 +5885,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6017,6 +5945,7 @@ formats:
         );
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],
@@ -6063,115 +5992,6 @@ formats:
                 .unwrap(),
             engine.registry_fingerprint(),
             "no-project effective composite fingerprint must equal boot fingerprint"
-        );
-    }
-
-    #[test]
-    fn project_scoped_engine_does_not_retain_deleted_project_trust() {
-        let project_dir = tempdir();
-        let trusted_dir = project_dir.join(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
-        fs::create_dir_all(&trusted_dir).unwrap();
-
-        let signing_key = SigningKey::from_bytes(&[77u8; 32]);
-        let verifying_key = signing_key.verifying_key();
-        let fingerprint = crate::trust::compute_fingerprint(&verifying_key);
-        let key_path = trusted_dir.join("project.toml");
-        fs::write(&key_path, node_vouched_project_trust_doc(&verifying_key)).unwrap();
-
-        let scoped = test_engine()
-            .with_node_trust_store(test_trust_store())
-            .for_project_root(&project_dir, None)
-            .unwrap();
-        assert!(scoped.trust_store.is_trusted(&fingerprint));
-        assert!(
-            !scoped
-                .effective_trust_store(None)
-                .unwrap()
-                .is_trusted(&fingerprint),
-            "projectless lookup must use the request trust base, not project-local keys"
-        );
-
-        fs::remove_file(key_path).unwrap();
-        let current = scoped.effective_trust_store(Some(&project_dir)).unwrap();
-        assert!(
-            !current.is_trusted(&fingerprint),
-            "project trust removals must be visible to the next request"
-        );
-    }
-
-    #[test]
-    fn logical_bundle_compile_subject_rejects_project_only_bundle_trust() {
-        let bundle_root = tempdir();
-        let project_root = tempdir();
-        let kinds_dir = tempdir();
-        let node_trust = test_trust_store();
-        write_signed_tool_schema(&kinds_dir);
-        let kinds = KindRegistry::load_base(&[kinds_dir], &node_trust).unwrap();
-
-        let project_signing_key = SigningKey::from_bytes(&[77u8; 32]);
-        let project_verifying_key = project_signing_key.verifying_key();
-        let project_fingerprint = crate::trust::compute_fingerprint(&project_verifying_key);
-        let trusted_dir = project_root.join(AI_DIR).join(crate::TRUST_KEYS_DIR);
-        fs::create_dir_all(&trusted_dir).unwrap();
-        fs::write(
-            trusted_dir.join("project.toml"),
-            node_vouched_project_trust_doc(&project_verifying_key),
-        )
-        .unwrap();
-
-        let source = "# ryeos-tool:\n#   note: project-only publisher\nprint('project trusted')\n";
-        let signed_source =
-            lillux::signature::sign_content(source, &project_signing_key, "#", None);
-        let source_path = bundle_root.join(AI_DIR).join("tools/hello.py");
-        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
-        fs::write(source_path, signed_source).unwrap();
-
-        let engine = Engine::new(
-            kinds,
-            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            vec![],
-        )
-        .with_trust_store(node_trust.clone())
-        .with_node_trust_store(node_trust)
-        .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
-            owned_namespaces: Vec::new(),
-            name: "core".to_owned(),
-            canonical_root: bundle_root,
-        }])
-        .for_project_root(&project_root, None)
-        .unwrap();
-        assert!(
-            !engine
-                .effective_trust_store(None)
-                .unwrap()
-                .is_trusted(&project_fingerprint),
-            "project-only signer must be absent from the compile trust base"
-        );
-
-        let mut pinned_ctx = test_plan_context();
-        pinned_ctx.project_context = ProjectContext::LocalPath { path: project_root };
-        pinned_ctx.subject_resolution_authority = SubjectResolutionAuthority::PinnedGeneration {
-            snapshot_hash: "b".repeat(64),
-        };
-        let canonical_ref = CanonicalRef::parse("tool:hello").unwrap();
-        let pinned_item = engine
-            .with_checked_bundle_generation(|generation| {
-                let resolved = generation.resolve(&pinned_ctx, &canonical_ref)?;
-                generation.verify(&pinned_ctx, resolved)
-            })
-            .unwrap();
-        assert_eq!(pinned_item.trust_class, TrustClass::Trusted);
-
-        let error = engine
-            .with_checked_bundle_generation(|generation| {
-                logical_bundle_compile_subject(generation, &pinned_ctx, &pinned_item, source)
-            })
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("pinned qualification Bundle source differs"),
-            "project-local trust must not transfer to projectless Bundle compilation: {error}"
         );
     }
 
@@ -6357,6 +6177,7 @@ formats:
         .with_trust_store(ts);
 
         let ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

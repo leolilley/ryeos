@@ -313,7 +313,6 @@ pub fn start_scoped_producer(
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: std::slice::from_ref(admitted_command.authority().identity()),
             verified_command: Some(&admitted_command),
             external_read_only_mounts: live.read_only_mounts(),

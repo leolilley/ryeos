@@ -16,11 +16,13 @@ pub mod metadata;
 pub mod model_setup;
 pub mod native_capacity;
 pub mod offline_operation;
+pub mod operator_layout;
 pub mod provider_env;
 pub mod start;
 pub mod status;
 pub mod stop;
 pub mod supervision;
+pub mod trust_registry;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -44,7 +46,7 @@ pub use init::{
 pub use init_check::{InitDiagnostics, InitState, require_initialized};
 pub use lifecycle_wire::{
     LIFECYCLE_FRAME_MAX_BYTES, LIFECYCLE_PROTOCOL_VERSION, LifecycleIdentity, LifecycleResponse,
-    LifecycleWireState, StartupPhase, StartupSnapshot,
+    LifecycleWireState, ServiceWindow, StartupPhase, StartupSnapshot,
 };
 pub use metadata::DaemonMetadata;
 pub use model_setup::{

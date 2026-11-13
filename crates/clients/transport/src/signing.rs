@@ -7,15 +7,15 @@ use lillux::crypto::{SigningKey, fingerprint as compute_fp, load_signing_key};
 use crate::error::TransportError;
 
 /// Location of the operator's persistent signing key under an app root,
-/// `<app_root>/.ai/config/keys/signing/private_key.pem`, as created by
+/// `<app_root>/.ai/node/operator/signing/private_key.pem`, as created by
 /// `ryeos init`. The single client-side owner of this layout: this crate's
 /// tests pin the exact path components, and the CLI's tests compare it with
 /// the engine's runtime-root layout, so a change on either side fails a test.
 pub fn operator_signing_key_path(app_root: &Path) -> PathBuf {
     app_root
         .join(".ai")
-        .join("config")
-        .join("keys")
+        .join("node")
+        .join("operator")
         .join("signing")
         .join("private_key.pem")
 }
@@ -58,6 +58,14 @@ impl Signer {
             signing_key: sk,
             fingerprint: fp,
         })
+    }
+
+    /// Sign raw bytes with this key and return the base64 signature. The caller
+    /// owns what the bytes mean; this is how a principal signs a statement of
+    /// its own, such as a remote delegation, without exposing the key.
+    pub fn sign_bytes_base64(&self, bytes: &[u8]) -> String {
+        let signature = lillux::crypto::Signer::sign(&self.signing_key, bytes);
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
     }
 
     /// Build the canonical request string and produce the four `x-ryeos-*`
@@ -162,7 +170,7 @@ mod tests {
                 .components()
                 .map(|component| component.as_os_str().to_str().unwrap())
                 .collect::<Vec<_>>(),
-            [".ai", "config", "keys", "signing", "private_key.pem"]
+            [".ai", "node", "operator", "signing", "private_key.pem"]
         );
     }
 

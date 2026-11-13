@@ -565,11 +565,21 @@ pub(crate) fn load_item_raw(
         crate::item_resolution::parse_signature_header(&content, &source_format.signature);
     let (trust_class, signer_fingerprint) = match &sig_header {
         Some(header) => {
+            let signer_project_root = roots
+                .logical_project_root
+                .as_deref()
+                .or_else(|| project_authority.map(|(root, _)| root))
+                .or_else(|| roots.project_root());
             let (contract_trust, signer) = crate::trust::verify_item_signature(
                 &content,
                 header,
                 &source_format.signature,
                 trust_store,
+                &crate::trust::SignerContext::new(
+                    result.winner_space,
+                    &ref_.kind,
+                    signer_project_root,
+                ),
             )
             .map_err(|e| ResolutionError::IntegrityFailure {
                 item_ref: ref_.to_string(),

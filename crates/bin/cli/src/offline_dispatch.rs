@@ -283,7 +283,6 @@ fn boot_engine(
         config,
         bundle_roots,
         project_root.as_deref(),
-        None, // no trust overlay
         isolation,
         execution_policy,
     )
@@ -306,6 +305,7 @@ fn effective_item_from_project_root(
     execute_ref: &str,
 ) -> Result<EffectiveItem, CliError> {
     let request = ryeos_engine::engine::EffectiveItemRequest {
+        logical_project_root: None,
         item_ref: canonical,
         expected_kind: None,
         subject_resolution_authority:
@@ -557,6 +557,26 @@ fn exec_tool(
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<Option<Value>, CliError> {
+    // A host-authority tool runs only through the daemon, under the node
+    // lane, the operator's exact grant and the configured operator. The
+    // offline path admits none of that, so it refuses rather than running the
+    // item confined or on the host.
+    let posture = engine
+        .kinds
+        .get(&item.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .map(|execution| execution.project_execution_posture(&item.composed_value))
+        .transpose()
+        .map_err(|error| CliError::Local {
+            detail: format!("offline tool `{tool_ref_str}`: {error}"),
+        })?;
+    if posture.is_some_and(|posture| posture.is_host_direct()) {
+        return Err(CliError::Local {
+            detail: format!(
+                "offline tool `{tool_ref_str}` declares host_authority: required; start the node and run it as the configured operator under a host_access grant"
+            ),
+        });
+    }
     // Check executor_id
     let executor_id = item
         .composed_value
@@ -761,11 +781,6 @@ fn exec_tool(
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: std::slice::from_ref(bundle_root),
-                node_trusted_keys_dir: Some(
-                    &app_root
-                        .join(ryeos_engine::AI_DIR)
-                        .join("config/keys/trusted"),
-                ),
                 verified_code: &isolation_verified_code,
                 verified_command: Some(&verified_command),
                 // Offline dispatch admits no launch capsule, so there is no
@@ -1203,6 +1218,7 @@ mod tests {
         project: PathBuf,
         bundle: PathBuf,
         key: SigningKey,
+        node_key: SigningKey,
     }
 
     impl Fixture {
@@ -1216,14 +1232,8 @@ mod tests {
             let system = tmp.path().join("system");
             let project = tmp.path().join("project");
             std::fs::create_dir_all(project.join(ryeos_engine::AI_DIR)).unwrap();
-            let trust_dir = system
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("trusted");
-            std::fs::create_dir_all(&trust_dir).unwrap();
             let key = SigningKey::generate(&mut OsRng);
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            let node_key = SigningKey::generate(&mut OsRng);
             let node_identity_dir = system
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
@@ -1237,9 +1247,15 @@ mod tests {
                  limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             )
             .unwrap();
-            std::fs::write(node_identity_dir.join("public-identity.json"), "{}").unwrap();
-            let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+            let pem = node_key.to_pkcs8_pem(Default::default()).unwrap();
             std::fs::write(node_identity_dir.join("private_key.pem"), pem.as_bytes()).unwrap();
+            ryeos_engine::test_support::pin_signer(
+                &system,
+                &key.verifying_key(),
+                "test",
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::everywhere(),
+            );
             let dev_trust = std::fs::read_to_string(
                 workspace_root()
                     .join(".dev-keys")
@@ -1248,7 +1264,13 @@ mod tests {
             .unwrap();
             let dev_trust = ryeos_engine::trust::PublisherTrustDoc::parse(&dev_trust).unwrap();
             let dev_key = dev_trust.decode_verifying_key().unwrap();
-            ryeos_engine::trust::pin_key(&dev_key, "RyeOS Development", &trust_dir, None).unwrap();
+            ryeos_engine::test_support::pin_signer(
+                &system,
+                &dev_key,
+                "RyeOS Development",
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::everywhere(),
+            );
             let core_key_pem = std::fs::read_to_string(
                 workspace_root().join(".dev-keys").join("PUBLISHER_DEV.pem"),
             )
@@ -1276,6 +1298,7 @@ mod tests {
                 project,
                 bundle,
                 key,
+                node_key,
             };
             this.resign_node_commands(&core_bundle, &core_key);
             this.write_signed_with(
@@ -1388,6 +1411,9 @@ mod tests {
             let body = lillux::signature::strip_signature_lines(&raw);
             let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =
                 serde_yaml::from_str(&body).unwrap();
+            // Offline dispatch is not about the sandbox: the node runs under
+            // the profile's unconfined class.
+            let profile = profile.for_host_class("local_unconfined").unwrap();
             for (name, source_policy) in profile.policies() {
                 let mut policy = source_policy.clone();
                 if name == "command_registration" {
@@ -1486,11 +1512,8 @@ mod tests {
             let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
             let mut item_source_hashes = if ref_path.exists() {
                 let signed_ref = std::fs::read_to_string(&ref_path).unwrap();
-                let trust_store = ryeos_engine::trust::TrustStore::load(
-                    None,
-                    &self.system.join(ryeos_engine::AI_DIR).join("config"),
-                )
-                .unwrap();
+                let trust_store =
+                    ryeos_engine::trust::TrustStore::load_node_registry(&self.system).unwrap();
                 let verified_ref =
                     ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
                         &signed_ref,
@@ -1569,8 +1592,16 @@ mod tests {
             );
         }
 
+        /// Sign node documents (under `<system>/.ai/node/`) with the node key
+        /// and everything else with the fixture publisher key.
         fn write_signed(&self, path: &Path, body: &str) {
-            self.write_signed_with(path, body, &self.key);
+            let node_dir = self.system.join(ryeos_engine::AI_DIR).join("node");
+            let signer = if path.starts_with(&node_dir) {
+                &self.node_key
+            } else {
+                &self.key
+            };
+            self.write_signed_with(path, body, signer);
         }
 
         fn write_signed_with(&self, path: &Path, body: &str, signer: &SigningKey) {

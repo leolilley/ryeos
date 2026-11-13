@@ -4,7 +4,7 @@
 //! ORIGIN publishes a product whose manifest names a file held in its
 //! large-object store, together with the witness attestation and the origin
 //! admission. HOSTED is configured with a remote entry for ORIGIN (pinned
-//! signing key, principal id, site id), a remote-operator grant for ORIGIN's
+//! signing key, principal id, site id), a remote-principal grant for ORIGIN's
 //! operator bound to ORIGIN's site, and a remote-node grant for ORIGIN's node
 //! key. ORIGIN holds a remote entry named `hosted` so the push service can
 //! address HOSTED.
@@ -140,12 +140,13 @@ fn remote_config(
         base64::engine::general_purpose::STANDARD.encode(node_key.verifying_key().as_bytes());
     ryeos_api::remote::config::RemoteConfig {
         name: name.to_owned(),
-        url,
+        url: Some(url),
+        reachability: Default::default(),
         principal_id: format!("fp:{}", fingerprint(node_key)),
         signing_key: format!("ed25519:{public_key}"),
         site_id: site_id.to_owned(),
         vault_fingerprint: format!("sha256:{name}-fixture-vault"),
-        ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
         project_bindings: HashMap::new(),
     }
 }
@@ -154,10 +155,17 @@ fn install_single_remote(
     state_path: &Path,
     remote: ryeos_api::remote::config::RemoteConfig,
 ) -> Result<()> {
-    ryeos_api::remote::config::save_remotes(
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf()).node_signing_key_path(),
+    )?;
+    ryeos_api::remote::config::write_remote_pin(
         state_path,
-        &HashMap::from([(remote.name.clone(), remote)]),
-    )
+        node.signing_key(),
+        &remote,
+        ryeos_api::remote::config::PinSource::ExpectedFingerprint,
+        None,
+    )?;
+    Ok(())
 }
 
 fn authorized_keys_dir(state_path: &Path) -> std::path::PathBuf {
@@ -189,32 +197,34 @@ fn authorize_remote_node(
         "product-transport-peer",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         remote_site_id,
         &local.node,
     )?;
     Ok(())
 }
 
-/// Admit `remote_operator` on the daemon at `state_path` as a remote operator
+/// Admit `remote_principal` on the daemon at `state_path` as a remote operator
 /// bound to `remote_site_id`.
-fn authorize_remote_operator(
+fn authorize_remote_principal(
     state_path: &Path,
     local: &FastFixture,
-    remote_operator: &SigningKey,
+    remote_principal: &SigningKey,
     remote_site_id: &str,
     scopes: &[&str],
 ) -> Result<()> {
     let public_key = base64::engine::general_purpose::STANDARD
-        .encode(remote_operator.verifying_key().as_bytes());
+        .encode(remote_principal.verifying_key().as_bytes());
     let identity = daemon_identity(state_path)?;
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &authorized_keys_dir(state_path),
-        &fingerprint(remote_operator),
+        &fingerprint(remote_principal),
         &public_key,
         &scope_strings(scopes),
         "product-transport-operator",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &identity,
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,
@@ -471,7 +481,7 @@ async fn start_pair() -> Result<Pair> {
                 ORIGIN_NODE_SCOPES,
             )?;
             for operator in [&origin_operator, &second] {
-                authorize_remote_operator(
+                authorize_remote_principal(
                     state_path,
                     fixture,
                     operator,
@@ -1155,5 +1165,329 @@ async fn receive_product_pulls_the_large_object() -> Result<()> {
     assert_eq!(received["witness_hash"], product.witness_hash);
     assert_eq!(received["manifest_hash"], product.manifest_hash);
     assert_resident_and_exact(&puller, product).await?;
+    Ok(())
+}
+
+// ── Wiring HOSTED by delegated offline operations, without a shell ───────
+//
+// HOSTED starts knowing only ORIGIN's operator, granted by HOSTED's local
+// operator the exact offline scopes for the wiring. Its signed maintenance
+// policy delegates the wiring operations. ORIGIN's operator then signs, from
+// HOSTED's reported facts, a pin of ORIGIN's descriptor and the grants the
+// push needs; each is delivered to HOSTED's inbox (the platform channel) and
+// applied at the next start. Then ORIGIN pushes, with no grant or remote ever
+// written on HOSTED by hand.
+
+const WIRING_SCOPES: &[&str] = &[
+    "ryeos.offline.node.authorize-client",
+    "ryeos.offline.node.remote.pin",
+];
+
+/// Republish HOSTED's maintenance member delegating the wiring operations,
+/// through the local operator's own offline path on the stopped node.
+fn delegate_wiring(state_path: &Path) -> Result<()> {
+    let path = state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("node/policies/maintenance.yaml");
+    let signed = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
+    let mut body: serde_yaml::Value =
+        serde_yaml::from_str(&lillux::signature::strip_signature_lines(&signed))?;
+    let mapping = body
+        .as_mapping_mut()
+        .context("maintenance policy is a mapping")?;
+    for path_owned in ["category", "section"] {
+        mapping.remove(path_owned);
+    }
+    mapping.insert(
+        "remote_offline_operations".into(),
+        serde_yaml::to_value([
+            "node.external-execution.compose",
+            "node.authorize-client",
+            "node.remote.pin",
+            "node.bundle.replace",
+        ])?,
+    );
+    let policy = serde_yaml::to_string(&body)?.into_bytes();
+    let pinned = ryeos_node::offline_operation::handlers::prospective_policy_apply_digest(
+        state_path,
+        "maintenance",
+        &policy,
+    )?;
+    ryeos_node::offline_operation::apply_local(
+        state_path,
+        &ryeos_node::offline_operation::BareHost,
+        ryeos_node::offline_operation::LocalDraft {
+            operation: "node.policy-apply".to_owned(),
+            arguments: json!({ "section": "maintenance" }),
+            inputs: std::collections::BTreeMap::from([("policy".to_owned(), policy)]),
+            expected_result: std::collections::BTreeMap::from([(
+                "policy_generation".to_owned(),
+                pinned,
+            )]),
+        },
+    )?;
+    Ok(())
+}
+
+/// ORIGIN's descriptor, as `ryeos remote-descriptor` exports it.
+fn origin_descriptor(origin_state: &Path, url: &str) -> Result<Vec<u8>> {
+    let node = common::fast_fixture::node_signing_key();
+    let fingerprint = fingerprint(&node);
+    let vault = lillux::vault::read_public_key(
+        &origin_state
+            .join(ryeos_engine::AI_DIR)
+            .join("node/vault/public_key.pem"),
+    )?
+    .fingerprint();
+    Ok(serde_yaml::to_string(&json!({
+        "version": 1,
+        "name": ORIGIN_REMOTE,
+        "url": url,
+        "node": {
+            "public_key": format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(node.verifying_key().as_bytes())
+            ),
+            "fingerprint": fingerprint,
+            "site_id": format!("site:{fingerprint}"),
+            "vault_fingerprint": vault,
+        },
+        "ingest_ignore": { "patterns": [] },
+    }))?
+    .into_bytes())
+}
+
+/// Sign `operation` as ORIGIN's operator against the stopped HOSTED's facts
+/// and current grant, and put it in HOSTED's inbox with its inputs, as the
+/// platform delivery does.
+fn deliver_to_inbox(
+    hosted_state: &Path,
+    operation: &str,
+    arguments: Value,
+    inputs: &[(&str, Vec<u8>)],
+) -> Result<String> {
+    let operator = common::fast_fixture::user_signing_key();
+    let facts = ryeos_node::offline_operation::read_facts(hosted_state)?;
+    let spec = ryeos_node::offline_operation::table::lookup(operation).context("operation")?;
+    let pins = ryeos_node::offline_operation::facts::MANDATORY_FACTS
+        .iter()
+        .chain(spec.preconditions)
+        .map(|fact| ((*fact).to_owned(), facts[*fact].clone()))
+        .collect();
+    let grant = std::fs::read(
+        authorized_keys_dir(hosted_state).join(format!("{}.toml", fingerprint(&operator))),
+    )?;
+    let delivery = ryeos_node::offline_operation::sign::sign_request_now(
+        ryeos_node::offline_operation::sign::SignDraft {
+            node_fingerprint: fingerprint(&hosted_node_key()),
+            operation: operation.to_owned(),
+            arguments,
+            inputs: inputs
+                .iter()
+                .map(|(slot, bytes)| ((*slot).to_owned(), bytes.clone()))
+                .collect(),
+            expected_result: Default::default(),
+            pins,
+            lifetime_minutes: None,
+            remote: Some(ryeos_node::offline_operation::sign::RemoteSigner {
+                grant_digest: lillux::sha256_hex(&grant),
+                origin_site_id: site_of(&common::fast_fixture::node_signing_key()),
+            }),
+        },
+        &operator,
+    )?;
+    let inbox = hosted_state
+        .join(ryeos_engine::AI_DIR)
+        .join("state/offline-operations/inbox");
+    std::fs::create_dir_all(&inbox)?;
+    for (digest, bytes) in delivery.input_bytes()? {
+        std::fs::write(inbox.join(format!("{digest}.input")), bytes)?;
+    }
+    let bytes = delivery.request.to_bytes()?;
+    std::fs::write(
+        inbox.join(format!("{}.json", lillux::sha256_hex(&bytes))),
+        &bytes,
+    )?;
+    delivery.request.digest()
+}
+
+/// Restart HOSTED so its startup applies the inbox, then stop it again, and
+/// return the request digests in its ledger.
+async fn apply_at_restart(hosted: &mut DaemonHarness) -> Result<Vec<String>> {
+    hosted.respawn_with(|_| {}).await?;
+    hosted.kill_daemon().await?;
+    let ledger = ryeos_node::offline_operation::read_ledger(&hosted.state_path)?;
+    Ok(ledger.request_digests.into_iter().collect())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosted_node_wired_by_delegated_offline_operations_takes_a_push() -> Result<()> {
+    let origin_node = common::fast_fixture::node_signing_key();
+    let origin_operator = common::fast_fixture::user_signing_key();
+    let origin_site = site_of(&origin_node);
+    let (mut hosted, hosted_fixture) = DaemonHarness::start_fast_with_node_and_user_keys(
+        hosted_node_key(),
+        hosted_operator_key(),
+        |state_path, _, fixture| {
+            authorize_remote_principal(
+                state_path,
+                fixture,
+                &origin_operator,
+                &origin_site,
+                WIRING_SCOPES,
+            )
+        },
+        |_| {},
+    )
+    .await?;
+    hosted.kill_daemon().await?;
+    delegate_wiring(&hosted.state_path)?;
+
+    let origin = start_origin(None).await?;
+    let origin_url = format!("http://{}", origin.harness.bind);
+    let encode = |key: &SigningKey| {
+        base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes())
+    };
+
+    // 1. Pin ORIGIN from its descriptor, without HOSTED contacting it.
+    let pin = deliver_to_inbox(
+        &hosted.state_path,
+        "node.remote.pin",
+        json!({ "name": ORIGIN_REMOTE }),
+        &[(
+            "descriptor",
+            origin_descriptor(&origin.harness.state_path, &origin_url)?,
+        )],
+    )?;
+    assert!(apply_at_restart(&mut hosted).await?.contains(&pin));
+    let remotes = ryeos_api::remote::config::load_remotes(&hosted.state_path)?;
+    assert_eq!(remotes[ORIGIN_REMOTE].site_id, origin_site);
+
+    // 2. Grant ORIGIN's node the push and forwarding scopes.
+    let node_grant = deliver_to_inbox(
+        &hosted.state_path,
+        "node.authorize-client",
+        json!({
+            "public_key": encode(&origin_node),
+            "scopes": ORIGIN_NODE_SCOPES,
+            "label": "origin node",
+            "class": "remote_node",
+            "origin_site_id": origin_site,
+        }),
+        &[],
+    )?;
+    assert!(apply_at_restart(&mut hosted).await?.contains(&node_grant));
+
+    // 3. Add the push scopes to ORIGIN's operator's own grant.
+    let operator_grant = deliver_to_inbox(
+        &hosted.state_path,
+        "node.authorize-client",
+        json!({
+            "public_key": encode(&origin_operator),
+            "scopes": PUSH_SCOPES,
+            "label": "origin operator",
+            "class": "remote_principal",
+            "origin_site_id": origin_site,
+            "merge_scopes": true,
+        }),
+        &[],
+    )?;
+    hosted.respawn_with(|_| {}).await?;
+    let ledger = ryeos_node::offline_operation::read_ledger(&hosted.state_path)?;
+    assert!(ledger.request_digests.contains(&operator_grant));
+
+    install_single_remote(
+        &origin.harness.state_path,
+        remote_config(
+            HOSTED_REMOTE,
+            format!("http://{}", hosted.bind),
+            &hosted_node_key(),
+            &hosted_fixture.site_id(),
+        ),
+    )?;
+    let pair = Pair {
+        origin,
+        hosted,
+        hosted_fixture,
+    };
+    let outcome = pair.push().await?;
+    assert_eq!(outcome["witness_hash"], pair.origin.product.witness_hash);
+    assert_resident_and_exact(&pair.hosted, &pair.origin.product).await?;
+    Ok(())
+}
+
+// ── The push bound defaults to the declaration ───────────────────────────
+
+/// The declared `maximum_total_bytes` of the product `publish_large_product`
+/// captures.
+const DECLARED_MAXIMUM_BYTES: u64 = 8 * 1024 * 1024;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_without_a_bound_takes_the_declared_maximum_after_a_command_admission() -> Result<()> {
+    let pair = start_pair().await?;
+    let product = &pair.origin.product;
+    // Admission through the service `ryeos admission submit` dispatches to:
+    // idempotent per subject and policy, so it names the origin admission.
+    let (status, body) = pair
+        .origin
+        .harness
+        .post_execute(
+            "service:admission/submit",
+            ".",
+            json!({
+                "subject_hash": product.witness_hash,
+                "policy": "local-node-v2",
+                "claim": "accepted",
+            }),
+        )
+        .await?;
+    ensure!(
+        status.is_success(),
+        "admission/submit returned {status}: {body}"
+    );
+    assert_eq!(body["result"]["attestation_hash"], product.admission_hash);
+
+    // A bound above the declaration is refused before anything is offered.
+    let (status, body) = pair
+        .origin
+        .harness
+        .post_execute(
+            "service:external-content/push-product",
+            ".",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "witness_hash": product.witness_hash,
+                "origin_admission_hash": product.admission_hash,
+                "maximum_bytes": DECLARED_MAXIMUM_BYTES + 1,
+            }),
+        )
+        .await?;
+    assert_refused(
+        status,
+        &body.to_string(),
+        "product_push_bound_exceeds_declaration",
+        "bound above the declaration",
+    );
+
+    let (status, body) = pair
+        .origin
+        .harness
+        .post_execute(
+            "service:external-content/push-product",
+            ".",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "witness_hash": product.witness_hash,
+                "origin_admission_hash": product.admission_hash,
+            }),
+        )
+        .await?;
+    ensure!(
+        status.is_success(),
+        "push-product returned {status}: {body}"
+    );
+    assert_eq!(body["result"]["maximum_bytes"], DECLARED_MAXIMUM_BYTES);
+    assert_eq!(body["result"]["witness_hash"], product.witness_hash);
+    assert_resident_and_exact(&pair.hosted, product).await?;
     Ok(())
 }

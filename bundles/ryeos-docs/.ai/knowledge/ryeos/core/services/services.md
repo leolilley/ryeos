@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:07:15Z:3518e2e8a7af41db3670a1be7c48a5386c4ed24bb0fbb4bfcae9478a3be44d05:YGGk6cXnh40lZriCxd/CcgPzPQzMSO1oRgDkhMIC20lnaZl6bbelrxhKLwZOHbzEFZdJAGr9EPMWXwMvv15mDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:952adc8ff8be16a1d1254d0679c5f1797cdadc9f69682f5e50e90a5149a7bd40:irw3f7AYM5SNUaGm/8cym9fjCbDoc6YycPupA5fjk5lvBemBGjLvEx1Z2LWXXNRtp0PRcD5UnHm/TMlifo5uCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -44,14 +44,25 @@ hashes through CAS.
 | `projection/verify` | `projection.verify` | `ryeos.execute.service.projection/verify` |
 | `projection/rebuild` | `projection.rebuild` | `ryeos.execute.service.projection/rebuild` |
 | `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
+| `external-execution/provider-inventory` | `external-execution.provider-inventory` | `ryeos.execute.service.external-execution/provider-inventory` |
 | `external-execution/settle-unknown-allocation` | `external-execution.settle-unknown-allocation` | `ryeos.execute.service.external-execution/settle-unknown-allocation` |
 | `external-execution/status` | `external-execution.status` | `ryeos.execute.service.external-execution/status` |
 | `health/status` | `health.status` | none |
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
+| `identity/renew-key` | `identity.renew-key` | `ryeos.execute.service.identity/renew-key` |
+| `identity/revoke-delegation` | `identity.revoke-delegation` | `ryeos.execute.service.identity/revoke-delegation` |
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
 | `system/push-head` | `system.push-head` | `ryeos.execute.service.system/push-head` |
+
+`external-execution/provider-inventory` lists, read only, what the provider
+holds for one binding's owner scope and stores a node-signed receipt (see the
+CLI reference). `external-execution/settle-unknown-allocation` takes
+`placement_thread_id`, a free-text `reason` and `inventory`, the digest of such
+a receipt; it refuses with `settle_inventory_refused` unless the receipt is
+fresh, complete, for the allocation's provider account and lists no unknown
+running sandbox created inside the allocation's contact window.
 
 `health/status`, `identity/public_key`, and `system/ingest-ignore` back
 unauthenticated discovery routes. Mutating routes such as
@@ -155,6 +166,9 @@ for the full matrix.
 | `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
+| `remote/delegate` | `remote.delegate` | `ryeos.execute.service.remote/delegate` |
+| `remote/delegation-list` | `remote.delegation-list` | `ryeos.execute.service.remote/delegation-list` |
+| `remote/delegation-revoke` | `remote.delegation-revoke` | `ryeos.execute.service.remote/delegation-revoke` |
 
 ## Core Thread Read Services
 

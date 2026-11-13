@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_authentication_refuses_every_non_remote_operator_shape() {
+    fn accept_authentication_refuses_every_non_remote_principal_shape() {
         let root = tempfile::tempdir().unwrap();
         let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let fingerprint = format!("fp:{}", "22".repeat(32));
@@ -313,12 +313,12 @@ mod tests {
                 true,
             ),
             (
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 None,
                 true,
             ),
             (
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 Some("site:o"),
                 false,
             ),

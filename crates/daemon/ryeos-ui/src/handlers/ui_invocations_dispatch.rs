@@ -1518,6 +1518,7 @@ pub(crate) fn prepare_item_ref(
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
 
     let plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: ctx.fingerprint.clone(),
@@ -2005,6 +2006,8 @@ mod tests {
             session_id: "session-1".to_string(),
             created_at: now,
             expires_at: now + Duration::from_secs(60),
+            absolute_expires_at: now + Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(60),
             principal_id: "fp:test".to_string(),
             granted_caps: vec!["ui.read".to_string()],
             user_principal_id,

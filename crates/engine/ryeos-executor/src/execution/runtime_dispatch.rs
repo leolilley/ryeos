@@ -328,6 +328,7 @@ fn callback_execution_context(
     // capsule. Parent selection controls are not forwarded as child inputs.
     let scheduled_fire = parent_resume.scheduled_fire;
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: thread_auth.acting_principal.clone(),
             scopes: dispatch_caps.to_vec(),
@@ -598,7 +599,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         anyhow::bail!("product-selected callbacks require an inline action");
     }
 
-    let child_provenance = cap.provenance.clone_for_borrowed_child();
+    let mut child_provenance = cap.provenance.clone_for_borrowed_child();
 
     let thread_auth = state
         .thread_auth
@@ -647,6 +648,32 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             &state.authorizer,
             &child_provenance.request_engine().kinds,
         )?;
+    }
+
+    // A child that declares host authority is judged before its exact
+    // preflight seals a root admission: the node lane, the operator's grant
+    // (origin graph_child, through this caller thread) and the operator as
+    // the acting principal. A granted child is sealed as what runs, unconfined
+    // on the host; its parent keeps its own confinement.
+    if let Ok(item) = ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
+        && let Some(converted) =
+            crate::execution::host_access_gate::host_direct_provenance_before_admission(
+                state,
+                &item,
+                &child_provenance,
+                &ryeos_app::host_access::HostAccessCaller {
+                    acting_principal: thread_auth.acting_principal.as_str(),
+                    handler_context: None,
+                    target_site_id: None,
+                    current_site_id: state.threads.site_id(),
+                    origin_site_id: &caller_thread.origin_site_id,
+                    parent_thread_id: Some(params.thread_id.as_str()),
+                    scheduled: false,
+                },
+            )
+            .map_err(anyhow::Error::new)?
+    {
+        child_provenance = converted;
     }
 
     // Actual capability, ThreadAuth, launch-owner and item/binding capability

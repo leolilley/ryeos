@@ -46,12 +46,12 @@ fn cli_descriptor_binds_pagination_flags_through_service_schema() {
     }
 }
 
-fn remote_operator(owner: &str) -> HandlerContext {
+fn remote_principal(owner: &str) -> HandlerContext {
     HandlerContext::new_with_authority(
         owner.to_owned(),
         vec![LIST_CAP.to_owned()],
         true,
-        Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+        Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
         Some(format!("site:{}", "c".repeat(64))),
     )
 }
@@ -97,7 +97,7 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
         .finish_credential_profile_deletion("d", &alice, generation)
         .unwrap();
 
-    let first = list(state.clone(), remote_operator(&alice), json!({"limit":1}))
+    let first = list(state.clone(), remote_principal(&alice), json!({"limit":1}))
         .await
         .unwrap();
     assert_eq!(first["profiles"].as_array().unwrap().len(), 1);
@@ -106,7 +106,7 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
     assert_eq!(first["next_cursor"], "a");
     let last = list(
         state.clone(),
-        remote_operator(&alice),
+        remote_principal(&alice),
         json!({"limit":1,"after":first["next_cursor"]}),
     )
     .await
@@ -133,7 +133,7 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
             "updated_at_ms"
         ]
     );
-    let other = list(state.clone(), remote_operator(&bob), json!({}))
+    let other = list(state.clone(), remote_principal(&bob), json!({}))
         .await
         .unwrap();
     assert_eq!(other["profiles"].as_array().unwrap().len(), 1);
@@ -175,10 +175,10 @@ async fn list_rejects_unverified_nonoperator_and_unforwarded_requests() {
     for (verified, class, origin) in [
         (
             false,
-            AuthorizedKeyPrincipalClass::RemoteOperator,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
             Some(format!("site:{}", "b".repeat(64))),
         ),
-        (true, AuthorizedKeyPrincipalClass::RemoteOperator, None),
+        (true, AuthorizedKeyPrincipalClass::RemotePrincipal, None),
         (
             true,
             AuthorizedKeyPrincipalClass::RemoteNode,
@@ -218,7 +218,7 @@ async fn list_rejects_invalid_bounds_and_caller_selected_ownership() {
         json!({"all":true}),
     ] {
         assert!(
-            list(state.clone(), remote_operator(&owner), request.clone())
+            list(state.clone(), remote_principal(&owner), request.clone())
                 .await
                 .is_err(),
             "{request}"

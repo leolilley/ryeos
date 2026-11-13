@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-13T04:25:00Z:c133d872b683417e0fd06869ea56c4779b6c8902cae8398894f6586204bfa67a:gUYWqefsNk25rYLvayTWwiYlEUgD6xoxqhDA0Scdi/+elSc6cEW3jr8XDghZlq7TGHRsLaEmazZIN/xIxm5KBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/sessions/list
+path: /ui/api/sessions/list
+methods:
+  - GET
+auth: ryeos_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/sessions/list"

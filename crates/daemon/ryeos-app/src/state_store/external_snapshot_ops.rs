@@ -657,3 +657,13 @@ impl StateStore {
             .quarantine_restored_verifier_attempt(operation_id)
     }
 }
+
+impl StateStore {
+    /// Every provider resource the node's journals name, for an inventory
+    /// join. Read only.
+    pub(crate) fn provider_resource_records(
+        &self,
+    ) -> Result<Vec<runtime_db::provider_inventory::NodeProviderRecord>> {
+        self.lock()?.runtime_db.provider_resource_records()
+    }
+}

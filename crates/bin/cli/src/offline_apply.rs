@@ -159,6 +159,21 @@ impl OfflineHost for CliHost {
             TypedReport::ReplayIndexes(report) => captured.replay_indexes = Some(*report),
         }
     }
+
+    fn pin_remote(&self, request: ryeos_node::offline_operation::RemotePin<'_>) -> Result<Value> {
+        request
+            .state_lock
+            .ensure_protects_app_root(request.app_root)?;
+        let text =
+            std::str::from_utf8(request.descriptor).context("the descriptor is not UTF-8")?;
+        ryeos_api::remote::config::pin_remote(
+            request.app_root,
+            request.node.signing_key(),
+            request.name,
+            text,
+            None,
+        )
+    }
 }
 
 /// A string field of a handler's JSON result.

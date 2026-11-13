@@ -1,4 +1,4 @@
-//! `remote/configure` — add or update a remote node config.
+//! `remote/configure` — pin a remote node and write its node-signed record.
 //!
 //! Configure never trusts the key a remote shows it on first contact.
 //! The caller must pin the remote node key with a descriptor
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use crate::remote::client::RemoteClient;
@@ -29,8 +30,9 @@ pub struct Request {
     /// URL of the remote node (HTTPS required except for loopback).
     #[serde(default)]
     pub url: Option<String>,
-    /// Path to a remote descriptor YAML. The descriptor is a trust pin,
-    /// not a credential; configure still verifies the live node matches it.
+    /// Path to a signed remote descriptor. The descriptor is a trust pin,
+    /// not a credential; configure verifies its signature and that the live
+    /// node matches it.
     #[serde(default)]
     pub descriptor: Option<PathBuf>,
     /// Expected remote node fingerprint (64 lowercase hex, the SHA-256 of
@@ -47,23 +49,7 @@ pub const REMOTE_EXPECTED_FINGERPRINT_INVALID: &str = "remote_expected_fingerpri
 /// Stable refusal code: the live node fingerprint differs from the pin.
 pub const REMOTE_KEY_PIN_MISMATCH: &str = "remote_key_pin_mismatch";
 
-/// How the remote node key was pinned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PinSource {
-    Descriptor,
-    ExpectedFingerprint,
-    DescriptorAndExpectedFingerprint,
-}
-
-impl PinSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PinSource::Descriptor => "descriptor",
-            PinSource::ExpectedFingerprint => "expected_fingerprint",
-            PinSource::DescriptorAndExpectedFingerprint => "descriptor_and_expected_fingerprint",
-        }
-    }
-}
+pub use crate::remote::config::PinSource;
 
 fn is_fingerprint_hex(value: &str) -> bool {
     value.len() == 64
@@ -141,26 +127,45 @@ pub fn resolve_pin(
     }
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    // A remote pin decides whose signatures the node accepts from that
+    // remote, so only the configured local operator may make one.
+    ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)
+        .context("remote configure requires the configured local operator")?;
+
+    let request_digest = {
+        let request = serde_json::json!({
+            "remote": req.remote,
+            "url": req.url,
+            "descriptor": req.descriptor,
+            "expect_fingerprint": req.expect_fingerprint,
+        });
+        lillux::cas::canonical_json(&request)
+            .ok()
+            .map(|canonical| lillux::cas::sha256_hex(canonical.as_bytes()))
+    };
     let descriptor = req
         .descriptor
         .as_deref()
-        .map(config::RemoteDescriptor::from_path)
+        .map(config::load_descriptor)
         .transpose()?;
 
     let remote_name = req
         .remote
         .clone()
-        .or_else(|| descriptor.as_ref().and_then(|d| d.name.clone()))
+        .or_else(|| descriptor.as_ref().map(|d| d.name.clone()))
         .context("remote name required: pass a remote name or descriptor.name")?;
     let remote_url_input = req
         .url
         .clone()
-        .or_else(|| descriptor.as_ref().map(|d| d.url.clone()))
-        .context("remote URL required: pass --url or descriptor.url")?;
+        .or_else(|| descriptor.as_ref().and_then(|d| d.url.clone()))
+        .context("remote URL required: pass --url or a descriptor that carries one (an inbound-only descriptor is pinned with `ryeos remote pin`)")?;
     let remote_url = config::normalize_url(&remote_url_input)?;
     if let Some(descriptor) = descriptor.as_ref()
-        && descriptor.url != remote_url
+        && descriptor
+            .url
+            .as_deref()
+            .is_some_and(|url| url != remote_url)
     {
         anyhow::bail!(
             "remote descriptor URL is not canonical; expected '{}'",
@@ -192,6 +197,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 pubkey.fingerprint,
             );
         }
+        if pubkey.site_id != descriptor.site_id {
+            anyhow::bail!(
+                "remote descriptor site_id mismatch for '{}': descriptor binds {}, live node reports {}",
+                remote_name,
+                descriptor.site_id,
+                pubkey.site_id,
+            );
+        }
+        if pubkey.vault_fingerprint != descriptor.vault_fingerprint {
+            anyhow::bail!(
+                "remote descriptor vault_fingerprint mismatch for '{}': descriptor binds {}, live node reports {}",
+                remote_name,
+                descriptor.vault_fingerprint,
+                pubkey.vault_fingerprint,
+            );
+        }
     }
     let pin_source = resolve_pin(
         &remote_name,
@@ -205,32 +226,36 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let ingest_ignore = client.get_ingest_ignore().await?;
 
     let app_root = state.config.runtime_root();
-    let mut remotes = config::load_remotes(app_root.as_path())?;
-    let existing_project_bindings = if let Some(remote) = remotes.get(&remote_name) {
-        remote.project_bindings.clone()
-    } else {
-        Default::default()
-    };
+    let existing_project_bindings = config::load_remotes_report(app_root.as_path())?
+        .remotes
+        .remove(&remote_name)
+        .map(|loaded| loaded.config.project_bindings)
+        .unwrap_or_default();
     let vault_fp = pubkey.vault_fingerprint.clone();
     let signing_key = pubkey.signing_key.clone();
     let remote_config = config::RemoteConfig {
         name: remote_name.clone(),
-        url: remote_url.clone(),
+        url: Some(remote_url.clone()),
+        reachability: config::Reachability::Outbound,
         principal_id: pubkey.principal_id.clone(),
         signing_key: pubkey.signing_key,
         site_id: pubkey.site_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
-        ingest_ignore,
+        ingest_ignore: Some(ingest_ignore),
         project_bindings: existing_project_bindings,
     };
-    remote_config.validate()?;
-    remotes.insert(remote_name.clone(), remote_config);
-    config::save_remotes(app_root.as_path(), &remotes)?;
+    let record_path = config::write_remote_pin(
+        app_root.as_path(),
+        state.identity.signing_key(),
+        &remote_config,
+        pin_source,
+        request_digest,
+    )?;
 
     Ok(serde_json::json!({
         "configured": remote_name,
         "scope": "operator",
-        "config_path": config::remotes_config_path(app_root.as_path()),
+        "config_path": record_path,
         "url": remote_url,
         "principal_id": pubkey.principal_id,
         "signing_key": signing_key,
@@ -247,10 +272,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.configure",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/configure"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

@@ -124,6 +124,25 @@ pub fn verify_and_parse(
     expected_section: &str,
     trust_store: &TrustStore,
 ) -> Result<VerifiedNodeConfigItem> {
+    verify_and_parse_in_space(
+        file,
+        section_root,
+        expected_section,
+        trust_store,
+        ryeos_engine::trust::SignerSpace::Node,
+    )
+}
+
+/// Like [`verify_and_parse`], judging the signer against the space the item
+/// was found in: node-owned configuration is node space, configuration
+/// contributed by an installed bundle is bundle space.
+pub fn verify_and_parse_in_space(
+    file: &lillux::PinnedRegularFile,
+    section_root: &Path,
+    expected_section: &str,
+    trust_store: &TrustStore,
+    space: ryeos_engine::trust::SignerSpace,
+) -> Result<VerifiedNodeConfigItem> {
     let path = file.path();
     let ext = path.extension().and_then(|e| e.to_str());
     if ext != Some("yaml") && ext != Some("yml") {
@@ -153,8 +172,13 @@ pub fn verify_and_parse(
         })?;
     let signer_fingerprint = header.signer_fingerprint.clone();
 
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        content,
+        &header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::new(space, "node_config", None),
+    )?;
 
     if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
         bail!(

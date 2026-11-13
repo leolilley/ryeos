@@ -1,7 +1,7 @@
 use ryeos_isolation_protocol::{FixedParentViewLimits, IsolationBackendSelection};
 use serde::{Deserialize, Serialize};
 
-pub const ISOLATION_POLICY_VERSION: u32 = 10;
+pub const ISOLATION_POLICY_VERSION: u32 = 11;
 /// Host class of the policy-free authoring and test boundary.
 pub const AUTHORING_HOST_CLASS: &str = "authoring";
 /// Required outright, together with the nested proc ceiling, this host
@@ -54,6 +54,8 @@ pub struct IsolationHostClass {
     pub mode: IsolationMode,
     pub backend: Option<IsolationBackendSelection>,
     pub proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem,
+    /// See [`IsolationPolicy::host_direct`].
+    pub host_direct: IsolationHostDirect,
     /// See [`IsolationPolicy::host_lifetime_bound`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_lifetime_bound: Option<lillux::process_control::HostLifetimeBound>,
@@ -136,6 +138,7 @@ impl IsolationPolicyDocument {
             mode,
             backend,
             proc_filesystem,
+            host_direct,
             host_lifetime_bound,
         } = class;
         let IsolationSharedFilesystemPolicy {
@@ -153,6 +156,7 @@ impl IsolationPolicyDocument {
             enclosure_inits,
             host_lifetime_bound,
             trusted_process_group_sessions,
+            host_direct,
             filesystem: IsolationFilesystemPolicy {
                 proc_filesystem,
                 live_project,
@@ -177,6 +181,7 @@ impl IsolationPolicyDocument {
             enclosure_inits,
             host_lifetime_bound,
             trusted_process_group_sessions,
+            host_direct,
             filesystem,
             network,
             environment,
@@ -199,6 +204,7 @@ impl IsolationPolicyDocument {
                     mode,
                     backend,
                     proc_filesystem,
+                    host_direct,
                     host_lifetime_bound,
                 },
             )]
@@ -249,6 +255,11 @@ pub struct IsolationPolicy {
     /// Explicit opt-in for trusted dedicated workers that use RyeOS's direct
     /// process-group lifecycle without claiming qualified containment.
     pub trusted_process_group_sessions: bool,
+    /// Whether this host class offers the host-direct execution posture at
+    /// all. The publisher's profile decides this per class; the operator's
+    /// `host_access` grants then name the exact items. `unavailable` refuses
+    /// every host-authority launch and every grant on this node.
+    pub host_direct: IsolationHostDirect,
     pub filesystem: IsolationFilesystemPolicy,
     pub network: IsolationNetworkPolicy,
     pub environment: IsolationEnvironmentPolicy,
@@ -295,6 +306,7 @@ impl IsolationPolicy {
             enclosure_inits: Vec::new(),
             host_lifetime_bound: None,
             trusted_process_group_sessions: false,
+            host_direct: IsolationHostDirect::Unavailable,
             filesystem: IsolationFilesystemPolicy {
                 proc_filesystem: ryeos_isolation_protocol::IsolationProcFilesystem::Empty,
                 // Values for this explicit non-enforcing authoring fixture
@@ -310,7 +322,6 @@ impl IsolationPolicy {
                     "{node_public_identity}".to_string(),
                     "{daemon_socket}".to_string(),
                     "{bundle_roots}".to_string(),
-                    "{node_trusted_keys}".to_string(),
                     "{verified_code}".to_string(),
                 ],
                 writable: vec!["{project}".to_string(), "{checkpoint_dir}".to_string()],
@@ -368,6 +379,26 @@ pub fn nested_sandbox_from(
 ) -> bool {
     floor_requires_outright(floor, ISOLATION_NAMESPACES)
         && proc_filesystem == ryeos_isolation_protocol::IsolationProcFilesystem::PidNamespaceNested
+}
+
+/// Whether a host class offers the host-direct execution posture: a tool
+/// that declares `host_authority: required` running unconfined on the host,
+/// under an exact operator grant, invoked by the configured local operator.
+/// Required on every class; nothing defaults it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationHostDirect {
+    Unavailable,
+    OperatorGranted,
+}
+
+impl IsolationHostDirect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::OperatorGranted => "operator_granted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -599,6 +630,49 @@ mod tests {
         .unwrap();
         flat["requires_capabilities"] = serde_json::json!([]);
         assert!(serde_json::from_value::<IsolationPolicyDocument>(flat).is_err());
+    }
+
+    #[test]
+    fn isolation_lane_requires_host_direct_field() {
+        let mut value = serde_json::to_value(IsolationPolicyDocument::from_selected_policy(
+            IsolationPolicy::disabled_for_authoring(),
+        ))
+        .unwrap();
+        let class = &mut value["host_classes"][AUTHORING_HOST_CLASS];
+        assert_eq!(class["host_direct"], "unavailable");
+        class.as_object_mut().unwrap().remove("host_direct");
+        let error = serde_json::from_value::<IsolationPolicyDocument>(value.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("host_direct"), "{error}");
+        value["host_classes"][AUTHORING_HOST_CLASS]["host_direct"] = "always".into();
+        assert!(serde_json::from_value::<IsolationPolicyDocument>(value).is_err());
+    }
+
+    #[test]
+    fn narrowing_keeps_the_lane_host_direct_value() {
+        let mut document = two_class_document();
+        document.host_classes.get_mut("local").unwrap().host_direct =
+            IsolationHostDirect::OperatorGranted;
+        let local = document
+            .clone()
+            .narrowed("local")
+            .unwrap()
+            .into_selected_policy()
+            .unwrap();
+        assert_eq!(local.host_direct, IsolationHostDirect::OperatorGranted);
+        let hosted = document
+            .narrowed("hosted")
+            .unwrap()
+            .into_selected_policy()
+            .unwrap();
+        assert_eq!(hosted.host_direct, IsolationHostDirect::Unavailable);
+        assert_eq!(
+            IsolationPolicyDocument::from_selected_policy(local.clone())
+                .into_selected_policy()
+                .unwrap(),
+            local
+        );
     }
 
     #[test]

@@ -19,6 +19,8 @@ pub const RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL: &str =
     "ryeos.runtime-snapshot-qualification-adapter.v1";
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL: &str =
     "ryeos.runtime-snapshot-qualification-termination.v1";
+pub const RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL: &str =
+    "ryeos.runtime-snapshot-qualification-readiness.v1";
 pub const MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES: usize = 24 * 1024;
 pub const MAX_RUNTIME_SNAPSHOT_UPLOAD_BYTES: u64 = 64 * 1024 * 1024 + 16 * 1024;
 pub const RUNTIME_SNAPSHOT_STAGE_SCHEMA: u32 = 1;
@@ -189,14 +191,20 @@ impl RuntimeSnapshotIntent {
             require_hash(value, label)?;
         }
         self.source.validate()?;
+        let bootstrap_witness = [
+            self.source_bootstrap_operation_id.is_some(),
+            self.source_created_at.is_some(),
+            self.source_timeout_seconds.is_some(),
+        ];
         match &self.source {
-            RuntimeSnapshotSource::CapturedProduct { .. } => ensure!(
-                self.source_bootstrap_operation_id.is_none()
-                    && self.source_created_at.is_none()
-                    && self.source_timeout_seconds.is_none(),
-                "captured product cannot borrow bootstrap authority"
-            ),
-            RuntimeSnapshotSource::BundleMaterialization { .. } => ensure!(
+            // A captured product is produced from a node-bootstrapped source
+            // (the complete creation witness) or, until the operator-named
+            // source path is retired, from an occurrence the operator names
+            // (no witness at all). Never a partial witness.
+            RuntimeSnapshotSource::CapturedProduct { .. }
+                if bootstrap_witness == [false, false, false] => {}
+            RuntimeSnapshotSource::CapturedProduct { .. }
+            | RuntimeSnapshotSource::BundleMaterialization { .. } => ensure!(
                 self.source_bootstrap_operation_id
                     .as_deref()
                     .is_some_and(|value| require_hash(value, "bootstrap operation").is_ok())
@@ -208,7 +216,7 @@ impl RuntimeSnapshotIntent {
                     && self
                         .source_timeout_seconds
                         .is_some_and(|value| (1..=86_400).contains(&value)),
-                "materialized snapshot lacks exact bootstrap creation witness"
+                "bootstrapped snapshot source lacks its exact bootstrap creation witness"
             ),
         }
         let owner = self
@@ -828,6 +836,91 @@ impl RuntimeSnapshotQualificationTerminationAdapterResponse {
     }
 }
 
+/// A read-only observation of a bound restored qualification occurrence, made
+/// before the one verifier attempt is claimed: a verifier run against a
+/// sandbox that is still being created would spend that attempt. It carries
+/// no create, verify or terminate authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshotQualificationReadinessRequest {
+    pub protocol: String,
+    pub qualification_intent: RuntimeSnapshotQualificationIntent,
+    pub occurrence: RuntimeSnapshotQualificationOccurrence,
+    pub provider_spec_digest: String,
+}
+
+impl RuntimeSnapshotQualificationReadinessRequest {
+    pub fn validate(&self) -> Result<()> {
+        self.occurrence.validate_for(&self.qualification_intent)?;
+        ensure!(
+            self.protocol == RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL
+                && self.provider_spec_digest == self.qualification_intent.provider_spec_digest
+                && !self.occurrence.contact_deadline_exceeded
+                && canonical_json(self)?.len() <= MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES,
+            "qualification readiness differs from a timely bound occurrence"
+        );
+        Ok(())
+    }
+}
+
+/// What the provider reports of the exact restored occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeSnapshotQualificationReadinessAdapterResponse {
+    Running {
+        operation_id: String,
+        occurrence_id: String,
+        provider_response_sha256: String,
+    },
+    /// Not running yet, or no longer: `status` is the provider's bounded
+    /// status word, or `absent` when the provider has no such occurrence.
+    NotRunning {
+        operation_id: String,
+        occurrence_id: String,
+        status: String,
+    },
+}
+
+impl RuntimeSnapshotQualificationReadinessAdapterResponse {
+    pub fn validate_for(
+        &self,
+        request: &RuntimeSnapshotQualificationReadinessRequest,
+    ) -> Result<()> {
+        request.validate()?;
+        let (operation_id, occurrence_id) = match self {
+            Self::Running {
+                operation_id,
+                occurrence_id,
+                provider_response_sha256,
+            } => {
+                require_hash(provider_response_sha256, "qualification readiness response")?;
+                (operation_id, occurrence_id)
+            }
+            Self::NotRunning {
+                operation_id,
+                occurrence_id,
+                status,
+            } => {
+                ensure!(
+                    !status.is_empty()
+                        && status.len() <= 64
+                        && status
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+                    "qualification readiness status is not a bounded word"
+                );
+                (operation_id, occurrence_id)
+            }
+        };
+        ensure!(
+            operation_id == &request.qualification_intent.operation_id
+                && occurrence_id == &request.occurrence.occurrence_id,
+            "qualification readiness changed the exact occurrence"
+        );
+        Ok(())
+    }
+}
+
 /// Sealed create-only handoff. The selected snapshot ID is a retained provider
 /// result, not a mutable setting or a value inferred from the adapter's own
 /// environment. This grants no verifier run or qualification claim.
@@ -1115,6 +1208,25 @@ mod tests {
         let mut unknown = serde_json::to_value(&baseline).unwrap();
         unknown["credential"] = serde_json::json!("ambient");
         assert!(serde_json::from_value::<RuntimeSnapshotIntent>(unknown).is_err());
+    }
+
+    #[test]
+    fn captured_product_takes_a_complete_bootstrap_witness_or_none() {
+        let baseline = intent();
+        assert!(matches!(
+            baseline.source,
+            RuntimeSnapshotSource::CapturedProduct { .. }
+        ));
+        baseline.validate().unwrap();
+        let mut bootstrapped = baseline.clone();
+        bootstrapped.source_bootstrap_operation_id = Some("d".repeat(64));
+        bootstrapped.operation_id = bootstrapped.derived_operation_id().unwrap();
+        assert!(bootstrapped.validate().is_err(), "partial witness refused");
+        bootstrapped.source_created_at = Some("2026-09-29T00:00:00Z".into());
+        bootstrapped.source_timeout_seconds = Some(900);
+        bootstrapped.operation_id = bootstrapped.derived_operation_id().unwrap();
+        bootstrapped.validate().unwrap();
+        assert_ne!(bootstrapped.operation_id, baseline.operation_id);
     }
 
     #[test]

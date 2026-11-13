@@ -152,7 +152,6 @@ pub(crate) fn run_handler_subprocess_bounded(
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &launch.bundle_roots,
-            node_trusted_keys_dir: None,
             verified_code: &verified_code,
             verified_command: Some(&verified_code[0]),
             external_read_only_mounts: &[],

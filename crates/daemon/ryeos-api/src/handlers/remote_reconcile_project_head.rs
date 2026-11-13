@@ -69,7 +69,7 @@ struct ReconciliationOperation {
     local_project_path: String,
     remote_project_path: String,
     operator_fingerprint: String,
-    operator_authority_digest: String,
+    delegation_digest: String,
     requested_origin_site_id: Option<String>,
     expected_local_head: String,
     expected_remote_head: String,
@@ -192,10 +192,7 @@ impl ReconciliationOperation {
         validate_hash("remote principal fingerprint", remote_fingerprint)?;
         for (label, hash) in [
             ("operator fingerprint", self.operator_fingerprint.as_str()),
-            (
-                "operator authority digest",
-                self.operator_authority_digest.as_str(),
-            ),
+            ("delegation digest", self.delegation_digest.as_str()),
             ("expected local HEAD", self.expected_local_head.as_str()),
             ("expected remote HEAD", self.expected_remote_head.as_str()),
         ] {
@@ -229,7 +226,7 @@ impl ReconciliationOperation {
             "local_project_path": self.local_project_path,
             "remote_project_path": self.remote_project_path,
             "operator_fingerprint": self.operator_fingerprint,
-            "operator_authority_digest": self.operator_authority_digest,
+            "delegation_digest": self.delegation_digest,
             "requested_origin_site_id": self.requested_origin_site_id,
             "expected_local_head": self.expected_local_head,
             "expected_remote_head": self.expected_remote_head,
@@ -250,25 +247,23 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     validate_hash("expected remote HEAD", &req.expected_remote_head)?;
     let operator_fingerprint =
         ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
-    let operator_authority_digest =
-        ryeos_app::operator_authority::admitted_operator_authority_digest(
-            &state,
-            &operator_fingerprint,
-        )?;
     let (local_project_path, remote, remote_project_path) =
         resolve_initial_route(&state, &req.remote, &req.project)?;
+    let delegation_digest = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &ctx)?
+        .delegation_digest()
+        .context("delegated client carries no delegation")?;
     let operation = ReconciliationOperation {
         operation_type: OPERATION_TYPE.to_owned(),
         schema: OPERATION_SCHEMA.to_owned(),
         remote: req.remote,
-        remote_url: remote.url,
+        remote_url: remote.outbound_url()?.to_owned(),
         source_site_id: state.threads.site_id().to_owned(),
         remote_site_id: remote.site_id,
         remote_principal_id: remote.principal_id,
         local_project_path,
         remote_project_path,
         operator_fingerprint,
-        operator_authority_digest,
+        delegation_digest,
         requested_origin_site_id: ctx.authenticated_origin_site_id,
         expected_local_head: req.expected_local_head,
         expected_remote_head: req.expected_remote_head,
@@ -482,14 +477,15 @@ async fn run_attempt(
     job_id: &str,
     progress: &mut ReconciliationProgress,
 ) -> std::result::Result<Response, AttemptFailure> {
-    let operator_client = RemoteClient::from_remote_cfg_as_retained_configured_operator(
+    let operator_client = RemoteClient::from_remote_cfg_as_retained_delegated(
         &state,
         remote,
         &operation.operator_fingerprint,
-        &operation.operator_authority_digest,
+        &operation.delegation_digest,
     )
     .map_err(AttemptFailure::permanent)?;
-    let node_client = RemoteClient::from_remote_cfg(&state, remote);
+    let node_client = RemoteClient::from_remote_cfg(&state, remote)
+        .map_err(|error| AttemptFailure::permanent(anyhow::Error::new(error)))?;
     let upload_session = operator_client
         .objects_put(None, &operation.remote_project_path, &[], &[])
         .await
@@ -932,7 +928,7 @@ fn resolve_initial_route(
 ) -> Result<(String, RemoteConfig, String)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&canonical))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
@@ -953,19 +949,18 @@ fn validate_current_route_and_authority(
     if state.threads.site_id() != operation.source_site_id {
         bail!("durable project-head reconciliation belongs to another source site");
     }
-    let authority_digest = ryeos_app::operator_authority::admitted_operator_authority_digest(
+    crate::remote::client::require_retained_delegation(
         state,
+        &operation.remote,
         &operation.operator_fingerprint,
+        &operation.delegation_digest,
     )?;
-    if authority_digest != operation.operator_authority_digest {
-        bail!("durable project-head reconciliation operator grant changed");
-    }
     let project = PathBuf::from(&operation.local_project_path);
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&project))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, &operation.remote)?;
     if loaded.config.site_id != operation.remote_site_id
         || loaded.config.principal_id != operation.remote_principal_id
-        || loaded.config.url != operation.remote_url
+        || loaded.config.url.as_deref() != Some(operation.remote_url.as_str())
     {
         bail!("durable project-head reconciliation remote identity or endpoint changed");
     }
@@ -1292,7 +1287,7 @@ mod tests {
             local_project_path: "/project".to_owned(),
             remote_project_path: "/remote/project".to_owned(),
             operator_fingerprint: "4".repeat(64),
-            operator_authority_digest: "5".repeat(64),
+            delegation_digest: "5".repeat(64),
             requested_origin_site_id: None,
             expected_local_head: "a".repeat(64),
             expected_remote_head: "b".repeat(64),

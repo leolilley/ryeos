@@ -275,6 +275,7 @@ pub(crate) async fn dispatch_subprocess(
             let effective = ctx
                 .engine
                 .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: verified.resolved.logical_project_root.clone(),
                     item_ref: verified.resolved.canonical_ref.clone(),
                     expected_kind: Some(current_ref.kind.clone()),
                     project_root: verified.resolved.materialized_project_root.clone(),
@@ -519,11 +520,19 @@ async fn dispatch_managed_subprocess(
             &launch_contract,
             root_admission.resolution_subject_authority(),
             handler_context.as_ref(),
-            &ctx.engine.resolution_roots(
-                root_admission
-                    .resolution_workspace()
-                    .map(std::path::Path::to_path_buf),
-            ),
+            &ctx.engine
+                .resolution_roots(
+                    root_admission
+                        .resolution_workspace()
+                        .map(std::path::Path::to_path_buf),
+                )
+                .with_logical_project_root(
+                    root_admission
+                        .verified_subject()
+                        .resolved
+                        .logical_project_root
+                        .clone(),
+                ),
         )
         .map_err(DispatchError::Internal)?;
         let dependencies_ready = dependencies.admission_ready;
@@ -766,7 +775,15 @@ fn validate_managed_effective_program(
         })
     })
     .transpose()?;
-    let roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let request_snapshot = match admission.admitted_request_snapshot() {
         Some(admitted) => engine.effective_request_snapshot_under_admitted_authority(
             resolution_project_root.ok_or_else(|| {
@@ -866,6 +883,25 @@ async fn dispatch_tool_subprocess(
                 .map_err(DispatchError::Internal)
         })
         .transpose()?;
+    // A root the execute route did not admit (a graph child, a schedule
+    // fire) is judged for host access here, before its root admission is
+    // sealed, so a granted one is sealed as what runs: unconfined on the host.
+    let provenance = if admitted_resolution.is_some() {
+        request.provenance.clone()
+    } else {
+        crate::execution::host_access_gate::host_direct_provenance_before_admission(
+            state,
+            current_ref,
+            &request.provenance,
+            &crate::execution::host_access_gate::dispatch_caller(
+                state,
+                request,
+                &ctx.plan_ctx,
+                handler_context.as_ref(),
+            ),
+        )?
+        .unwrap_or_else(|| request.provenance.clone())
+    };
     let resolution_engine = std::sync::Arc::clone(&ctx.engine);
     let resolution_item_ref = item_ref.clone();
     let resolution_plan_context = ctx.plan_ctx.clone();
@@ -873,7 +909,7 @@ async fn dispatch_tool_subprocess(
         ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
             &ctx.engine,
             &ctx.plan_ctx,
-            &request.provenance,
+            &provenance,
         )?;
     let node_history_policy = std::sync::Arc::new(state.node_history_policy()?.clone());
     let resolution_ref_bindings = request.ref_bindings.clone();
@@ -997,6 +1033,19 @@ async fn dispatch_tool_subprocess(
         &terminal.chain_authorities,
     )?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
+        // A method-dispatch wrapper spawns nothing itself, so it cannot be
+        // the subject of a host-access grant.
+        if resolved.root_admission.is_some()
+            && crate::execution::host_access_gate::admitted_posture(&ctx.engine, &resolved)?
+                .is_host_direct()
+        {
+            return Err(DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: format!(
+                    "`{item_ref}` declares host authority, but a method-dispatch wrapper spawns no process of its own"
+                ),
+            });
+        }
         if protocol.descriptor.stdout.mode
             == ryeos_engine::protocol_vocabulary::StdoutMode::Streaming
         {
@@ -1044,11 +1093,26 @@ async fn dispatch_tool_subprocess(
         resolved.target_site_id = Some(target.to_string());
     }
 
+    // Host access is judged right after launch trust, before finalization,
+    // secret reads or any process start: the node lane, the operator's exact
+    // grant (now with the resolved runtime) and the configured operator.
+    let host_access = crate::execution::host_access_gate::enforce_host_access(
+        state,
+        &ctx.engine,
+        &resolved,
+        &terminal,
+        request,
+        handler_context.as_ref(),
+    )?;
+    if host_access.is_some() {
+        crate::execution::host_access_gate::require_host_direct_project(&provenance)?;
+    }
+
     if request.validate_only {
         let engine = ctx.engine.clone();
         let validation_engine = engine.clone();
         let resolved_clone = resolved.clone();
-        let workspace_lifeline = request.provenance.workspace_lifeline();
+        let workspace_lifeline = provenance.workspace_lifeline();
         let validated = tokio::task::spawn_blocking(move || {
             let _workspace_lifeline = workspace_lifeline;
             ryeos_app::thread_lifecycle::validate_item(&validation_engine, &resolved_clone)
@@ -1112,7 +1176,7 @@ async fn dispatch_tool_subprocess(
     let finalized_direct = crate::execution::runner::finalize_direct_effective_program(
         state,
         &resolved,
-        &request.provenance,
+        &provenance,
         parent_thread_id.as_deref(),
         handler_context.as_ref(),
     )
@@ -1138,7 +1202,7 @@ async fn dispatch_tool_subprocess(
         parameters: request.params.clone(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
-        provenance: request.provenance.clone(),
+        provenance,
         lifecycle_authority: request.lifecycle_authority,
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
@@ -1146,6 +1210,7 @@ async fn dispatch_tool_subprocess(
         parent_thread_id,
         effect_authority: request.effect_authority.clone(),
         finalized_direct: Some(finalized_direct),
+        host_access,
     };
 
     if request.launch_mode == "detached" {
@@ -1211,7 +1276,15 @@ fn validate_direct_source_closure(
         ))
     })?;
     let resolution = admission.resolution_output();
-    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
+    let roots = engine
+        .resolution_roots(project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let materialization = admission
         .resolution_materialization_binding()
         .map_err(DispatchError::Internal)?;

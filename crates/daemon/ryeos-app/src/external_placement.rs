@@ -84,8 +84,28 @@ impl RuntimeProbeInput {
     }
 }
 
+/// The binding facts a provider inventory lists under: the signed settings
+/// that name the owner scope, and the network inputs the adapter may use.
+pub(crate) struct ProviderInventorySource<'a> {
+    pub(crate) network_inputs:
+        &'a ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
+    pub(crate) settings: &'a serde_json::Value,
+    pub(crate) settings_digest: &'a str,
+}
+
 pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn backend_id(&self) -> &str;
+    /// Read-only listing of the resources one provider owner scope holds.
+    fn list_provider_resources(
+        &self,
+        _source: &ProviderInventorySource<'_>,
+        _credential: &PlacementCredential,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterResponse,
+    > {
+        bail!("external placement backend has no provider inventory")
+    }
     /// Stage-one lease admission, offline and before any reservation or
     /// provider contact: the backend's lifecycle adapter judges one lease
     /// request against its signed provider spec while holding no credential,
@@ -293,6 +313,18 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         _deadline: lillux::time::MonotonicDeadline,
     ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
         bail!("external placement backend cannot terminate a qualification occurrence")
+    }
+    /// Read-only: observe the exact restored occurrence before its one
+    /// verifier attempt is claimed.
+    fn observe_snapshot_qualification_occurrence(
+        &self,
+        _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>>{
+        bail!("external placement backend cannot observe a qualification occurrence")
     }
     fn seal_restoration_verifier_upload(
         &self,
@@ -1527,6 +1559,54 @@ impl ExternalPlacementBackendRegistry {
             first_contact,
             deadline,
         )
+    }
+
+    pub(crate) fn observe_snapshot_qualification_occurrence(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>>{
+        let backend = self.producer_generation(
+            producer,
+            "exact signed qualification observation adapter generation is not installed",
+        )?;
+        backend.observe_snapshot_qualification_occurrence(
+            producer,
+            qualification,
+            credential,
+            request,
+            deadline,
+        )
+    }
+
+    /// List what the provider holds for the owner scope of a binding pinned to
+    /// the exact installed adapter generation `(backend, adapter_hash)`.
+    pub(crate) fn list_provider_resources(
+        &self,
+        backend: &str,
+        adapter_hash: &str,
+        source: &ProviderInventorySource<'_>,
+        credential: &PlacementCredential,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterResponse,
+    > {
+        let installed = self
+            .backends
+            .get(&(backend.to_owned(), adapter_hash.to_owned()))
+            .ok_or_else(|| {
+                self.binding_artifact_not_installed(
+                    "exact signed provider inventory adapter generation is not installed",
+                    serde_json::json!({ "backend": backend }),
+                    "adapter_artifact_hash",
+                    backend,
+                    adapter_hash,
+                )
+            })?;
+        installed.list_provider_resources(source, credential, deadline)
     }
 
     pub(crate) fn preflight_runtime_snapshot(

@@ -225,6 +225,20 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         .await;
     }
 
+    // `external-content product publish` is a client composite too: it
+    // sequences the verified produce, capture, admit and push commands.
+    if crate::product_publish::matches(&cli.rest) {
+        return crate::product_publish::run(
+            &cli.rest[crate::product_publish::TOKENS.len()..],
+            &app_root,
+            cli.project.as_deref(),
+            snapshot,
+            &command_registration_policy,
+            console,
+        )
+        .await;
+    }
+
     // Node-registered client handlers own local byte-oriented UX that cannot
     // be represented as an `/execute` JSON result. The verified command is
     // still only routing: the handler's signed daemon requests carry the
@@ -460,7 +474,20 @@ pub(crate) async fn execute_verified_command(
     command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
     argv: &[String],
 ) -> Result<Value, CliError> {
-    let resolved = resolve_command_for_daemon(argv, snapshot, command_registration_policy, None)?;
+    execute_verified_command_in(app_root, snapshot, command_registration_policy, argv, None).await
+}
+
+/// [`execute_verified_command`] with the project a command defaults to when
+/// its argv names none.
+pub(crate) async fn execute_verified_command_in(
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
+    argv: &[String],
+    default_project: Option<&Path>,
+) -> Result<Value, CliError> {
+    let resolved =
+        resolve_command_for_daemon(argv, snapshot, command_registration_policy, default_project)?;
     let mut body = daemon_execute_body(&resolved)?;
     if resolved.async_launch {
         let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());
@@ -520,6 +547,26 @@ async fn try_dispatch_client_handler(
                 "artifact-export.yaml",
             )?;
             crate::client_handlers::export_artifact(app_root, &parameters)
+                .await
+                .map(Some)
+        }
+        "runtime_snapshot_run" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "external-content-runtime-snapshot-run.yaml",
+            )?;
+            crate::runtime_snapshot_run::run(app_root, snapshot, &parameters)
+                .await
+                .map(Some)
+        }
+        "remote_delegate" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "remote-delegate.yaml",
+            )?;
+            crate::client_handlers::remote_delegate(app_root, &parameters)
                 .await
                 .map(Some)
         }
@@ -1159,6 +1206,31 @@ fn process_creation_busy_wait(
             PROCESS_CREATION_BUSY_MAX_WAIT,
         );
     (wait < remaining).then_some(wait)
+}
+
+/// Execute one node service on the running daemon over the buffered
+/// `/execute` route, returning its authored result.
+pub(crate) async fn execute_service(
+    app_root: &std::path::Path,
+    item_ref: &str,
+    parameters: Value,
+) -> Result<Value, CliError> {
+    let body = serde_json::json!({
+        "item_ref": item_ref,
+        "ref_bindings": {},
+        "product_selections": [],
+        "parameters": parameters,
+        "parameter_encoding": "command",
+        "validate_only": false,
+        "execution_policy": execution_policy_value_with_snapshot(
+            false, false, false, false, None, false, false,
+        ),
+    });
+    let payload = post_to_daemon(app_root, "/execute", &body, |_| Ok(())).await?;
+    if let Some(detail) = crate::tty::structured_result_failure(&payload) {
+        return Err(CliError::Reported { detail });
+    }
+    Ok(payload.get("result").cloned().unwrap_or(payload))
 }
 
 /// POST a JSON body to a daemon execute route and return the response.

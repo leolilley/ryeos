@@ -51,15 +51,29 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
     Ok(json!({
         "session_id": session_id,
         "redirect": "/ui",
-        "cookie": {
-            "name": "ryeos_session",
-            "value": session_id,
-            "http_only": true,
-            // Strict: the launch redirect is same-origin, so nothing
-            // legitimate needs this cookie on a cross-site request.
-            "same_site": "Strict",
-            "secure": false,
-            "path": "/ui"
-        }
+        "cookie": session_cookie(&session_id, None),
     }))
+}
+
+/// The session cookie envelope the route layer turns into `Set-Cookie`.
+/// Strict: the launch redirect is same-origin, so nothing legitimate needs
+/// this cookie on a cross-site request.
+fn session_cookie(value: &str, max_age: Option<u64>) -> Value {
+    let mut cookie = json!({
+        "name": "ryeos_session",
+        "value": value,
+        "http_only": true,
+        "same_site": "Strict",
+        "secure": false,
+        "path": "/ui"
+    });
+    if let Some(max_age) = max_age {
+        cookie["max_age"] = max_age.into();
+    }
+    cookie
+}
+
+/// The cookie envelope that makes the browser drop the session cookie.
+pub(crate) fn cleared_session_cookie() -> Value {
+    session_cookie("", Some(0))
 }

@@ -76,7 +76,7 @@ pub struct ResolutionCacheKey {
     /// root do NOT capture, pre-rendered by the caller to one stable string:
     /// the engine/bundle generation identity, the PROJECT parser-overlay
     /// fingerprint (`.ai/parsers/`), and the effective trust identity
-    /// (`.ai/trust-keys/`). An edit to any of these changes this string, so a
+    /// (the node signer registry identity). An edit to any of these changes this string, so a
     /// stale resolution misses rather than being served.
     pub plan_context_identity: String,
 }

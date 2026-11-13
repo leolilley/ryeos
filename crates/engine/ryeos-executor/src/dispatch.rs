@@ -737,6 +737,7 @@ fn resolve_dispatch_hop_with_verified(
                 let effective = ctx
                     .engine
                     .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                        logical_project_root: item.resolved.logical_project_root.clone(),
                         item_ref: current_ref.clone(),
                         expected_kind: Some(schema_kind.clone()),
                         project_root: item.resolved.materialized_project_root.clone(),
@@ -1165,7 +1166,11 @@ fn project_corpus(
     );
     let engine_roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
     if ctx
         .plan_ctx
         .subject_resolution_authority
@@ -1462,7 +1467,7 @@ impl MethodRuntimeConfigSnapshot {
             .map(|(name, proof)| Ok((name.clone(), proof.identity_digest()?)))
             .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
         let value = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "values": &self.values,
             "dependency_proofs": proof_digests,
         });
@@ -1474,24 +1479,17 @@ impl MethodRuntimeConfigSnapshot {
         &self,
         engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
         node_config_root: Option<&Path>,
-        node_trusted_keys_dir: &Path,
+        trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
         materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
     ) -> MethodRuntimeConfigProofStatus {
         if let Some(materialization) = materialization {
             match materialization.authoritative_project_content() {
                 Ok(Some((project_root, project_content))) => {
-                    let Ok(node_trust_identity) =
-                        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(
-                            node_trusted_keys_dir,
-                        )
-                    else {
-                        return MethodRuntimeConfigProofStatus::MutableAuthorityChanged;
-                    };
+                    let signers_digest =
+                        ryeos_engine::trust::trusted_signers_digest(trusted_signers);
                     let mut status = MethodRuntimeConfigProofStatus::Current;
                     for proof in self.dependency_proofs.values() {
-                        let proof_status = if !proof
-                            .trust_identities_match(None, &node_trust_identity)
-                        {
+                        let proof_status = if !proof.trusted_signers_match(&signers_digest) {
                             MethodRuntimeConfigProofStatus::MutableAuthorityChanged
                         } else {
                             match proof.revalidate_under_project_authority_status(
@@ -1528,12 +1526,8 @@ impl MethodRuntimeConfigSnapshot {
                 }
             }
         }
-        let Some((project_root, effective_trust_identity, node_trust_identity)) =
-            method_config_revalidation_context(
-                engine_roots,
-                node_config_root,
-                node_trusted_keys_dir,
-            )
+        let Some((project_root, signers_digest)) =
+            method_config_revalidation_context(engine_roots, node_config_root, trusted_signers)
         else {
             return if self.dependency_proofs.is_empty() {
                 MethodRuntimeConfigProofStatus::Current
@@ -1542,7 +1536,7 @@ impl MethodRuntimeConfigSnapshot {
             };
         };
         if self.dependency_proofs.values().all(|proof| {
-            proof.trust_identities_match(effective_trust_identity.as_deref(), &node_trust_identity)
+            proof.trusted_signers_match(&signers_digest)
                 && proof.revalidate_mutable_against(project_root.as_deref(), node_config_root, true)
         }) {
             MethodRuntimeConfigProofStatus::Current
@@ -1586,21 +1580,16 @@ fn combine_method_runtime_config_status(
 fn method_config_revalidation_context(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
-) -> Option<(Option<PathBuf>, Option<String>, String)> {
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
+) -> Option<(Option<PathBuf>, String)> {
     let project_root = engine_roots
         .authoritative_project_root()
         .ok()
         .flatten()
         .map(Path::to_path_buf);
     let loader =
-        verified_loader_for_method_runtime(engine_roots, node_config_root, node_trusted_keys_dir)
-            .ok()?;
-    Some((
-        project_root,
-        Some(loader.effective_trust_identity()),
-        loader.node_trust_identity(),
-    ))
+        verified_loader_for_method_runtime(engine_roots, node_config_root, trusted_signers).ok()?;
+    Some((project_root, loader.trusted_signers_digest().to_string()))
 }
 
 pub(crate) fn method_runtime_config_snapshot_with_proof(
@@ -1608,7 +1597,7 @@ pub(crate) fn method_runtime_config_snapshot_with_proof(
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<MethodRuntimeConfigSnapshot, DispatchError> {
     method_runtime_config_snapshot_with_proof_from_authority(
@@ -1616,7 +1605,7 @@ pub(crate) fn method_runtime_config_snapshot_with_proof(
         requirements,
         engine_roots,
         node_config_root,
-        node_trusted_keys_dir,
+        trusted_signers,
         launch_timings,
         None,
     )
@@ -1627,7 +1616,7 @@ pub(crate) fn method_runtime_config_snapshot_with_proof_under_project_authority(
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     project_root: &Path,
     project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
@@ -1637,7 +1626,7 @@ pub(crate) fn method_runtime_config_snapshot_with_proof_under_project_authority(
         requirements,
         engine_roots,
         node_config_root,
-        node_trusted_keys_dir,
+        trusted_signers,
         launch_timings,
         Some((project_root, project_content)),
     )
@@ -1648,7 +1637,7 @@ fn method_runtime_config_snapshot_with_proof_from_authority(
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
     project_authority: Option<(
         &Path,
@@ -1667,7 +1656,7 @@ fn method_runtime_config_snapshot_with_proof_from_authority(
     let loader = verified_loader_for_method_runtime_under_authority(
         engine_roots,
         node_config_root,
-        node_trusted_keys_dir,
+        trusted_signers,
         project_authority,
     )
     .map_err(|e| DispatchError::Internal(anyhow::anyhow!("runtime config loader: {e}")))?;
@@ -1713,7 +1702,6 @@ async fn method_runtime_config_snapshot_off_thread(
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     engine: &ryeos_engine::engine::Engine,
-    state: &AppState,
     launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     admitted_root: Option<&ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     subject_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
@@ -1727,7 +1715,8 @@ async fn method_runtime_config_snapshot_off_thread(
     let requirements = requirements.clone();
     let engine_roots = engine_roots.clone();
     let node_config_root = engine.node_config_root();
-    let trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let trusted_signers =
+        ryeos_engine::launch_envelope_types::trusted_signer_entries(&engine.node_trust_store);
     let materialization = admitted_root
         .map(|admission| admission.resolution_materialization_binding())
         .transpose()
@@ -1746,7 +1735,7 @@ async fn method_runtime_config_snapshot_off_thread(
                     &requirements,
                     &engine_roots,
                     node_config_root.as_deref(),
-                    &trusted_keys_dir,
+                    &trusted_signers,
                     launch_timings.as_ref(),
                     project_root,
                     content,
@@ -1757,7 +1746,7 @@ async fn method_runtime_config_snapshot_off_thread(
                 &requirements,
                 &engine_roots,
                 node_config_root.as_deref(),
-                &trusted_keys_dir,
+                &trusted_signers,
                 launch_timings.as_ref(),
             ),
         }?;
@@ -1774,12 +1763,12 @@ async fn method_runtime_config_snapshot_off_thread(
 fn verified_loader_for_method_runtime(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     verified_loader_for_method_runtime_under_authority(
         engine_roots,
         node_config_root,
-        node_trusted_keys_dir,
+        trusted_signers,
         None,
     )
 }
@@ -1787,7 +1776,7 @@ fn verified_loader_for_method_runtime(
 fn verified_loader_for_method_runtime_under_authority(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_authority: Option<(
         &Path,
         &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
@@ -1804,27 +1793,28 @@ fn verified_loader_for_method_runtime_under_authority(
         .collect();
 
     match (project_root, project_authority) {
-        (Some(project_root), Some((authority_root, content))) => {
+        (Some(project_root), Some((authority_root, _content))) => {
             if project_root != authority_root {
                 anyhow::bail!(
                     "method runtime project root differs from admitted project authority"
                 );
             }
-            ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config_under_project_authority(
+            ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
                 project_root,
-                content,
                 node_config_root.map(Path::to_path_buf),
                 bundle_roots,
-                node_trusted_keys_dir,
+                trusted_signers,
             )
+            .map(|loader| loader.with_logical_project_of(engine_roots))
         }
         (Some(project_root), None) => {
             ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
                 project_root,
                 node_config_root.map(Path::to_path_buf),
                 bundle_roots,
-                node_trusted_keys_dir,
+                trusted_signers,
             )
+            .map(|loader| loader.with_logical_project_of(engine_roots))
         }
         (None, Some(_)) => {
             anyhow::bail!("admitted method runtime project authority has no project root")
@@ -1833,7 +1823,7 @@ fn verified_loader_for_method_runtime_under_authority(
             ryeos_runtime::verified_loader::VerifiedLoader::new_projectless_with_node_config(
                 node_config_root.map(Path::to_path_buf),
                 bundle_roots,
-                node_trusted_keys_dir,
+                trusted_signers,
             )
         }
     }
@@ -1900,7 +1890,11 @@ pub(crate) async fn dispatch_method(
     );
     let engine_roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
 
     // Payload projection (single-root resolution+trust / corpus build) is
     // deferred via `project_method_payload`: for `validate_only` it runs
@@ -2066,7 +2060,6 @@ pub(crate) async fn dispatch_method(
             &method_decl.runtime_config,
             &engine_roots,
             &ctx.engine,
-            state,
             request.launch_timings.clone(),
             Some(&root_admission),
             &ctx.plan_ctx.subject_resolution_authority,
@@ -2406,7 +2399,6 @@ pub(crate) async fn dispatch_method(
             &method_decl.runtime_config,
             &engine_roots,
             &ctx.engine,
-            state,
             request.launch_timings.clone(),
             Some(&root_admission),
             &ctx.plan_ctx.subject_resolution_authority,
@@ -2616,7 +2608,6 @@ pub(crate) async fn dispatch_method(
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         };
-        let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
         let live_access = request
             .provenance
             .isolation_live_access_authority()
@@ -2665,7 +2656,6 @@ pub(crate) async fn dispatch_method(
                     daemon_socket_path: callback_ipc_requested
                         .then_some(envelope.callback.socket_path.as_path()),
                     bundle_roots: &bundle_roots,
-                    node_trusted_keys_dir: Some(&node_trusted_keys_dir),
                     verified_code: &[],
                     verified_command: Some(&isolation_verified_command),
                     external_read_only_mounts: &[],
@@ -4695,7 +4685,11 @@ pub async fn prepare_admitted_launch_contract(
     let resolution_project_root = root_admission.resolution_workspace();
     let roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
     let request_snapshot = match root_admission.admitted_request_snapshot() {
         Some(admitted) => ctx
             .engine
@@ -4936,7 +4930,11 @@ fn prepare_launch_contract_with_cache(
         resolution_project_root(&ctx.plan_ctx.subject_resolution_authority, project_path);
     let roots = ctx
         .engine
-        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            ctx.plan_ctx
+                .effective_logical_project_root(resolution_project_root),
+        );
     let request_snapshot = ctx
         .engine
         .effective_request_snapshot(
@@ -5040,6 +5038,35 @@ pub struct RootDispatchPreflight {
     /// workload-delegated workspace access; ordinary dispatch does not infer a
     /// relationship from this field.
     pub workspace_access: Option<ryeos_engine::kind_registry::WorkspaceAccess>,
+}
+
+/// Refuse, before any thread row exists, a fresh managed root whose caller does
+/// not cover every capability the composed item declares. Root admission makes
+/// the same judgement at launch; a synchronous caller of an accepted launch
+/// must hear it at admission, as the typed `caller_capability_not_covered`
+/// launch-policy refusal, rather than after a thread was minted. Only fresh
+/// root entry points call this: a child launch is bounded by its parent and a
+/// continuation by its sealed capsule.
+pub fn require_preflight_caller_coverage(
+    preflight: &RootDispatchPreflight,
+    ctx: &ExecutionContext,
+) -> Result<(), DispatchError> {
+    if preflight.class != RootDispatchClass::ManagedSubprocess {
+        return Ok(());
+    }
+    let Some(admission) = preflight.root_admission.as_ref() else {
+        return Ok(());
+    };
+    crate::execution::launch::preflight_root_caller_coverage(
+        &admission.resolution_output().composed,
+        crate::execution::launch::principal_caller_scopes(&ctx.plan_ctx.requested_by),
+        &ctx.principal_fingerprint,
+        &preflight
+            .requested_subject
+            .resolved
+            .canonical_ref
+            .to_string(),
+    )
 }
 
 /// Enforce the caller's durable-effect claim against the exact composed
@@ -5539,7 +5566,6 @@ fn map_engine_root_resolution_error(
         | EngineError::SignatureMissing { .. }
         | EngineError::SignatureVerificationFailed { .. }
         | EngineError::UntrustedSigner { .. }
-        | EngineError::ProjectTrustDocumentRefused { .. }
         | EngineError::ContentHashMismatch { .. }
         | EngineError::InvalidMetadata { .. }
         | EngineError::EffectiveItemNotFound { .. }
@@ -6576,6 +6602,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
             executor_ref,
             &subject.kind,
             None,
+            None,
             &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         );
     }
@@ -6591,6 +6618,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
                 executor_ref,
                 &subject.kind,
                 project_root,
+                subject.logical_project_root.clone(),
                 authority,
             )
         }
@@ -6599,6 +6627,7 @@ pub(super) fn resolve_terminal_executor_for_subject(
             executor_ref,
             &subject.kind,
             execution_project_root.map(Path::to_path_buf),
+            subject.logical_project_root.clone(),
             &subject.subject_resolution_authority,
         ),
     }
@@ -7189,6 +7218,7 @@ metadata:
 
     fn test_plan_context(project_path: PathBuf) -> ryeos_engine::contracts::PlanContext {
         ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: "fp:test".into(),
@@ -7247,6 +7277,7 @@ metadata:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx: ryeos_engine::contracts::PlanContext {
+                logical_project_root: None,
                 requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                     ryeos_engine::contracts::Principal {
                         fingerprint: "fp:test".into(),
@@ -7278,6 +7309,7 @@ metadata:
         let canonical_ref = CanonicalRef::parse("service:example/status").unwrap();
         VerifiedItem {
             resolved: ResolvedItem {
+                logical_project_root: None,
                 canonical_ref: canonical_ref.clone(),
                 kind: canonical_ref.kind.clone(),
                 source_path,
@@ -7603,6 +7635,7 @@ metadata:
                 .expect("signed tool fixture has a signature header");
         let canonical_ref = CanonicalRef::parse(item_ref).unwrap();
         let resolved_item = ResolvedItem {
+            logical_project_root: None,
             canonical_ref: canonical_ref.clone(),
             kind: canonical_ref.kind.clone(),
             source_path,
@@ -8090,66 +8123,6 @@ runtime_authority:
         )
         .unwrap_err();
         assert!(err.to_string().contains("identity mismatch"), "got: {err}");
-    }
-
-    #[test]
-    fn project_self_trust_mints_runtime_authority_from_exact_live_root() {
-        let project = tempdir().join("project");
-        let project_signing_key = SigningKey::from_bytes(&[72u8; 32]);
-        write_signed_manifest_with_key(
-            &project.join(ryeos_engine::AI_DIR),
-            SELF_BUNDLE_MANIFEST,
-            &project_signing_key,
-        );
-
-        // Model the live per-request store: persistent node trust plus the
-        // project's self-pinned publisher.
-        let node_trust_store = trust_store();
-        let mut combined_trust_store = node_trust_store.clone();
-        combined_trust_store.extend_from(&trust_store_for_key(&project_signing_key));
-        let project_manifest = ryeos_bundle::manifest::load_verified_manifest(
-            &project.join(ryeos_engine::AI_DIR),
-            "example-bundle",
-            &combined_trust_store,
-        )
-        .expect("fixture project manifest must verify");
-        assert_eq!(project_manifest.manifest.name, "example-bundle");
-
-        let engine =
-            build_test_engine_with_trust(Vec::new(), combined_trust_store, node_trust_store);
-        let ctx = ExecutionContext {
-            principal_fingerprint: "fp:test".into(),
-            caller_scopes: vec!["*".into()],
-            engine: std::sync::Arc::new(engine),
-            plan_ctx: test_plan_context(project.clone()),
-            requested_call: None,
-        };
-        let mut resolved = resolved_tool_in_space(
-            &project,
-            "tool:example-bundle/send",
-            ryeos_engine::contracts::ItemSpace::Project,
-            &project_signing_key,
-        );
-        resolved.resolved_item.metadata.extra = requires_extra(json!({
-            "capabilities": { "manifest": { "runtime_authority": {
-                "bundle_events": [
-                    { "event_kind": "example_event", "operations": ["append"] }
-                ]
-            } } }
-        }));
-
-        let caps = derive_manifest_runtime_caps(
-            &resolved.resolved_item,
-            fixture_trust(&resolved.resolved_item),
-            &resolved.item_ref,
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(
-            caps,
-            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
-            "the exact live project manifest is the authority upper bound"
-        );
     }
 
     #[test]
@@ -8958,6 +8931,7 @@ requires:
     fn resolve_dispatch_hop_enumerates_kinds_when_schema_absent() {
         let engine = build_test_engine();
         let plan_ctx = ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: "fp:test".into(),
@@ -9055,6 +9029,7 @@ requires:
             network_authority_ceiling: None,
             pushed_head_declaration: None,
             filesystem_authority_ceiling: None,
+            host_authority: None,
             target: None,
             endpoint: None,
             resource_authority_ceiling: None,

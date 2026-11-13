@@ -654,7 +654,7 @@ pub(crate) fn load_existing_capacity_binding(
         document.body.operator_fingerprint == operator_fingerprint,
         "capacity issuance operator differs from initialization"
     );
-    let trust = TrustStore::load(None, &app_root.join(".ai/config"))?;
+    let trust = TrustStore::load_node_registry(app_root)?;
     let operator = &trust
         .get(operator_fingerprint)
         .context("capacity operator is not pinned")?
@@ -1626,7 +1626,7 @@ impl RetainedCapacityAccount {
             .context("initialized capacity config directory is absent")?
             .open_child_directory(OsStr::new("onboarding"))?
             .context("initialized capacity onboarding directory is absent")?;
-        let trust = TrustStore::load(None, &inputs.root.path().join(".ai/config"))?;
+        let trust = TrustStore::load_node_registry(inputs.root.path())?;
         let operator = &trust
             .get(&inputs.operator_fingerprint)
             .context("capacity operator is not pinned")?

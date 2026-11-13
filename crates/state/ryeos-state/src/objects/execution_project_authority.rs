@@ -366,6 +366,30 @@ pub enum ExecutionProjectAuthority {
 }
 
 impl ExecutionProjectAuthority {
+    /// The project this authority belongs to, as the node knows it: the
+    /// absolute project path that signer project scopes name.
+    ///
+    /// A live project is its own logical root. A pinned generation is
+    /// materialized at a per-generation checkout, so its logical root is the
+    /// original project path, but only when the stable project identity says
+    /// the project is local to this node (`local:<path>`). A pinned
+    /// generation whose identity names another site has no logical root here,
+    /// so a signer scoped to specific projects never admits its content.
+    pub fn logical_project_root(&self) -> Option<PathBuf> {
+        match self {
+            Self::Projectless { .. } => None,
+            Self::LiveProject { canonical_root, .. } => Some(canonical_root.clone()),
+            Self::PinnedGeneration {
+                stable_project_identity,
+                display_path: Some(path),
+                ..
+            } if stable_project_identity == &format!("local:{}", path.display()) => {
+                Some(path.clone())
+            }
+            Self::PinnedGeneration { .. } => None,
+        }
+    }
+
     pub const PROJECTLESS: Self = Self::Projectless {
         environment: EnvironmentAuthority::None,
     };
@@ -1054,6 +1078,50 @@ impl ExecutionProjectAuthority {
         }
     }
 
+    /// The same authority for a host-direct launch: the process runs on the
+    /// host, unconfined, so the live project is recorded as `unconfined_host`
+    /// instead of a descriptor-rooted view nobody enforces. Only a read-write
+    /// live project or a projectless launch can be true under host access; a
+    /// read-only or pinned project cannot be enforced against a host process
+    /// and is refused.
+    pub fn into_unconfined_host(self) -> anyhow::Result<Self> {
+        let authority = match self {
+            Self::Projectless { .. } => self,
+            Self::LiveProject {
+                authority_id,
+                authored_project_identity,
+                canonical_root,
+                live_access,
+                environment,
+                capability_ceiling,
+                child_policy,
+            } => {
+                if live_access.access != LiveProjectAccess::ReadWrite {
+                    anyhow::bail!(
+                        "a host-direct launch runs unconfined on the host and cannot honour a read-only live project; request read-write live project access"
+                    );
+                }
+                Self::LiveProject {
+                    authority_id,
+                    authored_project_identity,
+                    canonical_root,
+                    live_access: LiveAccessAuthority {
+                        confinement: LiveFilesystemConfinement::UnconfinedHost,
+                        ..live_access
+                    },
+                    environment,
+                    capability_ceiling,
+                    child_policy,
+                }
+            }
+            Self::PinnedGeneration { .. } => anyhow::bail!(
+                "a host-direct launch runs unconfined on the host and cannot honour a pinned project generation; use a live read-write or projectless execution policy"
+            ),
+        };
+        authority.validate()?;
+        Ok(authority)
+    }
+
     pub fn live_access(&self) -> Option<&LiveAccessAuthority> {
         match self {
             Self::LiveProject { live_access, .. } => Some(live_access),
@@ -1264,6 +1332,44 @@ fn validate_sorted_capabilities(label: &str, capabilities: &[String]) -> anyhow:
 mod tests {
     use super::*;
 
+    fn pinned_for(identity: &str, display: Option<&str>) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::pinned(
+            identity.to_owned(),
+            display.map(PathBuf::from),
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn logical_project_root_is_the_local_project_path() {
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A project another site names is not a project of this node.
+        assert_eq!(
+            pinned_for(
+                "site:other:/srv/projects/alpha",
+                Some("/srv/projects/alpha")
+            )
+            .logical_project_root(),
+            None
+        );
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", None).logical_project_root(),
+            None
+        );
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS.logical_project_root(),
+            None
+        );
+    }
+
     fn output_partition() -> super::super::WorkspaceOutputPartition {
         let bounds = crate::external_content::products::ProductBounds {
             maximum_entries: 8,
@@ -1439,6 +1545,29 @@ mod tests {
             confinement: LiveFilesystemConfinement::UnconfinedHost,
         };
         assert!(false_read_only.validate().is_err());
+    }
+
+    #[test]
+    fn host_direct_records_unconfined_host_and_refuses_what_it_cannot_honour() {
+        let root = tempfile::tempdir().unwrap();
+        let writable = live_authority(root.path(), LiveProjectAccess::ReadWrite)
+            .into_unconfined_host()
+            .unwrap();
+        assert_eq!(
+            writable.live_access().unwrap().confinement,
+            LiveFilesystemConfinement::UnconfinedHost
+        );
+        let error = live_authority(root.path(), LiveProjectAccess::ReadOnly)
+            .into_unconfined_host()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("read-only"), "{error}");
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS
+                .into_unconfined_host()
+                .unwrap(),
+            ExecutionProjectAuthority::PROJECTLESS
+        );
     }
 
     #[test]

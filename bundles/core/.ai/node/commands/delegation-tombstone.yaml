@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-13T14:29:21Z:770e350a1bb12e0344d3cef23ccf567a963566f4b6ff265da9611001333d3f02:7lO6zVftd0lVkeiDZqcbHYtjdjwA+JXQTAR7QODcXXiYkPrqTPEXFxQr+ATTYsxUABq2Esx3tQMguv6Oxjy/Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- delegation
+- tombstone
+description: Record a tombstone for one remote delegation digest on this node
+help:
+  usage: "ryeos delegation tombstone --delegator <fp:...> --delegation-digest <digest>"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:identity/revoke-delegation

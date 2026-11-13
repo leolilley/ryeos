@@ -1,0 +1,6 @@
+# ryeos:signed:2026-11-13T14:29:21Z:50403308f6e0e9fe4e1530db33ccaa23fa7199ce8dc393cfa1c279125c2745e1:kKFPuQBM/If9hLtl76MMhFRFVxVDj2ST+ZrJe/7+fiC3XS1EhuKY6kMoOL+GjvYju7FyIPBp5AlmWF+M0avtCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.delegation-list
+required_caps: ["ryeos.execute.service.remote/delegation-list"]
+schema: {}
+description: "List the delegations stored for the caller, with their remotes, scopes and expiry"

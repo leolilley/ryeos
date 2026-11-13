@@ -15,7 +15,6 @@ pub(crate) struct ParserOverlayCacheKey {
     pub overlay_fingerprint: String,
     pub effective_trust_fingerprint: String,
     pub base_trust_fingerprint: String,
-    pub caller_overlay_identity: Option<String>,
     pub generation_fingerprint: String,
 }
 
@@ -317,9 +316,6 @@ fn rebuild_reason(
     if previous.base_trust_fingerprint != current.base_trust_fingerprint {
         return "base_trust_changed";
     }
-    if previous.caller_overlay_identity != current.caller_overlay_identity {
-        return "caller_overlay_changed";
-    }
     if previous.effective_trust_fingerprint != current.effective_trust_fingerprint {
         return "project_trust_changed";
     }
@@ -334,11 +330,6 @@ fn estimated_key_bytes(key: &ParserOverlayCacheKey) -> usize {
         + key.overlay_fingerprint.len()
         + key.effective_trust_fingerprint.len()
         + key.base_trust_fingerprint.len()
-        + key
-            .caller_overlay_identity
-            .as_ref()
-            .map(String::len)
-            .unwrap_or(0)
         + key.generation_fingerprint.len()
 }
 
@@ -558,7 +549,6 @@ mod tests {
             overlay_fingerprint: "overlay".to_string(),
             effective_trust_fingerprint: "effective-trust".to_string(),
             base_trust_fingerprint: "base-trust".to_string(),
-            caller_overlay_identity: None,
             generation_fingerprint: "generation".to_string(),
         }
     }

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-13T10:01:45Z:d26102bbdad3e0c98596fc90f03cce5dc65152cdc62ce63799778b731a887ce6:h0CYpBnXkI0wpETfnvmKJVwb4+lm/y7RM9ULjdm0ft9Yj6m046VMjkPINlF7QALb5Lauxxv15TYRBR04HsczBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-execution, inventory]
+description: List what the provider holds for one binding's owner scope and store a node-signed inventory receipt
+forms:
+  - slots:
+      - field: binding
+help:
+  usage: ryeos external-execution inventory <section>/<binding-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-execution/provider-inventory

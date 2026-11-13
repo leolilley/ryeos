@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T10:25:09Z:20a94ef85cbc91a47879e4912cbbce938cdc19c0d510cbab00f79ccff9731d0c:pit03NpfRJmqpxwIAonNDshrHBnNcxCi9qN0/5Z9mt6P3WYggGm+BNXOwYw9qjdvrbpGhkzRY4NwEyMVn5jjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:a544ce2a97a90858dbe0f67bdf261f7602152c20cdcb1f28d135cc3635b48de9:vSiVmWPEftF6H0RcspQ7kiqoEvfv5mQJ1hf1MEMmPr0SqjudoCwwFRkWcJt138Fj2uK4ONRwFVuxM+0csnnyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -37,73 +37,123 @@ untrusted tenants.
   it learns. See [Services: objects](../services/objects.md#authority-a-hash-plus-the-grant-fetches-the-object).
 - Vault is a single shared store in v1; capability checks protect
   mutation/listing, not per-principal isolation.
-- Remote requests are normally signed with the **caller's node Ed25519 key**;
-  the remote node verifies the signature against its authorized-keys trust
-  store. The explicit configured-operator continuity mode described below is
-  the sole generic exception.
+- Remote requests are signed with this node's Ed25519 key and carry the
+  calling principal's own signed delegation. The remote node admits the
+  principal from its authorized-keys trust store and caps the request to the
+  delegation (see [Identity Requirements](#identity-requirements)). A call made
+  as the node itself, with no principal behind it, is signed by the node key
+  alone.
 - Granting the local `remote.admin` capability is operator-level access
   to high-impact remote orchestrators in v1. It does not replace
   target-node authorized-key scopes.
 - A remote's pinned identity (`signing_key`, `principal_id`,
-  `vault_fingerprint`) comes only from the node's own remotes file. A
-  project cannot supply or override it: see [Configuration](#configuration).
+  `vault_fingerprint`) comes only from the node-signed pin records under
+  `.ai/node/remotes/`. A project cannot supply or override it: see
+  [Configuration](#configuration).
 
 ## Identity Requirements
 
-Remote outbound requests are normally signed with the **caller's node key**,
-not the user CLI key. This means:
+A remote run acts as the **principal that asked for it**, not as the node. Each
+principal signs, with its own key, a bounded delegation that lets this node act
+for it on one remote. The daemon never holds a principal's private key, the
+operator's included: the operator is one more principal that signs a
+delegation.
 
-- The key that must be authorized on the remote is the caller's **node
-  public key** (`<system>/.ai/node/identity/public-identity.json`).
-- To display your node's public key for sharing with a remote operator:
+### Delegating
 
-  ```bash
-ryeos identity
-  ```
+```bash
+ryeos remote delegate --remote hosted \
+  --scopes ryeos.execute.service.remote/run,ryeos.execute.service.remote/push \
+  --lifetime-secs 3600
+```
 
-- The remote operator authorizes the caller's **node key fingerprint**,
-  not the user key fingerprint.
+The CLI asks the node for the identities of both parties, signs the statement
+with the caller's own key, and hands it to the node, which stores it
+(node-signed) for that principal and remote and replaces any earlier one. The
+signed statement is `{schema, delegator, delegate_site, delegate_node,
+audience_site, audience_node, scopes, not_after, nonce}`:
 
-Operator-owned durable workflows may explicitly select the configured
-operator on `service:remote/push`; the matching retained-current-HEAD accepted
-`service:remote/run` preserves it automatically. Both local requests must be
-made by that exact configured operator, and the destination must authorize the
-same operator key through a node-signed `remote_operator` grant bound to the
-source site's canonical ID and exact scopes. The destination separately admits
-the source node key as `remote_node` with
-`ryeos.attest.request.forwarded-operator`; that key co-signs every exact
-operator request. The operator grant constrains the permitted site, while the
-source-node signature proves transit. Together they keep the principal as the
-operator and make verified remote origin visible to destination policy. A
-delegated caller cannot turn the node into an operator-key signing oracle or
-choose its authenticated origin.
+- `delegator` is the signing principal (`fp:<fingerprint>`);
+- `delegate_site` and `delegate_node` name this node, which may use it;
+- `audience_site` and `audience_node` name the one remote it is addressed to;
+- `scopes` are the capabilities the principal lends, a subset of what the
+  remote's grant allows;
+- `not_after` is the last second it is honoured. The node refuses to store one
+  that lasts more than 30 days;
+- `nonce` makes every delegation distinct, so each has its own digest.
 
-### Attribution: remote runs act as the node, not the user
+A delegation is addressed to a remote this node dials, so `remote delegate`
+against an inbound-only pin is refused with `remote_inbound_only`. The remote's
+own verification, where the origin calls in, does not depend on how the remote
+pinned the origin, so an origin pinned inbound-only there still works.
 
-`remote execute`, `remote push` (default mode) and target-site forwarding
-from `/execute` sign every request to the remote with the caller's **node
-key**. The remote therefore sees, authorizes and records one principal, the
-caller node, whichever local user started the run:
+The caller needs the local grant `ryeos.execute.service.remote/delegate`.
+`ryeos remote delegation list` shows the stored delegations;
+`ryeos remote delegation revoke --remote <name>` revokes one (below).
 
-- the remote's authorized-key scopes are granted to the node, so every local
-  user allowed to start remote work (for example `remote/admin` for
-  `remote execute`, `remote/push` for `remote push`) acts with the node's full
-  grant on that remote;
-- the remote stores pushed project HEADs and thread ownership under the node
-  key's fingerprint, so all of a node's users share one namespace there;
-- remote threads, results and audit records name the node, not the user. The
-  caller's own sync job (`service:sync/jobs/inspect`) is the only record of
-  which local principal (`acting_principal`) asked for the run.
+### What the remote checks
 
-Grant remote rights to local users on that basis: giving a user remote
-capabilities lends them the node's identity on every configured remote. The configured
-operator continuity mode above is the one exception, and it is reserved for
-the exact configured operator.
+For every request the node signs with its own key, adds its forwarding
+co-signature, and sends the delegation in `x-ryeos-delegation`. The remote
+verifies, in order:
 
-Per-user outbound keys, where each local principal holds its own key admitted
-and capped separately on the remote, are not available yet. They come with the
-keys work (per-user key custody on the caller and per-signer admission on the
-remote); until then, attribute and cap remote work per node.
+1. the source node's key is admitted as `remote_node` for the asserted source
+   site, with `ryeos.attest.request.forwarded-operator`, and its co-signature
+   covers the exact request;
+2. the delegation names the remote as its audience and the forwarding node as
+   its delegate, has not passed `not_after`, and carries a valid signature by
+   the delegator;
+3. the delegator holds a `remote_principal` grant on the remote bound to that
+   same source site;
+4. no tombstone for the delegation's digest is on the remote's ledger.
+
+The request then runs as the delegator with `delegated_via` set to the source
+site. Its effective scopes are the delegator's grant **intersected with** the
+delegation: a delegation never widens the grant, and the grant is never used
+beyond the delegation. The delegation digest is recorded with the forwarding
+evidence on the remote and in the source node's durable job records, so a
+result names whom it was for.
+
+A node that is not the principal's home cannot forge the principal, and a
+compromised source node can only act inside the scopes and time the principal
+signed.
+
+### Outbound principal
+
+`remote push`, `remote run`, `remote execute`, target-site forwarding from
+`/execute`, the `remote vault-*` commands and the product and testimony
+exports make the call as the **caller under its delegation** by default. When
+the caller is the node itself, the call is signed by the node key alone.
+`outbound_principal` on `remote/push` and `remote/run` selects explicitly:
+`delegated` or `node`. Retained-current-HEAD launches are always delegated.
+
+Refusals are typed and name the cure:
+
+| Code | Where | Meaning and cure |
+|------|-------|------------------|
+| `remote_delegation_missing` | source | no stored delegation: `ryeos remote delegate --remote <name>` |
+| `remote_delegation_expired` | source or remote | past `not_after`: sign a new one |
+| `remote_delegation_replaced` | source | a durable operation began under another delegation: start it again |
+| `remote_delegation_not_transitive` | source or remote | a request that arrived through a delegation cannot delegate onward |
+| `remote_delegation_malformed` | remote | not a canonical delegation |
+| `remote_delegation_bad_signature` | remote | not signed by the delegator's key |
+| `remote_delegation_wrong_audience` | remote | addressed to another node: sign one for this remote |
+| `remote_delegation_wrong_delegate` | remote | names another forwarding node |
+| `remote_delegation_revoked` | remote | tombstoned on the remote |
+| `remote_delegation_principal_not_admitted` | remote | the delegator has no `remote_principal` grant for that source site |
+
+### Revoking
+
+`ryeos remote delegation revoke --remote <name>` asks the remote to record a
+tombstone for the delegation's digest and then deletes the stored delegation.
+The remote accepts the tombstone from the delegating principal (so the
+delegation must lend `ryeos.execute.service.identity/revoke-delegation`, and
+the principal's grant must hold it) or from its own operator, who can record
+one for any digest with `ryeos delegation tombstone --delegator <fp:...>
+--delegation-digest <digest>`. If the remote cannot be asked, the local record
+is kept and the refusal names the operator command; `--local-only` deletes only
+the local record. A tombstone ends one delegation at once; revoking the
+principal's grant ends all of them, and `not_after` bounds the rest.
 
 ## Prerequisites
 
@@ -164,41 +214,47 @@ remote); until then, attribute and cap remote work per node.
      --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
    ```
 
+   Every grant expires. Without `--lifetime-secs` it lasts the class maximum
+   in the target's signed authorization policy (`remote_node` 90 days,
+   `remote_principal` 30 days, `local_client` 365 days in the shipped
+   profiles). When it lapses the key holder receives HTTP 401
+   `grant_expired`; the principal that granted it (or the target's operator)
+   renews it with `ryeos renew-key --fingerprint <fp>`. The grantee cannot
+   renew its own grant. See [Identity model](../identity-model.md).
+
 3. **Choose scopes by operation**. Do not mix local remote-service caps
    with remote authorized-key scopes. The complete matrix is in
    [Remote Command Reference](remote-command-reference.md#authority-matrix).
 
-For configured-operator continuity, do not use admission claim or the remote
+For a principal's delegated runs, do not use admission claim or the remote
 authorize endpoint: both create ordinary remote-node/client authority. Stop
-the hosted target and use its local operator to install the source operator's
-public key as an exact origin-bound operator grant. A fresh target needs no
+the target and use its local operator to install the principal's public key as
+an exact origin-bound `remote_principal` grant. A fresh target needs no
 semantic-conversion flag; supply it only when an incumbent grant for that same
 fingerprint is deliberately being reclassified or rebound:
 
 ```bash
 RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
-  --public-key "<configured_operator_raw_ed25519_base64>" \
-  --label "operator forwarded from source" \
+  --public-key "<principal_raw_ed25519_base64>" \
+  --label "principal forwarded from source" \
   --origin-site-id "site:<source>" \
   --scopes "<comma-separated exact workflow scopes>"
 ```
 
-Before conversion, separately admit the source node key with the exact scope
-`ryeos.attest.request.forwarded-operator`. The target-local operator-grant
-signature is an allowed-site constraint, not evidence that a request transited
-the source. The source-node co-signature covers the exact primary request and
-supplies that proof. Forwarded HEAD and execute bodies also include a
-caller-signed required-origin assertion so a missing or wrongly classified
-grant/proof fails closed; the assertion only narrows verified authority and
-can never create it.
+Before that, separately admit the source node key with the exact scope
+`ryeos.attest.request.forwarded-operator`. The principal's grant is an
+allowed-site constraint, not evidence that a request transited the source. The
+source-node co-signature covers the exact primary request and supplies that
+proof. Forwarded HEAD and execute bodies also include a caller-signed
+required-origin assertion so a missing or wrongly classified grant/proof fails
+closed; the assertion only narrows verified authority and can never create it.
 
-One grant exists per key fingerprint, so the target classifies the source
-operator key as remote. The target-local operator remains a separate
-`local_client` and performs local maintenance without changing the source
-grant. The offline tool holds the same exclusive state lock as the daemon
-throughout publication and refuses if the daemon is live. When an incumbent
-grant is deliberately reclassified, `--allow-semantic-conversion` is required
-and `--merge-scopes` is forbidden.
+One grant exists per key fingerprint, so the target classifies the principal's
+key as remote. The target-local operator remains a separate `local_client` and
+performs local maintenance without changing that grant. The offline tool holds
+the same exclusive state lock as the daemon throughout publication and refuses
+if the daemon is live. When an incumbent grant is deliberately reclassified,
+`--allow-semantic-conversion` is required and `--merge-scopes` is forbidden.
 
 Admission initially grants only the declared admission scopes. When that same
 source node also transports object closures or project heads, the target-local
@@ -213,21 +269,21 @@ RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
 ```
 
 Do not use `--origin-site-id` for this key: that flag describes the separate
-forwarded `remote_operator` principal.
+forwarded `remote_principal` principal.
 
    Common remote-side scopes:
 
    | Operation | Remote scopes on target |
    |-----------|-------------------------|
    | `remote push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` |
-   | `remote reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` |
+   | `remote reconcile-project-head` | the delegating operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` |
    | `remote pull` | `ryeos.execute.service.objects/get` |
    | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires; `ryeos.use.vault.operator` only if the policy exposes the target's operator vault (not by default, see below) |
    | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
-   | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_operator` principal) |
+   | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_principal` principal) |
 
    `ryeos.use.vault.operator` lets an execution read the target's
    operator vault (`include_operator_vault: true`, or the `operator` vault
@@ -243,7 +299,7 @@ forwarded `remote_operator` principal.
    handler — the matcher does not auto-prefix and the daemon's auth
    loader refuses to load TOMLs that contain them.
 
-   `ryeos external-content push-product <remote> <witness-hash> <origin-admission-hash> <maximum-bytes>` is the origin-side counterpart of `receive-product`. It offers the product's witness, admission and closure objects (`product-offer`); the hosted node verifies the admission against the pinned remote key before storing anything. Missing blobs and large objects then go up in bounded chunks (`objects/stage-chunk`, at most 512 KiB each, resumable) into an owned durable stage, and `product-accept` publishes the acceptance under the node identity once the closure and every large object are resident. Large objects live in a separate large-object tier and are read back in bounded chunks through `objects/get` `large_object_chunk`.
+   `ryeos external-content push-product <remote> <witness-hash> <origin-admission-hash> [maximum-bytes]` is the origin-side counterpart of `receive-product`. It offers the product's witness, admission and closure objects (`product-offer`); the hosted node verifies the admission against the pinned remote key before storing anything. Missing blobs and large objects then go up in bounded chunks (`objects/stage-chunk`, at most 512 KiB each, resumable) into an owned durable stage, and `product-accept` publishes the acceptance under the node identity once the closure and every large object are resident. Large objects live in a separate large-object tier and are read back in bounded chunks through `objects/get` `large_object_chunk`. The byte bound defaults to the product declaration's signed `maximum_total_bytes`, the bound its capture already enforced; an explicit bound may only narrow it (above it the push is refused `product_push_bound_exceeds_declaration`), and neither may exceed this node's import policy (`product_push_bound_exceeds_import_policy`).
 
 ### On the caller node
 
@@ -264,9 +320,12 @@ forwarded `remote_operator` principal.
 
    This discovers the remote's public key, principal id, canonical site ID,
    vault fingerprint, and ingest-ignore rules. A descriptor is a trust pin
-   only: it contains the signing key and fingerprint, which are verified
-   against the live `/public-key` document before the complete discovered
-   identity is written to local config.
+   only: it is signed by the remote node key it pins and binds the remote's
+   name, URL, site ID, vault fingerprint and key together. Configure verifies
+   that signature, then checks the pins against the live `/public-key`
+   document before the complete discovered identity is written as a
+   node-signed pin record under `.ai/node/remotes/`. Only the configured local
+   operator can run `remote configure` and `remote bind-project`.
 
    The configured endpoint is one canonical, credential-free base URL. It has
    no user information, query, fragment, control/whitespace characters, or
@@ -279,27 +338,109 @@ forwarded `remote_operator` principal.
    key/fingerprint, site ID, and vault fingerprint with that configured
    coordinate before making signed probes. A mismatch skips all authenticated
    thread/project contact. `remote admit` applies the same check before it
-   releases a one-time token to the target. Admission selects only an
-   operator-owned remote config; a project entry cannot shadow its credential
-   destination.
+   releases a one-time token to the target. Remote pins exist only as
+   node-signed records on the node: a project never supplies or overrides a
+   remote, so a project cannot change a credential destination. A pin record
+   that is unsigned, edited or signed by another key is refused with a typed
+   `remote_pin_*` code that names the cure.
 
 ### Publishing a descriptor
 
-Any node operator can export a descriptor locally:
+Any node operator can export a descriptor from the running daemon (the signed document is the `yaml` field of the reply):
 
 ```bash
 ryeos remote-descriptor \
   --name production \
   --url https://ryeos.example.com \
-  --capabilities "remote-execute,bundle-install" \
-  --output ./production.remote.yaml
+  --capabilities "remote-execute,bundle-install"
 ```
+
+The exported descriptor (version 2) is signed with the node key it pins. The
+signature proves the producer held that key and makes the bound name, URL,
+site ID and vault fingerprint tamper-evident; it does not replace checking the
+fingerprint with the remote operator out of band. Version 1 descriptors are
+unsigned and are refused with `remote_descriptor_unsigned`: ask the remote
+operator to re-export. A descriptor signed by a different key is refused with
+`remote_descriptor_wrong_signer`, and an edited one with
+`remote_descriptor_tampered`.
 
 The descriptor is intentionally generic core data. RyeOS Cloud or another
 hosted/provider bundle may distribute it through a web UI later, but the
 authority model does not depend on that distribution channel. The caller
 still verifies the descriptor against the live node identity during
 `remote configure --descriptor`.
+
+A version 2 descriptor always carries the node's site (`site_id`) and vault
+fingerprint (`vault_fingerprint`), and may carry its signed ingest-ignore rules
+(`ingest_ignore`) and a `url`. All of them are covered by the node signature.
+With them a node can pin the remote without contacting it:
+
+```bash
+ryeos remote pin origin --descriptor ./origin.remote.yaml
+```
+
+`remote pin` verifies the descriptor's node signature and writes a node-signed
+pin record under `.ai/node/remotes/` from the descriptor alone (`pin_source:
+descriptor_without_contact`). The descriptor is the trust anchor, so it must
+reach the pinning node through a channel its operator trusts. A version 1 or
+unsigned descriptor is refused with `remote_descriptor_unsigned`. One without
+ingest rules pins a remote this node never pushes to: push, execute and project
+sync to it refuse with `remote_pinned_without_ingest_rules` until `remote
+configure` (or a pin with the rules) replaces the entry.
+
+**Inbound-only peers.** A descriptor without a `url` pins an inbound-only
+remote: a node behind NAT that only ever calls in, such as the origin pinned by
+a hosted controller. The pin record carries `reachability: inbound_only` and no
+URL, and still holds the site, node key and vault fingerprint that inbound
+verification and grant origin checks use. Every path that dials a remote (run,
+push, pull, execute, sync, status, doctor, configure) refuses an inbound-only pin
+with `remote_inbound_only`, naming the remote. Export one with
+`ryeos remote-descriptor --name <name>` and no `--url`.
+
+## Wiring a hosted node without a shell
+
+A hosted controller behind an origin's NAT cannot dial the origin, and its
+operator has no terminal on it. The origin operator wires it with three signed
+offline operations, which the controller's signed profile delegates
+(`maintenance.remote_offline_operations` in the `hosted-controller` profile):
+
+| Operation | Input | Effect |
+|---|---|---|
+| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_principal` grant (public key, exact scopes, label, origin site, `merge_scopes`, optional `lifetime_secs`). Never an offline-operation scope or a wildcard. The grant ends: `lifetime_secs` (default the class maximum of the controller's signed `authorization` policy) above that maximum fails with `grant_lifetime_exceeds_policy`. Its `authorized_by` is the request's signer and the request digest. The configured operator's fingerprint is refused with `grant_is_operator`. |
+| `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its signed v2 descriptor (a URL-less one pins an inbound-only remote), as `ryeos remote pin`: a node-signed record under `.ai/node/remotes/`. |
+| `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
+
+Each is signed against the controller's facts (`authorized_keys`, `remotes`,
+`bundle_registrations` respectively) and applies at the controller's next
+start:
+
+```bash
+# controller-facts.json: the controller's facts, from its signed
+# GET /offline-operations/facts or the facts line of its startup log
+ryeos node offline-operation sign --operation node.remote.pin \
+  --arguments pin.json --input descriptor=./origin.remote.yaml \
+  --facts controller-facts.json --grant-digest <sha256> --origin-site site:<origin> \
+  --signing-key ./origin-operator.pem --stage-dir ./pin-delivery
+```
+
+Deliver `--stage-dir`'s `request.json` and `inputs/` through the platform
+channel the entrypoint reads (`RYEOS_OFFLINE_OPERATION_REQUEST` and
+`RYEOS_OFFLINE_OPERATION_INPUTS`, see `deploy/composition-images.md`) and
+restart the service. `ryeos node offline-operation submit` authenticates with
+the signing key alone, which a remote operator's grant does not accept without
+a source-node forwarding proof, so it serves the controller's local operator,
+not the origin's.
+
+Requests pin the ledger head, so sign the next operation against the facts
+the controller reports after the previous one applied, or sign each against
+the same head and submit them in order of application. A bundle replacement
+needs the daemon's own startup: it composes the node's configuration as
+`run-service` does to verify the new bundle, and only the daemon can.
+
+Delegating any of these is close to delegating the whole controller: a grant
+or a bundle changes who the node trusts and what it runs. The operator whose
+grant names the `ryeos.offline.node.*` scopes is trusted that far. Those
+scopes are themselves granted only by the controller's local operator.
 
 ## End-to-End Operator Workflow
 
@@ -310,13 +451,12 @@ UI or provisioning automation.
 ### Target node / remote operator
 
 Export a descriptor trust pin for the node and mint a one-time admission
-token. Deliver both files/values to the caller out of band.
+token. Save the descriptor `yaml` to a file and deliver it, with the token, to the caller out of band.
 
 ```bash
 ryeos remote-descriptor \
   --name prod \
-  --url https://ryeos.example.com \
-  --output ./prod.remote.yaml
+  --url https://ryeos.example.com
 
 ryeos admission-token \
   --label "dev-machine" \
@@ -387,14 +527,15 @@ keys must enumerate their capabilities explicitly.
 When a node's signing key is compromised or needs rotation, treat it as a
 break-glass operation. The daemon no longer has an `--init-only` path and
 will not auto-regenerate the node key, because doing so would invalidate
-the node trust doc pinned in the node trust store.
+the signer records, which the node key signs.
 
 Safe rotation requires explicit operator action:
 
 1. Stop the daemon.
 2. Replace/regenerate the node signing key under
    `<system>/.ai/node/identity/private_key.pem`.
-3. Recreate and pin the matching node trust doc in the node trust store.
+3. Re-pin every signer with `ryeos trust pin` so each signer record is
+   signed by the new node key.
 4. Re-sign or recreate node-signed local config items as needed.
 5. Reissue every remotely granted authorized key.
 
@@ -725,32 +866,33 @@ producing a clear error if the operator actually tries to invoke one.
 
 ## Configuration
 
-Remotes are stored in `<system_space_dir>/.ai/config/remotes/remotes.yaml`:
+Each remote is one node-signed record,
+`<system_space_dir>/.ai/node/remotes/<name>.yaml` (schema
+`ryeos/remote-pin/v1`), written by `ryeos remote configure`:
 
 ```yaml
-remotes:
-  production:
-    name: production
-    url: https://ryeos.example.com
-    principal_id: fp:<remote-signing-key-fingerprint>
-    signing_key: ed25519:<base64-remote-public-key>
-    site_id: site:production
-    vault_fingerprint: sha256:def456...
-    ingest_ignore:
-      patterns:
-        - ".git/"
-        - "target/"
-        - "*.pyc"
+# ryeos:signed:<timestamp>:<hash>:<signature>:<node-fingerprint>
+schema: ryeos/remote-pin/v1
+pin_source: expected_fingerprint   # descriptor | expected_fingerprint | descriptor_and_expected_fingerprint
+pinned_at: 2026-11-13T00:00:00Z
+request: <digest of the operator request that made the pin>
+remote:
+  name: production
+  url: https://ryeos.example.com
+  principal_id: fp:<remote-signing-key-fingerprint>
+  signing_key: ed25519:<base64-remote-public-key>
+  site_id: site:production
+  vault_fingerprint: sha256:def456...
+  ingest_ignore:
+    patterns:
+      - ".git/"
+      - "target/"
+      - "*.pyc"
 ```
 
-Only the node holds remotes. A project's own
-`<project>/.ai/config/remotes/remotes.yaml` can neither define a remote nor
-override one of the node's. If any entry in it names trust material
-(`signing_key`, `principal_id`, `fingerprint`, `vault_fingerprint` or
-`descriptor`), every remote operation that names that project is refused
-with `project_remote_trust_material` (HTTP 409). The refusal lists each
-entry and field it found, and names the cure: remove those entries from the
-project file and configure the remote on the node with
-`ryeos remote configure <name> --url <https-url> --expect-fingerprint <fingerprint>`
-(or `--descriptor <file>`). Other entries in a
-project remotes file are listed as invalid by `remote list` and never used.
+The loader verifies the node signature on every read, so editing the pinned
+key, URL or a binding in place makes the record unusable until it is pinned
+again. A leftover unsigned remotes config file is refused with
+`remote_config_file_unsupported`; `ryeos node doctor` reports it in its
+`remote_pins` row. Re-pin each remote with `ryeos remote configure`, then
+delete the file.

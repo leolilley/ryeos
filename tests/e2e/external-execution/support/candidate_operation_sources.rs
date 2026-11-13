@@ -1,10 +1,8 @@
-//! Signed project-side operation sources (trust root and independent
-//! evaluator) for the protocol tests' candidate flows.
+//! Signed project-side operation source (the independent evaluator) for the
+//! protocol tests' candidate flows. The node key signs it and is the implicit
+//! root for project items.
 
 use std::collections::BTreeMap;
-
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use lillux::crypto::EncodePublicKey as _;
 
 pub fn signed_candidate_operation_sources(
     identity: &ryeos_node_runtime::identity::NodeIdentity,
@@ -38,31 +36,11 @@ print(json.dumps({"schema_version": 1, "candidate_snapshot_hash": candidate,
 "##,
     );
     let signing_key = identity.signing_key();
-    let fingerprint = identity.fingerprint();
-    let public_der = identity.verifying_key().to_public_key_der().unwrap();
-    let public_pem = format!(
-        "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
-        STANDARD.encode(public_der.as_bytes())
-    );
-    let trust = format!(
-        "version = \"1.0.0\"\nfingerprint = \"{fingerprint}\"\nowner = \"external candidate E2E\"\nattestation = \"\"\n\n[public_key]\npem = \"\"\"\n{public_pem}\"\"\"\n"
-    );
-    BTreeMap::from([
+    BTreeMap::from([(
+        ".ai/tools/test/external-candidate/evaluate.py".into(),
         (
-            ".ai/config/keys/trusted/e2e.toml".into(),
-            (
-                // A project trust document counts only when a node-trusted
-                // key signed it; this identity is pinned on the test node.
-                lillux::signature::sign_content(&trust, signing_key, "#", None).into_bytes(),
-                ryeos_state::objects::ProjectFile::REGULAR_MODE,
-            ),
+            lillux::signature::sign_content(&evaluator, signing_key, "#", None).into_bytes(),
+            ryeos_state::objects::ProjectFile::REGULAR_MODE,
         ),
-        (
-            ".ai/tools/test/external-candidate/evaluate.py".into(),
-            (
-                lillux::signature::sign_content(&evaluator, signing_key, "#", None).into_bytes(),
-                ryeos_state::objects::ProjectFile::REGULAR_MODE,
-            ),
-        ),
-    ])
+    )])
 }

@@ -1,4 +1,6 @@
-//! Operator statement releasing one unknown external allocation outcome.
+//! Operator statement releasing one unknown external allocation outcome. The
+//! statement must cite a node-signed provider inventory receipt taken after
+//! the allocation's contact window; the node checks it before settling.
 
 use std::sync::Arc;
 
@@ -15,7 +17,8 @@ use ryeos_executor::executor::ServiceAvailability;
 pub struct Request {
     pub placement_thread_id: String,
     pub reason: String,
-    pub evidence: String,
+    /// Digest of a provider inventory receipt this node stored.
+    pub inventory: String,
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -26,22 +29,25 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state: Arc<AppState>| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)?;
-            let phase = state.state_store.settle_unknown_external_allocation(
-                &req.placement_thread_id,
+            let phase = ryeos_app::provider_inventory::settle_unknown_allocation(
+                &state,
                 &ctx.fingerprint,
+                &req.placement_thread_id,
                 &req.reason,
-                &req.evidence,
+                &req.inventory,
             )?;
             tracing::warn!(
                 placement = %req.placement_thread_id,
                 principal = %ctx.fingerprint,
                 reason = %req.reason,
+                inventory = %req.inventory,
                 "operator settled an unknown external allocation outcome"
             );
             let value: Result<Value> = Ok(serde_json::json!({
                 "placement_thread_id": req.placement_thread_id,
                 "phase": phase,
                 "principal": ctx.fingerprint,
+                "inventory": req.inventory,
             }));
             value
         })

@@ -560,7 +560,7 @@ mod tests {
 
     use anyhow::{Result, ensure};
     use lillux::crypto::SigningKey;
-    use ryeos_engine::trust::{TrustStore, TrustedSigner};
+    use ryeos_engine::trust::TrustedSigner;
     use ryeos_state::external_execution::admission::ExternalCandidateQualificationUse;
     use ryeos_state::external_execution::admission::test_support;
     use ryeos_state::objects::{
@@ -875,13 +875,12 @@ product_qualification_policy:
         roots.extend(workflow.iter().cloned());
         roots.push(codex);
         roots.push(test_bundle);
-        let mut trust = ryeos_engine::test_support::live_trust_store();
         let verifier = signer.verifying_key();
-        trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
+        let trust = crate::state::test_support::live_trust_store_with(vec![TrustedSigner {
             fingerprint: lillux::signature::compute_fingerprint(&verifier),
             verifying_key: verifier,
             label: Some("consumer context fixture".into()),
-        }]));
+        }]);
         let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
         kind_roots.extend(
             workflow

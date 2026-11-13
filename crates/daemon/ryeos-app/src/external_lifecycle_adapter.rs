@@ -1063,6 +1063,53 @@ pub(crate) fn relay_file_adapter_request(
 }
 
 impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
+    fn list_provider_resources(
+        &self,
+        source: &crate::external_placement::ProviderInventorySource<'_>,
+        credential: &PlacementCredential,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterResponse,
+    > {
+        use ryeos_external_execution_contract::provider_inventory::{
+            MAX_PROVIDER_INVENTORY_REQUEST_BYTES, PROVIDER_INVENTORY_PROTOCOL,
+            ProviderInventoryAdapterRequest, ProviderInventoryAdapterResponse,
+        };
+        let request = ProviderInventoryAdapterRequest {
+            protocol: PROVIDER_INVENTORY_PROTOCOL.into(),
+            provider_id: self.declaration.id.clone(),
+            adapter_artifact_hash: self.adapter_hash.clone(),
+            settings_digest: source.settings_digest.to_owned(),
+            provider_spec_digest: self.provider_spec.sha256.clone(),
+        };
+        request.validate()?;
+        let bytes = ryeos_external_execution_contract::canonical_json(&request)?;
+        ensure!(
+            bytes.len() <= MAX_PROVIDER_INVENTORY_REQUEST_BYTES,
+            "provider inventory request exceeds its bound"
+        );
+        let output = self.invoke_sealed_snapshot_operation(
+            source.network_inputs,
+            &self.provider_spec,
+            source.settings,
+            source.settings_digest,
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::ListProviderResources,
+            None,
+            deadline,
+        )?;
+        ensure!(
+            !output.deadline_exceeded,
+            "provider inventory listing exceeded its deadline"
+        );
+        let value: ProviderInventoryAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid provider inventory adapter response"))?;
+        value.validate_for(&request)?;
+        Ok(value)
+    }
+
     fn relay_file_contact(
         &self,
         contract: &ExternalPlacementBackendContract,
@@ -1633,6 +1680,54 @@ impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
                 "qualification adapter claimed daemon-only deadline evidence"
             );
         }
+        Ok(ExternalLifecycleObservation {
+            value,
+            deadline_exceeded: output.deadline_exceeded,
+        })
+    }
+
+    fn observe_snapshot_qualification_occurrence(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>>{
+        use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse;
+        self.preflight_snapshot_qualification_create(producer, qualification, credential)?;
+        request.validate()?;
+        ensure!(
+            request.qualification_intent.qualification_profile_digest == qualification.digest()
+                && request.qualification_intent.provider_id == producer.backend()
+                && request.qualification_intent.adapter_artifact_hash == self.adapter_hash
+                && request.qualification_intent.provider_spec_digest == self.provider_spec.sha256
+                && request.qualification_intent.settings_digest == qualification.settings_digest()
+                && request.provider_spec_digest == self.provider_spec.sha256,
+            "qualification observation differs from inspected signed authority"
+        );
+        let deadline = deadline.min(lillux::time::MonotonicDeadline::after(
+            lillux::time::Duration::from_secs(u64::from(qualification.contact_timeout_seconds())),
+        ));
+        let bytes = ryeos_external_execution_contract::canonical_json(request)?;
+        let output = self.invoke_sealed_snapshot_operation(
+            producer.network_inputs(),
+            &self.provider_spec,
+            qualification.settings(),
+            qualification.settings_digest(),
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::QualifySnapshotObserve,
+            None,
+            deadline,
+        )?;
+        let value: RuntimeSnapshotQualificationReadinessAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES).map_err(|_| {
+                anyhow::anyhow!("invalid qualification observation adapter response")
+            })?;
+        value
+            .validate_for(request)
+            .map_err(|_| anyhow::anyhow!("invalid qualification observation adapter response"))?;
         Ok(ExternalLifecycleObservation {
             value,
             deadline_exceeded: output.deadline_exceeded,

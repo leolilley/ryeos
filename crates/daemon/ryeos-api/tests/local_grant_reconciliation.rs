@@ -78,8 +78,8 @@ async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
     .await
     .unwrap();
     assert_eq!(first["fingerprint"], merged["fingerprint"]);
-    assert_eq!(merged["principal_class"], "remote_operator");
-    assert_eq!(merged["previous_principal_class"], "remote_operator");
+    assert_eq!(merged["principal_class"], "remote_principal");
+    assert_eq!(merged["previous_principal_class"], "remote_principal");
     assert_eq!(merged["origin_site_id"], "site:source");
     assert_eq!(merged["previous_origin_site_id"], "site:source");
     assert_eq!(merged["dropped_scopes"], json!([]));
@@ -142,7 +142,7 @@ async fn non_operator_callers_are_rejected_before_decoding_or_grant_access() {
             operator.principal_id(),
             vec!["*".into()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".into()),
         ),
         HandlerContext::new_with_authority(
@@ -242,4 +242,29 @@ async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
     assert_eq!(result["previous_origin_site_id"], "site:source");
     assert_eq!(result["origin_site_id"], "site:other");
     assert!(ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).is_err());
+}
+
+#[tokio::test]
+async fn authorize_client_refuses_to_rewrite_the_operator_grant() {
+    let (_node, _state_owner, state) = test_state::build_test_state();
+    let state = Arc::new(state);
+    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let context = HandlerContext::new_with_authority(
+        operator.principal_id(),
+        vec!["*".into()],
+        true,
+        Some(AuthorizedKeyPrincipalClass::LocalClient),
+        None,
+    );
+    let request: Request = serde_json::from_value(json!({
+        "public_key": base64::engine::general_purpose::STANDARD
+            .encode(operator.verifying_key().as_bytes()),
+        "scopes": "ryeos.execute.service.health/status",
+    }))
+    .unwrap();
+    let error = handle(request, context, state).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("grant_is_operator"),
+        "{error:#}"
+    );
 }

@@ -1532,6 +1532,7 @@ pub async fn handle_open(
                                     .project_root
                                     .clone(),
                                 user_principal_id: None,
+                                scopes: None,
                             };
                             let (compiled_binding, presentation) =
                                 super::ui_launch_mint::compile_session_binding(

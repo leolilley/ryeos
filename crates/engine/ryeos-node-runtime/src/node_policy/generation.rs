@@ -427,6 +427,7 @@ fn validate_policy_generation(
             );
         }
     }
+    super::sections::host_access::check_generation(&policies)?;
     for section in operator_sections.iter().flatten() {
         if !policies.contains_key(section) {
             bail!(
@@ -514,7 +515,7 @@ pub fn prepare_policy_member_replacement(
     let SignedPolicyBodies {
         mut policies,
         operator_sections,
-    } = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    } = read_signed_policy_bodies(&directory, trust_store)?;
     if !policies.contains_key(section) {
         bail!("node policy generation has no `{section}` member to replace");
     }
@@ -580,8 +581,8 @@ pub fn prepare_schema_cut_carrying_operator_policy(
 ) -> Result<NodePolicyUpdate> {
     let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
         .context("node has no existing policy generation to replace")?;
-    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)?;
-    let installed = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    validate_schema_cut_directory_occupant(&directory, trust_store)?;
+    let installed = read_signed_policy_bodies(&directory, trust_store)?;
     for name in choices.keep.iter().chain(&choices.reset) {
         validate_policy_name("policy carry section", name)?;
     }
@@ -691,15 +692,16 @@ pub fn validate_schema_cut_policy_occupant(
 ) -> Result<()> {
     let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
         .context("node has no existing policy generation to replace")?;
-    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)
+    validate_schema_cut_directory_occupant(&directory, trust_store)
 }
 
 fn validate_schema_cut_directory_occupant(
-    app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<()> {
-    let node_fingerprint = crate::identity::node_identity_fingerprint(app_root)?;
+    let node_key = trust_store
+        .node_verifying_key()
+        .context("node trust registry has no node key")?;
     let entries = directory.entries_no_follow_bounded(MAX_POLICY_FILES)?;
     if entries.is_empty() {
         bail!("existing node policy generation is empty");
@@ -723,7 +725,7 @@ fn validate_schema_cut_directory_occupant(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .context("existing node policy entry disappeared")?;
-        crate::node_document::verify_pinned_signed_yaml(&file, trust_store, &node_fingerprint)?;
+        crate::node_document::verify_node_signed_document_file(&file, node_key)?;
         if names.insert(name.to_owned(), ()).is_some() {
             bail!("existing node policy generation contains duplicate section names");
         }
@@ -732,7 +734,7 @@ fn validate_schema_cut_directory_occupant(
 }
 
 fn load_policy_generation_from_directory(
-    app_root: &Path,
+    _app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
     policy_table: &NodePolicyTable,
@@ -740,7 +742,7 @@ fn load_policy_generation_from_directory(
     let SignedPolicyBodies {
         policies,
         operator_sections,
-    } = read_signed_policy_bodies(app_root, directory, trust_store)?;
+    } = read_signed_policy_bodies(directory, trust_store)?;
     let missing = policy_table
         .sections()
         .map(|section| section.name())
@@ -766,11 +768,12 @@ struct SignedPolicyBodies {
 /// Signature/shape verification shared by strict loading and explicit cuts.
 /// Raw bodies never grant launch authority without full section compilation.
 fn read_signed_policy_bodies(
-    app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<SignedPolicyBodies> {
-    let node_fingerprint = crate::identity::node_identity_fingerprint(app_root)?;
+    let node_key = trust_store
+        .node_verifying_key()
+        .context("node trust registry has no node key")?;
     let entries = directory.entries_no_follow_bounded(MAX_POLICY_FILES)?;
     let mut policies = BTreeMap::new();
     let mut operator_sections = None;
@@ -800,8 +803,7 @@ fn read_signed_policy_bodies(
         let file = directory
             .open_pinned_regular(&entry.name, false)?
             .with_context(|| format!("node policy disappeared: {}", path.display()))?;
-        let verified =
-            crate::node_document::verify_pinned_signed_yaml(&file, trust_store, &node_fingerprint)?;
+        let verified = crate::node_document::verify_node_signed_document_file(&file, node_key)?;
         if is_operator_record {
             operator_sections = Some(
                 parse_operator_sections(&verified.body)
@@ -820,6 +822,29 @@ fn read_signed_policy_bodies(
         policies,
         operator_sections,
     })
+}
+
+/// Read one node-signed policy member as a raw body, verifying only that
+/// member's signature against the node's own key. Offline operations that
+/// need a single section while the node is stopped use it; it neither
+/// compiles the other sections nor admits a body the section's own parser
+/// would refuse (the caller parses it).
+pub fn load_signed_policy_member(
+    app_root: &Path,
+    node: &crate::identity::NodeIdentity,
+    section: &str,
+) -> Result<Value> {
+    validate_policy_name("node policy section", section)?;
+    let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
+        .context("node has no explicit signed policy generation")?;
+    let trust_store =
+        ryeos_engine::trust::TrustStore::from_registry(*node.verifying_key(), Vec::new())
+            .context("build the node-key trust root")?;
+    let mut bodies = read_signed_policy_bodies(&directory, &trust_store)?;
+    bodies
+        .policies
+        .remove(section)
+        .with_context(|| format!("node policy generation has no `{section}` member"))
 }
 
 /// Publish one complete validated generation. The caller must hold the same
@@ -843,9 +868,6 @@ pub fn publish_policy_update(
             current_node_fingerprint
         );
     }
-    if !trust_store.is_trusted(&current_node_fingerprint) {
-        bail!("current node identity is absent from the supplied trust store");
-    }
     let node_root_path = app_root.join(ryeos_engine::AI_DIR).join("node");
     let node_root = lillux::PinnedDirectory::open_or_create(&node_root_path)
         .context("pin node root for policy publication")?;
@@ -860,7 +882,7 @@ pub fn publish_policy_update(
             let current = current
                 .as_ref()
                 .context("node policy generation disappeared before replacement")?;
-            let observed = read_signed_policy_bodies(app_root, current, trust_store)?;
+            let observed = read_signed_policy_bodies(current, trust_store)?;
             let found = generation_digest(&observed.policies, observed.operator_sections.as_ref())?;
             if &found != expected {
                 bail!(
@@ -873,7 +895,6 @@ pub fn publish_policy_update(
         }
         ExpectedPolicyGeneration::PresentSchemaCut => {
             validate_schema_cut_directory_occupant(
-                app_root,
                 current.as_ref().expect("presence checked above"),
                 trust_store,
             )?;
@@ -1129,7 +1150,7 @@ mod tests {
             ("core", &["hosted", "local"]),
             ("core-scheduling", &["hosted", "local"]),
             ("hosted-controller", &["hosted", "hosted_enforced", "local"]),
-            ("standard", &["hosted", "local"]),
+            ("standard", &["hosted", "local", "local_unconfined"]),
         ];
         for (name, classes) in declared {
             let profile = authored_profile(name);
@@ -1193,8 +1214,11 @@ mod tests {
             .typed_policy(&table, path)
             .unwrap();
         assert!(!local.required_process_scope_capabilities().is_empty());
-        // A profile without a hosted variant declares only its local class.
-        assert_eq!(authored_profile("full").host_classes().unwrap(), ["local"]);
+        // A profile without a hosted variant declares its local classes only.
+        assert_eq!(
+            authored_profile("full").host_classes().unwrap(),
+            ["local", "local_unconfined"]
+        );
         assert_eq!(
             authored_profile("hosted-node").host_classes().unwrap(),
             ["hosted"]
@@ -1203,24 +1227,20 @@ mod tests {
 
     #[test]
     fn explicit_member_cut_preserves_other_policies_and_checks_exact_predecessor() {
-        use ryeos_engine::trust::{TrustStore, TrustedSigner};
+        use ryeos_engine::trust::TrustStore;
         let root = tempfile::tempdir().unwrap();
         let node = root.path().join(ryeos_engine::AI_DIR).join("node");
         let identity_path = node.join("identity/private_key.pem");
         std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
         let identity = NodeIdentity::create(&identity_path).unwrap();
-        let trust = TrustStore::from_signers(vec![TrustedSigner {
-            fingerprint: identity.fingerprint().to_owned(),
-            verifying_key: *identity.verifying_key(),
-            label: None,
-        }]);
+        let trust = TrustStore::from_registry(*identity.verifying_key(), Vec::new()).unwrap();
         let directory = policy_directory(root.path());
         std::fs::create_dir_all(&directory).unwrap();
         let profile_path = ryeos_engine::test_support::workspace_root()
             .join("bundles/.ai/node/init/profiles/full.yaml");
         let profile: NodeInitProfile =
             serde_yaml::from_str(&std::fs::read_to_string(profile_path).unwrap()).unwrap();
-        let mut policies = profile.policies;
+        let mut policies = profile.for_host_class("local").unwrap().policies;
         let replacement = policies["isolation"].clone();
         policies.insert(
             "isolation".into(),
@@ -1346,7 +1366,7 @@ mod tests {
 
     impl CarryFixture {
         fn new() -> Self {
-            use ryeos_engine::trust::{TrustStore, TrustedSigner};
+            use ryeos_engine::trust::TrustStore;
             let root = tempfile::tempdir().unwrap();
             let identity_path = root
                 .path()
@@ -1354,11 +1374,7 @@ mod tests {
                 .join("node/identity/private_key.pem");
             std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
             let identity = NodeIdentity::create(&identity_path).unwrap();
-            let trust = TrustStore::from_signers(vec![TrustedSigner {
-                fingerprint: identity.fingerprint().to_owned(),
-                verifying_key: *identity.verifying_key(),
-                label: None,
-            }]);
+            let trust = TrustStore::from_registry(*identity.verifying_key(), Vec::new()).unwrap();
             let table = NodePolicyTable::new();
             let profile = authored_profile("full")
                 .for_host_class("local")

@@ -81,7 +81,7 @@ pub fn workflow_bundle_roots() -> [PathBuf; 3] {
 /// in the dev tree — kind schemas, handler descriptor YAMLs, and the
 /// binary `item_source.json` sidecars all anchor to this single key.
 /// Public-key bytes are pinned here so the engine doesn't have to read
-/// `<app_root>/.ai/config/keys/signing/private_key.pem` from operator state.
+/// `<app_root>/.ai/node/operator/signing/private_key.pem` from operator state.
 ///
 /// PEM source: `crates/bin/daemon/tests/fixtures/trusted_signers/<fp>.toml`.
 pub fn platform_author_verifying_key() -> VerifyingKey {
@@ -203,4 +203,72 @@ where
         ParserRegistry::from_entries(parser_descriptors),
         load_live_handler_registry(),
     )
+}
+
+// ── Signer registry fixtures ────────────────────────────────────────
+
+/// Pin `verifying_key` in the node signer registry under `app_root`, the
+/// way the trust operations do, so fixtures exercise the real loader.
+///
+/// The node key is read from `<app_root>/.ai/node/identity/private_key.pem`;
+/// when the node has no identity yet, one is created along
+/// with a minimal public identity document. Returns the pinned fingerprint.
+pub fn pin_signer(
+    app_root: &std::path::Path,
+    verifying_key: &VerifyingKey,
+    label: &str,
+    role: crate::trust::SignerRole,
+    scope: crate::trust::SignerScope,
+) -> String {
+    let identity_dir = app_root.join(crate::AI_DIR).join("node").join("identity");
+    std::fs::create_dir_all(&identity_dir).expect("create fixture node identity dir");
+    let key_path = identity_dir.join("private_key.pem");
+    let node_key = if key_path.exists() {
+        lillux::crypto::load_signing_key(&key_path).expect("load fixture node key")
+    } else {
+        lillux::crypto::create_signing_key(&key_path).expect("create fixture node key")
+    };
+    let public_path = crate::trust::node_public_identity_path(app_root);
+    if !public_path.exists() {
+        let node_vk = node_key.verifying_key();
+        let doc = serde_json::json!({
+            "kind": "identity/v1",
+            "principal_id": format!("fp:{}", crate::trust::compute_fingerprint(&node_vk)),
+            "signing_key": format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(node_vk.as_bytes())
+            ),
+        });
+        std::fs::write(&public_path, doc.to_string()).expect("write fixture public identity");
+    }
+    pin_signer_with_node_key(app_root, &node_key, verifying_key, label, role, scope)
+}
+
+/// Like [`pin_signer`] for fixtures that already own the node signing key.
+pub fn pin_signer_with_node_key(
+    app_root: &std::path::Path,
+    node_key: &lillux::crypto::SigningKey,
+    verifying_key: &VerifyingKey,
+    label: &str,
+    role: crate::trust::SignerRole,
+    scope: crate::trust::SignerScope,
+) -> String {
+    let mut record = crate::trust::SignerRecord::new(
+        verifying_key,
+        label,
+        role,
+        scope,
+        crate::trust::SignerStatus::Active,
+    );
+    record.event = lillux::cas::sha256_hex(format!("fixture:{}", record.fingerprint).as_bytes());
+    let dir = crate::trust::signers_dir(app_root);
+    std::fs::create_dir_all(&dir).expect("create fixture signer registry dir");
+    std::fs::write(
+        dir.join(record.file_name()),
+        record
+            .render_signed(node_key)
+            .expect("render fixture signer record"),
+    )
+    .expect("write fixture signer record");
+    record.fingerprint
 }

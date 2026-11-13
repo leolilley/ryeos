@@ -533,7 +533,7 @@ pub(crate) fn with_installed_bundles<T>(
     read: impl FnOnce(&[PathBuf], &ryeos_engine::trust::TrustStore, &Path) -> Result<T>,
 ) -> Result<T> {
     let roots = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
-    let trust = ryeos_engine::trust::TrustStore::load(None, &roots.config())
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(roots.as_path())
         .context("load node trust store")?;
     let _bundle_generation_lock =
         ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire_for_startup(app_root)
@@ -858,18 +858,13 @@ pub(crate) fn verify_node_signed(
         identity.fingerprint(),
         header.signer_fingerprint
     );
-    let trust =
-        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
-            fingerprint: identity.fingerprint().to_owned(),
-            verifying_key: *identity.verifying_key(),
-            label: None,
-        }]);
-    let (class, _) = ryeos_engine::trust::verify_item_signature(signed, &header, &envelope, &trust)
-        .with_context(|| format!("verify {what} signature"))?;
-    ensure!(
-        class == ryeos_engine::contracts::TrustClass::Trusted,
-        "{what} signature is not trusted"
-    );
+    ryeos_engine::trust::verify_node_signed_document(
+        signed,
+        &header,
+        &envelope,
+        identity.verifying_key(),
+    )
+    .with_context(|| format!("verify {what} signature"))?;
     serde_yaml::from_str(&ryeos_node_runtime::node_config_source::strip_signature(
         signed,
     ))

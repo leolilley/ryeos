@@ -248,6 +248,7 @@ pub fn capture_root_mechanism_probe_source(
         // execution capability; a signed selection must not invent one for
         // later compilation or dispatch.
         let context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: purpose.owner_fingerprint().to_owned(),
                 scopes: vec![],

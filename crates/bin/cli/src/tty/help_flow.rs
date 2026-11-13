@@ -827,7 +827,7 @@ fn local_detail(tokens: &str, description: &str) -> String {
     let (usage, options) = match tokens {
         "init" => (
             "ryeos init [--non-interactive | --json] [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>] [--source <DIR>] [--trust-file <FILE>]... [--node-profile <NAME> --host-class <NAME>]",
-            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--bind <ADDR>      persisted daemon TCP endpoint\n--uds-path <PATH>  persisted local lifecycle endpoint\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes\n--host-class <NAME>   kind of host the node runs on (local, hosted); required with --node-profile",
+            "--non-interactive  run without onboarding prompts\n--json             emit the structured report\n--app-root <DIR>   application root\n--bind <ADDR>      persisted daemon TCP endpoint\n--uds-path <PATH>  persisted local lifecycle endpoint\n--source <DIR>     packaged bundle source\n--trust-file <FILE> additional publisher trust document (repeatable)\n--node-profile <NAME> publisher-signed source-root init profile; required on fresh nodes\n--host-class <NAME>   kind of host the node runs on (local, local_unconfined, hosted); local enforces the sandbox, local_unconfined is the explicit opt-out; required with --node-profile",
         ),
         "setup" => (
             "ryeos setup [--app-root <DIR>]",
@@ -856,6 +856,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
         "node host retire" => (
             "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
             "--confirm         confirm removing the administrator-owned host association\n--app-root <DIR>  application root of the stopped node whose service to retire\n--orphaned        retire every node service whose app root no longer exists",
+        ),
+        "external-content product publish" => (
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
+            "--activation <ref>   activate the recipe online first\n--from-thread <id>   resume from a completed producer thread\n--push-to <remote>   push the admitted product\n--json               emit the final result as JSON",
         ),
         "codex login device" => (
             "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
@@ -892,6 +896,18 @@ fn local_detail(tokens: &str, description: &str) -> String {
         "node reset policy-generation" => (
             "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",
             "--node-profile <NAME> trusted publisher profile\n--host-class <NAME>   the node's host class\n--confirm             confirm complete policy replacement\n--source <DIR>        trusted packaged source root\n--trust-file <FILE>   additional publisher trust file; repeatable\n--app-root <DIR>      application root",
+        ),
+        "node host-access grant" => (
+            "ryeos node host-access grant <item_ref> --project <DIR> [--id <ID>] [--origin <ORIGIN>]... [--env <NAME>]... [--containment <MODE>] [--app-root <DIR>]",
+            "--project <DIR>      project the item resolves in\n--id <ID>            grant id (default: the bare id with / as -)\n--origin <ORIGIN>    direct, graph_child or schedule; repeatable (default direct)\n--env <NAME>         daemon boot-environment name to deliver; repeatable\n--containment <MODE> scope_required (default) or group_allowed\n--app-root <DIR>     application root",
+        ),
+        "node host-access revoke" => (
+            "ryeos node host-access revoke <id> [--app-root <DIR>]",
+            "--app-root <DIR>  application root",
+        ),
+        "node host-access list" => (
+            "ryeos node host-access list [--project <DIR>] [--app-root <DIR>]",
+            "--project <DIR>   compare each grant with the item's bytes in this project\n--app-root <DIR>  application root",
         ),
         "help" => (
             "ryeos help [<tokens>...] [--plain]",
