@@ -171,22 +171,23 @@ fn authorize_remote_node(
         "portable-handoff-peer",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         remote_site_id,
         &local.node,
     )?;
     Ok(())
 }
 
-fn authorize_remote_operator(
+fn authorize_remote_principal(
     state_path: &Path,
     local: &common::fast_fixture::FastFixture,
-    remote_operator: &SigningKey,
+    remote_principal: &SigningKey,
     remote_site_id: &str,
     scopes: &[&str],
 ) -> Result<()> {
     let public_key = base64::engine::general_purpose::STANDARD
-        .encode(remote_operator.verifying_key().as_bytes());
-    let fingerprint = lillux::signature::compute_fingerprint(&remote_operator.verifying_key());
+        .encode(remote_principal.verifying_key().as_bytes());
+    let fingerprint = lillux::signature::compute_fingerprint(&remote_principal.verifying_key());
     let identity = daemon_identity(state_path)?;
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state_path
@@ -201,6 +202,7 @@ fn authorize_remote_operator(
         "portable-handoff-operator",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &identity,
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,
@@ -210,7 +212,7 @@ fn authorize_remote_operator(
     Ok(())
 }
 
-fn target_remote_operator_grant_path(handoff: &RealPortableHandoff) -> PathBuf {
+fn target_remote_principal_grant_path(handoff: &RealPortableHandoff) -> PathBuf {
     let fingerprint = lillux::signature::compute_fingerprint(
         &common::fast_fixture::user_signing_key().verifying_key(),
     );
@@ -222,11 +224,11 @@ fn target_remote_operator_grant_path(handoff: &RealPortableHandoff) -> PathBuf {
         .join(format!("{fingerprint}.toml"))
 }
 
-fn replace_target_remote_operator_grant(
+fn replace_target_remote_principal_grant(
     handoff: &RealPortableHandoff,
     scopes: &[&str],
 ) -> Result<()> {
-    authorize_remote_operator(
+    authorize_remote_principal(
         &handoff.target.state_path,
         &handoff.target_fixture,
         &common::fast_fixture::user_signing_key(),
@@ -3112,6 +3114,7 @@ fn plant_target_abort_state(
         "handoff-source-fixture",
         &target_fixture.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         REMOTE_SOURCE_SITE_ID,
         &target_fixture.node,
     )?;
@@ -4185,7 +4188,7 @@ async fn start_real_portable_handoff() -> Result<RealPortableHandoff> {
             "ryeos.execute.service.worker-placements/abort",
         ],
     )?;
-    authorize_remote_operator(
+    authorize_remote_principal(
         &target.state_path,
         &target_fixture,
         &source_operator_key,
@@ -5119,7 +5122,7 @@ async fn real_portable_worker_completes_cross_site_handoff_on_qualified_host() -
         "adoption receipt did not survive terminal-job retention"
     );
     drop(target_store);
-    replace_target_remote_operator_grant(
+    replace_target_remote_principal_grant(
         &handoff,
         &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
     )?;
@@ -5216,7 +5219,7 @@ async fn target_operator_grant_change_after_preflight_refuses_pre_cut_handoff_on
     let mut handoff = start_real_portable_handoff().await?;
     let (preflight_id, successor_id) = handoff.preflight().await?;
     handoff.target.kill_daemon().await?;
-    replace_target_remote_operator_grant(
+    replace_target_remote_principal_grant(
         &handoff,
         &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
     )?;
@@ -5275,11 +5278,11 @@ async fn target_operator_grant_change_after_source_cut_fences_then_exact_restore
 -> Result<()> {
     let (mut handoff, preflight_id, successor_id, _, cut) =
         crash_real_source_handoff_at(HandoffCrashBoundary::SourceWriterCutPublished).await?;
-    let grant_path = target_remote_operator_grant_path(&handoff);
+    let grant_path = target_remote_principal_grant_path(&handoff);
     let exact_grant = std::fs::read(&grant_path)
         .with_context(|| format!("read exact target operator grant {}", grant_path.display()))?;
     handoff.target.kill_daemon().await?;
-    replace_target_remote_operator_grant(
+    replace_target_remote_principal_grant(
         &handoff,
         &PORTABLE_OPERATOR_HANDOFF_SCOPES[..PORTABLE_OPERATOR_HANDOFF_SCOPES.len() - 1],
     )?;

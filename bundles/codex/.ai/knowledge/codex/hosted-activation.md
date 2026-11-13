@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T10:01:36Z:b4586462cfee83c7bfd2971c5ba461ffb940d6dfdeda68c1f5cb4ebeb3249fb9:TYQPmZEG00oFY/mFcC0tavXY7NzQV//0CbBB7zeTmt+bbT4QTgHdSsPbrw/Z5NLulWL8GIn29Af0zFsAnsRAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:9b6524b499ead45768fe18200dfd34eb836ff896e04d8f41ec9ce8ac78d66121:OSDCmWgOdT3SMq1gqneI/5njR7ICXAObzl+Robg2Mg+h9Fv3JNYgfeOR3sUo6LXEdblDUtcDdEC56aTyg679DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -262,7 +262,7 @@ configured-operator forwarding route to inspect profiles on a remote node.
    semantic-conversion flag; an intentional reclassification or origin change
    of an incumbent grant does.
    Use the complete exact scope set printed in the Codex bundle README. The
-   target-signed `remote_operator` grant constrains which source site may
+   target-signed `remote_principal` grant constrains which source site may
    forward the operator; it is not transit proof without the separate
    source-node co-signature. A plain `local_client` grant is not acceptable,
    and ordinary remote-node grants remain node principals that cannot own this
@@ -395,7 +395,7 @@ executions and invoke only the required local maintenance scopes
 is actually required). Same-class scope replacement is an atomic node-signed
 grant update and is hot-reloaded; an actual class or origin transition requires
 explicit stopped-node semantic-conversion authority. The source
-`remote_operator` grant and source private key are untouched. Never use
+`remote_principal` grant and source private key are untouched. Never use
 `--merge-scopes` across an actual class or origin transition.
 
 On daemon restart, the generic worker-execution runtime reclaims the same root

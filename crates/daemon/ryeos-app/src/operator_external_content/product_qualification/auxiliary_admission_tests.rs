@@ -643,6 +643,7 @@ fn fixture() -> Result<Fixture> {
         "qualification fixture",
         "fixture",
         "2026-09-29T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
     )?;

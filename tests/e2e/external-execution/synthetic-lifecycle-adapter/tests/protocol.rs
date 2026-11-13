@@ -564,6 +564,7 @@ fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
         "joined external candidate test operator",
         state.identity.fingerprint(),
         "2026-09-22T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )

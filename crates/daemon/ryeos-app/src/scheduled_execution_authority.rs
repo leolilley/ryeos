@@ -198,7 +198,7 @@ pub fn check_authenticated_grants(
                 ));
             }
         }
-        AuthorizedKeyPrincipalClass::RemoteNode | AuthorizedKeyPrincipalClass::RemoteOperator => {
+        AuthorizedKeyPrincipalClass::RemoteNode | AuthorizedKeyPrincipalClass::RemotePrincipal => {
             if grant.configured_origin_site_id.as_deref() != Some(effective_origin_site_id.as_str())
             {
                 return Err(refused(
@@ -281,6 +281,7 @@ mod tests {
                 "scheduled principal",
                 &format!("fp:{}", "99".repeat(32)),
                 created_at,
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 self.node.signing_key(),
             )
             .unwrap();

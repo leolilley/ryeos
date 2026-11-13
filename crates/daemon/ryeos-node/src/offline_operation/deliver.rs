@@ -454,6 +454,7 @@ mod tests {
                 "remote operator",
                 "test",
                 "2026-01-01T00:00:00Z",
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 &self.node,
                 wildcard,
                 false,
@@ -611,6 +612,7 @@ mod tests {
                 "remote operator",
                 "test",
                 "2026-01-01T00:00:00Z",
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 &fx.node,
                 WildcardPolicy::AllowBootstrap,
                 false,
@@ -643,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_operator_with_the_exact_scope_is_queued() {
+    fn a_remote_principal_with_the_exact_scope_is_queued() {
         let fx = fixture();
         let key = lillux::crypto::generate_signing_key();
         let grant = fx.grant(&key, &[RESTART_SCOPE], WildcardPolicy::Reject);

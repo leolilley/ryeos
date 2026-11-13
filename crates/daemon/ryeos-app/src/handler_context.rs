@@ -167,7 +167,7 @@ pub struct HandlerContext {
     /// non-RyeOS verifiers and synthetic contexts.
     pub authorized_key_class: Option<ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass>,
     /// Site identity established by a remote-node request, or by a
-    /// remote-operator request plus its source-node co-signature. Request
+    /// remote-principal request plus its source-node co-signature. Request
     /// payloads never populate this field. `None` denotes a local or non-RyeOS
     /// caller.
     pub authenticated_origin_site_id: Option<String>,
@@ -177,6 +177,12 @@ pub struct HandlerContext {
     #[serde(skip)]
     pub authenticated_grant_authority:
         Option<ryeos_engine::principal_contract::AuthenticatedGrantAuthority>,
+    /// `ryeos-request-v1` content hash of the signed request that
+    /// authenticated this caller, when it arrived as one. Grant issuance
+    /// records it as the evidence for who asked. Local dispatch context only:
+    /// it is never serialized and never caller input.
+    #[serde(skip)]
+    pub signed_request_digest: Option<String>,
     /// Thread of the currently executing recorded service invocation: its own
     /// chain root for a direct invocation, or an inline in-process child in
     /// its callback parent's chain. The executor supplies this only after that
@@ -203,6 +209,7 @@ impl HandlerContext {
             authorized_key_class: None,
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
+            signed_request_digest: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -222,6 +229,7 @@ impl HandlerContext {
             authorized_key_class: None,
             authenticated_origin_site_id,
             authenticated_grant_authority: None,
+            signed_request_digest: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -242,6 +250,7 @@ impl HandlerContext {
             authorized_key_class,
             authenticated_origin_site_id,
             authenticated_grant_authority: None,
+            signed_request_digest: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -263,6 +272,7 @@ impl HandlerContext {
             authorized_key_class: Some(authorized_key_class),
             authenticated_origin_site_id,
             authenticated_grant_authority: Some(authenticated_grant_authority),
+            signed_request_digest: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -289,6 +299,13 @@ impl HandlerContext {
             anyhow::bail!("recorded service handler context already has an invocation root");
         }
         Ok(self)
+    }
+
+    /// Record the content hash of the signed request that authenticated this
+    /// caller.
+    pub fn with_signed_request_digest(mut self, digest: Option<String>) -> Self {
+        self.signed_request_digest = digest;
+        self
     }
 
     /// Install the scope the handler's own task must run inside.
@@ -592,7 +609,7 @@ impl HandlerContext {
             }
             Some(
                 ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode
-                | ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                | ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
             ) if self.authenticated_origin_site_id.is_none() => {
                 anyhow::bail!("remote handler context has no authenticated origin");
             }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T15:12:59Z:30a978d695c7465475ef74c0ff5781adb1e04a83d23457ff43f4ec97aaf0c165:BsfkhU4p5+qZl88vRtmLtBa84X8XCH+QQf5hxc5BkBpnei+wkj1jfefXEAoz6ozoGTYzL34JFjnYIOy2CPKWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:52Z:70c13499482d328e1899acac80cae14797b6b20b35a8fd4c167537de5a1b27ab:sA3UwSIdFQRZFtyZTJspDUsOvPoWHaupFITzaecr9tCq+7SlmY6sOjqvciOfE5gMwnLi3UPrrHTeBva1qUUwCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -237,7 +237,7 @@ policies:
     # The origin operator that drives this controller may request, through
     # signed offline operations applied at the next start, external placement
     # composition and the controller's wiring: a remote-node or
-    # remote-operator grant, a remote pinned from its descriptor, and a site
+    # remote-principal grant, a remote pinned from its descriptor, and a site
     # bundle installed or replaced from an archive. Delegating one
     # authority-bearing operation is close to delegating them all (a grant or a
     # bundle changes who the node trusts and what it runs), so the operator
@@ -376,6 +376,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:

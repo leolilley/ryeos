@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:12:59Z:b822f98674aec6ff2b8e4acf728382d97d6a7fba04197b54809588a8151aa43f:p+b0/B9D25JOqPdQYlWfmP2g66Ymg5uFBpsBGj+1hMEYCtyRgY+hfoLc61iTYxtLyz9k87VhyriVBJI8b3aTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:5e34132e99557e27a6fcfe9fdf150ef0e55c85c6c57e40bae489eae73de89c73:/3NL+xrmfIKtvYsVFMwYqDIrQ8xToiYD1DQYP+XkrDFA21z1bPDjG2r72PlVpmHFXSlbnBMtPDnKekCvs1iYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -29,7 +29,7 @@ remote access. The generic `remote/push`, `remote/reconcile-project-head`, and
 `remote/run` services additionally support an explicit configured-operator
 continuity mode for durable workflows:
 the local request must already be signed by the configured operator, and the
-target must separately authorize that same operator key as `remote_operator`,
+target must separately authorize that same operator key as `remote_principal`,
 bound by the target node to the source's canonical `site:` ID and exact scopes.
 The target must also admit the source node key as `remote_node` with
 `ryeos.attest.request.forwarded-operator`. Each forwarded operator request is
@@ -280,7 +280,7 @@ locally on the remote node instead.
 
 Remote authorization rejects wildcard scope delegation. Enumerate every
 scope explicitly. It is create-only: `/authorize-key` cannot replace or
-reclassify any existing local-client, remote-node, remote-operator, bootstrap,
+reclassify any existing local-client, remote-node, remote-principal, bootstrap,
 or configured-operator grant. Admission claims are likewise create-only.
 
 Configured-operator continuity is provisioned only by the target's configured
@@ -354,7 +354,7 @@ snapshot must carry the source author's public trust document in its existing
 `.ai/config/keys/trusted/<fingerprint>.toml` tier (or the target operator must
 have made a separate explicit node-trust decision). This is public verification
 material only. Never copy the source private key, and never infer content trust
-from a `remote_operator` grant.
+from a `remote_principal` grant.
 
 ## `ryeos remote push`
 

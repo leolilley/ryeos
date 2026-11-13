@@ -714,13 +714,13 @@ mod tests {
     }
 
     #[test]
-    fn push_authentication_refuses_every_non_remote_operator_shape() {
+    fn push_authentication_refuses_every_non_remote_principal_shape() {
         let root = tempfile::tempdir().unwrap();
         let (_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
         let refusals = [
             // Not signature-verified.
             context(
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 Some("site:o"),
                 false,
             ),
@@ -734,7 +734,7 @@ mod tests {
             ),
             // A remote operator without the source-node forwarding proof.
             context(
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 None,
                 true,
             ),

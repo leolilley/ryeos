@@ -254,7 +254,7 @@ enum Cmd {
         merge_scopes: bool,
 
         /// Bind this operator key to an authenticated forwarding RyeOS site.
-        /// Emits a remote_operator grant and rejects wildcard scopes.
+        /// Emits a remote_principal grant and rejects wildcard scopes.
         #[arg(long)]
         origin_site_id: Option<String>,
 
@@ -267,6 +267,11 @@ enum Cmd {
         /// to change. Use only while the daemon is stopped.
         #[arg(long)]
         allow_semantic_conversion: bool,
+
+        /// Grant lifetime in seconds. Defaults to the class maximum in the
+        /// node's authorization policy; a larger value is refused.
+        #[arg(long)]
+        lifetime_secs: Option<u64>,
     },
 
     /// Export a remote descriptor trust pin for this node.
@@ -609,6 +614,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             origin_site_id,
             remote_node_origin_site_id,
             allow_semantic_conversion,
+            lifetime_secs,
         } => run_authorize_client(
             app_root,
             public_key,
@@ -618,6 +624,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             origin_site_id,
             remote_node_origin_site_id,
             allow_semantic_conversion,
+            lifetime_secs,
             cli.stdin_json,
         ),
         Cmd::RemoteDescriptor {
@@ -1707,6 +1714,8 @@ struct AuthorizeClientStdinParams {
     remote_node_origin_site_id: Option<String>,
     #[serde(default)]
     allow_semantic_conversion: bool,
+    #[serde(default)]
+    lifetime_secs: Option<u64>,
 }
 
 fn default_authorize_client_label() -> String {
@@ -1722,6 +1731,7 @@ fn run_authorize_client(
     origin_site_id: Option<String>,
     remote_node_origin_site_id: Option<String>,
     allow_semantic_conversion: bool,
+    lifetime_secs: Option<u64>,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_core_tools::actions::authorize::{
@@ -1739,6 +1749,7 @@ fn run_authorize_client(
             value.origin_site_id,
             value.remote_node_origin_site_id,
             value.allow_semantic_conversion,
+            value.lifetime_secs,
         )
     } else {
         let pk = public_key.ok_or_else(|| anyhow::anyhow!("--public-key required"))?;
@@ -1755,6 +1766,7 @@ fn run_authorize_client(
             origin_site_id,
             remote_node_origin_site_id,
             allow_semantic_conversion,
+            lifetime_secs,
         )
     };
 
@@ -1767,11 +1779,18 @@ fn run_authorize_client(
         origin_site_id,
         remote_node_origin_site_id,
         allow_semantic_conversion,
+        lifetime_secs,
     ) = params;
 
     let app_root = resolve_app_root(app_root)?;
 
-    let result = run(AuthorizeClientRequest {
+    // The operator at this volume asks for the grant, without a signed
+    // request: the grant records the operator and no request digest.
+    let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).operator_signing_key_path(),
+    )?;
+    let policy = ryeos_core_tools::actions::hosted_policy::load_authorization_policy(&app_root)?;
+    let params = AuthorizeClientRequest {
         public_key: pk_b64,
         scopes: scopes_str,
         label,
@@ -1779,8 +1798,22 @@ fn run_authorize_client(
         origin_site_id,
         remote_node_origin_site_id,
         allow_semantic_conversion,
+        lifetime_secs,
     }
-    .into_params_as_local_operator(app_root)?)?;
+    .into_params_as_local_operator(app_root)?;
+    if lillux::crypto::fingerprint(&params.public_key) == operator.fingerprint() {
+        anyhow::bail!(
+            "grant_is_operator: the configured operator's grant is managed by `ryeos init` and \
+             `ryeos node reset authorization`; it cannot be rewritten through authorize-client"
+        );
+    }
+    let terms = ryeos_core_tools::actions::authorize::authorize_client_terms(
+        &params,
+        lifetime_secs,
+        &policy,
+        ryeos_node_runtime::identity::AuthorizedBy::principal_request(operator.fingerprint(), None),
+    )?;
+    let result = run(params, &terms)?;
 
     if !result.dropped_scopes.is_empty() {
         eprintln!(
@@ -1912,7 +1945,7 @@ mod tests {
         let error = serde_json::from_value::<AuthorizeClientStdinParams>(serde_json::json!({
             "public_key": "ZmFrZQ==",
             "scopes": "scope:a",
-            "principal_class": "remote_operator"
+            "principal_class": "remote_principal"
         }))
         .unwrap_err();
 

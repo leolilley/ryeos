@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:24:06Z:63dacd9cc3b8b158bed5e9d946fb2f3138d556fb88b75c099932606493d91b24:4vMi6eP9/3KNgrBJ0s80K+4JHFwMQd5V5tfKfdthwnfUFn8NwAlgpgMuYVXp/9qdyputLEl2UtoELfnY+OVRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:e0e9088c148cc9250008b2db92bce7c7a8a5b919e1e17dd04ea430fe0c255e0f:QvKYRVgqiw01u8iQiiFBwZHUT41Sq8Qg+Z7LROrD6VMC/fAto57J9hkxosZKD6N7cq/62FcRSepkMA1dkqwaCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -131,8 +131,25 @@ Authorize a public key with scoped capabilities. Authenticated.
 
 - **Source:** `service:identity/authorize-key`
 - **Required cap:** `ryeos.execute.service.identity/authorize-key`
-- **Request:** `{ public_key, label, scopes }`
-- **Response:** authorized-key metadata including fingerprint and scopes
+- **Request:** `{ public_key, label, scopes, lifetime_secs? }`; an absent
+  lifetime is the `local_client` maximum of the node's authorization policy,
+  and a larger one is refused with `grant_lifetime_exceeds_policy`
+- **Response:** authorized-key metadata including fingerprint, scopes and
+  `expires_at`
+
+### `POST /renew-key`
+
+Renew an authorized-key grant with a new expiry. Authenticated; only the
+principal that granted the key or the node operator may renew it.
+
+- **Source:** `service:identity/renew-key`
+- **Required cap:** `ryeos.execute.service.identity/renew-key`
+- **Request:** `{ fingerprint, lifetime_secs? }`
+- **Response:** `{ fingerprint, label, principal_class, scopes,
+  previous_expires_at, expires_at, authorized_by }`
+- **Refusals:** `grant_not_found` (404), `grant_renewal_not_permitted` and
+  `grant_renewal_scopes_not_covered` (403), `grant_never_expires` (400),
+  `grant_lifetime_exceeds_policy` (400)
 
 ### `POST /admission/claim`
 
@@ -144,7 +161,8 @@ being admitted.
 - **Auth:** none; validates token hash file, token expiry, requested
   scopes subset, nonce/timestamp, and claimant signature
 - **Request:** `{ token, public_key, label, scopes, nonce, timestamp_unix, signature }`
-- **Response:** authorized-key metadata including fingerprint and scopes
+- **Response:** authorized-key metadata including fingerprint, scopes and
+  `expires_at` (the `remote_node` class maximum)
 - **Used by:** `ryeos remote admit`
 
 ## Thread Routes

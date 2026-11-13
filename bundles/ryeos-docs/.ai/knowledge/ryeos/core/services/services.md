@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:11:14Z:3518e2e8a7af41db3670a1be7c48a5386c4ed24bb0fbb4bfcae9478a3be44d05:YGGk6cXnh40lZriCxd/CcgPzPQzMSO1oRgDkhMIC20lnaZl6bbelrxhKLwZOHbzEFZdJAGr9EPMWXwMvv15mDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:a9bbc16afd48673f0dff702152c444768a32cb5c3d39b635011b5b40e8ed676e:TM/W3+tiu5OUxI5Bfn0w9WLTjUsUnftS9mSfKxTn6eKuZPMArPDPA8FIq2MOmFEkF/Hks1aj4HvbsakzkE94Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -49,6 +49,7 @@ hashes through CAS.
 | `health/status` | `health.status` | none |
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
+| `identity/renew-key` | `identity.renew-key` | `ryeos.execute.service.identity/renew-key` |
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
 | `system/push-head` | `system.push-head` | `ryeos.execute.service.system/push-head` |

@@ -18,7 +18,7 @@ fn context(class: AuthorizedKeyPrincipalClass, origin_site_id: Option<String>) -
 }
 
 #[tokio::test]
-async fn managed_activation_admits_an_origin_bound_remote_operator() {
+async fn managed_activation_admits_an_origin_bound_remote_principal() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
     let error = handle(
         Request {
@@ -27,7 +27,7 @@ async fn managed_activation_admits_an_origin_bound_remote_operator() {
             offline_archive_root: None,
         },
         context(
-            AuthorizedKeyPrincipalClass::RemoteOperator,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
             Some(format!("site:{}", "b".repeat(64))),
         ),
         Arc::new(state),
@@ -38,7 +38,7 @@ async fn managed_activation_admits_an_origin_bound_remote_operator() {
     let detail = format!("{error:#}");
     assert!(
         !detail.contains("local_client configured operator"),
-        "managed activation must preserve admitted remote-operator authority: {detail}"
+        "managed activation must preserve admitted remote-principal authority: {detail}"
     );
 }
 

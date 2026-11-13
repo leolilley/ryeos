@@ -228,32 +228,34 @@ fn authorize_remote_node(
         "testimony-transport-peer",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         remote_site_id,
         &local.node,
     )?;
     Ok(())
 }
 
-/// Admit `remote_operator` on the daemon at `state_path` as a remote operator
+/// Admit `remote_principal` on the daemon at `state_path` as a remote operator
 /// bound to `remote_site_id`.
-fn authorize_remote_operator(
+fn authorize_remote_principal(
     state_path: &Path,
     local: &FastFixture,
-    remote_operator: &SigningKey,
+    remote_principal: &SigningKey,
     remote_site_id: &str,
     scopes: &[&str],
 ) -> Result<()> {
     let public_key = base64::engine::general_purpose::STANDARD
-        .encode(remote_operator.verifying_key().as_bytes());
+        .encode(remote_principal.verifying_key().as_bytes());
     let identity = daemon_identity(state_path)?;
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &authorized_keys_dir(state_path),
-        &fingerprint(remote_operator),
+        &fingerprint(remote_principal),
         &public_key,
         &scope_strings(scopes),
         "testimony-transport-operator",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &identity,
         ryeos_node_runtime::identity::WildcardPolicy::Reject,
         false,
@@ -813,7 +815,7 @@ async fn start_pair() -> Result<Pair> {
                 &origin_site,
                 ORIGIN_NODE_SCOPES,
             )?;
-            authorize_remote_operator(
+            authorize_remote_principal(
                 state_path,
                 fixture,
                 &origin_operator,

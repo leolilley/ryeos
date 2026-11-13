@@ -6,7 +6,7 @@
 pub enum AuthorizedKeyPrincipalClass {
     LocalClient,
     RemoteNode,
-    RemoteOperator,
+    RemotePrincipal,
 }
 
 impl AuthorizedKeyPrincipalClass {
@@ -14,12 +14,12 @@ impl AuthorizedKeyPrincipalClass {
         match self {
             Self::LocalClient => "local_client",
             Self::RemoteNode => "remote_node",
-            Self::RemoteOperator => "remote_operator",
+            Self::RemotePrincipal => "remote_principal",
         }
     }
 
     pub const fn is_remote(self) -> bool {
-        matches!(self, Self::RemoteNode | Self::RemoteOperator)
+        matches!(self, Self::RemoteNode | Self::RemotePrincipal)
     }
 }
 
@@ -44,7 +44,7 @@ impl AuthenticatedGrantAuthority {
     pub fn validate_for_class(&self, class: AuthorizedKeyPrincipalClass) -> anyhow::Result<()> {
         validate_sha256("principal grant hash", &self.principal_grant_hash)?;
         match (class, self.forwarding.as_ref()) {
-            (AuthorizedKeyPrincipalClass::RemoteOperator, Some(forwarding)) => {
+            (AuthorizedKeyPrincipalClass::RemotePrincipal, Some(forwarding)) => {
                 validate_sha256(
                     "forwarding source-node fingerprint",
                     &forwarding.source_node_fingerprint,
@@ -54,11 +54,15 @@ impl AuthenticatedGrantAuthority {
                     &forwarding.source_node_grant_hash,
                 )?;
             }
-            (AuthorizedKeyPrincipalClass::RemoteOperator, None) => {
-                anyhow::bail!("remote-operator grant authority requires source-node grant evidence")
+            (AuthorizedKeyPrincipalClass::RemotePrincipal, None) => {
+                anyhow::bail!(
+                    "remote-principal grant authority requires source-node grant evidence"
+                )
             }
             (_, Some(_)) => {
-                anyhow::bail!("only remote-operator grant authority may carry source-node evidence")
+                anyhow::bail!(
+                    "only remote-principal grant authority may carry source-node evidence"
+                )
             }
             (_, None) => {}
         }

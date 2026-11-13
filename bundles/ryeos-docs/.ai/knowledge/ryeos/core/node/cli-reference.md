@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:14:30Z:614e78033d90a83a682a201d9314d56bce65c1fc0f2115ee928e19ceae9ce3c5:a74egAXH0+dGtkAEETrSAjvYsjy7+AEswXSarjMdK+FVlmAW+RWT/4fNapCsplsBu3ILp8aJKWLTlOM3B14sDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:d363df0b637784a594f7b2d5dc396fb158ea1ecc68749db83d7085622400bf62:tG3szXvg0mo8jep9Finu7yt0u92xKP05dzSii+5f7Gga7ZN52OByj6jOz9J9TBc3qJroSRPo70IjHUbu4ZwgCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -255,6 +255,14 @@ The `service_window` row reports the running node's service window (see
 `seconds_until_rollover`, `work_steps_until_rollover` and `rolls_at` while the
 node runs, and `n/a` while it is stopped or reports no window. It judges
 nothing; the caller compares it with what it is about to run.
+
+The `authorized_keys` row reads every node-signed grant without starting the
+node. It fails for a grant of a retired schema or class (`grant_schema_stale`,
+`grant_class_stale`, which also stop the daemon from starting) or one that
+cannot be read, and warns for a grant that has expired or will within the
+policy's `warn_before_secs`. Each entry names the grant and its cure: renew a
+lapsed grant with `ryeos renew-key --fingerprint <fp>` (the principal that
+granted it, or the node operator); re-issue a stale one.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and

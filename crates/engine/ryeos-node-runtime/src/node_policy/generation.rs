@@ -823,6 +823,32 @@ fn read_signed_policy_bodies(
     })
 }
 
+/// Read one node-signed policy member as a raw body, verifying only that
+/// member's signature against the node's own key. Offline operations that
+/// need a single section while the node is stopped use it; it neither
+/// compiles the other sections nor admits a body the section's own parser
+/// would refuse (the caller parses it).
+pub fn load_signed_policy_member(
+    app_root: &Path,
+    node: &crate::identity::NodeIdentity,
+    section: &str,
+) -> Result<Value> {
+    validate_policy_name("node policy section", section)?;
+    let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
+        .context("node has no explicit signed policy generation")?;
+    let trust_store =
+        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
+            fingerprint: node.fingerprint().to_owned(),
+            verifying_key: *node.verifying_key(),
+            label: Some("node".to_owned()),
+        }]);
+    let mut bodies = read_signed_policy_bodies(app_root, &directory, &trust_store)?;
+    bodies
+        .policies
+        .remove(section)
+        .with_context(|| format!("node policy generation has no `{section}` member"))
+}
+
 /// Publish one complete validated generation. The caller must hold the same
 /// state lock used by the daemon and every offline node mutation.
 pub fn publish_policy_update(

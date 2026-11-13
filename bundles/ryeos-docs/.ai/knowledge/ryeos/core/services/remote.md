@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T10:25:09Z:fa61d1d18d450e130e0c415a1f5a3bd9570a81c74997254f65db28f1422806c1:j7IbfzTAe60EZ4hEfwOFQOJVsVYEATaUY1nDSd75ckUoShorq5cdo9xVs4aDwarpKM4W7uy/V4wRb9xxy+VjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:ad05e6071d13d9ac2bfaa6ec6a3a408145c1d1b33e9baad9c24a5e5cb7acb2db:SWN2tUCqeJVtibkHlhhP8rPGVMY/b/FYlXH4eOWFUD8cdxow2QHGQpN6WrmZZSJJHrwKgY109twlVfZecchpDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -44,7 +44,7 @@ The authoritative matrix is in
 - Outbound remote requests normally use the local **node key**. The explicit
   configured-operator push/run mode uses the exact configured operator only
   after local operator authentication, and the target must bind it to the
-  forwarding site with an exact-scope `remote_operator` grant. The source node
+  forwarding site with an exact-scope `remote_principal` grant. The source node
   co-signs each exact request, and its independently admitted `remote_node`
   grant must carry `ryeos.attest.request.forwarded-operator`.
 - `remote configure` stores remote identity, vault fingerprint, URL, and

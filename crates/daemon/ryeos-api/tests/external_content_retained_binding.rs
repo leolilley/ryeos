@@ -85,6 +85,7 @@ fn fixture_on(
         "test operator",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )
@@ -186,7 +187,7 @@ fn replace_binding_with_remote_owner(
     binding_hash: &str,
 ) -> (String, String) {
     let remote_origin = format!("site:{}", "c".repeat(64));
-    let remote = NodeIdentity::create(&directory.path().join("remote-operator.pem")).unwrap();
+    let remote = NodeIdentity::create(&directory.path().join("remote-principal.pem")).unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
@@ -196,6 +197,7 @@ fn replace_binding_with_remote_owner(
         "remote binding owner",
         state.identity.fingerprint(),
         "2026-09-07T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -444,6 +446,7 @@ async fn bind_through_managed_activation_owner(
         "managed activation fixture operator",
         state.identity.fingerprint(),
         "2026-09-18T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )
@@ -940,7 +943,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
     assert_eq!(imported["manifest_hash"], manifest_hash);
 
     let remote_identity =
-        NodeIdentity::load(&directory.path().join("remote-operator.pem")).unwrap();
+        NodeIdentity::load(&directory.path().join("remote-principal.pem")).unwrap();
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &state.config.authorized_keys_dir,
         remote_identity.fingerprint(),
@@ -953,6 +956,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
         "changed remote binding owner",
         state.identity.fingerprint(),
         "2026-09-07T00:00:01Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         &state.identity,
         WildcardPolicy::Reject,
         false,
@@ -971,7 +975,7 @@ async fn local_operator_explicitly_imports_an_admitted_remote_owned_binding() {
 
     let mut remote_caller = context;
     remote_caller.fingerprint = remote_principal;
-    remote_caller.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    remote_caller.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemotePrincipal);
     remote_caller.authenticated_origin_site_id = Some(format!("site:{}", "c".repeat(64)));
     let error = external_content_import::handle(
         request_with_owner(&binding_hash, 11, Some(remote_caller.fingerprint.clone())),
@@ -1005,7 +1009,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
             .is_err()
     );
     let mut remote = context.clone();
-    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemoteOperator);
+    remote.authorized_key_class = Some(AuthorizedKeyPrincipalClass::RemotePrincipal);
     remote.authenticated_origin_site_id = Some("site:other".to_owned());
     assert!(
         external_content_import::handle(request(&hash, 11), remote, Arc::clone(&state))
@@ -1030,6 +1034,7 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
         "changed grant",
         state.identity.fingerprint(),
         "2026-09-07T00:00:01Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
         state.identity.signing_key(),
         WildcardPolicy::Reject,
     )

@@ -5105,7 +5105,7 @@ mod authority_tests {
 
         for rejected in [
             context(
-                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 "fp:operator",
                 Some("site:source"),
             ),

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T02:52:55Z:37da9fb39fa7223cce63e149d6f09b5f430c9373e325a4cd2b112ba5de1727ba:7R1ZXSx9EVprX3RSXumfj2TAJrZ2+AqIKatqgHB5YQi3u5RtoTFfhPUu+cBr8CGJ1ejAUBUqjyK42VsJKU1CCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:53Z:5e66541c45cb25dba7adae83b49ecd7d2b4bb26c6bcb94ae3060548c07756ffe:Hjz4TdBfABTVwPBW7nkfFIO38lH3szp2t7pfI9my+3KlSZ1T9K73tKro9grLy8SstLSLomkTbGlWuedi9/y0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -102,7 +102,7 @@ This workflow is intended for a dedicated hosted endpoint. Complete Codex
 managed activation and node policy setup with the hosted node's own local
 operator. Keep that target-local signing key on the target. The source
 operator's private key remains only at the source; the target receives its
-public key later in a node-signed `remote_operator` grant. Separately admit the
+public key later in a node-signed `remote_principal` grant. Separately admit the
 source node key on the hosted target as `remote_node` with only the generic
 forwarding-attestation scope:
 
@@ -117,7 +117,7 @@ ryeos remote admit --remote hosted --token '<one-time-token>' \
 ```
 
 Then stop the hosted daemon and install the source operator's public key in a
-target-node-signed `remote_operator` grant. A fresh hosted node has no incumbent
+target-node-signed `remote_principal` grant. A fresh hosted node has no incumbent
 grant for that fingerprint and needs no semantic conversion. If an exact
 incumbent grant for that source key is being reclassified or rebound, use
 `--allow-semantic-conversion` explicitly and never merge scopes across the
@@ -147,7 +147,7 @@ Use the exact `site_id` from the source node's identity. The operator grant is
 an allowed-source constraint, not source proof by itself. Each forwarded
 request is signed first by the configured operator and then co-signed over the
 exact request authorization by the separately admitted source-node key. The
-target accepts `remote_operator` only when both grants, the co-signature, the
+target accepts `remote_principal` only when both grants, the co-signature, the
 site, and the caller-signed required-origin assertion agree. A key holder
 calling the hosted daemon directly has no source-node proof and is rejected.
 
@@ -182,7 +182,7 @@ compare-and-swap publication and daemon hot reload. A real class or origin
 transition additionally requires `--allow-semantic-conversion`, mechanically
 acquires stopped-node authority, and refuses while the daemon owns it. Perform
 maintenance through the target-local operator; the independently stored source
-`remote_operator` grant is unchanged throughout. Never merge scopes across a
+`remote_principal` grant is unchanged throughout. Never merge scopes across a
 class or origin transition.
 
 The bundle registers daemon-local terminal aliases, but an activated hosted
@@ -361,7 +361,7 @@ remote authorization cannot create or control the workflow. Classifying the
 source key as a plain `local_client` at the target is incorrect because it
 erases forwarding origin and is rejected by this activation contract.
 
-Placement preflight captures the exact target-signed `remote_operator` grant
+Placement preflight captures the exact target-signed `remote_principal` grant
 as `AdmittedOperatorAuthority`: principal class, source origin, signed grant
 digest, and sorted scopes. The target proves it covers the retained effective
 and parent-delegation capability ceilings, seals it into the target capsule and

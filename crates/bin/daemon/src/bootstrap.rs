@@ -340,9 +340,14 @@ fn write_operator_authorized(
         &fp,
         &key_b64,
         &["*".to_string()],
-        "bootstrap-authorized-user",
+        "operator",
         &fp,
         &now,
+        // Initialization has no signed request: the operator who runs it is
+        // the principal that asks for their own grant, which never lapses.
+        &ryeos_node_runtime::identity::GrantTerms::operator(
+            ryeos_node_runtime::identity::AuthorizedBy::principal_request(&fp, None),
+        ),
         node_signing_key,
         ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
     )?;

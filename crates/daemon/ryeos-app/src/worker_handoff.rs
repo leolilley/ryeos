@@ -2711,10 +2711,10 @@ impl WorkerPlacementPreflightEvidence {
             {
                 bail!("local-operator preflight has no target chain owner anchor");
             }
-            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal
                 if self.target_chain_owner_anchor_hash.is_some() =>
             {
-                bail!("remote-operator preflight carries a local chain owner anchor");
+                bail!("remote-principal preflight carries a local chain owner anchor");
             }
             _ => {}
         }
@@ -5050,7 +5050,7 @@ mod tests {
                 owner_principal: request.owner_principal.clone(),
                 origin_site_id: request.origin_site_id.clone(),
                 principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "e".repeat(64),
                 scopes: vec!["*".to_owned()],
             },
@@ -5231,7 +5231,7 @@ mod tests {
                 owner_principal: format!("fp:{}", "e".repeat(64)),
                 origin_site_id: "site:a".into(),
                 principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "5".repeat(64),
                 scopes: vec!["*".into()],
             },

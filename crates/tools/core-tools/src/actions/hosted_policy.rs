@@ -50,6 +50,24 @@ pub fn load_hosted_policy(app_root: &Path) -> Result<LoadedHostedNodePolicy> {
     })
 }
 
+/// Load the required authorization policy (grant lifetimes) for `app_root`.
+pub fn load_authorization_policy(
+    app_root: &Path,
+) -> Result<ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy> {
+    let trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
+    )
+    .context("authorization policy: load trust store")?;
+    let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
+        app_root,
+        &trust_store,
+        &NodePolicyTable::new(),
+    )
+    .context("authorization policy: load verified node policy generation")?;
+    Ok(*snapshot.require::<ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy>()?)
+}
+
 #[cfg(test)]
 pub(crate) fn write_required_non_hosted_test_policies(
     app_root: &Path,

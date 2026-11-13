@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:13:17Z:dd29c8401900489ad96e67910a9b4362f86f8a0c3922f8f61da150c1b6722f53:RNhTanBv3yUdzHLv24mHkosSZx2a8l1eQyZ405Uw3gXbmIuc3edK7m6K76oFLeNFiTfr+445TuorURjhgf5KCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:33:26Z:7a06ef1a4e62ad8e487f431046719d85717cdd34eeaf448c44925d5399d8079b:qYxaEh8KVX1oIkmmsI/xgiYFt/xU/gaOc3fEK7buzHTCr27DoEt4HEqZnGfbahNw9EnGx/LsLwAeOcDsVaZvCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -68,7 +68,7 @@ Operator-owned durable workflows may explicitly select the configured
 operator on `service:remote/push`; the matching retained-current-HEAD accepted
 `service:remote/run` preserves it automatically. Both local requests must be
 made by that exact configured operator, and the destination must authorize the
-same operator key through a node-signed `remote_operator` grant bound to the
+same operator key through a node-signed `remote_principal` grant bound to the
 source site's canonical ID and exact scopes. The destination separately admits
 the source node key as `remote_node` with
 `ryeos.attest.request.forwarded-operator`; that key co-signs every exact
@@ -164,6 +164,14 @@ remote); until then, attribute and cap remote work per node.
      --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
    ```
 
+   Every grant expires. Without `--lifetime-secs` it lasts the class maximum
+   in the target's signed authorization policy (`remote_node` 90 days,
+   `remote_principal` 30 days, `local_client` 365 days in the shipped
+   profiles). When it lapses the key holder receives HTTP 401
+   `grant_expired`; the principal that granted it (or the target's operator)
+   renews it with `ryeos renew-key --fingerprint <fp>`. The grantee cannot
+   renew its own grant. See [Identity model](../identity-model.md).
+
 3. **Choose scopes by operation**. Do not mix local remote-service caps
    with remote authorized-key scopes. The complete matrix is in
    [Remote Command Reference](remote-command-reference.md#authority-matrix).
@@ -213,7 +221,7 @@ RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
 ```
 
 Do not use `--origin-site-id` for this key: that flag describes the separate
-forwarded `remote_operator` principal.
+forwarded `remote_principal` principal.
 
    Common remote-side scopes:
 
@@ -227,7 +235,7 @@ forwarded `remote_operator` principal.
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
-   | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_operator` principal) |
+   | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_principal` principal) |
 
    `ryeos.use.vault.operator` lets an execution read the target's
    operator vault (`include_operator_vault: true`, or the `operator` vault
@@ -326,7 +334,7 @@ offline operations, which the controller's signed profile delegates
 
 | Operation | Input | Effect |
 |---|---|---|
-| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_operator` grant (public key, exact scopes, label, origin site, `merge_scopes`). Never an offline-operation scope or a wildcard. |
+| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_principal` grant (public key, exact scopes, label, origin site, `merge_scopes`, optional `lifetime_secs`). Never an offline-operation scope or a wildcard. The grant ends: `lifetime_secs` (default the class maximum of the controller's signed `authorization` policy) above that maximum fails with `grant_lifetime_exceeds_policy`. Its `authorized_by` is the request's signer and the request digest. The configured operator's fingerprint is refused with `grant_is_operator`. |
 | `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its descriptor, as `ryeos remote pin`. |
 | `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
 

@@ -61,6 +61,7 @@ pub mod external_execution_status;
 pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
+pub(crate) mod grant_terms;
 pub mod health_status;
 pub mod identity_public_key;
 pub mod ingest_ignore;
@@ -111,6 +112,7 @@ pub mod remote_vault_delete;
 pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
+pub mod renew_key;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;
 #[cfg(feature = "scheduling")]
@@ -317,6 +319,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     rebuild::VERIFY_DESCRIPTOR,
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
+    renew_key::DESCRIPTOR,
     authorize_client::DESCRIPTOR,
     offline_operations::SUBMIT,
     offline_operations::FACTS,

@@ -217,7 +217,7 @@ impl Envelope<'_> {
             };
         // Never a remote node, and no ordinary client: only a remote
         // operator may sign an offline operation from outside the volume.
-        if grant.principal_class != AuthorizedKeyPrincipalClass::RemoteOperator {
+        if grant.principal_class != AuthorizedKeyPrincipalClass::RemotePrincipal {
             return refuse(
                 RefusalReason::SignerClassNotPermitted,
                 format!(
