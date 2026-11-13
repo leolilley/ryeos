@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T09:44:35Z:60d7af84fa51df6f8e380268620a33d6352ac21b6be5af34b2a6a5f2edcbcdbc:3H9WPSph9gtoPHrh390d2mE5dfbQ6gIbnHx3yuG4Zsucv1XKYG1df5W0qo+xbjR/YahX7ovt+0YEvHfrZTx1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-execution, status]
+description: List what still holds external capacity or a credential profile on this node, with the step that releases each
+help:
+  usage: ryeos external-execution status
+dispatch:
+  kind: execute_ref
+  execute: service:external-execution/status

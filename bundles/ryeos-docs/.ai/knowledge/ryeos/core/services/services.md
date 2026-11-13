@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T09:42:10Z:21738bd580644273fb08d1d6cb01bafe6a6841e38e5c2fd30d9c636ea0651755:Hqnu3evLkPGCsVsxisDMMh5o44IMmlnvW4mMfn8CWcvKPxO8Q7NMMafEBUKhH77E6tyS8wzlWK4YxehxM831CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:52:52Z:02aed3f35a0a572f318d3a8891bbc2d0f1965c8906e0c1fa17c8a772bfa22255:9Jez6tEny5MjeBIzBT+Dzn4uZxffl6GgmIZ4vdnE9OY3BEDQ4P2T+T2ZAo56lzNx2BOfGpq+KflFAgjjjnt3Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -45,6 +45,7 @@ hashes through CAS.
 | `projection/rebuild` | `projection.rebuild` | `ryeos.execute.service.projection/rebuild` |
 | `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
 | `external-execution/settle-unknown-allocation` | `external-execution.settle-unknown-allocation` | `ryeos.execute.service.external-execution/settle-unknown-allocation` |
+| `external-execution/status` | `external-execution.status` | `ryeos.execute.service.external-execution/status` |
 | `health/status` | `health.status` | none |
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |

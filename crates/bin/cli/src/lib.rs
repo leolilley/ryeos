@@ -7,6 +7,7 @@ mod bundle_set_update;
 mod client_handlers;
 pub mod daemon_preflight;
 pub mod dispatcher;
+mod doctor_external_status;
 pub mod effective_metadata;
 pub mod error;
 pub mod exec_stream;
