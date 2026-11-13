@@ -550,6 +550,10 @@ struct ServerRequestCorrelation {
 #[serde(deny_unknown_fields)]
 struct ApprovalResponses {
     accept: ValueTemplate,
+    /// Parsed for profile compatibility only: RyeOS records `accept` and
+    /// `decline`, so the bridge refuses a `cancel` decision and never renders
+    /// this template. Remove it at the next profile `schema_version` bump.
+    #[allow(dead_code)]
     cancel: ValueTemplate,
     decline: ValueTemplate,
     expire: ValueTemplate,
@@ -957,14 +961,15 @@ fn reject_nonlocal_schema_refs(value: &Value, depth: usize) -> Result<()> {
     Ok(())
 }
 
-/// Why the bridge refused a workload message. It rides on the error as a
-/// context so the refusal can be reported by class without reading any
-/// message content.
+/// Why the bridge refused a workload message or a RyeOS control. It rides on
+/// the error as a context so the refusal can be reported by class without
+/// reading any message content.
 #[derive(Debug, Clone, Copy)]
 enum RefusalClass {
     UnknownNotification,
     UnknownServerRequest,
     SchemaViolation,
+    UnrecordedApprovalDecision,
 }
 
 impl RefusalClass {
@@ -973,6 +978,7 @@ impl RefusalClass {
             Self::UnknownNotification => "unknown_notification",
             Self::UnknownServerRequest => "unknown_server_request",
             Self::SchemaViolation => "schema_violation",
+            Self::UnrecordedApprovalDecision => "unrecorded_approval_decision",
         }
     }
 }
@@ -986,6 +992,21 @@ impl std::fmt::Display for RefusalClass {
 impl std::error::Error for RefusalClass {}
 
 const MAX_REFUSED_METHOD_BYTES: usize = 128;
+
+/// The refused approval decision, only when it is a short plain identifier,
+/// so a refusal never echoes arbitrary control content.
+fn refused_decision_label(decision: &str) -> &str {
+    if !decision.is_empty()
+        && decision.len() <= 32
+        && decision
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        decision
+    } else {
+        "<non-identifier>"
+    }
+}
 
 /// The refused message's method name, only when it is a plain protocol
 /// identifier. Anything else is not reported, so a refusal event can never
@@ -2843,6 +2864,21 @@ impl StructuredWorkload {
             .get("requestId")
             .ok_or_else(|| anyhow!("approval has no requestId"))?;
         let key = canonical_id(request_id)?;
+        // The vocabulary is RyeOS's recorded decisions, not the upstream
+        // protocol's. It is checked before the pending request is looked up,
+        // so a refused decision never consumes the request.
+        let decision = request
+            .get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("approval decision must be a string"))?;
+        if !matches!(decision, "accept" | "decline") {
+            return Err(
+                anyhow::Error::new(RefusalClass::UnrecordedApprovalDecision).context(format!(
+                    "approval decision `{}` is not a RyeOS-recorded decision",
+                    refused_decision_label(decision)
+                )),
+            );
+        }
         let pending = match self.server_requests.get(&key) {
             Some(pending) if pending.request_digest == expected_request_digest => {
                 self.server_requests
@@ -2868,13 +2904,6 @@ impl StructuredWorkload {
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("pending server request has no method"))?;
-        let decision = request
-            .get("decision")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("approval decision must be a string"))?;
-        if !matches!(decision, "accept" | "decline" | "cancel") {
-            bail!("approval decision is outside the baseline vocabulary");
-        }
         let rule = self
             .profile
             .server_requests
@@ -2889,7 +2918,6 @@ impl StructuredWorkload {
         let response_template = match decision {
             "accept" => &rule.responses.accept,
             "decline" => &rule.responses.decline,
-            "cancel" => &rule.responses.cancel,
             _ => unreachable!("decision vocabulary checked above"),
         };
         let response = evaluate_template(response_template, &context)?;
@@ -5476,6 +5504,177 @@ mod tests {
         )
         .unwrap();
         assert!(child.wait().unwrap().success());
+    }
+
+    fn gating_approval_schemas() -> HashMap<String, Value> {
+        HashMap::from([
+            (
+                "request.json".to_owned(),
+                json!({"type":"object","additionalProperties":false}),
+            ),
+            (
+                "response.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["ok"],
+                    "properties":{"ok":{"const":true}},
+                    "additionalProperties":false
+                }),
+            ),
+            (
+                "approval.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["session","operation","command"],
+                    "properties":{
+                        "session":{"type":"string"},
+                        "operation":{"type":"string"},
+                        "command":{"type":"string"}
+                    },
+                    "additionalProperties":false
+                }),
+            ),
+        ])
+    }
+
+    /// Runs the gating-approval fixture and, once its approval is surfaced,
+    /// sends one approval control per decision in order. Returns the route
+    /// result, each control's outcome in order, and the workload.
+    fn run_gating_approval_decisions(
+        root: &tempfile::TempDir,
+        decisions: &[&str],
+    ) -> (Value, Vec<WorkloadCommandResult>, StructuredWorkload) {
+        let workload_home = root.path().join("home");
+        std::fs::create_dir(&workload_home).unwrap();
+        let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
+            "id":"approval-one",
+            "method":"approval/request",
+            "params":{"session":"session-one","operation":"operation-one","command":"true"}
+        }))
+        .unwrap();
+        let events = Arc::new(Mutex::new(EventQueue::default()));
+        let (control_sender, controls) = sync_channel(1);
+        let (result_sender, results) = sync_channel(decisions.len());
+        let observed_events = Arc::clone(&events);
+        let decisions = decisions
+            .iter()
+            .map(|decision| (*decision).to_owned())
+            .collect::<Vec<_>>();
+        let control_count = decisions.len();
+        let controller = std::thread::spawn(move || {
+            let deadline = MonotonicDeadline::after(Duration::from_secs(2));
+            while !observed_events
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event["event_type"] == "approval.requested")
+            {
+                assert!(!deadline.has_elapsed(), "approval event was not surfaced");
+                lillux::time::sleep(Duration::from_millis(1));
+            }
+            for (index, decision) in decisions.into_iter().enumerate() {
+                control_sender
+                    .send(PendingControl {
+                        request_id: format!("control-{index}"),
+                        body: json!({
+                            "kind":"approval_decision",
+                            "request_id":"approval-one",
+                            "request_digest":request_digest,
+                            "decision":decision,
+                            "reservation_token":format!("reservation-{index}")
+                        }),
+                    })
+                    .unwrap();
+            }
+        });
+        let mut lifecycle = BridgeLifecycle::default();
+        let mut workload = StructuredWorkload::start(
+            &mut lifecycle,
+            "/bin/sh",
+            root.path().to_str().unwrap(),
+            workload_home.to_str().unwrap(),
+            gating_approval_profile(),
+            "session".to_owned(),
+            HashSet::from([RouteEffectClass::SessionMutation]),
+            gating_approval_schemas(),
+            events,
+            controls,
+            result_sender,
+            "/bin/sh",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        workload.bound_session_id = Some("session-one".to_owned());
+        let result = workload
+            .handle(
+                json!({"route_id":"operation.run","payload":{}}),
+                root.path().to_str().unwrap(),
+            )
+            .unwrap();
+        controller.join().unwrap();
+        let outcomes = (0..control_count)
+            .map(|_| results.recv_timeout(Duration::from_secs(1)).unwrap())
+            .collect();
+        (result, outcomes, workload)
+    }
+
+    #[test]
+    fn approval_cancel_decision_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let (result, outcomes, mut workload) =
+            run_gating_approval_decisions(&root, &["cancel", "accept"]);
+        assert_eq!(result["response"]["result"], json!({"ok":true}));
+        let [(cancel_id, cancel), (accept_id, accept)] = <[_; 2]>::try_from(outcomes).unwrap();
+        assert_eq!(cancel_id, "control-0");
+        assert_eq!(
+            cancel.unwrap_err(),
+            "approval decision `cancel` is not a RyeOS-recorded decision"
+        );
+        // The refused decision left the request pending: the later accept
+        // still found and resolved it.
+        assert_eq!(accept_id, "control-1");
+        let WorkloadCommandOutput::Final(accepted) = accept.unwrap() else {
+            panic!("expected final control result")
+        };
+        assert_eq!(accepted, json!({"resolved":true}));
+
+        // The vocabulary is checked before the pending lookup and the refusal
+        // is typed.
+        let refused = workload
+            .handle_approval(
+                json!({"operation":"approval","requestId":"approval-absent","decision":"cancel"})
+                    .as_object()
+                    .unwrap(),
+                &"d".repeat(64),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refused.downcast_ref::<RefusalClass>(),
+            Some(RefusalClass::UnrecordedApprovalDecision)
+        ));
+        assert!(
+            refused
+                .to_string()
+                .contains("approval decision `cancel` is not a RyeOS-recorded decision")
+        );
+    }
+
+    #[test]
+    fn approval_accept_and_decline_still_deliver() {
+        for decision in ["accept", "decline"] {
+            let root = tempfile::tempdir().unwrap();
+            let (result, outcomes, _workload) = run_gating_approval_decisions(&root, &[decision]);
+            assert_eq!(result["response"]["result"], json!({"ok":true}));
+            let [(control_id, outcome)] = <[_; 1]>::try_from(outcomes).unwrap();
+            assert_eq!(control_id, "control-0");
+            let WorkloadCommandOutput::Final(resolved) = outcome.unwrap() else {
+                panic!("expected final control result")
+            };
+            assert_eq!(resolved, json!({"resolved":true}), "decision {decision}");
+        }
     }
 
     #[test]
