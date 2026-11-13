@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:55:03Z:420e92801b6479f28157dd84b7cb3f3fe8c703df9fdd2e666df66703c0b5d35b:jOmBK+lSV/g6zOFCO+G/TKZQi9+M5kV7/xgNDCtuqHIX7m6IK3XG3QuI9AlKj2w8em0/kXK8neoNDoiHTMeUDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:55:33Z:2d5ea905e0459d38cf716f09cacc6e3eca812c099e8f70990b57b6d58772fe64:/Tn92sPtWHSpkudybnfJRlWFOhey1p43liFEvhfhOXr4RLYbzD2Qz1WX35vNPVjP3ZNZZSq9PLi3C8gZes2FCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, knowledge, context]
@@ -24,6 +24,11 @@ when node `launch_trust` policy admits that class for the knowledge kind,
 carries a trust note in its header, for example `## Reference: notes/x
 (untrusted_project: signed by an unpinned key, admitted by node policy)`,
 and its `resolved_items` entry reports `trust_class`.
+
+`validate` reports trust per item: an `unsigned` item is an error that makes
+the corpus invalid, and an `untrusted_project` item is a warning naming it
+(`untrusted signer in corpus: <ref> ...`). Admitting it stays the launch
+gate's decision.
 
 The runtime registry selects this signed implementation binary for the
 `knowledge` kind. The signed knowledge kind schema separately selects
