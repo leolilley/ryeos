@@ -320,10 +320,7 @@ pub(crate) fn run_restored_verifier(adapter: &lillux::InheritedDescriptorAuthori
 pub(crate) fn observe_restored_sandbox(
     adapter: &lillux::InheritedDescriptorAuthority,
 ) -> Result<()> {
-    use ryeos_external_execution_contract::runtime_snapshot::{
-        RuntimeSnapshotQualificationReadinessAdapterResponse,
-        RuntimeSnapshotQualificationReadinessRequest,
-    };
+    use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest;
     let deadline = crate::operation_deadline()?;
     ensure!(
         [
