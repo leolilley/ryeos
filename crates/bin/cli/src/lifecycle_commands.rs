@@ -111,7 +111,7 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     },
     LocalCommandDescriptor {
         tokens: &["node", "offline-operation", "facts"],
-        summary: "Print the node facts a signed offline-operation request is signed against; works with the daemon stopped",
+        summary: "Print the node facts a signed offline-operation request is signed against; works with the daemon stopped; --remote reads a remote's through this node",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -121,7 +121,7 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     },
     LocalCommandDescriptor {
         tokens: &["node", "offline-operation", "submit"],
-        summary: "Send a signed offline-operation request to a running node's route; --stop makes the node apply it at once",
+        summary: "Send a signed offline-operation request to a running node's route, or through this node to a remote with --remote; --stop makes the node apply it at once",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -345,7 +345,9 @@ pub async fn try_dispatch(
             Ok(true)
         }
         ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("facts") => {
-            run_node_offline_operation_facts_command(&argv[3..], console).map_err(map_local_err)?;
+            run_node_offline_operation_facts_command(&argv[3..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("sign") => {
@@ -2061,7 +2063,7 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
 #[command(
     name = "ryeos node offline-operation facts",
     about = "Print the node facts a signed offline-operation request is signed against",
-    long_about = "Read-only. Prints every precondition fact of the node and the ledger head, and the operations this build can apply with the facts each pins. Works with the daemon stopped, so an operator can sign a request for a node that cannot start. The daemon prints the same facts in its log on every start.",
+    long_about = "Read-only. Prints every precondition fact of the node and the ledger head, and the operations this build can apply with the facts each pins. Works with the daemon stopped, so an operator can sign a request for a node that cannot start. The daemon prints the same facts in its log on every start. With --remote <name> it prints a remote's facts instead, read through this operator's running node under the delegation stored for that remote; `--json` then writes the document `sign --facts` reads.",
     no_binary_name = true
 )]
 struct NodeOfflineFactsArgs {
@@ -2069,18 +2071,39 @@ struct NodeOfflineFactsArgs {
     #[arg(long)]
     app_root: Option<PathBuf>,
 
+    /// Read the facts of the remote of this name through this operator's own
+    /// node. The stored delegation for it must lend
+    /// `ryeos.execute.service.offline-operations/facts`.
+    #[arg(long)]
+    remote: Option<String>,
+
+    /// The key authenticating the call to this operator's node (PKCS#8 PEM)
+    /// with --remote. Defaults to the operator key under the app root.
+    #[arg(long, requires = "remote")]
+    signing_key: Option<PathBuf>,
+
     /// Emit structured JSON.
     #[arg(long)]
     json: bool,
 }
 
-fn run_node_offline_operation_facts_command(
+async fn run_node_offline_operation_facts_command(
     argv: &[String],
     console: &crate::tty::Console,
 ) -> Result<()> {
     let Some(args) = parse_or_render_help::<NodeOfflineFactsArgs>(argv, console)? else {
         return Ok(());
     };
+    if let Some(remote) = &args.remote {
+        return crate::lifecycle_offline_operation::run_remote_facts(
+            remote,
+            args.app_root,
+            args.signing_key,
+            args.json,
+            console,
+        )
+        .await;
+    }
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root)?.app_root;
     let facts = ryeos_node::offline_operation::read_facts(&app_root)
         .context("measure the node's offline-operation facts")?;

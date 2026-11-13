@@ -141,6 +141,10 @@ pub async fn submit(
     let app_root = state.config.app_root.clone();
     let identity = Arc::clone(&state.identity);
     let submitted_by = submitting_fingerprint(&ctx.fingerprint)?.to_owned();
+    // A delivery another node forwarded under the caller's delegation names
+    // that node's site. The caller is still the principal, and the request's
+    // signer: the remote operator's grant binds both to that same site.
+    let delegated_via = ctx.delegated_via.clone();
     let request = req.request;
     let accepted = tokio::task::spawn_blocking(move || {
         accept(
@@ -177,6 +181,8 @@ pub async fn submit(
         "ledger_head": accepted.ledger_head,
         "already_queued": accepted.already_queued,
         "stop": stop_reported,
+        "submitted_by": ctx.fingerprint,
+        "delegated_via": delegated_via,
     }))
 }
 

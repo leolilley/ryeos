@@ -1897,6 +1897,30 @@ impl RemoteClient {
         self.signed_post("/revoke-delegation", &body).await
     }
 
+    /// POST /offline-operations (authenticated): deliver a signed
+    /// offline-operation request and its inputs to the remote's inbox. `body`
+    /// is the remote route's request: `{request, inputs, stop?}`.
+    pub async fn offline_operations_submit(&self, body: &Value) -> Result<Value> {
+        self.signed_post_with_response_limit(
+            "/offline-operations",
+            body,
+            DEFAULT_SERVICE_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// GET /offline-operations/facts (authenticated): the facts a request for
+    /// the remote is signed against.
+    pub async fn offline_operations_facts(&self) -> Result<Value> {
+        self.signed_get("/offline-operations/facts").await
+    }
+
+    /// GET /offline-operations (authenticated): what the remote has queued,
+    /// applied and refused.
+    pub async fn offline_operations_status(&self) -> Result<Value> {
+        self.signed_get("/offline-operations").await
+    }
+
     /// POST /vault/set (authenticated).
     pub async fn vault_set(&self, name: &str, value: &str) -> Result<Value> {
         let body = serde_json::json!({ "name": name, "value": value });

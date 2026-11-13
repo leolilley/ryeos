@@ -99,6 +99,7 @@ pub mod remote_execute;
 pub mod remote_import_admitted_head;
 pub mod remote_import_admitted_root;
 pub mod remote_list;
+pub mod remote_offline_operations;
 pub mod remote_pin;
 pub mod remote_project_status;
 pub mod remote_pull;
@@ -335,6 +336,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     offline_operations::SUBMIT,
     offline_operations::FACTS,
     offline_operations::STATUS,
+    remote_offline_operations::SUBMIT,
+    remote_offline_operations::FACTS,
+    remote_offline_operations::STATUS,
     #[cfg(feature = "scheduling")]
     scheduler_register::DESCRIPTOR,
     #[cfg(feature = "scheduling")]

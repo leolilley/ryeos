@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:fa7d50f4a7fc64ba16cbcd9901dcce11fbbe74943540568b2c525923ec913b1b:invnSRxRvYbYoioKdQPc6cK+nsdlx7NWyf9kDqxdrpQeZkLYwh+nlZNBsvR+oS707rRFoU15dRpdBNpDC+cpDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:32:28Z:eab776fa8984a6f56039531798a3ef347a45eb97772479db4f317caccc103bc1:eic/BFFsc+jhi3hZAvpchx5L276bFuLZV2eLlMkXZAnlO0KfXBc3emPkz2TAfCXCiEqOzv2bg4RAN0j4vsInDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -60,6 +60,9 @@ call made by the node itself is signed by the node key alone.
 | `ryeos remote delegate` | `ryeos.execute.service.remote/delegate` | none | none (the node stores the signed delegation) |
 | `ryeos remote delegation list` | `ryeos.execute.service.remote/delegation-list` | none | none |
 | `ryeos remote delegation revoke` | `ryeos.execute.service.remote/delegation-revoke` | `ryeos.execute.service.identity/revoke-delegation` (lent by the delegation; the remote operator may instead run `ryeos delegation tombstone`) | `POST /revoke-delegation` |
+| `ryeos node offline-operation facts --remote` | `ryeos.execute.service.remote/offline-operations-facts` | `ryeos.execute.service.offline-operations/facts` (lent by the delegation) | `GET /offline-operations/facts` |
+| `ryeos node offline-operation submit --remote` | `ryeos.execute.service.remote/offline-operations-submit` | `ryeos.execute.service.offline-operations/submit` (lent by the delegation) plus the exact `ryeos.offline.<operation>` scope in the grant | `POST /offline-operations` |
+| `ryeos node offline-operation list --remote` | `ryeos.execute.service.remote/offline-operations-status` | `ryeos.execute.service.offline-operations/status` (lent by the delegation) | `GET /offline-operations` |
 | `ryeos remote bundle-install` | `ryeos.execute.service.bundle/install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` | `POST /bundle/export`, `POST /objects/get` |
 | `ryeos remote vault-set` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/set` | `POST /vault/set` |
 | `ryeos remote vault-list` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/list` | `GET /vault/list` |

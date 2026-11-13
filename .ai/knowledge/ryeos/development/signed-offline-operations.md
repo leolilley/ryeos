@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:52Z:b86cf8badb16d416d1d27e45dd27b3656ca6a2598e2aabd05744b31889ab6a14:aWKuSWcy7TbgKP3RiCBT5yQ9sym4s+6m0jvP5SWQOalEoSCUFWF2Kwbs296uqzhRq2CWIBQ8Jx/OFSyIoJXjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:32:28Z:7d09bbef92a73b7f367f56b2ff789e6b9d3e2ebeb9f3d49c0e544c1308dbbc9a:wOJpvamcqeVlv2og3g4fPelh2McMOkIQWSbS9WAETtOSUjY2K+XY2vacXx2U7fqbXSN2gdWl9W7RJSjrigITAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signed-offline-operations"
@@ -159,7 +159,11 @@ Two channels feed one inbox under `.ai/state/offline-operations/inbox/`:
 1. A running node takes `POST /offline-operations`, checks the envelope and
    the preconditions it can measure cheaply, and stores the request. It
    stops only when asked (`--stop`), as a plain operator stop with no restart
-   inhibition. The supervisor or platform starts the next incarnation.
+   inhibition. The supervisor or platform starts the next incarnation. A
+   remote operator reaches this route through its origin node
+   (`submit --remote`), which forwards under the operator's delegation; the
+   route admits the operator as principal, so the delivering key is still the
+   request's signer, and its reply names `delegated_via`.
 2. A node that cannot start gets the request from the platform. The
    entrypoint copies `RYEOS_OFFLINE_OPERATION_REQUEST` and
    `RYEOS_OFFLINE_OPERATION_INPUTS` into the inbox as root, verifies nothing,

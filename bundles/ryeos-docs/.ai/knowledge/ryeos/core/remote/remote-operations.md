@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:a544ce2a97a90858dbe0f67bdf261f7602152c20cdcb1f28d135cc3635b48de9:vSiVmWPEftF6H0RcspQ7kiqoEvfv5mQJ1hf1MEMmPr0SqjudoCwwFRkWcJt138Fj2uK4ONRwFVuxM+0csnnyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:32:28Z:2fb79c505287d9a5e3f0e202d8e3738d849cb50eca81fd4d2181bc2d57ee0417:2ZN+Qsej/BnMGYr+zr1LcQbA7wBYZDooWNPE2yqN2AgG2rG2Y3vzyJG/cBe4irykBO4ylPq/ADNVMPIzxrIoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -411,25 +411,69 @@ offline operations, which the controller's signed profile delegates
 | `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
 
 Each is signed against the controller's facts (`authorized_keys`, `remotes`,
-`bundle_registrations` respectively) and applies at the controller's next
-start:
+`bundle_registrations` respectively), delivered through the origin node, and
+applies at the controller's next start.
+
+**Delivery through the origin node.** The origin operator's own node forwards
+the operator's calls to the controller under a delegation the operator signed
+for it, the same way `remote run` and `remote push` act for the operator. The
+origin node's key signs and co-signs each call and the operator's delegation
+rides with it, so the controller admits the operator as the principal; the
+origin node never holds the operator's key and never signs the request. Input
+files (a descriptor, a bundle archive) travel in the same call, so nothing is
+written onto the controller's container outside its own inbox.
+
+The controller must already hold two grants, which only its local operator
+can make (through the platform channel below, once): the origin node as a
+`remote_node` bound to the origin's site with the forwarded-operator
+attestation scope, and the origin operator as a `remote_principal` bound to the
+same site whose scopes name the offline-operations routes
+(`ryeos.execute.service.offline-operations/submit`, `/facts`, `/status`) and
+the exact `ryeos.offline.node.*` scopes it may sign. The origin pins the
+controller with its URL (the controller is the side the origin can dial).
+
+On the origin, the operator then lends the routes' scopes to its node for the
+controller and works from there:
 
 ```bash
-# controller-facts.json: the controller's facts, from its signed
-# GET /offline-operations/facts or the facts line of its startup log
+# once, and again before it expires (default 8 hours, at most 30 days)
+ryeos remote delegate --remote controller \
+  --scopes ryeos.execute.service.offline-operations/submit,ryeos.execute.service.offline-operations/facts,ryeos.execute.service.offline-operations/status
+
+ryeos node offline-operation facts --remote controller --json > controller-facts.json
 ryeos node offline-operation sign --operation node.remote.pin \
   --arguments pin.json --input descriptor=./origin.remote.yaml \
   --facts controller-facts.json --grant-digest <sha256> --origin-site site:<origin> \
-  --signing-key ./origin-operator.pem --stage-dir ./pin-delivery
+  --out pin-delivery.json
+ryeos node offline-operation submit --remote controller --file pin-delivery.json --stop
+ryeos node offline-operation list --remote controller
 ```
 
-Deliver `--stage-dir`'s `request.json` and `inputs/` through the platform
-channel the entrypoint reads (`RYEOS_OFFLINE_OPERATION_REQUEST` and
-`RYEOS_OFFLINE_OPERATION_INPUTS`, see `deploy/composition-images.md`) and
-restart the service. `ryeos node offline-operation submit` authenticates with
-the signing key alone, which a remote operator's grant does not accept without
-a source-node forwarding proof, so it serves the controller's local operator,
-not the origin's.
+The controller's effective scopes for the operator are its grant intersected
+with the delegation, so both must name a route's scope. The refusals name
+their cure:
+
+| Code | Where | Meaning and fix |
+|---|---|---|
+| `remote_delegation_missing` | origin | No delegation stored for (operator, remote): `ryeos remote delegate --remote <name> --scopes ...`. |
+| `remote_delegation_scope_missing` | origin | The stored delegation does not lend the route's scope; the message names it. Delegate again with it. |
+| `remote_inbound_only` | origin | The remote is pinned without a URL. An inbound-only remote is never dialed; delivering to one would need it to poll, which no path does. |
+| `offline_operation_signer_not_caller` | origin | The request is signed by another key than the caller's; the controller queues a request only from its signer. |
+| `remote_grant_scope_missing` | controller | The controller admitted the operator, but its grant does not name the route's scope; the controller's local operator adds it. |
+| `remote_delegation_*` (`principal_not_admitted`, `revoked`, `expired`, ...) | controller | The controller refused the delegation; the message names the cure. |
+| `remote_offline_operation_refused` | controller | The controller verified the request and refused it; `reason` is its offline-operation refusal (`stale_ledger_head`, `not_delegable`, `grant_changed`, ...). |
+
+The controller records each forwarded delivery as the operator: its reply
+names `submitted_by` (the operator, which must also be the request's signer)
+and `delegated_via` (the origin's site). The request itself names the signer,
+its grant digest and its origin site, and the node-signed receipt the next
+start writes covers that request.
+
+**The platform channel.** A controller that cannot start, or one that does not
+yet hold the two grants above, is reached through the channel the entrypoint
+reads (`RYEOS_OFFLINE_OPERATION_REQUEST` and `RYEOS_OFFLINE_OPERATION_INPUTS`,
+see `deploy/composition-images.md`): `sign --stage-dir` writes the files it
+takes.
 
 Requests pin the ledger head, so sign the next operation against the facts
 the controller reports after the previous one applied, or sign each against

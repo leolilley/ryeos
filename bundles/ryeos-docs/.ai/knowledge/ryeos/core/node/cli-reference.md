@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:15:40Z:0e4e16d7f02fb191f3a631a9e677643aa77e1b636f2dcbad5bccd093c2cde0fd:32LF2bHzslcXgka9Oa9nfZFn3QouE7hJdvNoyTsmyPxEA0DQIOLAcwmcXrLTuk3FdExGx9ke+F/+NVpad9KtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:32:28Z:b0d3751c87ceb2ee1a6ecfa46f06f704b89a56aceb4ff401412fc6cb814447c1:K1GUHMi/repEtqYkDuk9lzFBvHMkpEeKcqLMHHw53Y6gbi7h4pl/Gh5HjqCHVk0ZWgPfRBXieT8FxMuQeuBjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -665,6 +665,13 @@ install, and vault proxying.
   remote pin (`--input descriptor=<file>`) or a bundle installed from an
   archive (`--input archive=<file.tar.gz>`). See "Wiring a hosted node
   without a shell" in [Remote Operations](../remote/remote-operations.md).
+- `ryeos node offline-operation facts|submit|list --remote <name>` — read a
+  remote's facts, deliver a request signed with your own key (with its input
+  files), or read what the remote queued and applied, through your own node
+  under the delegation you stored for that remote. The delegation must lend
+  `ryeos.execute.service.offline-operations/facts`, `/submit` and `/status`
+  (`ryeos remote delegate --remote <name> --scopes ...`); an inbound-only
+  remote is refused with `remote_inbound_only`.
 See [Remote Command Reference](../remote/remote-command-reference.md).
 
 ## Aliases Quick Reference

@@ -73,6 +73,10 @@ itself before any other startup check can refuse. No shell is involved.
   The node keeps running unless `--stop` is given, which makes a plain operator
   stop; the supervisor or hosting platform must start the next incarnation
   (Render restarts every exit; Railway needs the restart policy Always).
+  A remote operator delivers through its own origin node instead:
+  `ryeos node offline-operation submit --remote <name> --file request.json`
+  forwards the request and its input files under the operator's delegation
+  for that remote (`facts --remote` and `list --remote` read the same way).
 - Node that cannot start: set `RYEOS_OFFLINE_OPERATION_REQUEST` (an absolute
   file path, or base64 of at most 64 KiB) and `RYEOS_OFFLINE_OPERATION_INPUTS`
   (a directory). The entrypoint copies them into the inbox as root, verifies

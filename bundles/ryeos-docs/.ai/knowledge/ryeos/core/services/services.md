@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:952adc8ff8be16a1d1254d0679c5f1797cdadc9f69682f5e50e90a5149a7bd40:irw3f7AYM5SNUaGm/8cym9fjCbDoc6YycPupA5fjk5lvBemBGjLvEx1Z2LWXXNRtp0PRcD5UnHm/TMlifo5uCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:32:28Z:6b48c729f017ce0b3845a4f54ac21bb8f5c9ea3bc49659fb700344a50327f106:nsrW+dMuLgXB9aD+5PBNrYHiGMH1xSwBOH1qLb6vwjXaDvA63qqlgf6yEcxaor3Aax4pJ274LnsMQRfM+nW7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -169,6 +169,9 @@ for the full matrix.
 | `remote/delegate` | `remote.delegate` | `ryeos.execute.service.remote/delegate` |
 | `remote/delegation-list` | `remote.delegation-list` | `ryeos.execute.service.remote/delegation-list` |
 | `remote/delegation-revoke` | `remote.delegation-revoke` | `ryeos.execute.service.remote/delegation-revoke` |
+| `remote/offline-operations-facts` | `remote.offline-operations-facts` | `ryeos.execute.service.remote/offline-operations-facts` |
+| `remote/offline-operations-submit` | `remote.offline-operations-submit` | `ryeos.execute.service.remote/offline-operations-submit` |
+| `remote/offline-operations-status` | `remote.offline-operations-status` | `ryeos.execute.service.remote/offline-operations-status` |
 
 ## Core Thread Read Services
 
