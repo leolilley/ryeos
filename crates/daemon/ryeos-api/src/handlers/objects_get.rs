@@ -1,4 +1,8 @@
-//! `objects/get` — retrieve blobs and objects from the CAS.
+//! `objects/get` — retrieve blobs and objects from the CAS under a root.
+//!
+//! Every read names a typed root the caller may see and serves only hashes
+//! reachable from it; see `crate::objects_read_scope`. `objects/get-any` is
+//! the operator-only unscoped read.
 //!
 //! Batch get accepts typed object and blob hash sets. The namespace is part of
 //! the request so an equal digest present in both namespaces is never resolved
@@ -15,13 +19,22 @@ use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::objects_read_scope::{
+    ReadRoot, require_blobs_in_scope, require_large_object_in_scope, require_objects_in_scope,
+    resolve_scope, root_required,
+};
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// The root the read is anchored at. Required by `objects/get`; the
+    /// operator-only `objects/get-any` takes none.
+    #[serde(default)]
+    pub root: Option<ReadRoot>,
     #[serde(
         default,
         deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
@@ -58,9 +71,47 @@ pub const MAX_BLOB_CHUNK_BYTES: usize = 512 * 1024;
 pub const MAX_INLINE_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_INLINE_OBJECT_BYTES: u64 = 32 * 1024 * 1024;
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+/// Scoped read: serve only what is reachable from the request's root.
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let root = req
+        .root
+        .clone()
+        .ok_or_else(|| root_required("objects/get"))?;
     validate_typed_hash_request(&req.object_hashes, &req.blob_hashes)?;
     validate_request_modes(&req)?;
+    let scope = resolve_scope(&root, &ctx, &state)?;
+    require_objects_in_scope(&scope, &root, &req.object_hashes)?;
+    require_blobs_in_scope(&scope, &root, &req.blob_hashes)?;
+    if let Some(chunk) = &req.blob_chunk {
+        require_blobs_in_scope(&scope, &root, std::slice::from_ref(&chunk.hash))?;
+    }
+    if let Some(chunk) = &req.large_object_chunk {
+        require_large_object_in_scope(&scope, &root, &chunk.hash)?;
+    }
+    serve(req, state).await
+}
+
+/// Unscoped read for the node operator. The configured operator already
+/// owns the node's CAS; nothing else may name a hash without a root.
+pub async fn handle_any(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    ryeos_app::operator_authority::require_admitted_operator(&state, &ctx).map_err(|_| {
+        crate::handler_error::HandlerError::Forbidden(
+            "objects/get-any is restricted to the node operator".into(),
+        )
+    })?;
+    if req.root.is_some() {
+        return Err(crate::handler_error::HandlerError::BadRequest(
+            "objects/get-any reads unscoped and takes no root; use objects/get to read under a root"
+                .into(),
+        )
+        .into());
+    }
+    validate_typed_hash_request(&req.object_hashes, &req.blob_hashes)?;
+    validate_request_modes(&req)?;
+    serve(req, state).await
+}
+
+async fn serve(req: Request, state: Arc<AppState>) -> Result<Value> {
     if let Some(chunk) = &req.large_object_chunk {
         validate_large_object_chunk(chunk)?;
         let chunk = chunk.clone();
@@ -270,10 +321,23 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "objects.get",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/get"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
+        })
+    },
+};
+
+pub const ANY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:objects/get-any",
+    endpoint: "objects.get_any",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.objects/get-any"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: Request = crate::handler_error::parse_request(params)?;
+            handle_any(req, ctx, state).await
         })
     },
 };
@@ -293,6 +357,7 @@ mod tests {
         assert_eq!(
             descriptor["schema"],
             serde_json::json!({
+                "root": "object",
                 "object_hashes": "string[]?",
                 "blob_hashes": "string[]?",
                 "blob_chunk": "object?",

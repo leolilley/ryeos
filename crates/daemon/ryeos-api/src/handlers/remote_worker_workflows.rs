@@ -1411,7 +1411,14 @@ async fn verify_target_launch(
         bail!("bound target launch capsule identity is invalid");
     }
     let fetched = client
-        .objects_get_with_total_timeout(&[capsule_hash.to_owned()], &[], STATUS_TIMEOUT)
+        .objects_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::ThreadResult {
+                thread_id: thread_id.to_owned(),
+            },
+            &[capsule_hash.to_owned()],
+            &[],
+            STATUS_TIMEOUT,
+        )
         .await?;
     let capsule_value = fetched
         .entries
@@ -1574,6 +1581,9 @@ async fn observe_target_completion(
     }
     let fetched = client
         .objects_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: evidence.placement_thread_id.clone(),
+            },
             std::slice::from_ref(&evidence.admitted_launch_capsule_hash),
             &[],
             STATUS_TIMEOUT,

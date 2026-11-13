@@ -121,6 +121,9 @@ async fn deliver_locked(
         .map_err(internal)?;
     let closure = target_client
         .objects_closure_get(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: req.operation_id.clone(),
+            },
             &[
                 req.target_chain_head_hash.clone(),
                 req.terminal_attestation_hash.clone(),

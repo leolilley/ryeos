@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:fa7d50f4a7fc64ba16cbcd9901dcce11fbbe74943540568b2c525923ec913b1b:invnSRxRvYbYoioKdQPc6cK+nsdlx7NWyf9kDqxdrpQeZkLYwh+nlZNBsvR+oS707rRFoU15dRpdBNpDC+cpDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:05:09Z:afbafb5c32444095ae65b7b002c454e48a73aecd0c5e5371d6e4e6053f13646b:R9HvVVoscpzBpl5UrsFkHc20vi8EkrwBvnlXa/4R89+J2cjotIeeg9EPUDIRUvAYXHGQ9VzerD2rtlQsVXY6Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -52,7 +52,7 @@ call made by the node itself is signed by the node key alone.
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | the delegating operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
-| `ryeos remote pull` | `ryeos.execute.service.remote/pull` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
+| `ryeos remote pull` | `ryeos.execute.service.remote/pull` | `ryeos.execute.service.objects/get` (reads are scoped to the `root` the command names; `objects/get-any` is operator-only and never granted to a peer) | `POST /objects/has`, `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
 | `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
@@ -472,7 +472,7 @@ handoff.
 Fetch explicitly typed CAS artifacts from a remote into one new directory.
 
 ```bash
-ryeos remote pull --remote prod --object-hashes abc123 --output-dir /tmp/objects
+ryeos remote pull --remote prod --root '{"kind":"thread_result","thread_id":"T-..."}' --object-hashes abc123 --output-dir /tmp/objects
 ryeos remote pull --remote prod --blob-hashes def456 --output-dir /tmp/blobs
 ```
 

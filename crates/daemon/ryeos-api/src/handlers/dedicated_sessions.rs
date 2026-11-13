@@ -3044,6 +3044,7 @@ async fn handoff_preflight(
         follow_delivery_reservation_attestation_hash,
     };
     request.validate().map_err(internal)?;
+    retain_preflight_read_grant(&state, &req.remote, &request).map_err(internal)?;
     let target_client =
         crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let target_value = target_client
@@ -3119,6 +3120,9 @@ async fn handoff_preflight(
     };
     let target_closure = target_node_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: request.preflight_id.clone(),
+            },
             std::slice::from_ref(&response.preflight_attestation_hash),
             target_fetch_options,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
@@ -3226,6 +3230,55 @@ async fn handoff_preflight(
         "target_credential_generation":response.evidence.target_credential_generation,
         "status":"eligible",
     }))
+}
+
+/// Operation type of the retained record that lets the target read this
+/// node's preflight inputs while the preflight is in flight.
+const PREFLIGHT_READ_GRANT_OPERATION: &str = "worker_session_handoff_preflight_read_grant";
+
+/// The target reads the source chain head (and any follow reservation) back
+/// from this node while it answers the preflight, before the source preflight
+/// job exists. Retain, before contacting the target, exactly what the target
+/// may read and who it is, so the read is authorized by this node's own record
+/// of the placement rather than by the target's say-so.
+fn retain_preflight_read_grant(
+    state: &AppState,
+    remote: &str,
+    request: &ryeos_app::worker_handoff::WorkerPlacementPreflightRequest,
+) -> Result<()> {
+    let job_id = format!("worker-handoff-preflight-grant:{}", request.preflight_id);
+    if state
+        .state_store
+        .with_state_db(|db| db.get_sync_job(&job_id))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let mut roots = vec![request.source_chain_head_hash.clone()];
+    roots.extend(
+        request
+            .follow_delivery_reservation_attestation_hash
+            .iter()
+            .cloned(),
+    );
+    state.state_store.with_state_db(|db| {
+        db.create_sync_job(&ryeos_state::NewSyncJob {
+            job_id: job_id.clone(),
+            operation_type: PREFLIGHT_READ_GRANT_OPERATION.to_owned(),
+            operation: json!({
+                "operation_type": PREFLIGHT_READ_GRANT_OPERATION,
+                "preflight_id": request.preflight_id,
+                "source_chain_head_hash": request.source_chain_head_hash,
+                "follow_delivery_reservation_attestation_hash":
+                    request.follow_delivery_reservation_attestation_hash,
+            }),
+            peer: Some(remote.to_owned()),
+            roots,
+            heads: vec![request.source_chain_head_hash.clone()],
+            max_attempts: 1,
+        })
+        .map(|_| ())
+    })
 }
 
 fn source_preflight_job_id(preflight_id: &str) -> String {
@@ -3779,6 +3832,9 @@ async fn handoff(
         ];
         let target_closure = target_node_client
             .objects_closure_get_with_total_timeout(
+                &crate::objects_read_scope::ReadRoot::Placement {
+                    placement_id: prepare_request.operation_id.clone(),
+                },
                 &target_roots,
                 crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
                     &state,
@@ -4583,6 +4639,9 @@ async fn fetch_target_handoff_terminal_attestation(
     .map_err(internal)?;
     let response = target_client
         .objects_get_with_response_limit_and_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: operation.operation_id.clone(),
+            },
             &[terminal_attestation_hash.to_owned()],
             &[],
             MAX_HANDOFF_TERMINAL_ATTESTATION_BYTES,
@@ -4663,6 +4722,9 @@ async fn fetch_target_handoff_terminal_chain_closure(
     ];
     let response = target_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: operation.operation_id.clone(),
+            },
             &roots,
             crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
                 state,

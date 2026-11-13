@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-13T20:05:09Z:544d449252f47f580ab428c32fb6b4338bda8e04ae84d19c1f616d551465655a:ctE7apesrN05UATZrGZx7ZFZyqdIYWyb7Y4bRkBqWa8YFWRPRxvLXF3Zk8YHLUI6o8cQtKIuRcAT67tsTMyPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: objects.get_any
+required_caps: ["ryeos.execute.service.objects/get-any"]
+schema:
+  object_hashes: string[]?
+  blob_hashes: string[]?
+  blob_chunk: object?
+  large_object_chunk: object?
+description: "Operator-only unscoped read of typed CAS object/blob batches or bounded chunks by hash, with no root. Never part of a recommended remote grant; the node operator uses it to read their own node"

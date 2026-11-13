@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:e0e9088c148cc9250008b2db92bce7c7a8a5b919e1e17dd04ea430fe0c255e0f:QvKYRVgqiw01u8iQiiFBwZHUT41Sq8Qg+Z7LROrD6VMC/fAto57J9hkxosZKD6N7cq/62FcRSepkMA1dkqwaCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:05:09Z:c3f867f2448985b2d18b17e22d85835f77f5ca35e9addb98d2e8f82ad59cedfd:ED4smy835RERQYPnv7w2qanNDk4D7dB7eVLcvEm8bFZp4EfTK94KJ8kIXee84FRf3Sj1yJG0JqGxEbufhgXpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -212,7 +212,11 @@ object request, or vice versa.
 
 - **Source:** `service:objects/has`
 - **Required cap:** `ryeos.execute.service.objects/has`
-- **Used by:** remote push/execute upload planning
+- **Request:** `{ root, object_hashes, blob_hashes }`; `root` is required.
+  Hashes outside the root are answered absent whether or not the node holds
+  them, so the call never reveals objects outside the caller's scope.
+- **Used by:** remote push/execute upload planning (under the `project_head`
+  root of the project being pushed)
 
 ### `POST /objects/put`
 
@@ -224,13 +228,25 @@ Upload CAS blobs/objects to this node.
 
 ### `POST /objects/get`
 
-Fetch CAS blobs/objects by hash.
+Fetch CAS blobs/objects by hash, under a root.
 
 - **Source:** `service:objects/get`
 - **Required cap:** `ryeos.execute.service.objects/get`
+- **Request:** `root` (required) plus the typed hash batches or one chunk
+  request. A request with no root, or any hash not reachable from the root, is
+  refused with `object_not_in_scope` (403).
 - **Used by:** remote pull, remote execute pull-back, remote bundle install
 - **Failure mode:** callers should treat missing requested hashes as
   fail-closed errors
+
+### `POST /objects/get-any`
+
+Operator-only unscoped read by hash.
+
+- **Source:** `service:objects/get-any`
+- **Required cap:** `ryeos.execute.service.objects/get-any`, and the caller
+  must be the configured node operator. Never part of a recommended grant.
+- **Used by:** CLI artifact export
 
 ### `POST /push-head`
 

@@ -1,9 +1,10 @@
-# ryeos:signed:2026-11-13T04:33:33Z:e9569adf9380708bb7ad635b9f208f4407708a2bf4aef521a158d43df1a7940a:DvFiGQqlCa0sIPqDyl5qqUHcSCAb9nDefjVA9bd307aqq7UExTAOUvzQKI9+BjrBLJDV6tjEZiwY3paZ1l8IAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T20:05:09Z:7e61aeddb726c0ff9e903c07d2079337cf7a0e811c9e529ded446a6a714cc241:e/8+2Wq48adRwDfVTGLifpe3penTpztad0Y0jKJQYXpG9V+VJ9rxZEYz5l8nUMw3ytwlwjQyw4k2hX2/osuPBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.pull
 required_caps: ["ryeos.execute.service.remote/pull"]
 schema:
   remote: string?
+  root: object
   object_hashes: string[]?
   blob_hashes: string[]?
   output_dir: string
