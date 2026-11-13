@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-06T00:23:47Z:6c86a40440df8ef28b1de8267cc272c262c7fb774b4664a3c49384631d8853d9:EibIvT1sUtTWj0ca7R74jIUoAb+OnUuwRTAENeqeZS8hRnW52k8RPIL24Smx0HwO5GThwwQI2OAB1ApHeNiuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:50:40Z:6bbce29bc4c10ec7bc6555b983dd5f45a9d7b1ba6326e32e2da29a14f5b3b715:uEKIYCwl53qylyMhd5PBRlV6LwQUYh/7kLCE4g30i0Rv5aGX768VO4vmxrddS4lgaqOtOXUzKW+yuiO8LWivBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -380,7 +380,11 @@ Worker candidate disposition uses four such exact-coordinate services:
   namespace-bounded authoring wrapper in an isolated retained candidate CoW.
 - `service:worker-executions/publish` re-verifies the accepted evaluation and,
   for bounded candidates, the integration plus final re-evaluation before a
-  serialized project-HEAD compare-and-swap.
+  serialized project-HEAD compare-and-swap. A HEAD that moved off the admitted
+  base ends the session terminal `base_superseded` (typed 409
+  `base_superseded`); any other refusal before the HEAD write is the retryable
+  typed 409 `publication_not_applied`; only a failure at or after the write is
+  `publication_unknown`.
 
 These services do not replace `live_direct` execution or ordinary live-project
 authoring. They provide the separate immutable-generation lane required when a

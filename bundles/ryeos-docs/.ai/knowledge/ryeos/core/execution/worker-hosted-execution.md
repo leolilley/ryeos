@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:36:23Z:f9f9a1428feb88e34d44a20cff012cd25f8708ad0e7dd1e07e892e59eed92c68:KqjiKW/561SUCPtpxXsENoZHIdQ7P2pHU8ah1rcQkqVrJKqG416eEpm+voIryu1tP5NvXyOm3t7npTCqhUA8Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:50:40Z:b603233976f91478df01a9a66a8198c0151826c9be0965ec5fa57bf37660e421:PMikv6h7yz92Oo+P5it6wiVST6kbOvSQawvGfJqBhDFycW3LNrVTRDlPj1wDq9/CwPv2DG40Ru2uqYH+8SvjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -1000,7 +1000,20 @@ terminal result before settling the controller projection: `HEAD == base`
 proves no publication and is the only retryable state; `HEAD == candidate`
 proves success. A missing or different HEAD is
 irreducibly ambiguous, receives authoritative `publication_unknown` testimony,
-and terminalizes without retry. Root
+and terminalizes without retry.
+
+A live publish classifies its own HEAD contact. A refusal raised before any
+HEAD write is never unknown. If the HEAD has moved off the admitted base (seen
+before the CAS, or the CAS's own typed conflict), the base is superseded for
+good: the root records `hosted_candidate.publication_superseded` with the
+observed HEAD, the session settles terminal `base_superseded:<candidate>`, the
+candidate stays retained as evidence, and the typed `base_superseded` refusal
+names the expected and observed HEAD and the next steps (inspect the
+candidate, start a new session from the current HEAD). Any other pre-write
+refusal (a handoff fence, an untrusted signer, an invalid or unreadable ref)
+records `publication_not_applied`, returns the session to `publish_ready` and
+answers with the typed, retryable `publication_not_applied`. Only a failure at
+or after the write is `publication_unknown`. Root
 terminalization waits while
 publication may have contacted HEAD. A process-local root-operation lease
 fences every hosted root-chain mutation; terminalization closes admission and

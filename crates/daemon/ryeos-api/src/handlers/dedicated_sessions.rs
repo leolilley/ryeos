@@ -13,14 +13,17 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::dedicated_session_service::{
-    CandidatePublicationAuthority, candidate_publication_operation_id,
-    candidate_publication_reservation_payload, candidate_publication_result_payload,
+    CANDIDATE_PUBLICATION_SUPERSEDED_EVENT, CandidatePublicationAuthority,
+    candidate_publication_operation_id, candidate_publication_reservation_payload,
+    candidate_publication_result_payload, candidate_publication_superseded_payload,
     verify_candidate_publication_reservation, verify_candidate_publication_result,
+    verify_candidate_publication_superseded,
 };
 use ryeos_app::persistent_session::ExclusiveRetirementOutcome;
 use ryeos_app::state::AppState;
 use ryeos_app::worker_handoff::WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::refs::ProjectHeadAdvanceRefusal;
 
 const MAX_HANDOFF_TERMINAL_ATTESTATION_BYTES: usize = 512 * 1024;
 
@@ -6428,7 +6431,19 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             "unknown",
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        if usize::from(published_fact) + usize::from(not_applied_fact) + usize::from(unknown_fact)
+        let superseded_fact = verify_candidate_publication_superseded(
+            &state,
+            &session,
+            &authority,
+            publication_root_id,
+            publication_operation_id,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        .is_some();
+        if usize::from(published_fact)
+            + usize::from(not_applied_fact)
+            + usize::from(unknown_fact)
+            + usize::from(superseded_fact)
             > 1
         {
             anyhow::bail!("candidate publication root contains contradictory terminal facts");
@@ -6469,6 +6484,14 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
                 publication_root_id,
                 publication_operation_id,
                 &format!("publication_unknown:{candidate}"),
+            )?;
+        } else if superseded_fact {
+            state.state_store.settle_dedicated_candidate_publication(
+                &session.placement_thread_id,
+                source_candidate,
+                publication_root_id,
+                publication_operation_id,
+                &format!("base_superseded:{candidate}"),
             )?;
         } else {
             // The reservation proves that HEAD may already have been
@@ -10225,6 +10248,131 @@ async fn discard(
     }))
 }
 
+/// Typed refusal for a candidate whose admitted base HEAD was superseded.
+/// It names the expected and observed HEAD and what the owner can do next.
+fn base_superseded_refusal(
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    observed_head: Option<&str>,
+) -> HandlerError {
+    HandlerError::Structured {
+        code: "base_superseded".to_string(),
+        status: 409,
+        body: json!({
+            "code": "base_superseded",
+            "message": format!(
+                "the project HEAD moved from the candidate's admitted base {} to {}; this \
+                 candidate can never publish against its base and the session is terminal \
+                 `base_superseded`",
+                authority.base_snapshot_hash,
+                observed_head.unwrap_or("no HEAD"),
+            ),
+            "chain_root_id": session.chain_root_id,
+            "placement_thread_id": session.placement_thread_id,
+            "candidate_snapshot_hash": authority.candidate_snapshot_hash,
+            "expected_previous_hash": authority.base_snapshot_hash,
+            "observed_head": observed_head,
+            "publication_result": format!("base_superseded:{}", authority.candidate_snapshot_hash),
+            "next_steps": [
+                format!(
+                    "inspect the retained candidate snapshot {} (kept as evidence)",
+                    authority.candidate_snapshot_hash
+                ),
+                "start a new session from the current project HEAD and redo the work there",
+            ],
+        }),
+    }
+}
+
+/// Record a publication whose admitted base HEAD was superseded and settle
+/// the session terminal `base_superseded:<candidate>`, keeping the candidate
+/// as evidence. The rooted fact precedes the settlement, so startup recovery
+/// settles an interrupted supersede from it.
+fn supersede_candidate_publication(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    publication_operation_id: &str,
+    observed_head: Option<&str>,
+) -> Result<HandlerError, HandlerError> {
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        publication_root_id,
+        CANDIDATE_PUBLICATION_SUPERSEDED_EVENT,
+        publication_operation_id,
+        candidate_publication_superseded_payload(
+            session,
+            authority,
+            publication_root_id,
+            publication_operation_id,
+            observed_head,
+        ),
+    )
+    .map_err(internal)?;
+    state
+        .state_store
+        .settle_dedicated_candidate_publication(
+            &session.placement_thread_id,
+            &authority.source_candidate_snapshot_hash,
+            publication_root_id,
+            publication_operation_id,
+            &format!("base_superseded:{}", authority.candidate_snapshot_hash),
+        )
+        .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
+    Ok(base_superseded_refusal(session, authority, observed_head))
+}
+
+/// Record a publication refused before any HEAD write for a reason that does
+/// not supersede the base (a handoff fence, an untrusted signer, an invalid
+/// or unreadable ref) and return the session to `publish_ready`, so the
+/// owner can retry once the cause is gone.
+fn publication_not_applied(
+    state: &AppState,
+    session: &ryeos_app::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    publication_operation_id: &str,
+    refusal: &ProjectHeadAdvanceRefusal,
+) -> Result<HandlerError, HandlerError> {
+    ryeos_app::authoritative_root_fact::append_once(
+        state,
+        publication_root_id,
+        "hosted_candidate.publication_not_applied",
+        publication_operation_id,
+        candidate_publication_result_payload(
+            session,
+            authority,
+            publication_root_id,
+            publication_operation_id,
+            "not_applied",
+            false,
+        ),
+    )
+    .map_err(internal)?;
+    state
+        .state_store
+        .fail_dedicated_candidate_disposition(&session.placement_thread_id, "publishing")
+        .map_err(internal)?;
+    ryeos_app::dedicated_session_service::notify_projection_change(&session.placement_thread_id);
+    Ok(HandlerError::Structured {
+        code: "publication_not_applied".to_string(),
+        status: 409,
+        body: json!({
+            "code": "publication_not_applied",
+            "reason": refusal.reason(),
+            "message": format!(
+                "candidate publication was refused before any HEAD write: {refusal}; the \
+                 candidate is still publish_ready, retry once the cause is resolved"
+            ),
+            "chain_root_id": session.chain_root_id,
+            "candidate_snapshot_hash": authority.candidate_snapshot_hash,
+            "expected_previous_hash": authority.base_snapshot_hash,
+        }),
+    })
+}
+
 async fn publish(
     req: PublishRequest,
     ctx: HandlerContext,
@@ -10295,6 +10443,19 @@ async fn publish(
             "retained_for_review"
         }
     };
+    if session.publication_result.as_deref()
+        == Some(format!("base_superseded:{candidate}").as_str())
+    {
+        let current = state
+            .state_store
+            .with_state_db(|db| db.read_project_head(principal_key, project_hash))
+            .map_err(internal)?;
+        return Err(base_superseded_refusal(
+            &session,
+            &publication_authority,
+            current.as_deref(),
+        ));
+    }
     if session.publication_result.as_deref() != Some(retained) && !already_published {
         return Err(HandlerError::BadRequest(
             "session has no publishable retained candidate".into(),
@@ -10412,32 +10573,14 @@ async fn publish(
         .with_state_db(|db| db.read_project_head(principal_key, project_hash))
         .map_err(internal)?;
     if current.as_deref() != Some(candidate) && current.as_deref() != Some(base_snapshot_hash) {
-        ryeos_app::authoritative_root_fact::append_once(
+        return Err(supersede_candidate_publication(
             &state,
+            &session,
+            &publication_authority,
             &invocation_root_id,
-            "hosted_candidate.publication_not_applied",
             &publication_operation_id,
-            candidate_publication_result_payload(
-                &session,
-                &publication_authority,
-                &invocation_root_id,
-                &publication_operation_id,
-                "not_applied",
-                false,
-            ),
-        )
-        .map_err(internal)?;
-        state
-            .state_store
-            .fail_dedicated_candidate_disposition(&session.placement_thread_id, "publishing")
-            .map_err(internal)?;
-        ryeos_app::dedicated_session_service::notify_projection_change(
-            &session.placement_thread_id,
-        );
-        return Err(HandlerError::BadRequest(format!(
-            "publication conflict: expected HEAD {}, current HEAD is {:?}",
-            base_snapshot_hash, current
-        )));
+            current.as_deref(),
+        )?);
     }
     let publication = if current.as_deref() == Some(candidate) {
         Ok(())
@@ -10452,6 +10595,32 @@ async fn publish(
         )
     };
     if let Err(error) = publication {
+        // A refusal proven to precede any HEAD write is never an unknown
+        // outcome. A moved HEAD supersedes the admitted base for good; every
+        // other pre-write refusal leaves the candidate publishable.
+        match error.downcast_ref::<ProjectHeadAdvanceRefusal>() {
+            Some(ProjectHeadAdvanceRefusal::Conflict { observed, .. }) => {
+                return Err(supersede_candidate_publication(
+                    &state,
+                    &session,
+                    &publication_authority,
+                    &invocation_root_id,
+                    &publication_operation_id,
+                    observed.as_deref(),
+                )?);
+            }
+            Some(refusal) => {
+                return Err(publication_not_applied(
+                    &state,
+                    &session,
+                    &publication_authority,
+                    &invocation_root_id,
+                    &publication_operation_id,
+                    refusal,
+                )?);
+            }
+            None => {}
+        }
         ryeos_app::authoritative_root_fact::append_once(
             &state,
             &invocation_root_id,

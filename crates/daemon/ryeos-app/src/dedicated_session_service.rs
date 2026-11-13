@@ -4971,6 +4971,91 @@ pub fn candidate_publication_result_payload(
     })
 }
 
+/// Rooted fact for a publication whose admitted base HEAD was superseded:
+/// the project HEAD moved to `observed_head` (none when the project has no
+/// HEAD), so the candidate can never publish against its admitted base. The
+/// candidate stays retained as evidence and the session settles terminal.
+pub const CANDIDATE_PUBLICATION_SUPERSEDED_EVENT: &str = "hosted_candidate.publication_superseded";
+
+pub fn candidate_publication_superseded_payload(
+    session: &crate::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    operation_id: &str,
+    observed_head: Option<&str>,
+) -> Value {
+    let mut payload = candidate_publication_result_payload(
+        session,
+        authority,
+        publication_root_id,
+        operation_id,
+        "base_superseded",
+        false,
+    );
+    let object = payload
+        .as_object_mut()
+        .expect("candidate publication result is an object");
+    object.insert("reason".into(), Value::String("head_moved".into()));
+    object.insert(
+        "observed_head".into(),
+        observed_head.map_or(Value::Null, |head| Value::String(head.to_owned())),
+    );
+    payload
+}
+
+/// The rooted superseded fact of this publication operation, if any, as the
+/// HEAD it observed. `Some(None)` means the project had no HEAD.
+pub fn verify_candidate_publication_superseded(
+    state: &AppState,
+    session: &crate::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    operation_id: &str,
+) -> Result<Option<Option<String>>, crate::handler_error::HandlerError> {
+    let fact = crate::authoritative_root_fact::lookup(
+        state,
+        publication_root_id,
+        CANDIDATE_PUBLICATION_SUPERSEDED_EVENT,
+        operation_id,
+    )
+    .map_err(candidate_publication_error)?;
+    if fact.count == 0 {
+        return Ok(None);
+    }
+    let contradiction = || {
+        candidate_publication_error(
+            "candidate publication superseded fact contradicts its reservation",
+        )
+    };
+    let payload = match (fact.count, fact.payload) {
+        (1, Some(payload)) => payload,
+        _ => return Err(contradiction()),
+    };
+    let observed_head = match payload.get("observed_head") {
+        Some(Value::Null) => None,
+        Some(Value::String(head)) if lillux::valid_hash(head) => Some(head.clone()),
+        _ => return Err(contradiction()),
+    };
+    let mut expected = candidate_publication_superseded_payload(
+        session,
+        authority,
+        publication_root_id,
+        operation_id,
+        observed_head.as_deref(),
+    );
+    expected
+        .as_object_mut()
+        .expect("candidate publication result is an object")
+        .insert(
+            "operation_id".into(),
+            Value::String(operation_id.to_owned()),
+        );
+    if payload != expected {
+        return Err(contradiction());
+    }
+    Ok(Some(observed_head))
+}
+
 pub fn verify_candidate_publication_reservation(
     state: &AppState,
     session: &crate::state_store::DedicatedSessionRecord,
@@ -5142,9 +5227,11 @@ fn terminal_candidate_publication_outcome(
     }
     let published = format!("published:{}", authority.candidate_snapshot_hash);
     let unknown = format!("publication_unknown:{}", authority.candidate_snapshot_hash);
+    let superseded = format!("base_superseded:{}", authority.candidate_snapshot_hash);
     match session.publication_result.as_deref() {
         Some(result) if result == published => Ok("published"),
         Some(result) if result == unknown => Ok("unknown"),
+        Some(result) if result == superseded => Ok("base_superseded"),
         _ => bail!("terminal candidate publication result names another target or outcome"),
     }
 }
@@ -5217,6 +5304,12 @@ pub fn verify_terminal_candidate_publication(
         {
             bail!("terminal candidate publication has contradictory result facts");
         }
+    }
+    if verify_candidate_publication_superseded(state, session, &authority, root_id, operation_id)?
+        .is_some()
+        && rooted_outcome.replace("base_superseded").is_some()
+    {
+        bail!("terminal candidate publication has contradictory result facts");
     }
     if rooted_outcome != Some(outcome) {
         bail!("terminal candidate publication has no exact rooted result");
@@ -7006,6 +7099,49 @@ mod tests {
     }
 
     #[test]
+    fn superseded_publication_fact_names_the_observed_head() {
+        let session = session_fixture();
+        let authority = CandidatePublicationAuthority {
+            source_candidate_snapshot_hash: "c".repeat(64),
+            candidate_snapshot_hash: "d".repeat(64),
+            candidate_validation_hash: "e".repeat(64),
+            base_snapshot_hash: "b".repeat(64),
+            principal_key: "owner".into(),
+            project_hash: "f".repeat(64),
+            candidate_evaluation_hash: "9".repeat(64),
+        };
+        let observed = "7".repeat(64);
+        let payload = candidate_publication_superseded_payload(
+            &session,
+            &authority,
+            "T-publish",
+            "op",
+            Some(&observed),
+        );
+        assert_eq!(payload["outcome"], "base_superseded");
+        assert_eq!(payload["reason"], "head_moved");
+        assert_eq!(payload["observed_head"], observed);
+        assert_eq!(payload["expected_previous_hash"], "b".repeat(64));
+        let mut base = candidate_publication_result_payload(
+            &session,
+            &authority,
+            "T-publish",
+            "op",
+            "base_superseded",
+            false,
+        );
+        let object = base.as_object_mut().unwrap();
+        object.insert("reason".into(), json!("head_moved"));
+        object.insert("observed_head".into(), json!(observed));
+        assert_eq!(payload, base, "superseded extends the result payload only");
+        assert_eq!(
+            candidate_publication_superseded_payload(&session, &authority, "T-publish", "op", None)
+                ["observed_head"],
+            Value::Null
+        );
+    }
+
+    #[test]
     fn settled_publication_recovery_keeps_source_c_and_exact_target_d() {
         let mut session = session_fixture();
         let source = "c".repeat(64);
@@ -7040,6 +7176,7 @@ mod tests {
         for (prefix, outcome) in [
             ("published", "published"),
             ("publication_unknown", "unknown"),
+            ("base_superseded", "base_superseded"),
         ] {
             session.publication_result = Some(format!("{prefix}:{target}"));
             let recovered: DedicatedSessionRecord =

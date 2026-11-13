@@ -237,7 +237,10 @@ impl StateStore {
     ) -> Result<()> {
         let g = self.lock()?;
         g.runtime_db
-            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+            .require_project_head_mutation_unfenced(principal_key, project_hash)
+            .map_err(|error| {
+                ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(format!("{error:#}"))
+            })?;
         g.state_db.advance_project_head_ref(
             principal_key,
             project_hash,
@@ -268,7 +271,10 @@ impl StateStore {
             bail!("stale launch owner cannot publish state for thread {thread_id}");
         }
         g.runtime_db
-            .require_project_head_mutation_unfenced(principal_key, project_hash)?;
+            .require_project_head_mutation_unfenced(principal_key, project_hash)
+            .map_err(|error| {
+                ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(format!("{error:#}"))
+            })?;
         g.state_db.advance_project_head_ref(
             principal_key,
             project_hash,

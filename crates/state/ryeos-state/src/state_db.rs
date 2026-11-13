@@ -6279,6 +6279,10 @@ impl StateDb {
     }
 
     /// Advance a principal-scoped project head ref (compare-and-swap).
+    ///
+    /// A refusal before the write is a typed
+    /// [`crate::refs::ProjectHeadAdvanceRefusal`]; any other error may have
+    /// reached the ref.
     pub fn advance_project_head_ref(
         &self,
         principal_key: &str,
@@ -6288,13 +6292,17 @@ impl StateDb {
         signer: &dyn Signer,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<()> {
-        self.ensure_cas_mutation_guard(cas_mutation_guard)?;
-        crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())?;
+        use crate::refs::ProjectHeadAdvanceRefusal;
+        self.ensure_cas_mutation_guard(cas_mutation_guard)
+            .map_err(ProjectHeadAdvanceRefusal::before_write)?;
+        crate::signer::ensure_signer_trusted(signer, self.trust_store.as_ref())
+            .map_err(|error| ProjectHeadAdvanceRefusal::Untrusted(format!("{error:#}")))?;
         let _project_lock = crate::refs::ProjectHeadLock::acquire_in_refs_directory(
             &self._refs_directory,
             principal_key,
             project_hash,
-        )?;
+        )
+        .map_err(ProjectHeadAdvanceRefusal::before_write)?;
         crate::refs::advance_verified_project_head_ref_in_directory(
             &self._refs_directory,
             principal_key,

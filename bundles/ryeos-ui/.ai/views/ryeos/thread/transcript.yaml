@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:55:34Z:9e64da38b36d3715024744b181a3243fde2548a11b65e11f0342774b3bf58558:qRe0XmeMhtTNO+ZBym9LxDUw80Eq/7cavj3qeb+Q2s2cUSpofCpAB96e/T2FlH9UsA2PDa/539n4qRrfZdo7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T01:50:40Z:f9bd930273969bdbf22139b9c1dc84cc1d2d37ea7abfe74ec6bf4bfa7876860c:BETgTb7YCpBiy5hKa9UT6YxWfY24jnjExtJHc7BrK6cfgvUnLDRT8Sd5Tg/x5XGUEOlxyPX8BALvQsY0MYHFCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -209,6 +209,15 @@ projections:
         field: event_type
         map:
           hosted_candidate.publication_not_applied: warn
+        default: warn
+    hosted_candidate.publication_superseded:
+      primary: payload.candidate_snapshot_hash
+      meta: payload.observed_head
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.publication_superseded: warn
         default: warn
     hosted_candidate.publication_unknown:
       primary: payload.candidate_snapshot_hash
