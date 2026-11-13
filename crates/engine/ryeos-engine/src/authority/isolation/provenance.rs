@@ -118,6 +118,54 @@ pub struct IsolationLaunchProvenance {
     /// and never authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_delivery: Option<IsolationCommandDelivery>,
+    /// The execution posture of a launch that did not run under the node's
+    /// isolation lane. Absence means confined: the lane's own isolation,
+    /// enforced or not, so confined provenance stays byte-identical. Present
+    /// only for a host-direct launch, with the exact operator grant that
+    /// admitted it. An attempt fact like the plan digest, not admission class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_posture: Option<IsolationExecutionPosture>,
+}
+
+/// A launch posture other than confined, recorded in launch provenance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum IsolationExecutionPosture {
+    /// Ran on the host, unconfined, as the daemon user, under this grant.
+    HostDirect(IsolationHostDirectGrant),
+}
+
+/// Exact identity of the operator grant that admitted one host-direct launch:
+/// the node-policy generation that carried it, the grant, the pinned subject
+/// and the origin and containment it ran under.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationHostDirectGrant {
+    pub policy_generation: String,
+    pub grant_id: String,
+    pub item: String,
+    pub signer: String,
+    /// Effective source-closure content-manifest digest, or `None` for an
+    /// item with no source closure.
+    pub source_closure: Option<String>,
+    pub runtime_ref: String,
+    pub runtime_content_hash: String,
+    /// `direct`, `graph_child` or `schedule`.
+    pub origin: String,
+    pub containment: IsolationHostDirectContainment,
+    /// Names delivered from the daemon's boot environment, sorted.
+    pub host_env: Vec<String>,
+}
+
+/// Whole-descendant containment of a host-direct launch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationHostDirectContainment {
+    /// A cgroup process scope: cancel and recovery reach every descendant.
+    Scope,
+    /// The strict process group only: a descendant that leaves the group
+    /// survives cancel.
+    Group,
 }
 
 /// The carrier of an admitted command's verified bytes under disabled
@@ -145,6 +193,7 @@ impl IsolationLaunchProvenance {
         Self {
             plan_digest: None,
             command_delivery: None,
+            execution_posture: None,
             ..self.clone()
         }
     }
@@ -362,6 +411,7 @@ mod tests {
             network_runtime_files: BTreeMap::new(),
             plan_digest: Some("sha256:attempt".to_string()),
             command_delivery: None,
+            execution_posture: None,
         }
     }
 
@@ -411,6 +461,42 @@ mod tests {
                 serde_json::from_value(admitted.into()).unwrap();
             assert_eq!(identity.as_str(), admitted);
         }
+    }
+
+    #[test]
+    fn confined_launch_provenance_is_byte_identical() {
+        let confined = provenance("ryeos.isolation-adapter/v9");
+        let value = serde_json::to_value(&confined).unwrap();
+        assert!(value.get("execution_posture").is_none());
+        let mut host = confined.clone();
+        host.execution_posture = Some(IsolationExecutionPosture::HostDirect(
+            IsolationHostDirectGrant {
+                policy_generation: "a".repeat(64),
+                grant_id: "guarded-cargo".into(),
+                item: "tool:ryeos/development/guarded-cargo".into(),
+                signer: "b".repeat(64),
+                source_closure: Some(format!("sha256:{}", "c".repeat(64))),
+                runtime_ref: "tool:ryeos/core/runtimes/python/script".into(),
+                runtime_content_hash: "d".repeat(64),
+                origin: "direct".into(),
+                containment: IsolationHostDirectContainment::Scope,
+                host_env: vec!["HOME".into(), "PATH".into()],
+            },
+        ));
+        let value = serde_json::to_value(&host).unwrap();
+        assert_eq!(
+            value["execution_posture"]["host_direct"]["grant_id"],
+            "guarded-cargo"
+        );
+        assert_eq!(
+            value["execution_posture"]["host_direct"]["containment"],
+            "scope"
+        );
+        assert_eq!(
+            serde_json::from_value::<IsolationLaunchProvenance>(value).unwrap(),
+            host
+        );
+        assert!(host.has_same_admission_class(&confined));
     }
 
     #[test]

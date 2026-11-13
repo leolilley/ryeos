@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T00:39:45Z:22f5eda8ac20ac868d68c227b3a9a0045867cbf5fccf6c149eb6592e07912634:7tuS+629937rZ3BZlFzBRk9QY2EQK4WaGWONuklp69R2clsXqIuFMCrTPov0DAHtbjx7OIkcouvYHXuu2yTUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T12:11:14Z:40585c1ac58424e4c4c94560c3b13b9164dabdd702cfc7c12e7cec4fcfe31eb0:QM0X24LBXoICL4WIp4bpr9Y5Zi8tvwTlnij68dSshvxeBTaueDR+fg/keCrVr8QiJO3HghL0Ti1zddu7PikJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -263,7 +263,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 10
+      version: 11
       # Host classes this profile supports. The deployment names one at
       # init (`ryeos init --host-class`), and the node runs under that
       # class's floor and isolation lane from then on. A class names the
@@ -285,6 +285,7 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
+          host_direct: unavailable
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -318,6 +319,12 @@ policies:
         verified_artifact_file_bytes: 67108864
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
+  # Operator grants of host-direct execution, per exact item. Empty by
+  # default, so nothing runs on the host. Changed only by the operator-signed
+  # `node.policy-apply` (`ryeos node host-access grant|revoke`).
+  host_access:
+    schema: 1
+    grants: []
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:

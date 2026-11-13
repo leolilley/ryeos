@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:07:35Z:ec4c872898849b6a683093a26d255f4c813106ddb3f639435f9d92f52c48c5ae:dY2QkCqeh+OCBPoMyZ5fXRGU3zjPKqsov1yZUpbXvOOSioRECfAWd6HEyN6CCNJ87R38R9+3TrU0uzB/le/6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T12:11:14Z:88235cdca3c7266606dc6a07d214670d4e689f9a645be2696e1a8c8da8b8c560:KmoTqwH+APNL/yOI+ChCItar/7MTtoMDyPXXA9KITNtCaVQJbCXF+rTM/GlzgGQyZtUM8rxgtieW4U61kbQUDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -389,6 +389,25 @@ sign the same `node.reset.policy-generation` operation against the
 `deploy/composition-images.md`), move the service to that image, and set
 `RYEOS_INIT_NODE_PROFILE=hosted-controller` wherever the deployment overrides
 the image's value.
+
+### `ryeos node host-access grant|revoke|list`
+
+```bash
+ryeos node host-access grant <item_ref> --project <dir> [--id <id>] \
+  [--origin direct|graph_child|schedule]... [--env <NAME>]... \
+  [--containment scope_required|group_allowed] [--app-root <dir>] [--json]
+ryeos node host-access revoke <id> [--app-root <dir>] [--json]
+ryeos node host-access list [--project <dir>] [--app-root <dir>] [--json]
+```
+
+The operator's grants of host-direct execution, in the `host_access`
+node-policy section. `grant` resolves the item in the project, computes its
+signer, source-closure and runtime digests, and installs the edited section
+through the operator-signed `node.policy-apply`; re-running it replaces the
+grant for that item. `revoke` removes one grant. `list --project` reports each
+grant as `current` or `stale` against the item's bytes there. The node must be
+stopped; grants take effect at the next start. A granted item runs on the host
+with the operator's authority: see `ryeos/core/node/host-access`.
 
 ### `ryeos node external-execution compose`
 

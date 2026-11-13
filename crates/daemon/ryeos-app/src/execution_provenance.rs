@@ -792,6 +792,76 @@ impl ExecutionProvenance {
         Ok(self)
     }
 
+    /// The same provenance for an admitted host-direct launch: its project
+    /// authority records `unconfined_host`, because that is what runs. Only a
+    /// read-write live project or a projectless execution can be true for a
+    /// host process; a pinned generation is refused. A callback child is
+    /// converted on its own; its parent keeps its sealed confinement.
+    pub fn into_host_direct(self) -> anyhow::Result<Self> {
+        Ok(match self {
+            Self::Projectless {
+                request_engine,
+                effective_path,
+                workspace_lifeline,
+                project_authority,
+                candidate_evaluation,
+                is_child,
+                __seal,
+            } => Self::Projectless {
+                request_engine,
+                effective_path,
+                workspace_lifeline,
+                project_authority: project_authority.into_unconfined_host()?,
+                candidate_evaluation,
+                is_child,
+                __seal,
+            },
+            Self::RootLiveProject {
+                request_engine,
+                project_path,
+                original_project_path,
+                workspace_lifeline,
+                state_root,
+                project_authority,
+                candidate_evaluation,
+                __seal,
+            } => Self::RootLiveProject {
+                request_engine,
+                project_path,
+                original_project_path,
+                workspace_lifeline,
+                state_root,
+                project_authority: project_authority.into_unconfined_host()?,
+                candidate_evaluation,
+                __seal,
+            },
+            Self::ChildLiveProject {
+                request_engine,
+                project_path,
+                original_project_path,
+                workspace_lifeline,
+                state_root,
+                project_authority,
+                candidate_evaluation,
+                __seal,
+            } => Self::ChildLiveProject {
+                request_engine,
+                project_path,
+                original_project_path,
+                workspace_lifeline,
+                state_root,
+                project_authority: project_authority.into_unconfined_host()?,
+                candidate_evaluation,
+                __seal,
+            },
+            Self::RootPinnedGeneration { .. }
+            | Self::ChildPinnedGeneration { .. }
+            | Self::ChildImmutableWorkspaceInput { .. } => anyhow::bail!(
+                "a host-direct launch runs unconfined on the host and cannot honour a pinned project generation; use a live read-write or projectless execution policy"
+            ),
+        })
+    }
+
     pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {
         match self {
             Self::Projectless {

@@ -1081,6 +1081,67 @@ pub struct FilesystemAuthorityCeilingDecl {
     pub default: crate::isolation::IsolationFilesystemAuthorityCeiling,
 }
 
+/// Signed projection of an item's declared host authority.
+///
+/// An item that authors `host_authority: required` at `path` asks to run on
+/// the host, unconfined, as the daemon user. Declaring it grants nothing: the
+/// node's isolation lane must offer host-direct execution, the operator must
+/// have granted that exact item in the `host_access` node-policy section, and
+/// the caller must be the configured local operator. The remaining fields are
+/// the projections that cannot be true for such a process; an item combining
+/// them with host authority is refused when the posture is projected.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostAuthorityDecl {
+    pub path: Vec<String>,
+    /// Composed paths whose presence contradicts host-direct execution.
+    pub incompatible: Vec<Vec<String>>,
+    /// Effect classes admitted with host authority, read through the kind's
+    /// effect-class projection. An absent effect class is live.
+    pub admitted_effects: Vec<String>,
+    /// Subprocess protocols admitted with host authority.
+    pub admitted_protocols: Vec<String>,
+    /// Thread profiles whose threads may launch a host-authority item as a
+    /// `graph_child` origin. Every other parent is a delegation and refused.
+    pub graph_parent_profiles: Vec<String>,
+}
+
+impl HostAuthorityDecl {
+    fn validate(&self, display: &str) -> Result<(), EngineError> {
+        let canonical = |path: &[String]| {
+            !path.is_empty()
+                && path.iter().all(|segment| {
+                    !segment.trim().is_empty()
+                        && segment.trim() == segment
+                        && !segment.contains('.')
+                })
+        };
+        if !canonical(&self.path) || !self.incompatible.iter().all(|path| canonical(path)) {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.host_authority paths must contain canonical non-empty segments"
+                ),
+            });
+        }
+        if self.admitted_effects.is_empty()
+            || self.admitted_protocols.is_empty()
+            || self
+                .admitted_effects
+                .iter()
+                .chain(&self.admitted_protocols)
+                .chain(&self.graph_parent_profiles)
+                .any(|value| value.trim().is_empty() || value.trim() != value)
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: execution.host_authority must admit at least one effect class and protocol, all canonical"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Kind-owned path to signed native subprocess restrictions.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1287,6 +1348,10 @@ pub struct ExecutionSchema {
     /// parent and node restrictions still apply independently.
     #[serde(default)]
     pub filesystem_authority_ceiling: Option<FilesystemAuthorityCeilingDecl>,
+    /// Optional signed projection of the item's declared host authority.
+    /// Absence means no item of this kind can ask for the host-direct posture.
+    #[serde(default)]
+    pub host_authority: Option<HostAuthorityDecl>,
     /// Shared signed platform/resource requirement for this process.
     #[serde(default)]
     pub target: Option<ExecutionTargetDecl>,
@@ -1467,6 +1532,86 @@ impl ExecutionSchema {
                 reason: format!("invalid signed execution target: {error:#}"),
             })?;
         Ok((Some(target), current))
+    }
+
+    /// Project the execution posture the composed subject declares.
+    ///
+    /// `host_authority: required` projects `HostDirect`; absence projects
+    /// `Confined`. The projection is a claim, not a grant: dispatch admits a
+    /// host-direct posture only through the node lane, the operator's exact
+    /// grant and the configured local operator. A host-authority subject that
+    /// also authors a projection which cannot be true on the host, a durable
+    /// effect class or a callback protocol is refused here.
+    pub fn project_execution_posture(
+        &self,
+        composed: &Value,
+    ) -> Result<crate::contracts::ExecutionPosture, EngineError> {
+        let Some(declaration) = self.host_authority.as_ref() else {
+            return Ok(crate::contracts::ExecutionPosture::Confined);
+        };
+        let lookup = |path: &[String]| {
+            let mut value = composed;
+            for segment in path {
+                value = value.get(segment)?;
+            }
+            Some(value)
+        };
+        let Some(value) = lookup(&declaration.path) else {
+            return Ok(crate::contracts::ExecutionPosture::Confined);
+        };
+        let refused = |detail: String| EngineError::SchemaLoaderError {
+            reason: format!("host-authority declaration refused: {detail}"),
+        };
+        match value.as_str() {
+            Some(crate::contracts::HOST_AUTHORITY_REQUIRED) => {}
+            _ => {
+                return Err(refused(format!(
+                    "`{}` admits only `{}`, found {value}",
+                    declaration.path.join("."),
+                    crate::contracts::HOST_AUTHORITY_REQUIRED
+                )));
+            }
+        }
+        for path in &declaration.incompatible {
+            if lookup(path).is_some() {
+                return Err(refused(format!(
+                    "`{}` cannot be true for a process running on the host; remove it or remove `{}`",
+                    path.join("."),
+                    declaration.path.join(".")
+                )));
+            }
+        }
+        let effect = match self.effect_class_ceiling.as_ref() {
+            Some(effect) => lookup(&effect.path)
+                .map(|value| {
+                    value.as_str().map(str::to_owned).ok_or_else(|| {
+                        refused(format!(
+                            "effect class `{}` is not a string",
+                            effect.path.join(".")
+                        ))
+                    })
+                })
+                .transpose()?,
+            None => None,
+        };
+        if let Some(effect) = effect
+            && !declaration.admitted_effects.contains(&effect)
+        {
+            return Err(refused(format!(
+                "effect class `{effect}` is not admitted with host authority; admitted: {}",
+                declaration.admitted_effects.join(", ")
+            )));
+        }
+        if let Some(TerminatorDecl::Subprocess { protocol, .. }) = self.terminator.as_ref() {
+            let selected = protocol.resolve(composed).map_err(refused)?;
+            if !declaration.admitted_protocols.contains(&selected) {
+                return Err(refused(format!(
+                    "protocol `{selected}` is not admitted with host authority; admitted: {}",
+                    declaration.admitted_protocols.join(", ")
+                )));
+            }
+        }
+        Ok(crate::contracts::ExecutionPosture::HostDirect)
     }
 
     pub fn project_filesystem_authority_ceiling(
@@ -3094,6 +3239,7 @@ fn parse_execution_schema(
         "network_authority_ceiling",
         "pushed_head_declaration",
         "filesystem_authority_ceiling",
+        "host_authority",
         "target",
         "endpoint",
         "resource_authority_ceiling",
@@ -3446,6 +3592,21 @@ fn parse_execution_schema(
         None => None,
     };
 
+    let host_authority =
+        match execution_value.get("host_authority") {
+            Some(value) => {
+                let declaration = serde_yaml::from_value::<HostAuthorityDecl>(value.clone())
+                    .map_err(|error| EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: invalid execution.host_authority declaration: {error}"
+                        ),
+                    })?;
+                declaration.validate(display)?;
+                Some(declaration)
+            }
+            None => None,
+        };
+
     let subprocess_limits = match execution_value.get("subprocess_limits") {
         Some(value) => {
             let declaration = serde_yaml::from_value::<SubprocessLimitsDecl>(value.clone())
@@ -3757,6 +3918,7 @@ fn parse_execution_schema(
         network_authority_ceiling,
         pushed_head_declaration,
         filesystem_authority_ceiling,
+        host_authority,
         target,
         endpoint,
         resource_authority_ceiling,
@@ -5534,6 +5696,118 @@ execution:
             }
             assert!(parse_exec(&yaml.replace(&format!("    default: {default}\n"), "")).is_err());
         }
+    }
+
+    const HOST_AUTHORITY_KIND: &str = "\
+execution:
+  effect_class_ceiling:
+    path: [effects]
+  host_authority:
+    path: [host_authority]
+    incompatible: [[network_authority], [workspace_access]]
+    admitted_effects: [live]
+    admitted_protocols: [protocol:ryeos/core/opaque]
+    graph_parent_profiles: [graph_run]
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      allowed: [protocol:ryeos/core/opaque, protocol:ryeos/core/tool_callback]
+";
+
+    #[test]
+    fn host_authority_kind_declares_host_direct_posture() {
+        use crate::contracts::ExecutionPosture;
+        let execution = parse_exec(HOST_AUTHORITY_KIND).unwrap().unwrap();
+        let opaque = serde_json::json!({"execution_protocol": "protocol:ryeos/core/opaque"});
+        assert_eq!(
+            execution.project_execution_posture(&opaque).unwrap(),
+            ExecutionPosture::Confined
+        );
+        let mut host = opaque.clone();
+        host["host_authority"] = "required".into();
+        assert_eq!(
+            execution.project_execution_posture(&host).unwrap(),
+            ExecutionPosture::HostDirect
+        );
+        let mut live = host.clone();
+        live["effects"] = "live".into();
+        assert_eq!(
+            execution.project_execution_posture(&live).unwrap(),
+            ExecutionPosture::HostDirect
+        );
+        // A kind without the projection never projects host-direct, whatever
+        // the item authors.
+        let plain = parse_exec(
+            "execution:\n  terminator:\n    kind: subprocess\n    protocol: protocol:ryeos/core/opaque\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            plain.project_execution_posture(&host).unwrap(),
+            ExecutionPosture::Confined
+        );
+    }
+
+    #[test]
+    fn host_authority_refuses_unknown_values_and_untrue_companions() {
+        let execution = parse_exec(HOST_AUTHORITY_KIND).unwrap().unwrap();
+        let host = serde_json::json!({
+            "execution_protocol": "protocol:ryeos/core/opaque",
+            "host_authority": "required",
+        });
+        for (key, value, needle) in [
+            (
+                "host_authority",
+                serde_json::json!("optional"),
+                "admits only `required`",
+            ),
+            (
+                "host_authority",
+                serde_json::json!(true),
+                "admits only `required`",
+            ),
+            (
+                "network_authority",
+                serde_json::json!("isolated"),
+                "`network_authority` cannot be true",
+            ),
+            (
+                "workspace_access",
+                serde_json::json!("shared_exclusive"),
+                "`workspace_access` cannot be true",
+            ),
+            (
+                "effects",
+                serde_json::json!("recorded"),
+                "effect class `recorded`",
+            ),
+            (
+                "execution_protocol",
+                serde_json::json!("protocol:ryeos/core/tool_callback"),
+                "protocol `protocol:ryeos/core/tool_callback`",
+            ),
+        ] {
+            let mut item = host.clone();
+            item[key] = value;
+            let error = execution
+                .project_execution_posture(&item)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(needle), "{key}: {error}");
+        }
+        assert!(
+            parse_exec(
+                &HOST_AUTHORITY_KIND.replace("admitted_effects: [live]", "admitted_effects: []")
+            )
+            .is_err()
+        );
+        assert!(
+            parse_exec(
+                &HOST_AUTHORITY_KIND.replace("    graph_parent_profiles: [graph_run]\n", "")
+            )
+            .is_err()
+        );
     }
 
     #[test]

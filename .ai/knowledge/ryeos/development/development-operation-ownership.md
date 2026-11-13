@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T01:27:48Z:1347fcddda69e314898c65a8914313edcc8fa285744114c4debd54a96c17f59b:aFyBU3DXD/jFA2KiTfq4byrtn7WqjlJ4QNbwAS1NYDk7U8/hgfFyUAC24MaukwGE7exmqXmJfs/B5E7EHVjrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:47:49Z:9f7cca5949e94fd8fc2368a9a965e2a3bf97a3dca0b6359e2b3a0d1965ab3a23:g3ugEPy/Czd6z/8kXnoSM5NFpsmOsRiy2Vlyqrqo1HQ8xH8yPRUtM6bv5sEMoiFKXVE1JvcH4tEZlss0Q/2IDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.7.0"
+version: "1.8.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -118,8 +118,12 @@ their tests. The rule:
   in the tracked tree.
 - Reusable development tooling goes in the repository-root `.ai` development
   bundle under `.ai/tools/ryeos/development/`: an admitted operation as a
-  Tool with its `ryeos-tool` header, a host-run helper as signed source in a
-  `lib/` directory (which Tool resolution excludes).
+  Tool with its `ryeos-tool` header. A helper that needs the host itself is
+  signed source in a `lib/` directory (which Tool resolution excludes) with a
+  thin Tool entry beside it that declares `host_authority: required` and runs
+  only under an operator `host_access` grant. Interactive and pre-node entries
+  (`sign-dev.sh`, `dev-tui.sh`, `dev-ui-assets.sh`) stay external `lib/`
+  scripts.
 - Tests live beside their subject: `bundles/<bundle>/tests/`,
   `tests/development/`, or the matching `tests/e2e/` family.
 
@@ -159,10 +163,9 @@ Moved out on 2026-11-13: the bundle-release source tests to
 `bundles/bundle-release/tests/`; `sign-dev.sh` and `revert-sig-churn.sh` to
 `.ai/tools/ryeos/development/maintainer/lib/`; `dev-tui.sh` and
 `dev-ui-assets.sh` to `.ai/tools/ryeos/development/interactive-host/lib/`;
-`rebuild-build-support-inputs.py` to
-`.ai/tools/ryeos/development/build-support-inputs/lib/`;
-`prove-contained-oci-provider.py` to
-`.ai/tools/ryeos/development/contained-oci-provider/lib/`, with their tests
+`rebuild-build-support-inputs.py` and `prove-contained-oci-provider.py` to
+`.ai/tools/ryeos/development/dev-host/lib/` (first under their own tool
+directories, then beside the other host helpers), with their tests
 in `tests/e2e/authoring-environment/` and `tests/development/`. Removed:
 `check-ui-wasm-fresh.sh` (call `browser-assets-production/publish.sh --check`),
 `release/verify-contained-oci-hook.sh`,

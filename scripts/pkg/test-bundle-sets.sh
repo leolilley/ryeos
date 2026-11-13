@@ -281,7 +281,7 @@ for profile_name in "${node_init_profiles[@]}"; do
   # composition profiles a strict local class and a hosted class, the hosted
   # workflow profiles only a hosted class, every other profile only its
   # local class. Initialization selects one, named by the deployment.
-  grep -Fxq '      version: 10' "$node_init_profile"
+  grep -Fxq '      version: 11' "$node_init_profile"
   grep -Fxq '      host_classes:' "$node_init_profile"
   declared_host_classes="$(
     sed -n '/^      host_classes:$/,/^      [a-z_]*:/p' "$node_init_profile" \

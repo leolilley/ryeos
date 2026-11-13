@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-12T23:59:42Z:7e963169b3d9fca5c6b5edc565f927c3d6337c69926da1cabb5effbc4206be48:nOqcyZ05RxCjVxGQz1STQiKHoT29sN21MvkYr+GZ9Ao/d0R8BjtwicGYK2eSD+rLQ3946gnZf+8q28ag3loWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:7e963169b3d9fca5c6b5edc565f927c3d6337c69926da1cabb5effbc4206be48:nOqcyZ05RxCjVxGQz1STQiKHoT29sN21MvkYr+GZ9Ao/d0R8BjtwicGYK2eSD+rLQ3946gnZf+8q28ag3loWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Hold a Codex binary's startup to a signed Codex Worker profile, with no credential.
 
 External development host tool; it grants no RyeOS authority, reaches no

@@ -117,6 +117,11 @@ pub struct ExecutionParams {
     /// Fresh direct-program evidence captured before capability projection,
     /// vault access, executor compilation, or callback credential minting.
     pub(crate) finalized_direct: Option<FinalizedDirectAdmission>,
+    /// The operator grant admitted at launch for a root that declared host
+    /// authority, after launch trust. `None` for every confined launch and
+    /// for every reconstructed or recovered launch: a host-direct run is never
+    /// rebuilt from durable state, so its plan refuses without this.
+    pub host_access: Option<ryeos_app::host_access::AdmittedHostAccess>,
 }
 
 /// Tracks execution state for explicit cleanup, with a conservative Drop net.
@@ -3162,6 +3167,23 @@ fn admitted_root_requires_process_scope(
         })
 }
 
+/// A host-direct grant that requires a scope seals the launch's containment
+/// as a cgroup scope, so cancel and recovery reach every descendant. Any
+/// stronger requirement already sealed stands.
+fn with_host_access_containment(
+    sealed: ryeos_app::thread_lifecycle::ProcessContainmentRequirement,
+    host_access: Option<&ryeos_app::host_access::AdmittedHostAccess>,
+) -> ryeos_app::thread_lifecycle::ProcessContainmentRequirement {
+    match sealed {
+        ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None
+            if ryeos_app::host_access::requires_scope(host_access) =>
+        {
+            ryeos_app::thread_lifecycle::ProcessContainmentRequirement::CgroupScope
+        }
+        other => other,
+    }
+}
+
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
@@ -3988,6 +4010,7 @@ fn restore_process_workspace_output_generation(
 
 pub(crate) fn prepare_process_inputs(
     state: &AppState,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     provenance: &ExecutionProvenance,
     thread_id: &str,
     retained_resolution: &ryeos_engine::resolution::ResolutionOutput,
@@ -4059,7 +4082,7 @@ pub(crate) fn prepare_process_inputs(
     let root_selection = select_process_input_root(
         project_class,
         has_bindings,
-        state.isolation.is_enforced(),
+        isolation.is_enforced(),
         candidate_integration,
         restore_outputs,
     );
@@ -4095,7 +4118,7 @@ pub(crate) fn prepare_process_inputs(
         project_class,
         root_selection,
         has_bindings,
-        state.isolation.is_enforced(),
+        isolation.is_enforced(),
     );
     let budget =
         (private_copy || pinned_read_only_private_root || candidate_integration_private_root)
@@ -4288,6 +4311,7 @@ fn admitted_direct_project_root(params: &ExecutionParams) -> Result<Option<&Path
 
 fn admitted_root_launch_metadata(
     state: &AppState,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     params: &ExecutionParams,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     finalized: FinalizedDirectAdmission,
@@ -4403,7 +4427,7 @@ fn admitted_root_launch_metadata(
     prepared_plan.preflight_external_execution(state, protocol, &resume.project_authority)?;
     let execution_closure = prepared_plan.admit_execution_closure(
         &cas,
-        state.isolation.as_ref(),
+        isolation,
         protocol,
         &params.provenance.request_engine().node_trust_store,
         admitted_project_root.as_deref(),
@@ -4933,18 +4957,14 @@ fn validate_recovered_direct_request_authority(
 /// same CAS member identity without binding a controller-native executable.
 fn capture_direct_command(
     state: &AppState,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     engine: &ryeos_engine::engine::Engine,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     prepared: &mut thread_lifecycle::PreparedItemPlan,
 ) -> Result<()> {
     match prepared.execution_plan().endpoint_requirement {
         ryeos_engine::contracts::ExecutionEndpointRequirement::Local {} => {
-            prepared.bind_realization_command(
-                state,
-                engine,
-                resolution,
-                state.isolation.as_ref(),
-            )?;
+            prepared.bind_realization_command(state, engine, resolution, isolation)?;
         }
         ryeos_engine::contracts::ExecutionEndpointRequirement::External { .. } => {
             let authority = state.state_store.pinned_state_authority()?;
@@ -4954,7 +4974,7 @@ fn capture_direct_command(
                 &guard,
                 engine,
                 resolution,
-                state.isolation.verified_command_file_bytes(),
+                isolation.verified_command_file_bytes(),
             )?;
         }
     }
@@ -5015,6 +5035,10 @@ pub async fn run_and_wait(
     let finalized_direct = params.finalized_direct.take().ok_or_else(|| {
         anyhow::anyhow!("fresh direct launch has no pre-authorized effective program")
     })?;
+    // The node's shared isolation runtime for a confined launch; the
+    // per-launch host-direct view for an operator-granted host-authority root.
+    let wait_launch_isolation =
+        super::host_access_gate::launch_isolation(&state, params.host_access.as_ref())?;
     // Block-scoped: the sealed-bytes source holds non-Send descriptor state
     // and plan build is fully synchronous, so it must be statically dead
     // before this future's next await point.
@@ -5029,7 +5053,7 @@ pub async fn run_and_wait(
         thread_lifecycle::prepare_item_plan(
             &engine,
             &params.resolved,
-            state.isolation.as_ref(),
+            wait_launch_isolation.as_ref(),
             params.lifecycle_authority,
             admission_isolation_live_access_authority.as_ref(),
             sealed_dependency_bytes
@@ -5046,6 +5070,10 @@ pub async fn run_and_wait(
             },
         )?
     };
+    super::host_access_gate::require_plan_matches_admission(
+        prepared_plan.execution_plan(),
+        params.host_access.as_ref(),
+    )?;
     prepared_plan.bind_finalized_execution_endpoint(
         &state,
         &engine,
@@ -5053,6 +5081,7 @@ pub async fn run_and_wait(
     )?;
     capture_direct_command(
         &state,
+        wait_launch_isolation.as_ref(),
         &engine,
         finalized_direct.program.resolution(),
         &mut prepared_plan,
@@ -5072,13 +5101,17 @@ pub async fn run_and_wait(
         .context("acquire direct admission CAS mutation authority")?;
     let (wait_launch_metadata, mut wait_external) = admitted_root_launch_metadata(
         &state,
+        wait_launch_isolation.as_ref(),
         &params,
         wait_project_authority.clone(),
         finalized_direct,
         &mut prepared_plan,
         protocol,
     )?;
-    let wait_requires_process_scope = admitted_root_requires_process_scope(&wait_launch_metadata)?;
+    let wait_requires_process_scope = with_host_access_containment(
+        admitted_root_requires_process_scope(&wait_launch_metadata)?,
+        params.host_access.as_ref(),
+    );
     let dispatch_effect_identity = if let Some(prepared) = params.effect_authority.as_ref() {
         if !params
             .resolved
@@ -5286,17 +5319,18 @@ pub async fn run_and_wait(
         source: wait_bound_source,
     } = prepare_process_inputs(
         &state,
+        wait_launch_isolation.as_ref(),
         &params.provenance,
         &created.thread_id,
         &wait_external.retained_resolution,
         &effective_path,
         super::source_closure::direct_source_placement(
             &prepared_plan,
-            state.isolation.is_enforced(),
+            wait_launch_isolation.is_enforced(),
         ),
         super::persistent_session::tool_supports_private_descriptor_realizations(
             &protocol.descriptor,
-            state.isolation.as_ref(),
+            wait_launch_isolation.as_ref(),
         ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
@@ -5344,7 +5378,7 @@ pub async fn run_and_wait(
     super::external_content::bind_prepared_realization_command(
         &mut prepared_plan,
         wait_bound_external.as_deref(),
-        state.isolation.as_ref(),
+        wait_launch_isolation.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
 
@@ -5461,7 +5495,7 @@ pub async fn run_and_wait(
         &state.config.app_root,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
-    let wait_isolation = state.isolation.clone();
+    let wait_isolation = wait_launch_isolation.clone();
     let wait_isolation_daemon_socket_path = isolation_daemon_socket_path;
     if super::process_attachment::finalize_requested_stop_if_present(&state, &tid)? {
         return Err(guard.fail_before_spawn(anyhow::anyhow!(
@@ -6167,6 +6201,10 @@ pub async fn run_detached(
     let finalized_direct = params.finalized_direct.take().ok_or_else(|| {
         anyhow::anyhow!("fresh direct launch has no pre-authorized effective program")
     })?;
+    // The node's shared isolation runtime for a confined launch; the
+    // per-launch host-direct view for an operator-granted host-authority root.
+    let bg_launch_isolation =
+        super::host_access_gate::launch_isolation(&state, params.host_access.as_ref())?;
     // Block-scoped: the sealed-bytes source holds non-Send descriptor state
     // and plan build is fully synchronous, so it must be statically dead
     // before this future's next await point.
@@ -6181,7 +6219,7 @@ pub async fn run_detached(
         thread_lifecycle::prepare_item_plan(
             &engine,
             &params.resolved,
-            state.isolation.as_ref(),
+            bg_launch_isolation.as_ref(),
             params.lifecycle_authority,
             admission_isolation_live_access_authority.as_ref(),
             sealed_dependency_bytes
@@ -6198,6 +6236,10 @@ pub async fn run_detached(
             },
         )?
     };
+    super::host_access_gate::require_plan_matches_admission(
+        prepared_plan.execution_plan(),
+        params.host_access.as_ref(),
+    )?;
     prepared_plan.bind_finalized_execution_endpoint(
         &state,
         &engine,
@@ -6205,6 +6247,7 @@ pub async fn run_detached(
     )?;
     capture_direct_command(
         &state,
+        bg_launch_isolation.as_ref(),
         &engine,
         finalized_direct.program.resolution(),
         &mut prepared_plan,
@@ -6223,6 +6266,7 @@ pub async fn run_detached(
         .context("acquire detached direct admission CAS mutation authority")?;
     let (bg_launch_metadata, mut bg_fresh_external) = admitted_root_launch_metadata(
         &state,
+        bg_launch_isolation.as_ref(),
         &params,
         bg_project_authority.clone(),
         finalized_direct,
@@ -6338,17 +6382,18 @@ pub async fn run_detached(
         source: bg_bound_source,
     } = prepare_process_inputs(
         &state,
+        bg_launch_isolation.as_ref(),
         &params.provenance,
         &created.thread_id,
         &bg_fresh_external.retained_resolution,
         &effective_path,
         super::source_closure::direct_source_placement(
             &prepared_plan,
-            state.isolation.is_enforced(),
+            bg_launch_isolation.is_enforced(),
         ),
         super::persistent_session::tool_supports_private_descriptor_realizations(
             &protocol.descriptor,
-            state.isolation.as_ref(),
+            bg_launch_isolation.as_ref(),
         ),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
@@ -6392,7 +6437,7 @@ pub async fn run_detached(
     super::external_content::bind_prepared_realization_command(
         &mut prepared_plan,
         bg_bound_external.as_ref(),
-        state.isolation.as_ref(),
+        bg_launch_isolation.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
 
@@ -6530,6 +6575,7 @@ pub async fn run_detached(
         bg_bound_external,
         bg_bound_source,
         bg_runtime_state_dir,
+        params.host_access.clone(),
         DetachedDispatchKind::Detached,
         Some(
             ryeos_state::objects::ThreadStatus::Created
@@ -6615,6 +6661,7 @@ impl DetachedDispatchKind {
         bg_skip_resume_snapshot_pin, bg_terminal_publication, bg_external_realizations,
         bg_source_closure,
         bg_runtime_state_dir,
+        bg_host_access,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token, launch_claim
     ),
@@ -6660,6 +6707,7 @@ async fn dispatch_detached_bg_task(
     bg_external_realizations: Option<super::external_content::BoundExternalRealizations>,
     bg_source_closure: Option<super::source_closure::BoundSourceClosure>,
     bg_runtime_state_dir: PathBuf,
+    bg_host_access: Option<ryeos_app::host_access::AdmittedHostAccess>,
     dispatch_kind: DetachedDispatchKind,
     prior_status_for_mark_running: Option<String>,
     bg_cb_token: Option<String>,
@@ -6733,7 +6781,7 @@ async fn dispatch_detached_bg_task(
     let bg_requires_process_scope = match admitted_root_requires_process_scope(
         &admitted_launch_metadata,
     ) {
-        Ok(required) => required,
+        Ok(required) => with_host_access_containment(required, bg_host_access.as_ref()),
         Err(error) => {
             tracing::error!(thread_id = %bg_thread_id, %error, "invalid retained process-scope requirement");
             let _ = fail_settled_unattached_thread(
@@ -6797,7 +6845,26 @@ async fn dispatch_detached_bg_task(
         !bg_skip_resume_snapshot_pin && bg_project_authority.requires_project_foldback();
     let bg_records_terminal_generation = bg_project_authority.records_terminal_project_generation();
     let state_root_for_spawn = bg_state_root;
-    let isolation_for_spawn = bg_state.isolation.clone();
+    // A host-direct root runs under its per-launch view; a host-direct plan
+    // without a launch-time admission (a recovered launch) refuses.
+    let isolation_for_spawn = match super::host_access_gate::require_plan_matches_admission(
+        bg_prepared_plan.execution_plan(),
+        bg_host_access.as_ref(),
+    )
+    .and_then(|()| super::host_access_gate::launch_isolation(&bg_state, bg_host_access.as_ref()))
+    {
+        Ok(isolation) => isolation,
+        Err(error) => {
+            tracing::error!(thread_id = %bg_thread_id, %error, "host-direct launch refused");
+            let _ = fail_settled_unattached_thread(
+                &bg_state,
+                &bg_thread_id,
+                "host_access_refused",
+                &launch_owner,
+            );
+            return;
+        }
+    };
     let isolation_daemon_socket_path_for_spawn = bg_isolation_daemon_socket_path;
     let spawn_workspace_lifeline = bg_process_input_dir.clone().or_else(|| bg_temp_dir.clone());
 
@@ -8496,6 +8563,7 @@ pub fn execution_params_from_sealed_root_request(
         parent_thread_id: None,
         effect_authority: None,
         finalized_direct: None,
+        host_access: None,
     })
 }
 
@@ -9064,6 +9132,7 @@ async fn run_existing_recovered_thread(
         source: bg_source_closure,
     } = prepare_process_inputs(
         &state,
+        state.isolation.as_ref(),
         &params.provenance,
         &thread_id,
         retained_resolution,
@@ -9375,6 +9444,7 @@ async fn run_existing_recovered_thread(
         bg_external_realizations,
         bg_source_closure,
         bg_runtime_state_dir,
+        None,
         dispatch_kind,
         Some(prior_status),
         bg_cb_token,

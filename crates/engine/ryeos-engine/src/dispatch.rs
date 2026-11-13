@@ -1603,6 +1603,7 @@ mod tests {
                 crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            execution_posture: crate::contracts::ExecutionPosture::Confined,
             target_requirement: None,
             current_target_request: None,
             endpoint_requirement: crate::contracts::ExecutionEndpointRequirement::Local {},

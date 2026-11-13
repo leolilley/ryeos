@@ -3564,6 +3564,14 @@ pub fn spawn_item(
                                     key.to_string_lossy().into_owned(),
                                     value.to_string_lossy().into_owned(),
                                 )
+                            })
+                            // A host-direct launch inherits only the names
+                            // its operator grant lists, read from the
+                            // daemon's own boot environment.
+                            .filter(|(key, _)| {
+                                isolation.host_direct_grant().is_none_or(|grant| {
+                                    grant.host_env.iter().any(|name| name == key)
+                                })
                             }),
                     )?
                     .with_daemon_roots(roots.clone())?

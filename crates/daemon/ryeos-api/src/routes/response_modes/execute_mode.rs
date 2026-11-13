@@ -552,6 +552,34 @@ pub fn resolve_execution_contract(
     caller_scopes: &[String],
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<ResolvedExecutionContract> {
+    resolve_execution_contract_with_posture(
+        policy,
+        project_source,
+        project_ctx,
+        workspace_lifeline,
+        state_root,
+        acting_principal,
+        caller_scopes,
+        state,
+        ryeos_engine::contracts::ExecutionPosture::Confined,
+    )
+}
+
+/// [`resolve_execution_contract`] for an admitted execution posture. A
+/// host-direct launch seals its live project as `unconfined_host`, because
+/// that is what runs; only read-write live and projectless policies can be
+/// true for it.
+pub fn resolve_execution_contract_with_posture(
+    policy: &ExecutionPolicy,
+    project_source: &ProjectSource,
+    project_ctx: &project_source::ResolvedProjectContext,
+    workspace_lifeline: Option<Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    state_root: Option<PathBuf>,
+    acting_principal: &str,
+    caller_scopes: &[String],
+    state: &ryeos_app::state::AppState,
+    posture: ryeos_engine::contracts::ExecutionPosture,
+) -> anyhow::Result<ResolvedExecutionContract> {
     policy.validate()?;
     ryeos_app::execution_policy::authorize_operator_vault_exposure(
         state.authorizer.as_ref(),
@@ -628,6 +656,11 @@ pub fn resolve_execution_contract(
             principal: acting_principal,
         },
     )?;
+    let authority = if posture.is_host_direct() {
+        authority.into_unconfined_host()?
+    } else {
+        authority
+    };
     authorize_terminal_publication(
         policy,
         &project_ctx.original_path,
@@ -686,6 +719,119 @@ pub fn resolve_execution_contract(
         provenance,
         lifecycle_authority,
     })
+}
+
+/// Admission-time check of a root that declares host authority.
+///
+/// Returns `None` for every ordinary root (its kind has no host-authority
+/// projection, or the item does not declare it). For a host-direct root it
+/// refuses, with a typed code, any project policy a host process cannot honour
+/// and any caller other than the configured local operator, then admits the
+/// item against the operator's grant. The runtime pin is checked at launch,
+/// where the executor chain is resolved.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn admit_host_direct_execution(
+    state: &ryeos_app::state::AppState,
+    policy: &ExecutionPolicy,
+    root: &ryeos_engine::canonical_ref::CanonicalRef,
+    no_project_requested: bool,
+    project_ctx: &project_source::ResolvedProjectContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    principal: &crate::handler_context::HandlerContext,
+    target_site_id: Option<&str>,
+    origin_site_id: &str,
+) -> Result<
+    Option<ryeos_app::host_access::AdmittedHostAccess>,
+    ryeos_executor::dispatch_error::DispatchError,
+> {
+    use ryeos_app::host_access::{HostAccessCaller, HostAccessRefusal, HostAccessSubject};
+    let refused = |refusal: HostAccessRefusal| {
+        ryeos_executor::dispatch_error::DispatchError::LaunchPolicyForbidden {
+            code: refusal.code.to_owned(),
+            message: refusal.message,
+            binding: None,
+        }
+    };
+    let engine = project_ctx.request_engine.clone();
+    let Some(execution) = engine
+        .kinds
+        .get(&root.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .filter(|execution| execution.host_authority.is_some())
+    else {
+        return Ok(None);
+    };
+    // A root that does not resolve here is left to dispatch, which reports
+    // its own error and re-judges host access at launch. That stays fail
+    // closed: a host-direct launch whose authority was sealed confined is
+    // refused by the launch-time gate or the disabled-shape compile.
+    let Ok((_, output)) =
+        engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            item_ref: root.clone(),
+            expected_kind: Some(root.kind.clone()),
+            project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
+            subject_resolution_authority: provenance.subject_resolution_authority(),
+        })
+    else {
+        return Ok(None);
+    };
+    let posture = execution
+        .project_execution_posture(&output.composed.composed)
+        .map_err(
+            |error| ryeos_executor::dispatch_error::DispatchError::SchemaMisconfigured {
+                kind: root.kind.clone(),
+                detail: error.to_string(),
+            },
+        )?;
+    if !posture.is_host_direct() {
+        return Ok(None);
+    }
+    let honourable = match &policy.project {
+        ProjectExecutionPolicy::Projectless => true,
+        ProjectExecutionPolicy::LiveDirect { access, .. } => {
+            *access == ryeos_app::execution_policy::LiveAccess::ReadWrite
+        }
+        ProjectExecutionPolicy::Pinned { .. } => false,
+    };
+    if !honourable {
+        return Err(refused(HostAccessRefusal::new(
+            HostAccessRefusal::PROJECT_REFUSED,
+            format!(
+                "`{}` runs unconfined on the host, so only a read-write live project or a projectless execution can be true for it; this request's project policy cannot be enforced",
+                output.root.resolved_ref
+            ),
+        )));
+    }
+    let source_closure = ryeos_app::host_access::source_closure_digest(
+        output
+            .composed
+            .derived
+            .get(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY),
+    )
+    .map_err(ryeos_executor::dispatch_error::DispatchError::Internal)?;
+    let subject = HostAccessSubject {
+        item: &output.root.resolved_ref,
+        signer: output.root.signer_fingerprint.as_deref(),
+        source_closure: source_closure.as_deref(),
+        runtime: None,
+    };
+    let current_site_id = state.threads.site_id();
+    ryeos_app::host_access::admit(
+        state,
+        &engine,
+        &subject,
+        &HostAccessCaller {
+            acting_principal: &principal.fingerprint,
+            handler_context: Some(principal),
+            target_site_id: target_site_id.filter(|target| *target != current_site_id),
+            current_site_id,
+            origin_site_id,
+            parent_thread_id: None,
+            scheduled: false,
+        },
+    )
+    .map(Some)
+    .map_err(refused)
 }
 
 /// Project capture and checkout perform blocking filesystem/CAS work. Keep
@@ -1633,6 +1779,40 @@ async fn admit_execution_with_publication(
         &state,
     )
     .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+    // A tool that declares host authority is admitted here, before anything
+    // runs: the node lane, the operator's exact grant and the configured
+    // local operator. Its project authority is then sealed as what actually
+    // runs (`unconfined_host`). The executor checks again at launch.
+    let host_access = match admit_host_direct_execution(
+        &state,
+        &request.execution_policy,
+        &root_canonical,
+        no_project_requested,
+        &project_ctx,
+        &resolved_contract.provenance,
+        &principal,
+        request.target_site_id.as_deref(),
+        &execution_origin_site_id,
+    ) {
+        Ok(admitted) => admitted,
+        Err(error) => return Ok(dispatch_error_response(error)),
+    };
+    let resolved_contract = if host_access.is_some() {
+        resolve_execution_contract_with_posture(
+            &request.execution_policy,
+            &project_source,
+            &project_ctx,
+            no_project_lifeline.clone(),
+            state_root.clone(),
+            &caller_principal_id,
+            &caller_scopes,
+            &state,
+            ryeos_engine::contracts::ExecutionPosture::HostDirect,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?
+    } else {
+        resolved_contract
+    };
     let ResolvedExecutionContract {
         provenance,
         lifecycle_authority,

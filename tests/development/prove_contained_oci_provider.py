@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
-    "prove", ROOT / ".ai/tools/ryeos/development/contained-oci-provider/lib/prove-contained-oci-provider.py")
+    "prove", ROOT / ".ai/tools/ryeos/development/dev-host/lib/prove-contained-oci-provider.py")
 PROVE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROVE)
 

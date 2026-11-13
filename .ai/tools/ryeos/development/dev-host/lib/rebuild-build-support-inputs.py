@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T00:09:46Z:5256c92a8e9e711f4c810037b68aa231da3b4cd1fa73e21c9c46c59c43b1c6f9:H0jyRxYUhOHGnSGAh5D0rEBqN4v3Ug+MSIm1jEtFTeVuQn1zFBTFcgiV2/6+3dZfqY6LVmFa5sgwFk349dAJBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:ab4ccf6ecda63345251cd6531f6ab9341cdb79ecd9c1c1b455ee285060c28fe3:txscuz8XYYJBqQhPiRTSK6UwtqPcTvz63iVIU2PaUqbV2PF755eWs9mJ3jbTo1M6/edhnd+9n+pz4a352bgxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.
@@ -42,12 +42,25 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 ROOT = Path(__file__).resolve().parents[6]
-INVENTORY = ROOT / ".ai/config/development/ryeos/authoring-build-support-inputs.yaml"
-ACQUISITION = ROOT / ".ai/config/development/ryeos/authoring-source-acquisition.yaml"
-SOURCE_ACTIVATION = (ROOT / "bundles/environment-qualification/.ai/config/development/ryeos/"
-                     "authoring-source-inputs-activation.yaml")
-PIN_HOLDER = (ROOT / ".ai/tools/ryeos/development/authoring-environment-production/"
-              "assemble-build-support.py")
+
+
+def pin_paths(root: Path) -> dict:
+    """The repository YAML the pins are read from, under one repository root."""
+    return {
+        "inventory_path": root / ".ai/config/development/ryeos/authoring-build-support-inputs.yaml",
+        "acquisition_path": root / ".ai/config/development/ryeos/authoring-source-acquisition.yaml",
+        "activation_path": (root / "bundles/environment-qualification/.ai/config/development/ryeos/"
+                            "authoring-source-inputs-activation.yaml"),
+        "pin_holder": (root / ".ai/tools/ryeos/development/authoring-environment-production/"
+                       "assemble-build-support.py"),
+    }
+
+
+_DEFAULT_PATHS = pin_paths(ROOT)
+INVENTORY = _DEFAULT_PATHS["inventory_path"]
+ACQUISITION = _DEFAULT_PATHS["acquisition_path"]
+SOURCE_ACTIVATION = _DEFAULT_PATHS["activation_path"]
+PIN_HOLDER = _DEFAULT_PATHS["pin_holder"]
 PIN_ID = "build-support-inputs"
 
 INVENTORY_SCHEMA = "ryeos.development.authoring-build-support-inputs.v1"
@@ -453,9 +466,12 @@ def main(argv=None) -> int:
     parser.add_argument("--scratch", type=Path, default=Path(tempfile.gettempdir()),
                         help="parent for the two new archive download directories")
     parser.add_argument("--keep-scratch", action="store_true")
+    parser.add_argument("--repository-root", type=Path,
+                        help="repository the pins are read from (default: this checkout)")
     args = parser.parse_args(argv)
     try:
-        pins = load_pins()
+        pins = load_pins(**pin_paths(args.repository_root.resolve())) if args.repository_root \
+            else load_pins()
         plan = build_plan(pins)
         if not args.execute:
             print(json.dumps(plan, indent=2, sort_keys=True))

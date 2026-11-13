@@ -52,6 +52,7 @@ pub mod federated_follow;
 pub mod guest_runtime_upload;
 pub mod handler_context;
 pub mod handler_error;
+pub mod host_access;
 pub mod hosted_candidate_result;
 pub mod hosted_operation;
 pub mod ignore;

@@ -61,6 +61,16 @@ pub fn select_host_class(body: &Value, host_class: &str) -> anyhow::Result<Value
     serde_json::to_value(narrowed).context("serialize the selected node isolation policy")
 }
 
+/// The runtime policy of a single-class section body: a node generation's
+/// selected lane.
+pub fn selected_policy(body: &Value) -> anyhow::Result<ryeos_engine::isolation::IsolationPolicy> {
+    IsolationPolicyEnvelope::parse(body)?
+        .policy
+        .into_selected_policy()
+        .map_err(anyhow::Error::msg)
+        .context("compile node isolation policy")
+}
+
 /// The single-class section body whose compiled policy is `policy`.
 pub fn section_body(policy: ryeos_engine::isolation::IsolationPolicy) -> anyhow::Result<Value> {
     serde_json::to_value(IsolationPolicyEnvelope {

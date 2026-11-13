@@ -8297,6 +8297,7 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
         }?
     };
     plan.network_authority_ceiling = project_execution_network_authority_ceiling(engine, resolved)?;
+    plan.execution_posture = project_execution_posture(engine, resolved)?;
     plan.filesystem_authority_ceiling = plan
         .filesystem_authority_ceiling
         .intersect(filesystem_ceiling);
@@ -8351,6 +8352,33 @@ pub(super) fn project_execution_network_authority_ceiling(
     execution
         .project_network_authority_ceiling(&admission.resolution_output().composed.composed)
         .map_err(|error| anyhow!("compile execution network-authority ceiling: {error}"))
+}
+
+/// Compile the kind-owned execution-posture projection from the same complete
+/// composed subject already admitted for this root, as the network projection
+/// does. Extensions may have changed `host_authority`; the raw root carrier
+/// is not the authority.
+pub fn project_execution_posture(
+    engine: &Engine,
+    resolved: &ResolvedExecutionRequest,
+) -> Result<ryeos_engine::contracts::ExecutionPosture> {
+    let kind = &resolved.resolved_item.kind;
+    let execution = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .ok_or_else(|| anyhow!("execution kind `{kind}` has no execution schema"))?;
+    if execution.host_authority.is_none() {
+        return Ok(ryeos_engine::contracts::ExecutionPosture::Confined);
+    }
+    let admission = resolved.root_admission.as_ref().ok_or_else(|| {
+        anyhow!(
+            "execution kind `{kind}` declares a host-authority projection but the request has no admitted composed subject"
+        )
+    })?;
+    execution
+        .project_execution_posture(&admission.resolution_output().composed.composed)
+        .map_err(|error| anyhow!("compile execution posture: {error}"))
 }
 
 /// Run verify → trust → build_plan without spawning.

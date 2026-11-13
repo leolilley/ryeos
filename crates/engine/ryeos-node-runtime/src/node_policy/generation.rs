@@ -427,6 +427,7 @@ fn validate_policy_generation(
             );
         }
     }
+    super::sections::host_access::check_generation(&policies)?;
     for section in operator_sections.iter().flatten() {
         if !policies.contains_key(section) {
             bail!(

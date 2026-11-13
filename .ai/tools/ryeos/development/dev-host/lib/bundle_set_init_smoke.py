@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-12T23:59:42Z:cad80f9c94e83764cbe7d3245cd842ff6540d026a0604382d703ecb13e418ab8:se9v3nPE1u6N0wzfYxSv+nCZkin1HRX8j8eZ2P3r8hCO4v3YNKA6tX85SY3ogsLAu5Ey/A2o4/i23bMVmrCYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:6db6fc5be0df4fda91259e84ab57186506e248ee95f6878ff65fb3ea8e57483d:KhAjdh/tx7kOM8FnIheKVgB+H/sZnRTlTLbXTAyGzz5vs0qrlaLwqyfImtnDJwiQ1rkyx7Ey4aqapZZqpYKfDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Initialise a throwaway node from a worktree's bundles and check it admits them.
 
 External development host tool; it grants no RyeOS authority and spends
@@ -36,7 +36,7 @@ import time
 import urllib.request
 
 _spec = importlib.util.spec_from_file_location(
-    "dev_host", Path(__file__).resolve().parents[2] / "dev-host/lib/dev_host.py")
+    "dev_host", Path(__file__).resolve().parent / "dev_host.py")
 dev_host = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev_host)
 ToolError = dev_host.ToolError

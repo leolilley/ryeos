@@ -7791,6 +7791,7 @@ while True:
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             filesystem_authority_ceiling:
                 ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            execution_posture: ryeos_engine::contracts::ExecutionPosture::Confined,
             target_requirement: None,
             current_target_request: None,
             endpoint_requirement: ryeos_engine::contracts::ExecutionEndpointRequirement::Local {},

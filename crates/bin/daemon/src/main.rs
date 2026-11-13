@@ -4575,6 +4575,10 @@ async fn run(
                 .require::<ryeos_node_runtime::node_policy::sections::launch_trust::NodeLaunchTrustPolicy>()?
                 .check_against_kinds(&engine.kinds)
                 .context("node launch_trust policy does not fit the installed kinds")?;
+            node_policy_snapshot
+                .require::<ryeos_node_runtime::node_policy::sections::host_access::NodeHostAccessPolicy>()?
+                .check_against_kinds(&engine.kinds)
+                .context("node host_access policy grants an item whose kind cannot declare host authority")?;
             tracing::info!(
                 max_private_materialization_copy_bytes = private_copy_limit,
                 "node private materialization limit armed"

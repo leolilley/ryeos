@@ -1054,6 +1054,50 @@ impl ExecutionProjectAuthority {
         }
     }
 
+    /// The same authority for a host-direct launch: the process runs on the
+    /// host, unconfined, so the live project is recorded as `unconfined_host`
+    /// instead of a descriptor-rooted view nobody enforces. Only a read-write
+    /// live project or a projectless launch can be true under host access; a
+    /// read-only or pinned project cannot be enforced against a host process
+    /// and is refused.
+    pub fn into_unconfined_host(self) -> anyhow::Result<Self> {
+        let authority = match self {
+            Self::Projectless { .. } => self,
+            Self::LiveProject {
+                authority_id,
+                authored_project_identity,
+                canonical_root,
+                live_access,
+                environment,
+                capability_ceiling,
+                child_policy,
+            } => {
+                if live_access.access != LiveProjectAccess::ReadWrite {
+                    anyhow::bail!(
+                        "a host-direct launch runs unconfined on the host and cannot honour a read-only live project; request read-write live project access"
+                    );
+                }
+                Self::LiveProject {
+                    authority_id,
+                    authored_project_identity,
+                    canonical_root,
+                    live_access: LiveAccessAuthority {
+                        confinement: LiveFilesystemConfinement::UnconfinedHost,
+                        ..live_access
+                    },
+                    environment,
+                    capability_ceiling,
+                    child_policy,
+                }
+            }
+            Self::PinnedGeneration { .. } => anyhow::bail!(
+                "a host-direct launch runs unconfined on the host and cannot honour a pinned project generation; use a live read-write or projectless execution policy"
+            ),
+        };
+        authority.validate()?;
+        Ok(authority)
+    }
+
     pub fn live_access(&self) -> Option<&LiveAccessAuthority> {
         match self {
             Self::LiveProject { live_access, .. } => Some(live_access),
@@ -1439,6 +1483,29 @@ mod tests {
             confinement: LiveFilesystemConfinement::UnconfinedHost,
         };
         assert!(false_read_only.validate().is_err());
+    }
+
+    #[test]
+    fn host_direct_records_unconfined_host_and_refuses_what_it_cannot_honour() {
+        let root = tempfile::tempdir().unwrap();
+        let writable = live_authority(root.path(), LiveProjectAccess::ReadWrite)
+            .into_unconfined_host()
+            .unwrap();
+        assert_eq!(
+            writable.live_access().unwrap().confinement,
+            LiveFilesystemConfinement::UnconfinedHost
+        );
+        let error = live_authority(root.path(), LiveProjectAccess::ReadOnly)
+            .into_unconfined_host()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("read-only"), "{error}");
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS
+                .into_unconfined_host()
+                .unwrap(),
+            ExecutionProjectAuthority::PROJECTLESS
+        );
     }
 
     #[test]

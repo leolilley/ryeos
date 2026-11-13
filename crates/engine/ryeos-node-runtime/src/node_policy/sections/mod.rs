@@ -4,6 +4,7 @@ pub mod command_registration;
 pub mod event_storage;
 pub mod execution;
 pub mod external_content;
+pub mod host_access;
 pub mod hosted;
 pub mod ingest_ignore;
 pub mod isolation;

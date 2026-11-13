@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T00:39:45Z:2387ffc442f9b93e4109e8b172946cd20efc22f985e51f0b9a84ac55c593dfe7:Bl41BBPSIOYGaxQSCJHX9cscFqNRxE1Ogb0GIMwCLirsRyzrI4odTjdaYDTMylY0+2UtvMOx0zbjnkxKquf4Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T12:11:14Z:464867a4990767435802b4fa90c126fced4c5b9abe3daba05b01937c7b9e5b6e:lEMgaKIX2YN4twl3YZTKqXTQE71Es/4jvBaNSkamkOJJyl8yMuz6aye5a5iLHnCQCKKq+qCr7dpliI0DFRH0Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -249,7 +249,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 10
+      version: 11
       # Host classes this profile supports. The deployment names one at
       # init (`ryeos init --host-class`), and the node runs under that
       # class's floor and isolation lane from then on. A class names the
@@ -275,6 +275,7 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
+          host_direct: unavailable
         local:
           # A host the operator runs the node on directly.
           # Capabilities this node must prove on its host before it starts.
@@ -286,6 +287,7 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
+          host_direct: unavailable
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -319,6 +321,12 @@ policies:
         verified_artifact_file_bytes: 67108864
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
+  # Operator grants of host-direct execution, per exact item. Empty by
+  # default, so nothing runs on the host. Changed only by the operator-signed
+  # `node.policy-apply` (`ryeos node host-access grant|revoke`).
+  host_access:
+    schema: 1
+    grants: []
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T06:50:13Z:32d0eb761d3954d8ad07b3ad9f30cb6fa360db7556266d21158212a35edaf97e:ncbIUxE/ND9aZAz6ca4DXsT/NBurMdHn9T2AJ+ZN8eO9tY2LMGMjjrWeDijgILUYHqwEkTaHhUY1kzLmJPNoDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T12:11:14Z:982226bb0c27fe5bff40163e3a9cae182ac6a7115ae4af99045f611eef508e16:pVSL1JUtC0AL/MvHAOSV4dNdnoKQem0A+CzOkk788gJkXOD2YbGweUbfweLZHYIKbjKzLzzf15QowDFhhW15Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
-version: "1.22.0"
+version: "1.23.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -229,16 +229,25 @@ The policy has two modes:
 
 ## Explicit disabled policy member
 
+The `standard` profile's member, narrowed by `ryeos init --host-class local`
+to the one class the node runs under:
+
 ```yaml
 schema: 1
 policy:
-  version: 6
-  mode: disabled
-  backend: null
-  process_scopes:
-    mode: unconfigured
+  version: 11
+  host_classes:
+    local:
+      requires_capabilities: [accounting, storage:durable_root, time]
+      process_scopes:
+        mode: unconfigured
+      trusted_process_group_sessions: false
+      mode: disabled
+      backend: null
+      proc_filesystem: empty
+      host_direct: unavailable
+  enclosure_inits: [catatonit, dumb-init, tini]
   filesystem:
-    proc_filesystem: empty
     live_project:
       mode: fixed_parents
       limits:
@@ -327,8 +336,12 @@ refusal is not an executed workload's nonzero exit result.
 
 ## Strict schema
 
-- The outer member `schema` is `1`; `policy.version` must be `5`. Other
+- The outer member `schema` is `1`; `policy.version` must be `11`. Other
   versions and unknown fields are rejected without aliases or translation.
+- Every host class declares `host_direct: unavailable | operator_granted`,
+  with no default. It says whether that class offers the host-direct posture
+  at all (see below). Only the `development` profile's `local` and
+  `local_direct` classes say `operator_granted`.
 - `backend` is null when no backend is selected and must be present in enforce
   mode.
 - `backend.bundle` names one registered signed bundle.
@@ -376,6 +389,28 @@ refusal is not an executed workload's nonzero exit result.
 Missing required sections, malformed YAML, invalid paths or wildcard forms,
 and unsupported values are errors even when disabled. Disabled mode skips
 backend availability and OS-confinement controls, not node-owned output caps.
+
+## Host-direct posture
+
+A tool may declare `host_authority: required`: it asks to run on the host,
+unconfined, as the daemon user. That is the operator's own authority: the
+process can read the operator key, the node key, the vault and every bundle
+root. Declaring it grants nothing. A launch runs host-direct only when the
+node's host class says `host_direct: operator_granted`, the operator granted
+that exact item in the `host_access` node-policy section (pinned to its signer
+and the exact source-closure and runtime bytes), and the caller is the
+configured local operator. See `ryeos/core/node/host-access`.
+
+A granted launch takes the disabled-mode path described above on any node,
+enforced or not, through a per-launch runtime view; every other launch on the
+node keeps the lane's isolation. The node-owned controls stay: exact-digest
+delivery of the interpreter and source closure, the attachment hold, the
+output caps, the timeout and subprocess limits, and a cgroup process scope when
+the grant says `scope_required`. The child inherits only the grant's
+`host_env` names from the daemon's boot environment. Launch provenance records
+`execution_posture: {host_direct: <grant>}`; the live project authority
+records `unconfined_host`. `ryeos node doctor` shows `host_direct` in the
+`isolation` row and lists grants in the `host_access` row.
 
 ## Per-execution network ceiling
 

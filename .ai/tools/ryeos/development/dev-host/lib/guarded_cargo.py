@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-12T23:59:41Z:691a48e1012fa5eacc683f07834295e3f5e3f1d1149c83e19c9614ca7fa9092f:4dnDRR5atDb7BJtdKk+vdx8Z646bpFcGetUmic6cY3+h6mc4hAwC1uk9n1KY17qDlq55kIHJr63TtcXVoaFoCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:986ffba7401177ebb9d64c6a1aa2e87699d4c53d431b74e19531dfadd4208f50:pN4Fq1GrPFEd484aQLXyedfOuhQCxAHSZ4BabmSd7jPW8p5pYat4/b25wqJfsqwInMPsBIBhZI5y1X+Saa6DDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Run one cargo command for a worktree under the machine's shared build guard.
 
 External development host tool; it grants no RyeOS authority. One guarded
@@ -38,7 +38,7 @@ import sys
 import time
 
 _spec = importlib.util.spec_from_file_location(
-    "dev_host", Path(__file__).resolve().parents[2] / "dev-host/lib/dev_host.py")
+    "dev_host", Path(__file__).resolve().parent / "dev_host.py")
 dev_host = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev_host)
 ToolError = dev_host.ToolError
