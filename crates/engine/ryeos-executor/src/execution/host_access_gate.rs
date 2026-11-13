@@ -105,22 +105,21 @@ pub(crate) fn enforce_host_access(
     .map_err(refusal)
 }
 
-/// For a root that was not admitted by the execute route (a graph child or a
-/// schedule fire), judge host access before its root admission is sealed and,
-/// when it is granted, return its provenance with the project authority
-/// converted to `unconfined_host`. The root admission is then sealed from that
-/// converted provenance, so the child's record says what runs while its parent
-/// keeps its own confinement. Returns `None` for every confined root, and for a
-/// root that does not resolve here: dispatch reports that itself, and the
-/// launch gate still refuses a host-direct launch sealed confined.
+/// Judge host access for a launch before its root admission is sealed and,
+/// when it is granted, return `provenance` with this launch's project
+/// authority converted to `unconfined_host`. The root admission is then sealed
+/// from that converted provenance, so the record says what runs. A callback
+/// child (a graph node's action) is converted on its own: its parent keeps its
+/// own confinement. Returns `None` for every confined launch, and for an item
+/// that does not resolve here: dispatch reports that itself, and the launch
+/// gate still refuses a host-direct launch sealed confined.
 pub(crate) fn host_direct_provenance_before_admission(
     state: &ryeos_app::state::AppState,
-    engine: &ryeos_engine::engine::Engine,
-    plan_ctx: &ryeos_engine::contracts::PlanContext,
     item: &ryeos_engine::canonical_ref::CanonicalRef,
-    request: &crate::dispatch::DispatchRequest<'_>,
-    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
+    caller: &HostAccessCaller<'_>,
 ) -> Result<Option<ryeos_app::execution_provenance::ExecutionProvenance>, DispatchError> {
+    let engine = provenance.request_engine();
     let Some(execution) = engine
         .kinds
         .get(&item.kind)
@@ -129,16 +128,18 @@ pub(crate) fn host_direct_provenance_before_admission(
     else {
         return Ok(None);
     };
-    let project_root = match &plan_ctx.project_context {
-        ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
-        _ => None,
-    };
+    let subject_resolution_authority = provenance.subject_resolution_authority();
+    let project_root = (!matches!(
+        subject_resolution_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ))
+    .then(|| provenance.subject_effective_path().to_path_buf());
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
             item_ref: item.clone(),
             expected_kind: Some(item.kind.clone()),
             project_root,
-            subject_resolution_authority: plan_ctx.subject_resolution_authority.clone(),
+            subject_resolution_authority,
         })
     else {
         return Ok(None);
@@ -165,29 +166,8 @@ pub(crate) fn host_direct_provenance_before_admission(
         source_closure: source_closure.as_deref(),
         runtime: None,
     };
-    let current_site_id = state.threads.site_id();
-    ryeos_app::host_access::admit(
-        state,
-        engine,
-        &subject,
-        &HostAccessCaller {
-            acting_principal: request.acting_principal,
-            handler_context,
-            target_site_id: request
-                .target_site_id
-                .filter(|target| *target != current_site_id),
-            current_site_id,
-            origin_site_id: &plan_ctx.origin_site_id,
-            parent_thread_id: request
-                .parent_execution_context
-                .as_ref()
-                .map(|parent| parent.parent_thread_id.as_str()),
-            scheduled: plan_ctx.scheduled_fire.is_some(),
-        },
-    )
-    .map_err(refusal)?;
-    request
-        .provenance
+    ryeos_app::host_access::admit(state, engine, &subject, caller).map_err(refusal)?;
+    provenance
         .clone()
         .into_host_direct()
         .map(Some)
@@ -197,6 +177,30 @@ pub(crate) fn host_direct_provenance_before_admission(
                 format!("{error:#}"),
             ))
         })
+}
+
+/// The caller of a dispatched launch, for the host-access checks.
+pub(crate) fn dispatch_caller<'a>(
+    state: &'a ryeos_app::state::AppState,
+    request: &'a crate::dispatch::DispatchRequest<'a>,
+    plan_ctx: &'a ryeos_engine::contracts::PlanContext,
+    handler_context: Option<&'a ryeos_app::handler_context::HandlerContext>,
+) -> HostAccessCaller<'a> {
+    let current_site_id = state.threads.site_id();
+    HostAccessCaller {
+        acting_principal: request.acting_principal,
+        handler_context,
+        target_site_id: request
+            .target_site_id
+            .filter(|target| *target != current_site_id),
+        current_site_id,
+        origin_site_id: &plan_ctx.origin_site_id,
+        parent_thread_id: request
+            .parent_execution_context
+            .as_ref()
+            .map(|parent| parent.parent_thread_id.as_str()),
+        scheduled: plan_ctx.scheduled_fire.is_some(),
+    }
 }
 
 /// Require the sealed project authority to be true for a host process: a

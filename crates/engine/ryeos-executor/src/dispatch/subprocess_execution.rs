@@ -869,11 +869,14 @@ async fn dispatch_tool_subprocess(
     } else {
         crate::execution::host_access_gate::host_direct_provenance_before_admission(
             state,
-            &ctx.engine,
-            &ctx.plan_ctx,
             current_ref,
-            request,
-            handler_context.as_ref(),
+            &request.provenance,
+            &crate::execution::host_access_gate::dispatch_caller(
+                state,
+                request,
+                &ctx.plan_ctx,
+                handler_context.as_ref(),
+            ),
         )?
         .unwrap_or_else(|| request.provenance.clone())
     };
