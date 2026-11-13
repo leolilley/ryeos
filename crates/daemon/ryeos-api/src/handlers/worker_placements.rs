@@ -172,6 +172,9 @@ pub async fn preflight(
     .map_err(internal)?;
     let closure = source_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: req.preflight_id.clone(),
+            },
             &preflight_roots,
             closure_options,
             WORKER_SESSION_HANDOFF_PEER_CALL_TIMEOUT,
@@ -538,6 +541,9 @@ pub async fn prepare(
     }
     let closure = source_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: req.operation_id.clone(),
+            },
             &roots,
             NodeAdmittedObjectsClosureRequestOptions::for_node(
                 &state,
@@ -1103,6 +1109,9 @@ pub async fn abort(
     }
     let closure = source_client
         .objects_closure_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: source_operation.operation_id.clone(),
+            },
             &source_roots,
             NodeAdmittedObjectsClosureRequestOptions::for_node(
                 &state,
@@ -1742,6 +1751,9 @@ async fn adopt_authorized(
         let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
         let closure = source_client
             .objects_closure_get_with_total_timeout(
+                &crate::objects_read_scope::ReadRoot::Placement {
+                    placement_id: req.operation_id.clone(),
+                },
                 std::slice::from_ref(&req.target_chain_head_hash),
                 NodeAdmittedObjectsClosureRequestOptions::for_node(
                     &state,

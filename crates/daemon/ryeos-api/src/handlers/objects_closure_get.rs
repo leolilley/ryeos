@@ -8,13 +8,22 @@ use serde_json::Value;
 
 use crate::handlers::objects_closure_describe::{
     Request, admit_request, closure_summary_json, collect_limited_closure_with_cas,
-    enforce_serialized_response_limit,
+    enforce_serialized_response_limit, require_roots_in_scope,
 };
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    require_roots_in_scope(&req, &ctx, &state, "objects/closure/get")?;
+    handle_authorized(req, state).await
+}
+
+/// Fetch the closure of roots a caller has already been authorized to read.
+/// Scope is enforced by [`handle`]; this entry exists so closure mechanics can
+/// be exercised without a caller.
+pub async fn handle_authorized(req: Request, state: Arc<AppState>) -> Result<Value> {
     let req = admit_request(req, &state)?;
     let authority = state
         .state_store
@@ -246,10 +255,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "objects.closure.get",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/closure/get"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

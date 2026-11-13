@@ -1,8 +1,9 @@
-# ryeos:signed:2026-08-11T02:28:16Z:e391853c08f720fa585fe52dd7d01dc0f99fd01b4d7a248293b21c9faa12cbe3:lbjCcaJTttN8SbMtVuiKeEiEmHnd4DCuQq21IgPHNOzWy0SKhWeDPa4QRMNp6r1BtY04uouZPUMYdQL4YG9gCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T20:05:09Z:9a73aea379edb57826c84459ade6334f274bcfbe7d1730d1f37f13277b53f433:iVCLvtofxr9TPDoAuw+48XQ+zsBSLvjaeY2ugYXOU0jgMrVoeO7lJ4BZKUoqvMo/ilpAIyAvw2iUU1+rM5G1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.has
 required_caps: ["ryeos.execute.service.objects/has"]
 schema:
+  root: object
   object_hashes: array
   blob_hashes: array
-description: "Check object and blob CAS namespaces independently"
+description: "Check object and blob CAS namespaces independently, answering present only for hashes reachable from the named root and absent for everything else"

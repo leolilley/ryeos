@@ -484,8 +484,6 @@ async fn run_attempt(
         &operation.delegation_digest,
     )
     .map_err(AttemptFailure::permanent)?;
-    let node_client = RemoteClient::from_remote_cfg(&state, remote)
-        .map_err(|error| AttemptFailure::permanent(anyhow::Error::new(error)))?;
     let upload_session = operator_client
         .objects_put(None, &operation.remote_project_path, &[], &[])
         .await
@@ -521,8 +519,15 @@ async fn run_attempt(
         )));
     }
 
-    ensure_remote_generation_local(&state, &node_client, remote, operation, job_id, progress)
-        .await?;
+    ensure_remote_generation_local(
+        &state,
+        &operator_client,
+        remote,
+        operation,
+        job_id,
+        progress,
+    )
+    .await?;
     let merge_hash = match progress.merge_snapshot_hash.clone() {
         Some(hash) => {
             validate_merge_generation(&state, operation, &hash)
@@ -598,7 +603,7 @@ async fn run_attempt(
 
 async fn ensure_remote_generation_local(
     state: &Arc<AppState>,
-    node_client: &RemoteClient,
+    operator_client: &RemoteClient,
     remote: &RemoteConfig,
     operation: &ReconciliationOperation,
     job_id: &str,
@@ -607,8 +612,13 @@ async fn ensure_remote_generation_local(
     if validate_project_generation(state, &operation.expected_remote_head).is_ok() {
         return Ok(());
     }
-    let closure = node_client
+    // The remote head lives in the configured operator's own head namespace,
+    // so it is read as the operator and under that project's head root.
+    let closure = operator_client
         .objects_closure_get(
+            &crate::objects_read_scope::ReadRoot::ProjectHead {
+                project_path: operation.remote_project_path.clone(),
+            },
             std::slice::from_ref(&operation.expected_remote_head),
             crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
                 state,

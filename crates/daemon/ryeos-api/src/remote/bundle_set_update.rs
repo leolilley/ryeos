@@ -142,7 +142,13 @@ impl RemoteAuthority {
             } => catalog_publication_attestation_hash.clone(),
         };
         let response = client
-            .objects_closure_get(std::slice::from_ref(&root), self.closure_options.clone())
+            .objects_closure_get(
+                &crate::objects_read_scope::ReadRoot::CatalogPublication {
+                    catalog_namespace: request.catalog_namespace.clone(),
+                },
+                std::slice::from_ref(&root),
+                self.closure_options.clone(),
+            )
             .await?;
         for entry in response.entries {
             match entry.kind.as_str() {

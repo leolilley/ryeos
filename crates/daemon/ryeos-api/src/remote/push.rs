@@ -587,8 +587,19 @@ pub(crate) async fn upload_missing(
             "publication root {publication_root_hash} is absent from the typed object closure"
         );
     }
+    // Presence is asked under the project head being pushed to. Objects for
+    // the head that does not exist yet are not reachable from the current
+    // head, so the receiver answers them absent and they are uploaded; the
+    // write deduplicates. Nothing outside the pusher's own head is revealed.
+    let read_root = crate::objects_read_scope::ReadRoot::ProjectHead {
+        project_path: project_path_for_ref.to_owned(),
+    };
     let has_resp = client
-        .objects_has(&upload_closure.object_hashes, &upload_closure.blob_hashes)
+        .objects_has(
+            &read_root,
+            &upload_closure.object_hashes,
+            &upload_closure.blob_hashes,
+        )
         .await?;
     let skipped = has_resp.found_object_hashes.len() + has_resp.found_blob_hashes.len();
     let missing_objects = has_resp.missing_object_hashes;
