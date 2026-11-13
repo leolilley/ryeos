@@ -253,7 +253,7 @@ async fn run_directive_and_capture_first_request_headers(
     plant_directive_with_secrets(
         project.path(),
         "test/secret_injection",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -458,7 +458,7 @@ async fn run_directive_with_vault_secret(
     plant_directive_with_secrets(
         project.path(),
         "test/vault_secret",
-        "Hello {{ name }}.",
+        "Hello ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -572,7 +572,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     plant_directive_with_secrets(
         project.path(),
         "test/dotenv_secret",
-        "Hello {{ name }}.",
+        "Hello ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
