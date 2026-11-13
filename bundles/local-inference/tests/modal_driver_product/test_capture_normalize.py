@@ -29,7 +29,7 @@ def _load(name: str, path: Path):
 CAPTURE = _load('modal_driver_projection_capture', ROOT / 'authoring/modal_driver_projection_capture.py')
 NORMALIZE = _load(
     'modal_driver_normalize',
-    ROOT / '.ai/tools/local-inference/modal-driver-normalize/normalize.py',
+    ROOT / 'authoring/drafts/tools/local-inference/modal-driver-normalize/normalize.py',
 )
 
 
