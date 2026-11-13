@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T09:40:08Z:18748f6a5f39fad9e9e53e5fe3344d4bb022d4eb1c37227b81450f9d84f27cd4:v2gE6soHffbuuespT6VmMOZOoPKJCfqgPw9fKfn5X5UEfx/hixh1iDzL+mMy8p51+ALreeHY00UcphAA4K+9DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T19:46:58Z:408adf57f5e63a37b779be87816165e8d85be5c80cabeebde5120ab2e1004192:boi673ZZ/YPjJmbsKXPekRBj5z1qzZanJjrWsP891Rmtcupi8kLgQw5N0zP+jCuDkGXID/Xd9vA6abrBOhDYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -228,6 +228,37 @@ Isolation](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/executio
 
 If `ryeos tui` works but `ryeos help tui` fails, fix the CLI help path. Do not
 work around it by adding kind-specific CLI dispatch logic.
+
+## Daemon e2e: tools that call back into the daemon
+
+A tool launched under the default `tool_callback` protocol can call the daemon
+over its UDS callback channel (bundle events, item authoring). To test such a
+callback end to end, use `ryeosd::test_support::callback_probe`
+(`crates/bin/daemon/src/test_support/callback_probe.rs`). It plants one signed
+project tool that makes exactly one named callback through the shipped runtime
+client (the `ryeos-callback-probe` executable, a test-only binary of `ryeosd`)
+and prints the result as JSON.
+
+1. Choose the authority the tool may hold with `ProbeAuthority`
+   (`bundle_event(kind, ops)`, `item_authoring(kind, namespace)`,
+   `declared_cap(cap)`). Callback authority is minted only from a signed
+   manifest, so `plant_probe_tool` also plants a signed project manifest
+   declaring exactly that authority and the tool requests the same.
+2. Plant it with `plant_probe_tool(project, &fixture.publisher,
+   Path::new(env!("CARGO_BIN_EXE_ryeos-callback-probe")), &authority)`. The
+   executable path comes from the integration test because only it sees
+   `CARGO_BIN_EXE_*`. Start the daemon with `register_workflow_bundles` when
+   the callback touches workflow kinds such as `graph`.
+3. `run_callback(&h, &project, "bundle_events_append" | "bundle_events_read_chain"
+   | "bundle_events_scan" | "author_item", params)` launches the tool as the
+   harness principal and returns a `ProbeOutcome`: `Accepted(result)` (use
+   `.accepted()`) or `Refused { code, message }` (use `.refusal_code()`).
+   Each call is a separate thread, so a read-back after an append proves the
+   event is durable state.
+
+Assert refusal codes and trust classes (for example
+`authored_capability_not_covered`, `runtime_authored`), not signer
+fingerprints. Worked examples: `crates/bin/daemon/tests/callback_probe_e2e.rs`.
 
 ## Common failures
 
