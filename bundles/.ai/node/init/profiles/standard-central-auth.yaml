@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:34:21Z:f0f27c350ddab54773941e2d5fc7db45761ef0112c9e0a6e0c80faa83a6bd506:7GmzlWMElqHTE+MmxoAXseit2VcSACpEj1/R69taG52dpK/ShMCXHZ5gQgvC2O8DPkCLb2ix5amK8i10WZ37CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:44:03Z:0cf39d984ef896665d262be409bf981a936767ab3a1158268629222079fe44cf:QeVVkryKWI1NSdKzdeUJjHJ6CWGUFQV+76hHgknl+XEFQYPIiISFmb3V59R/Vd5V9EW7k2FqfR9E5dreUg/ODw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -367,6 +367,9 @@ policies:
     session_scopes:
       - ryeos.execute.service.ui/ryeos-ui/*
       - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
       - ryeos.execute.service.projects/add
       - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input

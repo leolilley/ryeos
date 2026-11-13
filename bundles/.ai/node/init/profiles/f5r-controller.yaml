@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:34:21Z:1bedaea985c6326e65fe9be22de4f6bc32e90b3ad0587daa813f55cb0b273946:kv8ts1esx0XJSBKibJ3NjpW8wOIsh4NoK3pJM744fXHxdyZce12fR9QsILeaQH3DweIV8Fm2d/pOa8tS1l7RBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:44:03Z:daedbe1bfff87b76e9eb3ae1f34300b6e81d1c803fe288fdc03ed8aabdaba5e8:1552xOvbfvxzCxHDhBgjUqHdNWGl1UBnnaliqZJ/qAy77/vbI67plB2Hf4RvCmGEM+IBP+dRXS0X4KfQ+EsyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -459,6 +459,9 @@ policies:
     session_scopes:
       - ryeos.execute.service.ui/ryeos-ui/*
       - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
       - ryeos.execute.service.projects/add
       - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input

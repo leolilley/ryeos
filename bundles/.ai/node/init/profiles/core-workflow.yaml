@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:34:21Z:195c44983bc3e010bd9f66f932f8e66ae7bac33d0a9d37296d7ac7df63ca6a61:ubVWnm0OSHFy7D52qHQttw6h2BQ3tiba/GoYxoI9fPHRWnMXE9aghjwjtNob4EKE/fymXrUuSNLVdf9Qlc95Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:44:02Z:00edc100d2632e6a4af672f71be0ceea38df066e5b76466aefed07c8be97829f:pmMDgeYIHjgLk2Z0+7cspHsX2NSFOeE9hGFMVlGUbk+pJp4YYuH2uE+zvwrELw4VH6hjIb0vHg6MaK4+ZX0TDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -383,6 +383,9 @@ policies:
     session_scopes:
       - ryeos.execute.service.ui/ryeos-ui/*
       - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
       - ryeos.execute.service.projects/add
       - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input

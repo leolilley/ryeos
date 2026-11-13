@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:34:21Z:4d9576430e5546a4d69790b611902f619104e689c80f8cdb0d51ae013c533945:DaiDiDal7H4cn6f2hYorj6tzhG0Bz/u1nYTZcBHoyO8WIUbXgJlxWHMCjH6VycBchpnyffEw2VtUgaXrNmpCAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:44:03Z:6e3d918d4d07edf7d92b9a5fc986a15fee51dcae3c863089f5ad7f0ea9f42cb4:swHsevrj2pPg303XnNIY/qQXvgVSvcXllx19dlAqlrd5waVuCtjnIvEGiFa7FNIX9QAxqx6JI/Vt+uUU8aplDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -383,6 +383,9 @@ policies:
     session_scopes:
       - ryeos.execute.service.ui/ryeos-ui/*
       - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
       - ryeos.execute.service.projects/add
       - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input

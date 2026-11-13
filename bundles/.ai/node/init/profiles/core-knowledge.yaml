@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:34:21Z:d9445e835a3d2a60775c5b7071dbf0b5e9d8c56fa0fa3e022a415f9d154473c9:Cc+mJNyuEijTmKFAkNuDo5PxJIaw57AnGuUH8MG5EJlPL7N/e8d//fvmPqm17873gZTIDqbha/lbapYyvjlvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:44:02Z:9abafc179c0ae447e6ec8581493ec86d503f7ccaae0b2ce6eb3a45baf08f05b5:dlXXViVDhvuzFyicdgr8vlw9zfi0WUApZ46IfhLts1PVbaTKEcqL34d0ktSMjnM2exye98CEkxraGDIwnSarCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -382,6 +382,9 @@ policies:
     session_scopes:
       - ryeos.execute.service.ui/ryeos-ui/*
       - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
       - ryeos.execute.service.projects/add
       - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T04:34:21Z:ca4e4ffe0e369e071a044f33a58b14d8c2d7b63047ad32e004a264cb52179bef:GLhTLbPLevORSIoMfct/Ou6ZHodWUhs0jPALMJKX7MDj32AtAiDkLa6/5s5J1PwVDmBYgkTQSvP72r9xIEvrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:44:03Z:70b78789a676268a860943e421160dfc360bc8685a6bac8a3b2a25bcc22a6e1f:j3GUi0cxpkUD0UL7q1XQGJmOKWspnpNSXFqUYkY5xBD2xNMD+nENjt7uzghYyXV1ugXJ6G6vQZyUneR36bXiAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -486,6 +486,9 @@ policies:
     session_scopes:
       - ryeos.execute.service.ui/ryeos-ui/*
       - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.node/status
+      - ryeos.execute.service.projects/list
+      - ryeos.execute.service.events/chain_replay
       - ryeos.execute.service.projects/add
       - ryeos.execute.service.projects/open
       - ryeos.execute.service.threads/input
