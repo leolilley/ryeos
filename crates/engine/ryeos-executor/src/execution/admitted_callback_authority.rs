@@ -24,7 +24,7 @@ pub(super) fn admitted_qualification_root(
     purpose.validate()?;
     if metadata.launch_driver
         != Some(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
-        || protocol.descriptor.callback_channel != CallbackChannel::Http
+        || protocol.descriptor.callback_channel != CallbackChannel::RuntimeSocket
     {
         bail!("qualification verifier requires a direct callback-capable Tool");
     }

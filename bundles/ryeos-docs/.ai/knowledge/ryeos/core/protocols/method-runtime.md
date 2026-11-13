@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-18T22:04:50Z:d08e140d48698805e8b05d7fb07c74202fdbcb6d6253263d1267fafd2fb10e07:+61hfTDU+vYXWZvWeiEdlXf8aY3IHIFiOYnctSxEP6Jns5CSTpQVOa9WwdjRmbPj4XwallKMWJ3ucCxlRjQiDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:27:41Z:309bcda30fcc169b6688e6f74a3622a672364dfc1681edcd9fa600aeb2f022fe:8nfw0euXjLzIdLqKLwQpdRzBsOiD+56VId846KEvKCXrSFUYypSc2fFx5KiFa96LBS+kg0Z+Z4dExwnhTSQBBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [protocol, method-runtime, callbacks, methods]
@@ -30,7 +30,7 @@ process outcome, result wire, echo fields, and any parent-view projection.
 Accepted-launch preflight, boot validation, and live dispatch require the same
 exact descriptor contract:
 `method_call_envelope` stdin, terminal `method_call_result` stdout,
-managed lifecycle, `http` callbacks, and the canonical
+managed lifecycle, `runtime_socket` callbacks, and the canonical
 `RYEOSD_THREAD_AUTH_TOKEN` binding from the `thread_auth_token` injection
 source. Normal method dispatch and method-based launch
 augmentations both use the descriptor-aware stdin builder and stdout decoder.

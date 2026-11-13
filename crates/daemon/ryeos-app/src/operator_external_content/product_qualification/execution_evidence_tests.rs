@@ -88,11 +88,11 @@ fn zero_participant_qualification_requires_exact_subordinate_authority() {
     use ryeos_engine::protocols::QualificationCallbackAuthority::{RemoteConsumer, ScopedProducer};
     for subordinate in [None, Some(ScopedProducer), Some(RemoteConsumer)] {
         for purpose in [None, Some(ScopedProducer), Some(RemoteConsumer)] {
-            for channel in [CallbackChannel::None, CallbackChannel::Http] {
+            for channel in [CallbackChannel::None, CallbackChannel::RuntimeSocket] {
                 let admitted = subordinate == purpose
                     && matches!(
                         (subordinate, channel),
-                        (None, CallbackChannel::None) | (Some(_), CallbackChannel::Http)
+                        (None, CallbackChannel::None) | (Some(_), CallbackChannel::RuntimeSocket)
                     );
                 assert_eq!(
                     require_zero_participant_lane(subordinate, purpose, channel).is_ok(),

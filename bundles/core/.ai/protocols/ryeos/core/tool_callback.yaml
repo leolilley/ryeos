@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-18T22:04:37Z:dc8ccd221fca128ed6c10117a2faf6cd84daa983f989eabcdf81ba1da98fe954:N9PUDsmL4EAWtADXKMHVu4slBWJ5XmholRWbs8sPmFVzP1oLoiJhT0gnodaUrLwM+OWNXlLD7tENY/YZ8oq6Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:27:41Z:adffa45e5aef0b213736dbba34ee8d985a66388fbc7a23abb484272e3935d131:hBqEOPZX+TXie1h9xAkAILMUsj0PgSRb+h8hrFxG4h3P6IUrvXyDRkT4q3kQtcKXV8oLTUGBFlYd+Ua/9jYrDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: tool_callback
 category: ryeos/core
@@ -23,4 +23,4 @@ capabilities:
   allows_detached: true
 lifecycle:
   mode: detached_ok
-callback_channel: http
+callback_channel: runtime_socket

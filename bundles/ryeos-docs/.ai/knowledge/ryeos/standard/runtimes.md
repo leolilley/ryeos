@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:fb2da90840ad873c1f9a633b40c33481adb125ebc1d54b3573056c348a954c5c:P4wRS8imEklTN5MvKZApsfXoArED74TDKxqr6S7Fa70c2f429aYGOiUoT1wegv/B+bX2JkqWscu6WDOP5cO0BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:27:41Z:46bb6c1aaa92434114201437ed4d80c2ebfb71c292ba2ba1aa14a338067f859b:y0B/n3nHybm2SD0KzznHDe+Wc3+bESJjwIe4SEeCfO3SPowTDYYaMsL9fDeEbef3J2J6gDXPZKTm3j6ku5yLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [runtime, directive-runtime, graph-runtime, knowledge-runtime, llm]
@@ -54,7 +54,7 @@ The runtime resolves the model from the directive's `model` config:
 ### Tool Dispatch
 Tools declared in the directive's `actions` are presented to the LLM
 as available functions. When the LLM calls one, the runtime dispatches
-through the daemon's HTTP callback channel, which enforces permissions.
+through the daemon's runtime socket callback channel, which enforces permissions.
 
 ## Graph Runtime (`runtime:graph-runtime`)
 
