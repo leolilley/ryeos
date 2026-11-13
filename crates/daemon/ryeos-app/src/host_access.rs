@@ -303,6 +303,305 @@ pub fn requires_scope(admitted: Option<&AdmittedHostAccess>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_node_runtime::node_policy::sections::host_access::{
+        HostAccessGrant, HostAccessRuntimePin,
+    };
+
+    const ITEM: &str = "tool:ryeos/development/dev-host/guarded-cargo";
+    const RUNTIME: &str = "tool:ryeos/core/runtimes/python/script";
+
+    fn signer() -> String {
+        "a".repeat(64)
+    }
+
+    fn grant(origins: Vec<HostAccessOrigin>) -> HostAccessGrant {
+        HostAccessGrant {
+            id: "guarded-cargo".into(),
+            item: ITEM.into(),
+            signer: signer(),
+            source_closure: Some("b".repeat(64)),
+            runtime: HostAccessRuntimePin {
+                runtime_ref: RUNTIME.into(),
+                content_hash: "c".repeat(64),
+            },
+            origins,
+            host_env: vec!["PATH".into()],
+            containment: HostAccessContainment::GroupAllowed,
+        }
+    }
+
+    /// A composed App on a lane that offers host access, holding `grants`.
+    fn state_with(
+        root: &std::path::Path,
+        lane: IsolationHostDirect,
+        grants: Vec<HostAccessGrant>,
+    ) -> (crate::state_store::test_native::TestStateStore, AppState) {
+        let (store, mut state) = crate::state::test_support::build(root).unwrap();
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+        policy.host_direct = lane;
+        state.isolation = std::sync::Arc::new(IsolationRuntime::for_test_policy(policy).unwrap());
+        state.node_policy = std::sync::Arc::new(
+            ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
+                std::sync::Arc::new(NodeHostAccessPolicy { schema: 1, grants }),
+            ]),
+        );
+        (store, state)
+    }
+
+    fn operator(state: &AppState) -> String {
+        NodeIdentity::load(&state.config.operator_signing_key_path)
+            .unwrap()
+            .principal_id()
+    }
+
+    fn subject<'a>(signer: &'a str, closure: &'a str) -> HostAccessSubject<'a> {
+        HostAccessSubject {
+            item: ITEM,
+            signer: Some(signer),
+            source_closure: Some(closure),
+            runtime: None,
+        }
+    }
+
+    fn caller<'a>(
+        state: &'a AppState,
+        principal: &'a str,
+        context: Option<&'a HandlerContext>,
+    ) -> HostAccessCaller<'a> {
+        let site = state.threads.site_id();
+        HostAccessCaller {
+            acting_principal: principal,
+            handler_context: context,
+            target_site_id: None,
+            current_site_id: site,
+            origin_site_id: site,
+            parent_thread_id: None,
+            scheduled: false,
+        }
+    }
+
+    fn local_operator(principal: &str) -> HandlerContext {
+        HandlerContext::new_with_authority(
+            principal.to_owned(),
+            vec!["*".into()],
+            true,
+            Some(AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        )
+    }
+
+    fn refused(result: Result<AdmittedHostAccess, HostAccessRefusal>) -> HostAccessRefusal {
+        match result {
+            Ok(admitted) => panic!("expected a refusal, admitted {admitted:?}"),
+            Err(refusal) => refusal,
+        }
+    }
+
+    #[test]
+    fn the_configured_operator_is_admitted_with_the_exact_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = state_with(
+            root.path(),
+            IsolationHostDirect::OperatorGranted,
+            vec![grant(vec![HostAccessOrigin::Direct])],
+        );
+        let principal = operator(&state);
+        let context = local_operator(&principal);
+        let (signer, closure) = (signer(), "b".repeat(64));
+        let admitted = admit(
+            &state,
+            &state.engine,
+            &subject(&signer, &closure),
+            &caller(&state, &principal, Some(&context)),
+        )
+        .unwrap();
+        assert_eq!(admitted.grant().grant_id, "guarded-cargo");
+        assert_eq!(admitted.grant().origin, "direct");
+        assert_eq!(admitted.grant().runtime_ref, RUNTIME);
+        assert!(!admitted.requires_scope());
+        assert_eq!(
+            admitted.grant().policy_generation,
+            state.node_policy.generation_digest()
+        );
+    }
+
+    #[test]
+    fn an_unavailable_lane_refuses_first() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = state_with(
+            root.path(),
+            IsolationHostDirect::Unavailable,
+            vec![grant(vec![HostAccessOrigin::Direct])],
+        );
+        let principal = operator(&state);
+        let (signer, closure) = (signer(), "b".repeat(64));
+        let refusal = refused(admit(
+            &state,
+            &state.engine,
+            &subject(&signer, &closure),
+            &caller(&state, &principal, None),
+        ));
+        assert_eq!(refusal.code, HostAccessRefusal::LANE_UNAVAILABLE);
+        assert!(refusal.message.contains("unavailable"), "{refusal}");
+    }
+
+    #[test]
+    fn host_access_principal_refused_for_anyone_but_the_local_operator() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = state_with(
+            root.path(),
+            IsolationHostDirect::OperatorGranted,
+            vec![grant(vec![HostAccessOrigin::Direct])],
+        );
+        let (signer, closure) = (signer(), "b".repeat(64));
+        let item = subject(&signer, &closure);
+
+        // Another principal holding `*` is still refused.
+        let other = format!("fp:{}", "d".repeat(64));
+        let context = local_operator(&other);
+        let refusal = refused(admit(
+            &state,
+            &state.engine,
+            &item,
+            &caller(&state, &other, Some(&context)),
+        ));
+        assert_eq!(refusal.code, HostAccessRefusal::PRINCIPAL_REFUSED);
+        assert!(refusal.message.contains(&other), "{refusal}");
+
+        // A browser session.
+        let session = "session:browser-1";
+        let context = HandlerContext::new(session.into(), vec!["*".into()], true);
+        let refusal = refused(admit(
+            &state,
+            &state.engine,
+            &item,
+            &caller(&state, session, Some(&context)),
+        ));
+        assert_eq!(refusal.code, HostAccessRefusal::PRINCIPAL_REFUSED);
+        assert!(refusal.message.contains("browser session"), "{refusal}");
+
+        // The operator's fingerprint over an unverified or non-local key class.
+        let principal = operator(&state);
+        for context in [
+            HandlerContext::new_with_authority(
+                principal.clone(),
+                vec!["*".into()],
+                false,
+                Some(AuthorizedKeyPrincipalClass::LocalClient),
+                None,
+            ),
+            HandlerContext::new_with_authority(
+                principal.clone(),
+                vec!["*".into()],
+                true,
+                Some(AuthorizedKeyPrincipalClass::RemoteNode),
+                None,
+            ),
+        ] {
+            let refusal = refused(admit(
+                &state,
+                &state.engine,
+                &item,
+                &caller(&state, &principal, Some(&context)),
+            ));
+            assert_eq!(refusal.code, HostAccessRefusal::PRINCIPAL_REFUSED);
+        }
+    }
+
+    #[test]
+    fn host_access_delegation_refused_for_remote_paths_and_unknown_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = state_with(
+            root.path(),
+            IsolationHostDirect::OperatorGranted,
+            vec![grant(vec![
+                HostAccessOrigin::Direct,
+                HostAccessOrigin::GraphChild,
+            ])],
+        );
+        let principal = operator(&state);
+        let (signer, closure) = (signer(), "b".repeat(64));
+        let item = subject(&signer, &closure);
+
+        let mut remote_target = caller(&state, &principal, None);
+        remote_target.target_site_id = Some("site:elsewhere");
+        let refusal = refused(admit(&state, &state.engine, &item, &remote_target));
+        assert_eq!(refusal.code, HostAccessRefusal::DELEGATION_REFUSED);
+        assert!(refusal.message.contains("site:elsewhere"), "{refusal}");
+
+        let mut remote_origin = caller(&state, &principal, None);
+        remote_origin.origin_site_id = "site:origin";
+        let refusal = refused(admit(&state, &state.engine, &item, &remote_origin));
+        assert_eq!(refusal.code, HostAccessRefusal::DELEGATION_REFUSED);
+
+        let forwarded = HandlerContext::new_with_authority(
+            principal.clone(),
+            vec!["*".into()],
+            true,
+            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some("site:source".into()),
+        );
+        let refusal = refused(admit(
+            &state,
+            &state.engine,
+            &item,
+            &caller(&state, &principal, Some(&forwarded)),
+        ));
+        assert_eq!(refusal.code, HostAccessRefusal::DELEGATION_REFUSED);
+        assert!(refusal.message.contains("site:source"), "{refusal}");
+
+        // A child whose parent is not a known operator graph thread.
+        let mut child = caller(&state, &principal, None);
+        child.parent_thread_id = Some("T-not-a-thread");
+        let refusal = refused(admit(&state, &state.engine, &item, &child));
+        assert_eq!(refusal.code, HostAccessRefusal::DELEGATION_REFUSED);
+        assert!(refusal.message.contains("T-not-a-thread"), "{refusal}");
+    }
+
+    #[test]
+    fn origin_and_signer_refusals_name_what_was_seen() {
+        let root = tempfile::tempdir().unwrap();
+        let (_store, state) = state_with(
+            root.path(),
+            IsolationHostDirect::OperatorGranted,
+            vec![grant(vec![HostAccessOrigin::Direct])],
+        );
+        let principal = operator(&state);
+        let (signer, closure) = (signer(), "b".repeat(64));
+        let mut scheduled = caller(&state, &principal, None);
+        scheduled.scheduled = true;
+        let refusal = refused(admit(
+            &state,
+            &state.engine,
+            &subject(&signer, &closure),
+            &scheduled,
+        ));
+        assert_eq!(refusal.code, HostAccessRefusal::ORIGIN_NOT_GRANTED);
+        assert!(refusal.message.contains("schedule"), "{refusal}");
+
+        let node_key = state.identity.fingerprint().to_owned();
+        let refusal = refused(admit(
+            &state,
+            &state.engine,
+            &subject(&node_key, &closure),
+            &caller(&state, &principal, None),
+        ));
+        assert_eq!(refusal.code, HostAccessRefusal::SIGNER_REFUSED);
+
+        let unsigned = HostAccessSubject {
+            item: ITEM,
+            signer: None,
+            source_closure: Some(&closure),
+            runtime: None,
+        };
+        let refusal = refused(admit(
+            &state,
+            &state.engine,
+            &unsigned,
+            &caller(&state, &principal, None),
+        ));
+        assert_eq!(refusal.code, HostAccessRefusal::SIGNER_REFUSED);
+    }
 
     #[test]
     fn source_closure_digest_reads_only_the_manifest_hash() {

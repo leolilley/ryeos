@@ -6202,6 +6202,26 @@ impl IsolationRuntime {
         .expect("compiled disabled isolation fixture policy is valid")
     }
 
+    /// A policy-free runtime compiled from an explicit, unenforced test
+    /// policy, for composed tests that need a lane field such as
+    /// `host_direct` without an app root or backend.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_policy(policy: IsolationPolicy) -> Result<Self, EngineError> {
+        Self::resolve(IsolationRuntimeResolution {
+            policy,
+            source: None,
+            digest: None,
+            app_root: None,
+            app_root_authority: None,
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+            process_scope_provider: None,
+            process_scope_authority_digest: None,
+            scope_admission: ProcessScopeAdmission::DefinitionValidation,
+        })
+    }
+
     /// Construct the explicit disabled execution boundary with exact app-root
     /// and runtime-workspace descriptor authority. Downstream composed tests
     /// use this instead of the authoring-only runtime when they exercise the

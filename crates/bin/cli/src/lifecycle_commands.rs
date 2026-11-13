@@ -3065,20 +3065,33 @@ fn inspect_host_access(app_root: &std::path::Path) -> Result<HostAccessInspectio
 /// survives cancel) and fails when a grant names an unpinned signer or the
 /// node's own key, which a valid generation never contains.
 fn host_access_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::FAIL;
+    let fix = HOST_ACCESS_FIX;
+    let inspected = inspect_host_access(app_root);
+    match inspected {
+        Ok((policy, lane, trust_store, node_key)) => {
+            host_access_row(&policy, &lane, &trust_store, &node_key)
+        }
+        Err(error) => check(
+            "host_access",
+            FAIL,
+            serde_json::json!({ "error": format!("{error:#}"), "fix": fix }),
+        ),
+    }
+}
+
+const HOST_ACCESS_FIX: &str = "ryeos node host-access grant|revoke|list (with --project to compare grants with an item's current bytes)";
+
+/// The `host_access` doctor row for one node's grants and lane.
+fn host_access_row(
+    policy: &ryeos_node_runtime::node_policy::sections::host_access::NodeHostAccessPolicy,
+    lane: &ryeos_engine::isolation::IsolationPolicy,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    node_key: &str,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
     use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
     use ryeos_node_runtime::node_policy::sections::host_access::HostAccessContainment;
-    let fix = "ryeos node host-access grant|revoke|list (with --project to compare grants with an item's current bytes)";
-    let inspected = inspect_host_access(app_root);
-    let (policy, lane, trust_store, node_key) = match inspected {
-        Ok(inspected) => inspected,
-        Err(error) => {
-            return check(
-                "host_access",
-                FAIL,
-                serde_json::json!({ "error": format!("{error:#}"), "fix": fix }),
-            );
-        }
-    };
+    let fix = HOST_ACCESS_FIX;
     let mut status = OK;
     let mut findings = Vec::new();
     let grants = policy
@@ -4229,6 +4242,125 @@ fn policy_carry_choices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod host_access_doctor {
+        use super::*;
+        use ryeos_node_runtime::node_policy::sections::host_access::{
+            HostAccessContainment, HostAccessGrant, HostAccessOrigin, HostAccessRuntimePin,
+            NodeHostAccessPolicy,
+        };
+
+        fn signer_key() -> lillux::crypto::SigningKey {
+            lillux::crypto::SigningKey::from_bytes(&[7u8; 32])
+        }
+
+        fn pinned() -> (ryeos_engine::trust::TrustStore, String) {
+            let key = signer_key().verifying_key();
+            let fingerprint = lillux::signature::compute_fingerprint(&key);
+            let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+                ryeos_engine::trust::TrustedSigner {
+                    fingerprint: fingerprint.clone(),
+                    verifying_key: key,
+                    label: Some("dev publisher".into()),
+                },
+            ]);
+            (trust, fingerprint)
+        }
+
+        fn grant(signer: &str, containment: HostAccessContainment) -> HostAccessGrant {
+            HostAccessGrant {
+                id: "guarded-cargo".into(),
+                item: "tool:ryeos/development/dev-host/guarded-cargo".into(),
+                signer: signer.to_owned(),
+                source_closure: None,
+                runtime: HostAccessRuntimePin {
+                    runtime_ref: "tool:ryeos/core/runtimes/python/script".into(),
+                    content_hash: "c".repeat(64),
+                },
+                origins: vec![HostAccessOrigin::Direct],
+                host_env: vec!["PATH".into()],
+                containment,
+            }
+        }
+
+        fn row(grants: Vec<HostAccessGrant>) -> ryeos_core_tools::actions::doctor::CheckResult {
+            let (trust, _) = pinned();
+            let mut lane = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+            lane.host_direct = ryeos_engine::isolation::IsolationHostDirect::OperatorGranted;
+            host_access_row(
+                &NodeHostAccessPolicy { schema: 1, grants },
+                &lane,
+                &trust,
+                &"e".repeat(64),
+            )
+        }
+
+        #[test]
+        fn doctor_host_access_row_lists_grants() {
+            let (_, fingerprint) = pinned();
+            let result = row(vec![grant(
+                &fingerprint,
+                HostAccessContainment::ScopeRequired,
+            )]);
+            assert_eq!(result.name, "host_access");
+            assert_eq!(result.status, ryeos_core_tools::actions::doctor::OK);
+            assert_eq!(result.detail["host_direct"], "operator_granted");
+            let listed = &result.detail["grants"][0];
+            assert_eq!(listed["id"], "guarded-cargo");
+            assert_eq!(listed["signer_label"], "dev publisher");
+            assert_eq!(listed["containment"], "scope_required");
+            assert!(
+                result.detail["fix"]
+                    .as_str()
+                    .unwrap()
+                    .contains("host-access")
+            );
+            let empty = row(Vec::new());
+            assert_eq!(empty.status, ryeos_core_tools::actions::doctor::OK);
+        }
+
+        #[test]
+        fn doctor_host_access_warns_on_group_containment() {
+            let (_, fingerprint) = pinned();
+            let result = row(vec![grant(
+                &fingerprint,
+                HostAccessContainment::GroupAllowed,
+            )]);
+            assert_eq!(result.status, ryeos_core_tools::actions::doctor::WARN);
+            assert!(
+                result.detail["findings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("survive cancel")
+            );
+        }
+
+        #[test]
+        fn doctor_host_access_fails_on_an_unpinned_or_node_signer() {
+            let unpinned = row(vec![grant(
+                &"f".repeat(64),
+                HostAccessContainment::ScopeRequired,
+            )]);
+            assert_eq!(unpinned.status, ryeos_core_tools::actions::doctor::FAIL);
+            assert!(
+                unpinned.detail["findings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("not pinned")
+            );
+            let node = row(vec![grant(
+                &"e".repeat(64),
+                HostAccessContainment::ScopeRequired,
+            )]);
+            assert_eq!(node.status, ryeos_core_tools::actions::doctor::FAIL);
+            assert!(
+                node.detail["findings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("own key")
+            );
+        }
+    }
 
     #[test]
     fn capacity_reissue_refuses_while_the_state_lock_is_held_and_names_the_uninitialized_node_next()
