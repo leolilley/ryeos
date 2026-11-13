@@ -163,7 +163,9 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             None,
         )
         .map_err(|error| {
-            RouteDispatchError::BadRequest(format!("launch admission failed: {error}"))
+            crate::routes::launch::typed_launch_policy_refusal(&error).unwrap_or_else(|| {
+                RouteDispatchError::BadRequest(format!("launch admission failed: {error}"))
+            })
         })?;
         if !preflight.class.persists_pre_minted_root() {
             return Err(RouteDispatchError::BadRequest(

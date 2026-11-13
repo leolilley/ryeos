@@ -231,6 +231,7 @@ mod tests {
             execute: None,
             request: Default::default(),
             source_file: Default::default(),
+            authority: None,
         }
     }
 
@@ -254,6 +255,7 @@ mod tests {
             execute: None,
             request: Default::default(),
             source_file: Default::default(),
+            authority: None,
         }
     }
 

@@ -762,6 +762,7 @@ fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
             body: RawRequestBody::Json,
         },
         source_file: "/test/route.yaml".into(),
+        authority: None,
     };
     vec![
         route(

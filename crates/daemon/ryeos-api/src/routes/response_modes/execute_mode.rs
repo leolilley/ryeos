@@ -1957,7 +1957,9 @@ async fn admit_execution_with_publication(
             let _preflight_work_timer = preflight_timings
                 .as_ref()
                 .map(|timings| timings.nested("preflight_admission", "preflight_blocking_work"));
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            // The caller must cover what the item declares; an accepted launch
+            // refuses that here, before a thread id exists.
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -1969,7 +1971,12 @@ async fn admit_execution_with_publication(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -2318,7 +2325,7 @@ async fn admit_execution_with_publication(
         let preflight_state = state.clone();
         let preflight_timings = launch_timings.clone();
         let preflight = tokio::task::spawn_blocking(move || {
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -2330,7 +2337,12 @@ async fn admit_execution_with_publication(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -3676,6 +3688,7 @@ mod tests {
             execute: None,
             request: RawRequest { body },
             source_file: std::path::PathBuf::from("/test/execute.yaml"),
+            authority: None,
         }
     }
 

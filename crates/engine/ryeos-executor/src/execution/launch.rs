@@ -3476,25 +3476,106 @@ pub fn covering_authority_for(
 }
 
 /// Typed 403 refusal naming the item, the caller, every uncovered cap, and the cure.
-fn caller_capability_not_covered(
+fn caller_capability_not_covered_error(
     item_ref: &str,
     caller_principal: &str,
     uncovered: &[String],
-) -> BuildAndLaunchError {
+) -> DispatchError {
     let caps = uncovered
         .iter()
         .map(|cap| format!("`{cap}`"))
         .collect::<Vec<_>>()
         .join(", ");
-    BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+    DispatchError::LaunchPolicyForbidden {
         code: "caller_capability_not_covered".to_owned(),
         message: format!(
             "caller `{caller_principal}` does not hold every capability `{item_ref}` declares: \
              uncovered {caps}. A thread never holds authority its caller did not lend; \
-             grant the caller {caps}, or narrow the item's `requires.capabilities.declared`"
+             grant the caller {caps} (a route principal holds what its signed route lists under \
+             `authority.capabilities`, within its bundle manifest's \
+             `runtime_authority.route_capabilities`; a schedule holds its registered \
+             `capabilities`), or narrow the item's `requires.capabilities.declared`"
         ),
         binding: None,
-    }))
+    }
+}
+
+fn caller_capability_not_covered(
+    item_ref: &str,
+    caller_principal: &str,
+    uncovered: &[String],
+) -> BuildAndLaunchError {
+    BuildAndLaunchError::LaunchPreparation(Box::new(caller_capability_not_covered_error(
+        item_ref,
+        caller_principal,
+        uncovered,
+    )))
+}
+
+/// Refuse, before any thread exists, a root launch whose caller does not cover
+/// every capability the composed item declares: the same judgement root
+/// admission makes at launch, run on the exact admitted resolution so a
+/// synchronous caller learns of the refusal instead of an accepted-then-failed
+/// thread. Reserved or malformed declarations are refused here as launch
+/// would refuse them.
+pub fn preflight_root_caller_coverage(
+    composed: &ryeos_engine::resolution::KindComposedView,
+    caller_scopes: &[String],
+    caller_principal: &str,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    require_declared_caps_covered(
+        derive_effective_caps(composed),
+        caller_scopes,
+        caller_principal,
+        item_ref,
+    )
+}
+
+/// Refuse unless `caller_scopes` cover every cap in `declared` (an item's
+/// composed `requires.capabilities.declared`). Reserved and malformed
+/// declarations are refused as launch refuses them.
+pub fn require_declared_caps_covered(
+    declared: Vec<String>,
+    caller_scopes: &[String],
+    caller_principal: &str,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&declared).map_err(
+        |error| DispatchError::CapabilityRejected {
+            reason: error.to_string(),
+        },
+    )?;
+    let uncovered = uncovered_by_caller(caller_scopes, &declared);
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    Err(caller_capability_not_covered_error(
+        item_ref,
+        caller_principal,
+        &uncovered,
+    ))
+}
+
+/// The capabilities the composed item at `item_ref` declares, resolved from the
+/// engine without a launch. This is the declaration root admission will judge,
+/// read for callers that must refuse a mismatch before the launch exists (a
+/// schedule registration).
+pub fn composed_declared_caps(
+    engine: &ryeos_engine::engine::Engine,
+    plan_context: &ryeos_engine::contracts::PlanContext,
+    item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+    materialized_project_root: Option<PathBuf>,
+) -> Result<Vec<String>, ryeos_engine::error::EngineError> {
+    let resolved = engine.resolve(plan_context, item_ref)?;
+    let attestation = engine.verify_attested(plan_context, resolved)?;
+    let closure = engine.resolve_verified_resolution_closure(
+        plan_context,
+        &attestation,
+        materialized_project_root,
+    )?;
+    let (resolution, _, _) = closure.into_parts();
+    Ok(derive_effective_caps(&resolution.composed))
 }
 
 /// Every cap in `caps` that no caller scope covers, sorted and de-duplicated.
@@ -12591,6 +12672,52 @@ mod tests {
         assert!(!message.contains("`ryeos.execute.tool.echo`"));
         assert!(message.contains("fp:caller"));
         assert!(message.contains("narrow the item's `requires.capabilities.declared`"));
+    }
+
+    #[test]
+    fn preflight_coverage_refuses_with_the_code_root_admission_would_use() {
+        let scopes = caps(&["ryeos.execute.tool.echo"]);
+        let error = require_declared_caps_covered(
+            caps(&[
+                "ryeos.execute.tool.echo",
+                "ryeos.execute.service.bundle/list",
+            ]),
+            &scopes,
+            "route:arc/ingest",
+            "directive:arc/ingest",
+        )
+        .unwrap_err();
+        let DispatchError::LaunchPolicyForbidden { code, message, .. } = error else {
+            panic!("expected a launch-policy refusal");
+        };
+        assert_eq!(code, "caller_capability_not_covered");
+        assert!(message.contains("route:arc/ingest"));
+        assert!(message.contains("`ryeos.execute.service.bundle/list`"));
+        assert!(!message.contains("`ryeos.execute.tool.echo`"));
+        assert!(message.contains("authority.capabilities"));
+        assert!(message.contains("narrow the item's `requires.capabilities.declared`"));
+    }
+
+    #[test]
+    fn preflight_coverage_admits_a_covering_caller_and_refuses_reserved_declarations() {
+        assert!(
+            require_declared_caps_covered(
+                caps(&["ryeos.execute.tool.echo"]),
+                &caps(&["ryeos.execute.tool.*"]),
+                "fp:caller",
+                "directive:x",
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            require_declared_caps_covered(
+                caps(&["ryeos.get.vault.child/oauth"]),
+                &caps(&["*"]),
+                "fp:caller",
+                "directive:x",
+            ),
+            Err(DispatchError::CapabilityRejected { .. })
+        ));
     }
 
     #[test]

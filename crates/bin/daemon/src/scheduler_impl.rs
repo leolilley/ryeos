@@ -524,6 +524,9 @@ impl SchedulerContext for AppSchedulerContext {
             &self.0,
             None,
         )?;
+        // The schedule's registered capabilities are the caller; they must
+        // cover what the item declares before any thread is born.
+        ryeos_executor::dispatch::require_preflight_caller_coverage(&preflight, &exec_ctx)?;
         if !preflight.class.produces_admitted_launch_capsule() {
             bail!(
                 "scheduled item `{}` resolves to `{}` execution, which cannot publish an admitted launch capsule at the scheduled durable-handoff boundary",
