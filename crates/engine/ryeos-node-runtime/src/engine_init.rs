@@ -46,6 +46,7 @@ struct VerifiedBundleGenerationRecord {
     root_authority: Arc<lillux::PinnedDirectory>,
     manifest_body_digest: String,
     manifest_signer_fingerprint: String,
+    owned_namespaces: Vec<String>,
     executor_manifest: Option<ryeos_engine::binary_resolver::BundleExecutorManifestIdentity>,
 }
 
@@ -88,10 +89,17 @@ impl VerifiedBundleGeneration {
                 root_authority: Arc::new(root_authority),
                 manifest_body_digest: manifest.body_digest,
                 manifest_signer_fingerprint: manifest.signer_fingerprint,
+                owned_namespaces: manifest.owns_namespaces,
                 executor_manifest,
             });
         }
 
+        let claims: Vec<(String, Vec<String>)> = bundles
+            .iter()
+            .map(|bundle| (bundle.name.clone(), bundle.owned_namespaces.clone()))
+            .collect();
+        ryeos_engine::item_resolution::check_owned_namespace_claims(&claims)
+            .map_err(|error| anyhow::anyhow!("installed bundles: {error}"))?;
         let generation = Self { records, bundles };
         generation.ensure_current(node_trust_store)?;
         Ok(generation)
@@ -115,6 +123,7 @@ impl VerifiedBundleGeneration {
                 |bundle| ryeos_engine::item_resolution::RegisteredBundleRoot {
                     name: bundle.name.clone(),
                     canonical_root: bundle.canonical_root.clone(),
+                    owned_namespaces: bundle.owned_namespaces.clone(),
                 },
             )
             .collect()
@@ -1357,6 +1366,7 @@ mod isolation_generation_tests {
             root_authority: Arc::new(authority),
             manifest_body_digest: "a".repeat(64),
             manifest_signer_fingerprint: "b".repeat(64),
+            owned_namespaces: Vec::new(),
             executor_manifest: None,
         };
 

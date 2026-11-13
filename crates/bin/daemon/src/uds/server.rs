@@ -5959,6 +5959,11 @@ mod tests {
             "tool:example-bundle/send"
         );
         assert_eq!(
+            rpc_ok(&append)["event"]["attribution"]["actor"],
+            "user:test",
+            "actor must be the thread's recorded principal"
+        );
+        assert_eq!(
             rpc_ok(&append)["event"]["attachments"][0]["name"],
             "checkpoint"
         );

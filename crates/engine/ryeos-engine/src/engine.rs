@@ -79,6 +79,10 @@ pub struct EffectiveItem {
     pub derived: std::collections::HashMap<String, Value>,
     pub policy_facts: std::collections::HashMap<String, Value>,
     pub diagnostics: Vec<EffectiveItemDiagnostic>,
+    /// True when the winner came from project space and a bundle also ships
+    /// an item under the same ref, so the project copy shadows the bundle's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shadows_bundle_item: bool,
 }
 
 /// Trust, parser dispatch, and the downstream cache fingerprint captured for
@@ -3998,6 +4002,19 @@ impl Engine {
             });
         }
 
+        let shadows_bundle_item = output.root.source_space == crate::contracts::ItemSpace::Project
+            && self
+                .kinds
+                .get(&request.item_ref.kind)
+                .is_some_and(|schema| {
+                    crate::item_resolution::resolve_item_full(
+                        &self.resolution_roots(None),
+                        schema,
+                        &request.item_ref,
+                    )
+                    .is_ok()
+                });
+
         Ok(EffectiveItem {
             requested_ref: request.item_ref.to_string(),
             canonical_ref: output.root.resolved_ref.clone(),
@@ -4016,6 +4033,7 @@ impl Engine {
             derived: output.composed.derived,
             policy_facts: output.composed.policy_facts,
             diagnostics,
+            shadows_bundle_item,
         })
     }
 
@@ -4469,14 +4487,20 @@ impl Engine {
     pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
         let mut ordered = roots.ordered.clone();
         let Some(node_config_root) = &self.node_config_root else {
-            return ResolutionRoots { ordered };
+            return ResolutionRoots {
+                owned_namespaces: roots.owned_namespaces.clone(),
+                ordered,
+            };
         };
         let node_config_ai_root = node_config_root.join(crate::AI_DIR);
         if ordered
             .iter()
             .any(|root| root.ai_root == node_config_ai_root)
         {
-            return ResolutionRoots { ordered };
+            return ResolutionRoots {
+                owned_namespaces: roots.owned_namespaces.clone(),
+                ordered,
+            };
         }
         let position = ordered
             .iter()
@@ -4492,7 +4516,10 @@ impl Engine {
                 content_root: Some(node_config_root.clone()),
             },
         );
-        ResolutionRoots { ordered }
+        ResolutionRoots {
+            owned_namespaces: roots.owned_namespaces.clone(),
+            ordered,
+        }
     }
 
     /// Composite cache fingerprint over the kind registry and the
@@ -4886,6 +4913,7 @@ formats:
         )
         .with_trust_store(trust_store)
         .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }]);
@@ -5003,10 +5031,12 @@ formats:
         .with_composers(composers)
         .with_registered_bundle_roots(vec![
             crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "early".to_owned(),
                 canonical_root: early_root,
             },
             crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "chosen".to_owned(),
                 canonical_root: chosen_root.clone(),
             },
@@ -5135,6 +5165,7 @@ formats:
         .with_node_trust_store(test_trust_store())
         .with_composers(composers)
         .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }]);
@@ -5406,6 +5437,7 @@ formats:
     #[test]
     fn retained_generation_identity_does_not_alias_same_registered_paths() {
         let roots = vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "same-name".to_string(),
             canonical_root: PathBuf::from("/same/canonical/root"),
         }];
@@ -5466,6 +5498,7 @@ formats:
     fn registered_resolution_roots_keep_project_ai_root_first() {
         let engine = test_engine().with_registered_bundle_roots(vec![
             crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "core".to_owned(),
                 canonical_root: PathBuf::from("/bundles/core"),
             },
@@ -6101,6 +6134,7 @@ formats:
         .with_trust_store(node_trust.clone())
         .with_node_trust_store(node_trust)
         .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }])

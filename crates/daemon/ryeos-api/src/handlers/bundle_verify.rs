@@ -201,18 +201,22 @@ mod tests {
         let request: Request = serde_json::from_value(json!({"source":"/candidate"})).unwrap();
         let registered = [
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "core".into(),
                 canonical_root: "/core".into(),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "candidate".into(),
                 canonical_root: "/installed-old".into(),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "same-path".into(),
                 canonical_root: "/candidate".into(),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "graph".into(),
                 canonical_root: "/graph".into(),
             },
@@ -242,6 +246,7 @@ mod tests {
         }))
         .unwrap();
         let registered = [RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "unused".into(),
             canonical_root: "/not-selected".into(),
         }];

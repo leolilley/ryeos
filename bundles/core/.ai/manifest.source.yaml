@@ -2,6 +2,8 @@ name: core
 version: "0.5.0"
 description: "Engine foundation: kind schemas, handlers, parsers, services, tools"
 requires_kinds: []
+owns_namespaces:
+  - ryeos/core
 runtime_authority:
   project_snapshots: [status, log, show, create]
 isolation_backends:

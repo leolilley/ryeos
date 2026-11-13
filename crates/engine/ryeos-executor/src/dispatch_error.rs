@@ -64,6 +64,30 @@ pub enum DispatchError {
     InvalidRef(String, String),
     #[error("kind '{kind}' is not root-executable: {detail}")]
     NotRootExecutable { kind: String, detail: String },
+    /// One item name exists in more than one format in the folder that would
+    /// win resolution. Resolution never ranks formats silently; the operator
+    /// keeps exactly one of the candidate files.
+    #[error(
+        "item '{item_ref}' exists in more than one format in {space} ({}); keep exactly one of these files",
+        candidates.join(", ")
+    )]
+    AmbiguousItemFormats {
+        item_ref: String,
+        space: String,
+        candidates: Vec<String>,
+    },
+    /// A project file sits inside a namespace an installed bundle owns. The
+    /// project cannot shadow it; the file moves to the project's own
+    /// namespace and whatever named it is repointed.
+    #[error(
+        "project file {project_path} for '{item_ref}' is inside namespace '{namespace}' owned by bundle '{bundle}'; a project cannot shadow an owned namespace"
+    )]
+    ReservedNamespaceShadow {
+        item_ref: String,
+        namespace: String,
+        bundle: String,
+        project_path: String,
+    },
     #[error(
         "insufficient capabilities for runtime '{runtime}': required {required:?}, caller_scopes {caller_scopes:?}"
     )]
@@ -506,6 +530,8 @@ impl DispatchError {
             // State-conflict: push-first, checkout race, etc.
             Self::ProjectSource(_)
             | Self::ProjectSourcePushFirst(_)
+            | Self::AmbiguousItemFormats { .. }
+            | Self::ReservedNamespaceShadow { .. }
             | Self::Conflict(_)
             | Self::LaunchCancelled { .. }
             | Self::RuntimeActionResultUnavailable { .. } => StatusCode::CONFLICT,
@@ -581,6 +607,8 @@ impl DispatchError {
         match self {
             Self::InvalidRef(..) => "invalid_ref",
             Self::NotRootExecutable { .. } => "not_root_executable",
+            Self::AmbiguousItemFormats { .. } => "ambiguous_item_formats",
+            Self::ReservedNamespaceShadow { .. } => "reserved_namespace_shadow",
             Self::InsufficientCaps { .. } => "insufficient_caps",
             Self::AliasCycle { .. } => "alias_cycle",
             Self::AliasChainTooLong { .. } => "alias_chain_too_long",

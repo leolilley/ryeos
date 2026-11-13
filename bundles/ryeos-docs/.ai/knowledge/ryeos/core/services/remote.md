@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:47:38Z:043ca9fec04fc72ad3635bf210a0885ff34a1402ae189f02a7d46dfd8ceafdad:ePyLOEPUhVvZva0JN38COVCxdjBhRqTdL8biK3ImDgnYN98F2WmuY9cQc0Euc1jWdRFKk+481yPCD1+MSB2wBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:25:09Z:fa61d1d18d450e130e0c415a1f5a3bd9570a81c74997254f65db28f1422806c1:j7IbfzTAe60EZ4hEfwOFQOJVsVYEATaUY1nDSd75ckUoShorq5cdo9xVs4aDwarpKM4W7uy/V4wRb9xxy+VjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -29,7 +29,7 @@ The authoritative matrix is in
 | `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
 | `remote/reconcile-project-head` | `remote.reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` |
-| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
+| `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |

@@ -5466,6 +5466,32 @@ struct ValidatedDispatchRoot {
         Option<std::sync::Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
 }
 
+/// The typed refusal for a project file inside a bundle-owned namespace, when
+/// `error` is (or wraps) that engine refusal. Executor-chain hops resolve
+/// through the same engine check, so launch paths use this to keep the
+/// refusal typed instead of folding it into a generic chain failure.
+pub(crate) fn reserved_namespace_shadow_error(
+    error: &ryeos_engine::error::EngineError,
+) -> Option<DispatchError> {
+    use ryeos_engine::error::EngineError;
+
+    match error {
+        EngineError::Shared(inner) => reserved_namespace_shadow_error(inner),
+        EngineError::ReservedNamespaceShadow {
+            canonical_ref,
+            namespace,
+            bundle,
+            project_path,
+        } => Some(DispatchError::ReservedNamespaceShadow {
+            item_ref: canonical_ref.clone(),
+            namespace: namespace.clone(),
+            bundle: bundle.clone(),
+            project_path: project_path.display().to_string(),
+        }),
+        _ => None,
+    }
+}
+
 fn map_engine_root_resolution_error(
     error: &ryeos_engine::error::EngineError,
     requested_root: &str,
@@ -5491,9 +5517,21 @@ fn map_engine_root_resolution_error(
             kind: kind.clone(),
             detail: error.to_string(),
         }),
+        EngineError::AmbiguousResolution {
+            canonical_ref,
+            space,
+            candidates,
+        } => Some(DispatchError::AmbiguousItemFormats {
+            item_ref: canonical_ref.clone(),
+            space: space.clone(),
+            candidates: candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        }),
+        EngineError::ReservedNamespaceShadow { .. } => reserved_namespace_shadow_error(error),
         EngineError::ItemNotFound { .. }
         | EngineError::ItemResolutionUnavailable { .. }
-        | EngineError::AmbiguousResolution { .. }
         | EngineError::PinnedVersionNotFound { .. }
         | EngineError::NoExtensionsForKind { .. }
         | EngineError::SchemaLoaderError { .. }
@@ -6144,12 +6182,16 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                                         project_binding.execution_workspace(),
                                         admitted_request_snapshot.as_deref(),
                                     )
-                                    .map_err(|e| DispatchError::SchemaMisconfigured {
-                                        kind: v.resolved.kind.clone(),
-                                        detail: format!(
-                                            "failed to resolve executor-chain terminal for \
-                                             '{hop_ref}': {e}"
-                                        ),
+                                    .map_err(|e| {
+                                        reserved_namespace_shadow_error(&e).unwrap_or_else(|| {
+                                            DispatchError::SchemaMisconfigured {
+                                                kind: v.resolved.kind.clone(),
+                                                detail: format!(
+                                                    "failed to resolve executor-chain terminal for \
+                                                     '{hop_ref}': {e}"
+                                                ),
+                                            }
+                                        })
                                     })?;
                                     if terminal.kind
                                         == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch
@@ -6830,6 +6872,69 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_formats_map_to_typed_conflict() {
+        let error = anyhow::Error::new(ryeos_engine::error::EngineError::AmbiguousResolution {
+            canonical_ref: "tool:demo/x".to_string(),
+            space: "project (project)".to_string(),
+            candidates: vec![
+                std::path::PathBuf::from(".ai/tools/demo/x.py"),
+                std::path::PathBuf::from(".ai/tools/demo/x.yaml"),
+            ],
+        })
+        .context("admitted root resolution failed");
+
+        match map_root_resolution_validation_error(error, "tool:demo/x") {
+            DispatchError::AmbiguousItemFormats {
+                item_ref,
+                space,
+                candidates,
+            } => {
+                assert_eq!(item_ref, "tool:demo/x");
+                assert_eq!(space, "project (project)");
+                assert_eq!(
+                    candidates,
+                    vec![".ai/tools/demo/x.py", ".ai/tools/demo/x.yaml"]
+                );
+            }
+            other => panic!("expected ambiguous_item_formats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserved_namespace_shadow_maps_to_typed_conflict() {
+        let error = ryeos_engine::error::EngineError::ReservedNamespaceShadow {
+            canonical_ref: "tool:ryeos/core/runtimes/python/function".to_string(),
+            namespace: "ryeos/core".to_string(),
+            bundle: "core".to_string(),
+            project_path: std::path::PathBuf::from(
+                ".ai/tools/ryeos/core/runtimes/python/function.yaml",
+            ),
+        };
+        let direct = reserved_namespace_shadow_error(&error).expect("typed refusal");
+        assert_eq!(direct.code(), "reserved_namespace_shadow");
+        assert_eq!(direct.http_status(), axum::http::StatusCode::CONFLICT);
+
+        let wrapped = anyhow::Error::new(error).context("admitted root resolution failed");
+        match map_root_resolution_validation_error(wrapped, "tool:demo/x") {
+            DispatchError::ReservedNamespaceShadow {
+                item_ref,
+                namespace,
+                bundle,
+                project_path,
+            } => {
+                assert_eq!(item_ref, "tool:ryeos/core/runtimes/python/function");
+                assert_eq!(namespace, "ryeos/core");
+                assert_eq!(bundle, "core");
+                assert_eq!(
+                    project_path,
+                    ".ai/tools/ryeos/core/runtimes/python/function.yaml"
+                );
+            }
+            other => panic!("expected reserved_namespace_shadow, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn root_resolution_preserves_caller_and_configuration_error_classes() {
         let missing = anyhow::Error::new(ryeos_engine::error::EngineError::ItemNotFound {
             canonical_ref: "work:example/root".to_string(),
@@ -7066,6 +7171,7 @@ metadata:
         let registered_bundle_roots = bundle_roots
             .iter()
             .map(|root| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "example-bundle".to_owned(),
                 canonical_root: std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()),
             })

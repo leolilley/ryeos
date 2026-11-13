@@ -2941,6 +2941,7 @@ mod tests {
 
     fn roots_for(bundle_roots: &[&Path]) -> ResolutionRoots {
         ResolutionRoots {
+            owned_namespaces: Vec::new(),
             ordered: bundle_roots
                 .iter()
                 .map(|root| {

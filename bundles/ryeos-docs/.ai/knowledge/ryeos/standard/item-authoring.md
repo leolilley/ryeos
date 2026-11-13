@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:04:15Z:2750abc2b63c54263a86a6a187490b325e20d0c78842e524c8ec5cd763a18047:2ri+ztCW2ls8B/Hdd5gEee7u42yHNxUI+83Rl6l5btZT4EPTm4Gv6TaVA4bMX0LPc8kJ3bgSnHlcBA8MpMKUDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:39:30Z:f69fd1697a43474ba1f77518caaf0ececd406b9bd64401caa1bf3630e64d07a6:temchjigDjtuYSOe/6DOw9cmg7hA2dTjAzQaXyqdU/+Rctqg0vdIO3bTFmst+NqVZbQDXhGJbz3ppIWPt25YDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -137,6 +137,7 @@ On success the daemon:
 - derives the path from the kind schema's directory plus the bare id (rejecting
   symlinks and non-relative components),
 - parses and path-anchors the body against the kind schema,
+- checks the capability ceiling (below) before anything is signed,
 - appends a signed `ryeos:authored:` provenance comment (author = runtime, plus
   thread, invocation, parent item ref, acting principal, effective bundle id,
   target ref, and content digest),
@@ -146,6 +147,38 @@ Response: `{ item_ref, path, mode, signer_fingerprint, content_digest,
 required_capability }`.
 
 v1 supports live-filesystem project provenance only.
+
+### The capability ceiling
+
+An authoring run cannot write an item that declares more authority than the run
+itself holds. After the body is parsed and path-anchored, and before it is
+signed, the daemon collects every capability the item would carry and requires
+each to be covered (exact match or wildcard pattern) by the authoring run's
+effective caps:
+
+- the body's own `effective_caps` policy fact, at the path the kind schema
+  declares for it (for directives and graphs, `requires.capabilities.declared`);
+- when the body omits that declaration but `extends` a parent, the parent's
+  composed `effective_caps` — an item that inherits a broad parent carries the
+  broad parent's caps;
+- every manifest runtime capability the body requests under
+  `requires.capabilities.manifest.runtime_authority`.
+
+Kinds without an `effective_caps` policy fact (knowledge, for instance) carry no
+declared caps and are unaffected by the declared-caps part of the check. An
+uncovered capability is refused with code `authored_capability_not_covered`,
+naming the capability, the target ref and the authoring thread. The cure is in
+the message: the authoring run must hold that capability, or the body must drop
+it. An `extends` parent written as an `@alias` is refused too, because its caps
+cannot be bounded without the canonical ref.
+
+### Operator signature is the trusted path
+
+The operator's signature (`ryeos sign`) is the trusted path for items. An item
+the runtime authors is a machine draft: it is signed by the node key and tagged
+with `ryeos:authored:` provenance, and it stays a draft until the operator
+reviews it and signs it again with their own key. Inspection (`authorship` in
+`items.effective`) is how a reviewer tells the two apart.
 
 ### How authored items resolve and show up
 
