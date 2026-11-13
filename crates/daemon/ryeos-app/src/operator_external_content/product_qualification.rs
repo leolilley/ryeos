@@ -5382,10 +5382,14 @@ fn resolve_current_consumer_relationship(
 /// manufacture a verified request context: the current node-signed operator
 /// grant supplies that authority. This is a fresh read-only check, not a
 /// contact permit or retained recovery proof.
+/// `project_context_resolver` is required when the qualification's verifier
+/// ran on the pinned project lane: re-verifying it resolves its retained
+/// snapshot, exactly as qualify did.
 pub(crate) fn verify_current_external_runtime_qualification(
     state: &AppState,
     binding: &crate::node_config::sections::external_execution::ExternalRuntimeQualificationBinding,
     expected_manifest_hash: &str,
+    project_context_resolver: Option<&dyn QualificationProjectContextResolver>,
 ) -> anyhow::Result<VerifiedQualificationWitness> {
     binding.validate()?;
     require_canonical_hash("external runtime manifest", expected_manifest_hash)?;
@@ -5450,7 +5454,7 @@ pub(crate) fn verify_current_external_runtime_qualification(
         &current_policy.policy.verifier_ref,
         &current_policy.policy.verifier_parameters,
         &proof.evidence,
-        None,
+        project_context_resolver,
     )?;
     proof.evidence.validate_current_policy(
         &current_policy,
@@ -5466,7 +5470,7 @@ pub(crate) fn verify_current_external_runtime_qualification(
         &context,
         &proof.evidence,
         &current_verifier,
-        None,
+        project_context_resolver,
     )?;
     require_qualification_still_current(
         state,

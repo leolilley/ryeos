@@ -2288,6 +2288,7 @@ fn admit_current_runtime_qualification(
             state,
             qualification,
             &contract.guest_runtime_manifest_hash,
+            None,
         )?;
         (witness.attestation_hash, witness.evidence, None)
     };

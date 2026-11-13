@@ -125,6 +125,7 @@ impl GuestRuntimeUploadBinding {
                             &self.state,
                             qualification,
                             &contract.guest_runtime_manifest_hash,
+                            None,
                         )?;
                     (
                         witness.evidence.product_witness_hash,

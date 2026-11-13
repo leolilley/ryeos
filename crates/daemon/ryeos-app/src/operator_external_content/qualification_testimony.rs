@@ -173,6 +173,7 @@ pub fn export_testimony_blocking(
             state,
             &binding,
             &witness.evidence.result.subject_manifest_hash,
+            Some(project_context_resolver),
         )?
     };
     ensure!(
