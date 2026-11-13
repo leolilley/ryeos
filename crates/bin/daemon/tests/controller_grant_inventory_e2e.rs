@@ -61,7 +61,10 @@ const SESSION_CAPS: [&str; 3] = [
 const SERVICE_FAMILIES: [&str; 3] = ["credential-profiles", "worker-executions", "objects"];
 
 /// Single services granted by exact reference.
-const SINGLE_SERVICES: [&str; 2] = ["system/push-head", "external-execution/admit-product-program"];
+const SINGLE_SERVICES: [&str; 2] = [
+    "system/push-head",
+    "external-execution/admit-product-program",
+];
 
 /// The publication service needs live-project write on top of its own execute
 /// capability, which no service-family wildcard covers. The operator does not
@@ -72,10 +75,7 @@ const LIVE_PROJECT_WRITE: &str = "ryeos.write.project.live";
 /// Live-project access the test launches need only because the harness binds a
 /// directory on disk as the project. A launch pinned to a pushed snapshot does
 /// not use it.
-const PROJECT_SCAFFOLD: [&str; 2] = [
-    "ryeos.read.project.live",
-    "ryeos.write.project.live",
-];
+const PROJECT_SCAFFOLD: [&str; 2] = ["ryeos.read.project.live", "ryeos.write.project.live"];
 
 fn service_cap(service: &str) -> String {
     format!("ryeos.execute.service.{service}")
@@ -153,9 +153,7 @@ fn is_capability_refusal(status: reqwest::StatusCode, body: &Value) -> bool {
             | "insufficient_caps"
             | "service_cap_denied"
             | "ref_binding_unauthorized"
-    ) || body
-        .to_string()
-        .contains("missing required capability")
+    ) || body.to_string().contains("missing required capability")
 }
 
 /// How the operator's requests reach the controller.
@@ -211,9 +209,7 @@ fn authorize_forwarding_node(
         &authorized_keys_dir(state_path),
         &fingerprint(remote_node),
         &public_key,
-        &scope_strings(&[
-            ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE,
-        ]),
+        &scope_strings(&[ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE]),
         "controller-grant-inventory-origin-node",
         &local.node_fp(),
         &lillux::time::iso8601_now(),
@@ -273,9 +269,8 @@ async fn post_forwarded(
         .to_string();
     let nonce = format!("{:016x}", rand::random::<u64>());
     let body_hash = lillux::cas::sha256_hex(&body_bytes);
-    let to_sign = format!(
-        "ryeos-request-v1\nPOST\n{path}\n{body_hash}\n{timestamp}\n{nonce}\n{audience}"
-    );
+    let to_sign =
+        format!("ryeos-request-v1\nPOST\n{path}\n{body_hash}\n{timestamp}\n{nonce}\n{audience}");
     let content_hash = lillux::cas::sha256_hex(to_sign.as_bytes());
     let signature = lillux::crypto::Signer::sign(operator, content_hash.as_bytes());
     let signature_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
@@ -286,8 +281,7 @@ async fn post_forwarded(
         "ryeos-forwarded-request-v1\nPOST\n{path}\n{body_hash}\n{timestamp}\n{nonce}\n{audience}\n{key_id}\n{signature_b64}\n{forwarding_key_id}\n{origin_site_id}"
     );
     let forwarded_hash = lillux::cas::sha256_hex(forwarded.as_bytes());
-    let forwarding_signature =
-        lillux::crypto::Signer::sign(origin_node, forwarded_hash.as_bytes());
+    let forwarding_signature = lillux::crypto::Signer::sign(origin_node, forwarded_hash.as_bytes());
     let response = reqwest::Client::new()
         .post(format!("{base}{path}"))
         .header("content-type", "application/json")
@@ -323,33 +317,31 @@ impl Controller {
             .chain(PROJECT_SCAFFOLD.map(str::to_owned))
             .collect();
         let plant_lane = lane.clone();
-        let plant = move |state_path: &Path,
-                          _user: &Path,
-                          fixture: &FastFixture|
-              -> anyhow::Result<()> {
-            let scopes: Vec<&str> = initial.iter().map(String::as_str).collect();
-            match &plant_lane {
-                Lane::Local => write_authorized_key_with_scopes(
-                    state_path,
-                    &fixture.user,
-                    &fixture.node,
-                    &scopes,
-                ),
-                Lane::Forwarded {
-                    operator,
-                    origin_node,
-                } => {
-                    authorize_forwarding_node(state_path, fixture, origin_node)?;
-                    authorize_remote_operator(
+        let plant =
+            move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+                let scopes: Vec<&str> = initial.iter().map(String::as_str).collect();
+                match &plant_lane {
+                    Lane::Local => write_authorized_key_with_scopes(
                         state_path,
-                        fixture,
-                        operator,
-                        &site_of(origin_node),
+                        &fixture.user,
+                        &fixture.node,
                         &scopes,
-                    )
+                    ),
+                    Lane::Forwarded {
+                        operator,
+                        origin_node,
+                    } => {
+                        authorize_forwarding_node(state_path, fixture, origin_node)?;
+                        authorize_remote_operator(
+                            state_path,
+                            fixture,
+                            operator,
+                            &site_of(origin_node),
+                            &scopes,
+                        )
+                    }
                 }
-            }
-        };
+            };
         let started = match &lane {
             Lane::Local => DaemonHarness::start_fast_with(plant, |_| {}).await,
             // The controller has its own node and operator identities, so the
@@ -610,7 +602,8 @@ async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps_through_the_remote_operator_forwarding_path() {
+async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps_through_the_remote_operator_forwarding_path()
+ {
     the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps(Lane::forwarded()).await;
 }
 
@@ -620,7 +613,8 @@ async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap_locally() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap_through_the_remote_operator_forwarding_path() {
+async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap_through_the_remote_operator_forwarding_path()
+ {
     the_trusted_worker_is_resolved_data_and_needs_no_execute_cap(Lane::forwarded()).await;
 }
 
@@ -630,7 +624,8 @@ async fn trusted_login_needs_exactly_its_execute_and_session_caps_locally() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn trusted_login_needs_exactly_its_execute_and_session_caps_through_the_remote_operator_forwarding_path() {
+async fn trusted_login_needs_exactly_its_execute_and_session_caps_through_the_remote_operator_forwarding_path()
+ {
     trusted_login_needs_exactly_its_execute_and_session_caps(Lane::forwarded()).await;
 }
 
@@ -640,7 +635,8 @@ async fn each_service_family_wildcard_covers_every_service_in_it_locally() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn each_service_family_wildcard_covers_every_service_in_it_through_the_remote_operator_forwarding_path() {
+async fn each_service_family_wildcard_covers_every_service_in_it_through_the_remote_operator_forwarding_path()
+ {
     each_service_family_wildcard_covers_every_service_in_it(Lane::forwarded()).await;
 }
 
@@ -650,7 +646,8 @@ async fn the_publication_service_also_needs_live_project_write_locally() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_publication_service_also_needs_live_project_write_through_the_remote_operator_forwarding_path() {
+async fn the_publication_service_also_needs_live_project_write_through_the_remote_operator_forwarding_path()
+ {
     the_publication_service_also_needs_live_project_write(Lane::forwarded()).await;
 }
 
@@ -660,7 +657,7 @@ async fn each_single_service_needs_exactly_its_own_execute_cap_locally() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn each_single_service_needs_exactly_its_own_execute_cap_through_the_remote_operator_forwarding_path() {
+async fn each_single_service_needs_exactly_its_own_execute_cap_through_the_remote_operator_forwarding_path()
+ {
     each_single_service_needs_exactly_its_own_execute_cap(Lane::forwarded()).await;
 }
-
