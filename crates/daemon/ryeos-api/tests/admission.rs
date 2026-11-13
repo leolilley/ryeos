@@ -629,7 +629,6 @@ fn attestation_scopes() -> Vec<String> {
     vec![ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE.to_string()]
 }
 
-
 /// Co-sign `req` as `forwarder`, which speaks for `site`, the way an origin
 /// node attests a principal's claim.
 fn cosign(
@@ -712,13 +711,27 @@ async fn principal_token_requires_principal_and_node_cosignature() {
 
     // A co-signature from a node that is not admitted here is refused.
     let mut req = claim(&state);
-    cosign(&state, &mut req, token, &principal, &unadmitted_node, "site:home");
+    cosign(
+        &state,
+        &mut req,
+        token,
+        &principal,
+        &unadmitted_node,
+        "site:home",
+    );
     let unadmitted = admission_claim::handle(req, state.clone()).await;
     assert_eq!(refusal_code(&unadmitted), "admission_cosignature_invalid");
 
     // A node admitted for another site cannot attest for the token's site.
     let mut req = claim(&state);
-    cosign(&state, &mut req, token, &principal, &other_node, "site:home");
+    cosign(
+        &state,
+        &mut req,
+        token,
+        &principal,
+        &other_node,
+        "site:home",
+    );
     let wrong_site = admission_claim::handle(req, state.clone()).await;
     assert_eq!(refusal_code(&wrong_site), "admission_cosignature_invalid");
 
@@ -730,7 +743,10 @@ async fn principal_token_requires_principal_and_node_cosignature() {
     assert!(replayed.is_err());
 
     // None of the refusals burned the token.
-    assert!(toml.is_file(), "refused claims must leave the token claimable");
+    assert!(
+        toml.is_file(),
+        "refused claims must leave the token claimable"
+    );
 
     let mut req = claim(&state);
     cosign(&state, &mut req, token, &principal, &home_node, "site:home");
@@ -751,7 +767,14 @@ async fn principal_token_requires_principal_and_node_cosignature() {
 
     // Single use.
     let mut again = claim(&state);
-    cosign(&state, &mut again, token, &principal, &home_node, "site:home");
+    cosign(
+        &state,
+        &mut again,
+        token,
+        &principal,
+        &home_node,
+        "site:home",
+    );
     let reused = admission_claim::handle(again, state).await;
     assert!(matches!(reused, Err(HandlerError::Forbidden(_))));
 }
@@ -852,7 +875,14 @@ async fn forwarding_node_without_attestation_scope_cannot_cosign() {
         AuthorizedKeyPrincipalClass::RemotePrincipal,
         Some("site:home"),
     );
-    cosign(&state, &mut req, PRINCIPAL_TOKEN.token, &claimant, &forwarder, "site:home");
+    cosign(
+        &state,
+        &mut req,
+        PRINCIPAL_TOKEN.token,
+        &claimant,
+        &forwarder,
+        "site:home",
+    );
     let result = admission_claim::handle(req, Arc::new(state)).await;
     assert_eq!(refusal_code(&result), "admission_cosignature_invalid");
 }

@@ -1079,15 +1079,25 @@ admission_enabled: {admission_enabled}
         let stored = std::fs::read_to_string(&minted.path).unwrap();
         assert!(stored.contains("version = 2"), "{stored}");
         assert!(stored.contains("class = \"remote_principal\""), "{stored}");
-        assert!(stored.contains("origin_site_id = \"site:home\""), "{stored}");
+        assert!(
+            stored.contains("origin_site_id = \"site:home\""),
+            "{stored}"
+        );
     }
 
     #[test]
     fn principal_token_requires_an_origin_site_and_others_refuse_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let missing = mint_for(tmp.path(), AuthorizedKeyPrincipalClass::RemotePrincipal, None)
-            .expect_err("a principal token must name its origin site");
-        assert!(format!("{missing:#}").contains("--origin-site-id"), "{missing:#}");
+        let missing = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            None,
+        )
+        .expect_err("a principal token must name its origin site");
+        assert!(
+            format!("{missing:#}").contains("--origin-site-id"),
+            "{missing:#}"
+        );
 
         let tmp = tempfile::tempdir().unwrap();
         let unexpected = mint_for(
@@ -1108,7 +1118,10 @@ admission_enabled: {admission_enabled}
             Some("home"),
         )
         .expect_err("the origin site must be canonical");
-        assert!(format!("{malformed:#}").contains("site:<name>"), "{malformed:#}");
+        assert!(
+            format!("{malformed:#}").contains("site:<name>"),
+            "{malformed:#}"
+        );
     }
 
     #[test]

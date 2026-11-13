@@ -29,7 +29,8 @@ const CLAIM_MAX_AGE_SECS: u64 = 300;
 const ADMISSION_CLAIM_PROTOCOL_VERSION: u32 = 3;
 /// Admission token format this node reads. Any other version is refused as
 /// stale, because the class of a token's grant is part of the stored format.
-const ADMISSION_TOKEN_FORMAT_VERSION: u32 = ryeos_core_tools::actions::authorize::ADMISSION_TOKEN_FORMAT_VERSION;
+const ADMISSION_TOKEN_FORMAT_VERSION: u32 =
+    ryeos_core_tools::actions::authorize::ADMISSION_TOKEN_FORMAT_VERSION;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
