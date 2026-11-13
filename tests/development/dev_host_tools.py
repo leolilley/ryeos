@@ -418,5 +418,55 @@ class RenderProviderShape(unittest.TestCase):
             self.assertIn(expected, problems)
 
 
+
+class NodeEntries(Scratch):
+    """The `.ai/tools` entries map one RyeOS request to a helper's argv."""
+
+    site_config = GuardedCargo.site_config
+
+    def run_entry(self, relative, request, *argv):
+        return subprocess.run([sys.executable, str(TOOLS / relative), *argv],
+                              input=json.dumps(request), capture_output=True, text=True)
+
+    def test_every_host_entry_declares_host_authority_and_nothing_untrue(self):
+        host = ["guarded-cargo/run.py", "featured-build-check/run.py", "bundle-set-init-smoke/run.py",
+                "dev-node-drift-check/run.py", "codex-worker-handshake-check/run.py",
+                "build-support-inputs/execute.py", "contained-oci-provider/container.py"]
+        ordinary = ["build-support-inputs/plan.py", "contained-oci-provider/report.py",
+                    "render-provider-shape-check/run.py"]
+        for relative in host + ordinary:
+            header = (TOOLS / relative).read_text().split('"""', 1)[0]
+            declares = "#   host_authority: required\n" in header
+            self.assertEqual(declares, relative in host, relative)
+            self.assertIn("#   execution_protocol: protocol:ryeos/core/opaque\n", header, relative)
+            if declares:
+                for untrue in ("network_authority", "filesystem_authority", "workspace_access",
+                               "external_content", "execution_endpoint", "supported_target"):
+                    self.assertNotIn(f"#   {untrue}:", header, relative)
+
+    def test_guarded_cargo_entry_maps_the_request_onto_the_helper(self):
+        tree = self.git_worktree()
+        config = json.loads(self.site_config().read_text())
+        done = self.run_entry("guarded-cargo/run.py",
+                              {"worktree": str(tree), "mode": "status", "resolved_config": config})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("lock", json.loads(done.stdout).__repr__())
+        refused = self.run_entry("guarded-cargo/run.py",
+                                 {"worktree": "relative/tree", "resolved_config": config})
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("worktree must be an absolute path", refused.stderr)
+        unresolved = self.run_entry("guarded-cargo/run.py", {"worktree": str(tree)})
+        self.assertEqual(unresolved.returncode, 2)
+        self.assertIn("resolved no Config", unresolved.stderr)
+
+    def test_build_support_helper_reads_pins_under_a_given_root(self):
+        rebuild = load("rebuild_build_support_inputs",
+                       "build-support-inputs/lib/rebuild-build-support-inputs.py")
+        paths = rebuild.pin_paths(self.tmp)
+        self.assertEqual(paths["inventory_path"],
+                         self.tmp / ".ai/config/development/ryeos/authoring-build-support-inputs.yaml")
+        self.assertEqual(rebuild.INVENTORY, rebuild.pin_paths(rebuild.ROOT)["inventory_path"])
+
+
 if __name__ == "__main__":
     unittest.main()
