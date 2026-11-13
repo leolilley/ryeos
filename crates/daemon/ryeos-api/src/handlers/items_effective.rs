@@ -58,7 +58,9 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::{EffectiveItem, EffectiveItemDiagnostic, EffectiveItemRequest};
 use ryeos_engine::error::EngineError;
-use ryeos_engine::resolution::{AsLaunchedResolutionDigest, ResolutionDigestNode};
+use ryeos_engine::resolution::{
+    AsLaunchedResolutionDigest, ResolutionDigestNode, ResolutionOutput, ResolvedAncestor,
+};
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_runtime::events::RuntimeEventType;
 
@@ -97,18 +99,19 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
 
     let project_root = req.project_path.map(std::path::PathBuf::from);
 
-    let effective = state
+    let (effective, resolution) = state
         .engine
         .with_checked_bundle_generation(|generation| {
-            let mut effective = generation.effective_item(EffectiveItemRequest {
-                item_ref,
-                expected_kind: req.expected_kind,
-                project_root: project_root.clone(),
-                subject_resolution_authority:
-                    ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
-                        project_root.as_deref(),
-                    ),
-            })?;
+            let (mut effective, resolution) =
+                generation.effective_item_with_resolution(EffectiveItemRequest {
+                    item_ref,
+                    expected_kind: req.expected_kind,
+                    project_root: project_root.clone(),
+                    subject_resolution_authority:
+                        ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                            project_root.as_deref(),
+                        ),
+                })?;
 
             // A surface and every view it binds are one coherent read. Keep
             // the verified generation guard around the complete batch instead
@@ -126,9 +129,10 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
                     });
                 }
             }
-            Ok(effective)
+            Ok((effective, resolution))
         })
         .map_err(map_engine_error)?;
+    let authorship = authorship_rows(state.identity.fingerprint(), &resolution);
 
     // Thread-scoped mode: attach the launch-time digest (truth) alongside the
     // fresh resolution (now), with per-ancestor drift flags.
@@ -138,10 +142,55 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
         .map(|thread_id| as_launched_block(&state, thread_id, &effective));
 
     let mut body = serde_json::to_value(effective)?;
-    if let (Value::Object(map), Some(as_launched)) = (&mut body, as_launched) {
-        map.insert("as_launched".to_string(), as_launched);
+    if let Value::Object(map) = &mut body {
+        map.insert("authorship".to_string(), Value::Array(authorship));
+        if let Some(as_launched) = as_launched {
+            map.insert("as_launched".to_string(), as_launched);
+        }
     }
     Ok(body)
+}
+
+/// Who signed each resolved item (root, extends ancestors, referenced
+/// items, in that order) and whether it is runtime-authored. Reporting only:
+/// trust classes and launch decisions are unchanged.
+///
+/// `signer_role` is `node` when this node's identity key signed the item,
+/// `other` for any other key (a bundle publisher, the operator signing key,
+/// or an unpinned key), and `none` when the item carries no signature.
+/// `runtime_authored` is true only for a node-signed item whose signed bytes
+/// carry the daemon's runtime provenance line: the item was written through
+/// `runtime.author_item` on behalf of a runtime, not signed by the operator.
+fn authorship_rows(node_fingerprint: &str, resolution: &ResolutionOutput) -> Vec<Value> {
+    let rows = std::iter::once(("root", &resolution.root))
+        .chain(resolution.ancestors.iter().map(|item| ("ancestor", item)))
+        .chain(
+            resolution
+                .referenced_items
+                .iter()
+                .map(|item| ("reference", item)),
+        );
+    rows.map(|(position, item)| authorship_row(node_fingerprint, position, item))
+        .collect()
+}
+
+fn authorship_row(node_fingerprint: &str, position: &str, item: &ResolvedAncestor) -> Value {
+    let signer_role = match item.signer_fingerprint.as_deref() {
+        None => "none",
+        Some(signer) if signer == node_fingerprint => "node",
+        Some(_) => "other",
+    };
+    let runtime_authored = signer_role == "node"
+        && ryeos_engine::identity::authored_provenance::has_runtime_provenance_line(
+            &item.raw_content,
+        );
+    json!({
+        "position": position,
+        "resolved_ref": item.resolved_ref,
+        "signer_fingerprint": item.signer_fingerprint,
+        "signer_role": signer_role,
+        "runtime_authored": runtime_authored,
+    })
 }
 
 /// Build the `as_launched` block for a thread: the persisted launch digest
@@ -327,9 +376,11 @@ mod tests {
     };
     use ryeos_engine::error::EngineError;
 
-    use ryeos_engine::resolution::{ResolutionDigestNode, TrustClass};
+    use ryeos_engine::resolution::{
+        ResolutionDigestNode, ResolutionStepName, ResolvedAncestor, TrustClass,
+    };
 
-    use super::{digest_node_json, map_engine_error};
+    use super::{authorship_row, digest_node_json, map_engine_error};
     use std::collections::HashMap;
 
     fn node(resolved_ref: &str, digest: &str) -> ResolutionDigestNode {
@@ -344,6 +395,58 @@ mod tests {
             signer_fingerprint: Some("fixture-signer".to_string()),
             raw_content_digest: digest.to_string(),
         }
+    }
+
+    fn project_item(signer: Option<&str>, raw_content: &str) -> ResolvedAncestor {
+        ResolvedAncestor {
+            requested_id: "knowledge:notes/x".to_string(),
+            resolved_ref: "knowledge:notes/x".to_string(),
+            source_path: std::path::PathBuf::from("/p/.ai/knowledge/notes/x.md"),
+            source_space: ryeos_engine::contracts::ItemSpace::Project,
+            source_root: ItemSourceRoot::Project,
+            trust_class: TrustClass::TrustedProject,
+            signer_fingerprint: signer.map(str::to_string),
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: raw_content.to_string(),
+            source_content_digest: "s".to_string(),
+            raw_content_digest: "r".to_string(),
+        }
+    }
+
+    const AUTHORED_BODY: &str = "Body.\n\n<!-- ryeos:authored: {\"authored_by\":\"runtime\",\"content_digest\":\"ab\"} -->\n";
+
+    #[test]
+    fn node_signed_item_with_provenance_is_runtime_authored() {
+        let row = authorship_row(
+            "node-fp",
+            "root",
+            &project_item(Some("node-fp"), AUTHORED_BODY),
+        );
+        assert_eq!(row["signer_role"], "node");
+        assert_eq!(row["runtime_authored"], true);
+        assert_eq!(row["signer_fingerprint"], "node-fp");
+    }
+
+    #[test]
+    fn operator_signed_item_is_not_runtime_authored_even_with_the_line() {
+        let row = authorship_row(
+            "node-fp",
+            "root",
+            &project_item(Some("op-fp"), AUTHORED_BODY),
+        );
+        assert_eq!(row["signer_role"], "other");
+        assert_eq!(row["runtime_authored"], false);
+    }
+
+    #[test]
+    fn node_signed_item_without_provenance_is_not_runtime_authored() {
+        let row = authorship_row("node-fp", "root", &project_item(Some("node-fp"), "Body.\n"));
+        assert_eq!(row["signer_role"], "node");
+        assert_eq!(row["runtime_authored"], false);
+        let unsigned = authorship_row("node-fp", "root", &project_item(None, AUTHORED_BODY));
+        assert_eq!(unsigned["signer_role"], "none");
+        assert_eq!(unsigned["runtime_authored"], false);
     }
 
     #[test]

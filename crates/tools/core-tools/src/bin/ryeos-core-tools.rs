@@ -332,7 +332,8 @@ enum Cmd {
         #[arg(long)]
         content: Option<String>,
 
-        /// `create` (default; fails if the item exists) or `upsert` (replaces).
+        /// `create` (default; fails if the item exists) or `upsert` (replaces;
+        /// over an existing item it requires `--expected-digest`).
         #[arg(long, default_value = "create")]
         mode: String,
 
@@ -341,8 +342,9 @@ enum Cmd {
         #[arg(long)]
         format_ext: Option<String>,
 
-        /// Compare-and-swap guard for `--mode upsert`: the incumbent's authored
-        /// `content_digest` must equal this or the upsert fails with a conflict.
+        /// Compare-and-swap guard for `--mode upsert`, required when the item
+        /// already exists: the incumbent's authored `content_digest` must equal
+        /// this or the upsert fails with a conflict.
         #[arg(long)]
         expected_digest: Option<String>,
     },

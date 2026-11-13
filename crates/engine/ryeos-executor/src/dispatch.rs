@@ -4642,8 +4642,9 @@ pub async fn admit_launch_contract(
 /// callers. This compiles symbolic secret requirements but deliberately does
 /// not open any credential source. [`admit_launch_contract`] performs the
 /// authority-bound availability check for real admission; static validation
-/// must remain credential-read-free. Callers must not persist or serialize
-/// the opaque prepared runtime payload itself.
+/// asks the vault for per-name presence only, so no secret value leaves the
+/// vault helper. Callers must not persist or serialize the opaque prepared
+/// runtime payload itself.
 pub async fn prepare_admitted_launch_contract(
     applicability: &LaunchContractApplicability,
     root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,

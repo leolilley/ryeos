@@ -130,6 +130,12 @@ impl NodeConfigSection for GuestRuntimeMaterializationSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> Result<Box<dyn CompiledNodeConfigItem>> {
+        crate::node_config::coherence::require_admitted_binding_schema(
+            SECTION_NAME,
+            body,
+            &[1],
+            "ryeos.guest-runtime-materialization.v1",
+        )?;
         let document: MaterializationDocument = serde_json::from_value(body.clone())
             .context("invalid guest runtime materialization binding")?;
         document.validate()?;

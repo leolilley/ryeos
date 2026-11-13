@@ -171,9 +171,9 @@ mod tests {
         decoded
             .authenticate_hash(&decoded.capability_hash().unwrap())
             .unwrap();
-        assert!(vault.read_all("operator").unwrap().is_empty());
-        assert!(vault.list_keys("operator").unwrap().is_empty());
-        assert!(read_named_secret(&vault, "operator", access.physical_key()).is_err());
+        assert!(vault.read_all().unwrap().is_empty());
+        assert!(vault.list_keys().unwrap().is_empty());
+        assert!(read_named_secret(&vault, access.physical_key()).is_err());
         assert!(
             authorize_secret_delivery(
                 &crate::vault::vault_only_sources(&vault),
@@ -200,16 +200,8 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(
-            vault
-                .set_secret("operator", access.physical_key(), "forged")
-                .is_err()
-        );
-        assert!(
-            vault
-                .delete_secret("operator", access.physical_key())
-                .is_err()
-        );
+        assert!(vault.set_secret(access.physical_key(), "forged").is_err());
+        assert!(vault.delete_secret(access.physical_key()).is_err());
         assert!(
             vault
                 .provision_external_connector_capability(
@@ -342,6 +334,6 @@ mod tests {
             .map(|handle| handle.join().unwrap())
             .collect();
         assert!(digests.iter().all(|digest| digest == &digests[0]));
-        assert!(vault.read_all("operator").unwrap().is_empty());
+        assert!(vault.read_all().unwrap().is_empty());
     }
 }

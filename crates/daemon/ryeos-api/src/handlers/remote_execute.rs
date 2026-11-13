@@ -341,6 +341,18 @@ fn remote_forward_error_to_handler_error(e: forward::RemoteForwardError) -> Hand
                 result, pushed
             ))
         }
+        refused @ (forward::RemoteForwardError::ResultUnsigned
+        | forward::RemoteForwardError::ResultAttestationInvalid { .. }) => {
+            let code = refused.code();
+            HandlerError::Structured {
+                code: code.to_string(),
+                status: 502,
+                body: serde_json::json!({
+                    "code": code,
+                    "error": refused.to_string(),
+                }),
+            }
+        }
         mismatch @ forward::RemoteForwardError::SnapshotAuthorityMismatch { .. } => {
             let code = mismatch.code();
             HandlerError::Internal(format!(

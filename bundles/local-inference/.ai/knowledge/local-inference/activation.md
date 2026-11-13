@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T00:45:54Z:0af2ecaa3b1cafcc0752eaf8bd735ac2e2a2ead9d21fd4c0106ade8e6b919bea:C8RSKijGQ9jX9mx/mozt9DPNCky2TRej0mJtF81/ck8/q3/51IDWtIPiyZyPDTlbnoMYwd1oxprofbM0Ey0sBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:34:16Z:0e3f263b3df41302574ef402adc975a6c54f4542854f64f34243c6848b5b58f5:V1Djq1jAKDmbOgu5U9ATrMmzdllCGfcFnplsm+HJB2uDNCOwVsyUyHen4rGHCv6z8Eh0kl3os5pmm9GLF/mKBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]
@@ -236,17 +236,16 @@ Validate both signed profiles threadlessly, then execute them sequentially:
 
 ~~~text
 ryeos validate directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-  --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
   --no-project --input '{}'
 
 ryeos execute directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
-  --ref-binding model=directive:local-inference/examples/qwen3_0_6b_cpu_4096_smoke \
   --no-project --no-stream --input '{}'
 ~~~
 
-The directive runtime requires its signed model declaration as the `model`
-launch binding. This binding selects the same trusted directive; it is not a
-caller-selected provider, model name, worker, or realization. Static validation
+The directive runtime binds its required `model` launch binding to the
+executed directive's own signed model declaration when the caller gives none.
+This binding selects the same trusted directive; it is not a caller-selected
+provider, model name, worker, or realization. Static validation
 invokes the same signed bounded launch preparer used by execution and reports
 the selected worker's canonical ref, as-launched resolution digest, source and
 four exact content/binding readiness records, and session-policy eligibility.

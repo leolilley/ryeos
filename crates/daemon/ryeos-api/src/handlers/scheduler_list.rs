@@ -99,6 +99,7 @@ pub async fn handle(
                 "cursor_fresh": cursor.is_some(),
                 "decision": plan.decision,
                 "decision_reason": plan.decision_reason,
+                "lifetime_exhausted": plan.lifetime_exhausted,
                 "total_fires": total_fires,
             })
         })

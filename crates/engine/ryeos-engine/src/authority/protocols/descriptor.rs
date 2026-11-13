@@ -282,7 +282,7 @@ pub fn validate_method_runtime_protocol(descriptor: &ProtocolDescriptor) -> Resu
         injection.source == EnvInjectionSource::ThreadAuthToken
             && injection.name == "RYEOSD_THREAD_AUTH_TOKEN"
     });
-    if descriptor.callback_channel != CallbackChannel::Http
+    if descriptor.callback_channel != CallbackChannel::RuntimeSocket
         || descriptor.stdin.shape != StdinShape::MethodCallEnvelope
         || descriptor.stdout.shape != StdoutShape::MethodCallResult
         || descriptor.stdout.mode != StdoutMode::Terminal
@@ -290,7 +290,7 @@ pub fn validate_method_runtime_protocol(descriptor: &ProtocolDescriptor) -> Resu
         || !injects_thread_auth
     {
         return Err(format!(
-            "must declare http callbacks, method_call_envelope stdin, terminal method_call_result stdout, managed lifecycle, and RYEOSD_THREAD_AUTH_TOKEN from the thread_auth_token source; got callback={:?}, stdin={:?}, stdout={:?}/{:?}, lifecycle={:?}, canonical_thread_auth_binding={injects_thread_auth}",
+            "must declare runtime_socket callbacks, method_call_envelope stdin, terminal method_call_result stdout, managed lifecycle, and RYEOSD_THREAD_AUTH_TOKEN from the thread_auth_token source; got callback={:?}, stdin={:?}, stdout={:?}/{:?}, lifecycle={:?}, canonical_thread_auth_binding={injects_thread_auth}",
             descriptor.callback_channel,
             descriptor.stdin.shape,
             descriptor.stdout.shape,
@@ -532,7 +532,7 @@ mod tests {
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
-            callback_channel: CallbackChannel::Http,
+            callback_channel: CallbackChannel::RuntimeSocket,
             qualification_callback: None,
             captured_compatible_callback: None,
             session: None,

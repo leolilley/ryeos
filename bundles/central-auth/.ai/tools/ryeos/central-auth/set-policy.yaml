@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T21:49:53Z:68e3e71f3dbd8dab4b22fd8f8e2f961bd378b5a8ad0e74d5a377ab5bc20b81ec:xeIpDZJR7cePRsCX3saS7/CW7xJb9uWu2aAK6NQf2OZmnTaansRuhcvWwnlwnULl4Iyag8LjHwgiWRD1XHmODg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:43:18Z:1c404325486ef898357191f64c84fbad98b0c51e9657acfa1e92751e05f9bf98:c/XpwOAjrLSWNjy5Vo3e5HTC+2JNrTJ3UO0Ia6eufipdgYLPoXE2v+vy4JgVcByxJCUXkl8QHp+2SFUJxVcjCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "set-policy"
@@ -18,16 +18,10 @@ config:
 config_schema:
   type: object
   properties:
-    project_path:
-      type: string
-      description: "Project root used for .ai/state/central-auth storage."
-    runtime_state_dir:
-      type: string
-      description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
       description: "Realm/app namespace, e.g. example-app."
     policy:
       type: object
-      description: "Policy object with roles and allowed_capabilities."
+      description: "Policy object with roles, allowed_capabilities and login_throttle {max_failures, window_secs, lockout_secs}."
   required: [realm_id, policy]

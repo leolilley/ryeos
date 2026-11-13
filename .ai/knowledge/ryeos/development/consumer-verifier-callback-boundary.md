@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-05T03:59:09Z:48c01e70894f7fe4aa88142d511adf59cdb4f95a374159d4527f4f06ade121cc:pzsIw6m0WCAkZXogauhm09A5+ita9xxvp/P06ujkGgX9mMFxN4pIr5Bl8YiRZIBM+lqLnWLE2/mWh1Rik4yWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:57:18Z:62679218016a5c899a3a25fd99082c1eba575da56892047b2d7d99b5d384975f:bAEhXmCk6ifwSNdwtR82yqs1c3oRimNyD4eUHD+ZbeNZDlodS8CjJ4ZwbWMOgxBl592OwF4/cBzbVZJpdnR7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Consumer verifier callback boundary
 
 The `ryeos-codex-runtime-verifier` crate and `codex-runtime-verifier` binary interpret a finite credential-free diagnostic on
@@ -47,6 +47,43 @@ those exact bytes and only observes the retained attempt. A lost START response
 does not authorize START replay. Provider settlement rejoins the existing exact
 occurrence termination journal; it proves provider death, separately from native
 namespace/process settlement and the enclosing verifier's process settlement.
+
+## Launch-gate admission of the callback route
+
+The executor's ordinary protocol validator refuses the
+`qualification_consumer_callback` route for every caller
+(`validate_ordinary_protocol_contract`, `dispatch/subprocess_execution.rs`).
+That refusal used to apply at every launch gate, so the runner's grant
+plumbing was unreachable and any product qualification with a consumer
+invocation was refused at launch.
+
+The gates now add a necessary condition and the runner keeps the sufficient
+one:
+
+- `RemoteConsumerLaunchProof` (`ryeos-app/src/remote_consumer_launch.rs`)
+  names the invoked scenario and the verifier ref. Its fields are private and
+  it has no `Default` or deserializer. It is built only from a prepared
+  launch (`from_prepared`) or a sealed root admission (`from_admission`).
+  It is `None` without a consumer invocation, and an error for a scenario
+  that is not remote, a verifier that differs from the signed policy, or a
+  lane mismatch. From a sealed admission it also requires the scenario in
+  the purpose's `remote_verifier_sources`.
+- `validate_direct_protocol_contract` admits the callback route only when
+  the proof `authorizes` the exact hop ref being checked. Every other route
+  takes the ordinary contract, with or without a proof. Callers are
+  subprocess dispatch, `launch_contract_applicability_with_evidence`, the
+  `preflight_root_dispatch*_with_remote_consumer` variants (the plain names
+  pass no proof), and the runner's `resolved_terminator_protocol`.
+- Managed-protocol classification and admitted-direct revalidation keep the
+  ordinary validator, so they still refuse the route.
+
+The proof is never sufficient. The runner still requires the born-root
+custody: the owner-bound planning row, the authoritative root snapshot and
+the bearer minted by `set_remote_consumer_grant`. It fails closed without a
+sealed purpose. The first gate sees only the prepared launch; later gates and
+the runner re-derive the proof from the sealed purpose, so a divergence
+fails closed. Occurrence expiry stays with the daemon's
+`require_current_consumer_invocation`.
 
 ## Evidence and claim limits
 
@@ -535,3 +572,31 @@ joins and all operational acceptance gates remain necessary. All five ordinary
 runtime claims stay disabled until their actual required evidence exists. Any
 changed profile or schema refreshes and re-signs every Worker binding to the shared
 source directory; older retained evidence cannot substitute for that closure.
+
+## Finite product contract literal
+
+Each verifier Tool passes `--product-contract <json>` as its third argument.
+That literal is derived data, not a value an author fills in:
+
+- Tool `args` substitute only fixed roots (`tool_path`, `params_json` and the
+  like, `ryeos-engine/src/runtime/mod.rs`). Nothing per-node can be
+  interpolated, so the complete contract is inlined in the signed Tool. It
+  must stay within 8192 bytes.
+- Its values have three sources. Fixed policy strings live in the builder.
+  Helper manifest digests come from the external Worker's `external_content`,
+  the checker runtime manifest hash from the Tool's pinned `checker-runtime`
+  tree, and the checker script size and digest from the shipped file. Four
+  values exist only on a live node that holds the Worker: the checker code
+  manifest hash, `profile_hash`, `source_binding_hash` and
+  `source_content_manifest_hash`.
+- The checker host selects its runtime and code from admitted realizations by
+  slot id and manifest hash (`consumer_checker_program.rs`). So the Tool
+  declares the `checker-runtime` pinned tree and the `checker-code` product
+  slot beside `subject`, each with a producer behind it.
+
+Regenerate the literal with
+`bundles/codex/.ai/tools/codex/qualification/lib/product-contract/build.py`
+and re-sign the Tool; never edit it by hand. `--placeholders` emits
+`@@NAME@@` tokens the verifier refuses, so a Tool built before the live
+capture cannot pass for a real one. `bundles/codex/test_contract.py` checks
+the builder round-trips.

@@ -253,7 +253,7 @@ async fn run_directive_and_capture_first_request_headers(
     plant_directive_with_secrets(
         project.path(),
         "test/secret_injection",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -458,7 +458,7 @@ async fn run_directive_with_vault_secret(
     plant_directive_with_secrets(
         project.path(),
         "test/vault_secret",
-        "Hello {{ name }}.",
+        "Hello ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -572,7 +572,7 @@ async fn dotenv_overlay_supplies_declared_secret_to_provider() {
     plant_directive_with_secrets(
         project.path(),
         "test/dotenv_secret",
-        "Hello {{ name }}.",
+        "Hello ${inputs.name}.",
         &[env_var],
         &fixture.publisher,
     )
@@ -715,6 +715,131 @@ async fn vault_blocked_name_fails_request_loud() {
          policy; got: {body_str}"
     );
 
+    drop(project);
+    drop(mock);
+}
+
+/// POST a validate-only `/execute` for a project directive.
+async fn validate_only_directive(
+    h: &DaemonHarness,
+    item_ref: &str,
+    project: &Path,
+) -> serde_json::Value {
+    let post_fut = h.post_json(
+        "/execute",
+        serde_json::json!({
+            "item_ref": item_ref,
+            "ref_bindings": { "model": item_ref },
+            "project_path": project,
+            "parameters": { "name": "World" },
+            "validate_only": true,
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
+        }),
+    );
+    let (status, body) = tokio::time::timeout(Duration::from_secs(30), post_fut)
+        .await
+        .expect("validate-only /execute timed out")
+        .expect("validate-only /execute send failed");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "validate-only preview should answer; body={body:#}"
+    );
+    assert_eq!(body.get("validated"), Some(&serde_json::json!(true)));
+    body
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_only_preview_sees_vault_secret() {
+    // The preview asks the vault for the declared names only. A secret sealed
+    // in the vault reads as present and leaves admission ready; a declared name
+    // the vault lacks is reported by name and holds admission back. The mock
+    // provider is never called: validation launches nothing.
+    let present = "OPENROUTER_API_KEY";
+    let absent = "DEEPSEEK_API_KEY";
+    let secret = "sk-preview-present-0badc0de0badc0de";
+
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, present, None, None, fixture)?;
+        let mut secrets = std::collections::HashMap::new();
+        secrets.insert(present.to_string(), secret.to_string());
+        plant_sealed_vault_secrets(state_path, &secrets)?;
+        Ok(())
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env_remove(present);
+        cmd.env_remove(absent);
+    })
+    .await
+    .expect("start daemon with one vault-backed secret");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/preview_present",
+        "Hello {{ name }}.",
+        &[present],
+        &fixture.publisher,
+    )
+    .expect("plant present directive");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/preview_missing",
+        "Hello {{ name }}.",
+        &[present, absent],
+        &fixture.publisher,
+    )
+    .expect("plant missing directive");
+
+    let ready = validate_only_directive(&h, "directive:test/preview_present", project.path()).await;
+    assert_eq!(
+        ready.pointer("/runtime_preparation/credential_readiness"),
+        Some(&serde_json::json!({ "status": "present", "required_count": 1 })),
+        "body={ready:#}"
+    );
+    assert_eq!(
+        ready.get("admission_ready"),
+        Some(&serde_json::json!(true)),
+        "a vault-present secret must not hold admission back; body={ready:#}"
+    );
+    assert!(
+        !ready.to_string().contains(secret),
+        "the preview must never carry a secret value; body={ready:#}"
+    );
+
+    let missing =
+        validate_only_directive(&h, "directive:test/preview_missing", project.path()).await;
+    assert_eq!(
+        missing.pointer("/runtime_preparation/credential_readiness"),
+        Some(&serde_json::json!({
+            "status": "missing",
+            "required_count": 2,
+            "missing": [absent],
+        })),
+        "body={missing:#}"
+    );
+    assert_eq!(
+        missing.get("admission_ready"),
+        Some(&serde_json::json!(false)),
+        "body={missing:#}"
+    );
+    assert!(
+        !missing.to_string().contains(secret),
+        "the preview must never carry a secret value; body={missing:#}"
+    );
+
+    assert!(
+        mock.captured_headers().await.is_empty(),
+        "validate-only must not reach the provider"
+    );
     drop(project);
     drop(mock);
 }

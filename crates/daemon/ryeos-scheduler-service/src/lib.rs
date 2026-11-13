@@ -3,6 +3,7 @@
 /// Owner token carried by the secure temporaries this crate publishes.
 pub const SCHEDULER_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("scheduler");
 
+mod authority_inspection;
 mod project;
 mod reset;
 mod retention;
@@ -10,6 +11,7 @@ mod retirement_attempt;
 mod retirement_journal;
 mod terminal;
 
+pub use authority_inspection::{SupersededScheduleGrant, superseded_schedule_grants};
 pub use reset::SchedulerHistoryReset;
 pub use retention::SchedulerService;
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-04T08:52:01Z:102960bb09ea79cdebc81449d50099bcb2e5c0a9bf27a45b6857f7f78937aecb:yLuE+qfkAvWKHeRG63GDPzx8M+VIIsuejZHdbTwCFq5bjgcB6muwtJqwxoqlRVG+3KRFxwz9+D0vDs/kTVcWAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:41:47Z:d9a630f5dd17f955be7d1fc2223fbf57985bbcf80b5fcd1a8e4997120f804108:p0Xoo6oDhN7HHawEbHrQpMDfGQugrVAmvrhvPkTLzvSV3CPGqVIpoq5Y2DbWK/lqeQLE3dgQ4VwqMU1qck0dCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -50,10 +50,13 @@ The authoritative matrix is in
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.
-- `remote configure` may import a remote descriptor. The descriptor is a
-  trust pin/discovery record, not a credential; configure still reads the
-  live `/public-key` document and refuses to write config if the live node
-  key or fingerprint does not match the descriptor.
+- `remote configure` requires a pin for the remote node key: a remote
+  descriptor or an `expect_fingerprint` (64 lowercase hex). Without either it
+  refuses with `remote_key_unpinned` and names the fingerprint seen; there is
+  no trust-on-first-use. The descriptor is a trust pin/discovery record, not a
+  credential; configure still reads the live `/public-key` document and
+  refuses to write config if the live node key or fingerprint does not match
+  the descriptor or the expected fingerprint (`remote_key_pin_mismatch`).
 - Initial remote authorization can use `admission/claim` when the target
   node has a one-time local admission token. Claiming the token creates a
   normal authorized-key grant on the target node; execution traffic still

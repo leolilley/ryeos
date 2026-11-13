@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T19:53:22Z:62c2c179e28bfb9d1f0067719b83f1b11f32c01c0a6179d83b78137f99310414:CNerJDZ0huJrZKIOwKOkYVl7w2t7mJb0CKb+bwT76TUpYR+BoynfS9lEvBFujFJxjhwBmxGQ3BkzryRxKwiIBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:27:48Z:c5c2624d5b4f7d9b7fb50e4d3ca77beb29079a63db268fa323859b5da31eaa28:vJXArxf9m2bEHyMs48FVVZJ2TSprzie3aZ4edAv3+tCScIgLU5OKEcSY6qEhJQaiEl91df3+mEa2OX9RrKMxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -525,7 +525,7 @@ daemon:
 
 ```bash
 scripts/build-rune-web.sh            # WASM_BINDGEN must be the CLI the lock names
-scripts/dev-ui-assets.sh --background --port 7411 \
+.ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh --background --port 7411 \
   --upstream http://127.0.0.1:PORT --asset-dir crates/clients/rune/pkg
 ```
 
@@ -534,7 +534,7 @@ Mint a launch URL through the CLI (`web --presentation config:ryeos/ui/presentat
 7411 serves the checkout's package; the node's own port serves the package its
 daemon embeds and cannot show source edits.** Rebuild and reload after each
 change; there is no hot reload. Stop the proxy with
-`scripts/dev-ui-assets.sh --stop`. Keep launch tokens private.
+`.ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh --stop`. Keep launch tokens private.
 
 For drawing work no node is needed. The native fixture run draws the real
 renderer over an in-memory presentation built from the bundle's own view

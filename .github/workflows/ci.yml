@@ -119,9 +119,49 @@ jobs:
           python3 tests/development/hosted_oci_runtime_verifier.py
           python3 tests/development/oci_hook_contract.py
           python3 tests/development/contained_workflow_products.py
+          python3 -B tests/development/prove_contained_oci_provider.py
+
+      - name: Check build-support input rebuild planning
+        run: python3 -B tests/e2e/authoring-environment/test_rebuild_build_support_inputs.py
+
+      - name: Check development host tools
+        run: python3 tests/development/dev_host_tools.py
 
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
+
+      - name: Check native bundle publication inventories
+        run: python3 -B scripts/release/test-native-bundle-wp0.py
+
+      - name: Check installer lifecycle boundaries
+        run: bash scripts/pkg/test-install-lifecycle.sh
+
+      - name: Check contained Docker host setup
+        run: |
+          python3 -B scripts/pkg/test-contained-docker-node.py
+          python3 -B scripts/pkg/test-contained-docker-runtime.py
+          python3 -B scripts/release/test-contained-oci-hook-artifact.py
+
+      - name: Check workspace version gate
+        run: python3 -B scripts/release/test-check-workspace-versions.py
+
+      - name: Check development registry bootstrap entry
+        run: python3 -B scripts/release/test-development-registry.py
+
+      - name: Check bundle-release sources
+        run: |
+          for test in bundles/bundle-release/tests/test-*.py; do
+            echo "::group::$test"
+            python3 -B "$test"
+            echo "::endgroup::"
+          done
+
+      - name: Check release-candidate inspection tooling
+        run: |
+          python3 -B scripts/release/test-audit-bundle-generation.py
+          python3 -B scripts/release/test-inspect-core-native-set.py
+          python3 -B scripts/release/test-inspect-native-bundle-input.py
+          python3 -B scripts/release/test-release-candidate.py
 
       - name: Check Codex authored contract
         run: python3 bundles/codex/test_contract.py
@@ -189,6 +229,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Check test-support features stay out of shipped builds
+        run: ./scripts/ci/check-test-support-feature-leak.sh
 
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings

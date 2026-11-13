@@ -20,8 +20,9 @@ use super::launch_envelope::{
 
 use super::limits::{
     LimitsConfigSnapshot, apply_caller_limit_overrides, apply_execution_policy_defaults,
-    apply_execution_policy_item_overrides, compute_effective_limits, load_limits_config_snapshot,
-    load_limits_config_snapshot_under_project_authority, merge_header_limits, policy_item_override,
+    apply_execution_policy_item_overrides, clamp_to_schedule_ceiling, compute_effective_limits,
+    load_limits_config_snapshot, load_limits_config_snapshot_under_project_authority,
+    merge_header_limits, policy_item_override,
 };
 use super::thread_meta::ThreadMeta;
 use crate::dispatch_error::DispatchError;
@@ -4595,6 +4596,7 @@ async fn prepare_managed_launch_authority(
                     .contains_key(&outputs.partition.recipe_binding),
                 None => super::launch_preparation::project_effective_ref_bindings(
                     &selected_runtime.yaml.launch_contract.ref_bindings,
+                    &resolution.root.resolved_ref,
                     &resolution.composed.composed,
                     &params.resolved.ref_bindings,
                 )?
@@ -5759,6 +5761,7 @@ async fn condition_workspace_output_authority(
     let declarations = &runtime.yaml.launch_contract.ref_bindings;
     let bindings = super::launch_preparation::project_effective_ref_bindings(
         declarations,
+        &admission.resolution_output().root.resolved_ref,
         &admission.resolution_output().composed.composed,
         &params.resolved.ref_bindings,
     )?;
@@ -6586,6 +6589,18 @@ async fn run_claimed_thread_row_inner(
         parent_limits.as_ref(),
         &selected_runtime.yaml.limits,
     );
+    // A scheduled fire carries its schedule owner's per-fire ceiling in the
+    // daemon-authored fire context, sealed with the admitted request, so the
+    // same ceiling applies on recovery and to continuation successors.
+    let hard_limits = match resolved
+        .plan_context
+        .scheduled_fire
+        .as_ref()
+        .and_then(|fire| fire.limits.as_ref())
+    {
+        Some(ceiling) => clamp_to_schedule_ceiling(hard_limits, ceiling),
+        None => hard_limits,
+    };
     let header_has_limit = |field: &str| {
         limits_header
             .and_then(Value::as_object)

@@ -1,6 +1,7 @@
 //! Content identity: canonical references, item resolution, effective
 //! programs, and the sealed external-content realization model.
 
+pub mod authored_provenance;
 pub mod canonical_ref;
 pub mod content_dependencies;
 pub mod effective_program;

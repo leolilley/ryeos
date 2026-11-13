@@ -1690,6 +1690,16 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
                 ),
             ));
         }
+        if let Some(amendment) = &report.capacity_amendment {
+            status.rows.push(crate::tty::Row::key_value(
+                "capacity issuance",
+                if amendment.already_applied {
+                    format!("policy {} already in force", amendment.policy_digest)
+                } else {
+                    format!("amended to policy {}", amendment.policy_digest)
+                },
+            ));
+        }
         console.success(&status)?;
     }
     Ok(())
@@ -2487,6 +2497,11 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Schedules pinned to a grant generation that no longer holds refuse
+    // their next fire and pause; report them before that happens.
+    #[cfg(feature = "scheduling")]
+    checks.push(schedule_authority_check(&config.app_root, initialized));
+
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
     //    daemon (metadata present, not responding) may be hung-but-alive and
@@ -2616,6 +2631,14 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     OK,
                     serde_json::json!({ "bundles": roots.len() }),
                 ));
+                checks.push(external_bindings_check(
+                    &config.app_root,
+                    isolation
+                        .as_ref()
+                        .ok()
+                        .and_then(|runtime| runtime.registered_generation_node_trust()),
+                    &snapshot,
+                ));
                 if !args.no_bundles {
                     let operator_config_root =
                         ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
@@ -2649,14 +2672,20 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                 }
             }
             Err(e) => {
-                checks.push(check(
-                    "node_config",
-                    FAIL,
-                    serde_json::json!({
-                        "error": format!("{e:#}"),
-                        "note": "installed bundle registrations failed verification",
-                    }),
-                ));
+                let mut detail = serde_json::json!({
+                    "error": format!("{e:#}"),
+                    "note": "installed bundle registrations failed verification",
+                });
+                // A binding in a schema this node no longer admits is named
+                // with the step that clears it.
+                if let Some(refusal) = e.chain().find_map(|cause| {
+                    cause.downcast_ref::<ryeos_app::node_config::coherence::BindingSchemaUnsupported>()
+                }) {
+                    detail["code"] = serde_json::json!(refusal.code());
+                    detail["note"] = serde_json::json!(refusal.to_string());
+                    detail["fix"] = serde_json::json!(refusal.fix());
+                }
+                checks.push(check("node_config", FAIL, detail));
             }
         }
     } else {
@@ -2700,6 +2729,21 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         .with_tone(crate::tty::Tone::Secondary),
                 );
             }
+            if c.name == "external_bindings" {
+                for finding in c.detail["findings"].as_array().into_iter().flatten() {
+                    section.rows.push(
+                        crate::tty::Row::text(format!(
+                            "{} {}/{} {}: {}",
+                            finding["code"].as_str().unwrap_or_default(),
+                            finding["binding"]["section"].as_str().unwrap_or_default(),
+                            finding["binding"]["id"].as_str().unwrap_or_default(),
+                            finding["field"].as_str().unwrap_or_default(),
+                            finding["fix"].as_str().unwrap_or_default(),
+                        ))
+                        .with_tone(crate::tty::Tone::Secondary),
+                    );
+                }
+            }
         }
         let mut document =
             crate::tty::Document::titled(format!("NODE DOCTOR — {}", config.app_root.display()));
@@ -2728,6 +2772,68 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         Ok(())
     } else {
         Err(ReportedLocalFailure("node doctor found failing checks".to_string()).into())
+    }
+}
+
+/// Doctor row for pin coherence: every pin of every installed external
+/// execution and runtime snapshot binding compared with the installed signed
+/// bundles and the node vault, read only. FAIL names each pin the next fresh
+/// operation through that binding would refuse; WARN names pins it could not
+/// decide (an unreadable vault).
+fn external_bindings_check(
+    app_root: &std::path::Path,
+    trust: Option<&ryeos_engine::trust::TrustStore>,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
+    if snapshot.external_execution.is_empty()
+        && snapshot.runtime_snapshot_production.is_empty()
+        && snapshot.runtime_snapshot_qualification.is_empty()
+    {
+        return check(
+            "external_bindings",
+            NA,
+            serde_json::json!({
+                "note": "no external execution or runtime snapshot binding is installed",
+            }),
+        );
+    }
+    let Some(trust) = trust else {
+        return check(
+            "external_bindings",
+            FAIL,
+            serde_json::json!({ "error": "the locked isolation runtime retains no node trust" }),
+        );
+    };
+    match ryeos_app::node_config::coherence::inspect_installed_binding_coherence(
+        app_root, trust, snapshot,
+    ) {
+        Ok(report) => {
+            let status = if report.has_failures() {
+                FAIL
+            } else if report.has_warnings() {
+                WARN
+            } else {
+                OK
+            };
+            check(
+                "external_bindings",
+                status,
+                serde_json::json!({
+                    "bindings": report.bindings,
+                    "findings": report.findings,
+                    "not_checked": report.not_checked,
+                }),
+            )
+        }
+        Err(error) => check(
+            "external_bindings",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "note": "the installed bundles' artifacts could not be inventoried",
+            }),
+        ),
     }
 }
 
@@ -2840,6 +2946,59 @@ fn wall_clock_check(
 /// Doctor row for the native-capacity account: healthy with its summary,
 /// a warning with the cure when the allowance is spent and the signed policy
 /// lets the operator re-issue, a failure when it does not.
+/// Schedules whose pinned authorized-key grant generation is missing or
+/// superseded. Each refuses its next fire and pauses itself; the owner
+/// re-pins it with `ryeos scheduler reauthorize <id>`.
+#[cfg(feature = "scheduling")]
+fn schedule_authority_check(
+    app_root: &std::path::Path,
+    initialized: bool,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+    if !initialized {
+        return check(
+            "schedule_authority",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        );
+    }
+    match inspect_schedule_grant_generations(app_root) {
+        Ok(superseded) if superseded.is_empty() => {
+            check("schedule_authority", OK, serde_json::json!({}))
+        }
+        Ok(superseded) => check(
+            "schedule_authority",
+            WARN,
+            serde_json::json!({
+                "superseded": superseded,
+                "note": "these schedules pin a grant generation that no longer holds; each refuses its next fire and pauses itself",
+                "fix": "as each schedule's owner: ryeos scheduler reauthorize <schedule_id>, then ryeos scheduler resume <schedule_id> if it was paused",
+            }),
+        ),
+        Err(error) => check(
+            "schedule_authority",
+            WARN,
+            serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
+#[cfg(feature = "scheduling")]
+fn inspect_schedule_grant_generations(
+    app_root: &std::path::Path,
+) -> anyhow::Result<Vec<ryeos_scheduler_service::SupersededScheduleGrant>> {
+    let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
+    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+        .map_err(|error| anyhow::anyhow!("load trust store: {error}"))?;
+    ryeos_scheduler_service::superseded_schedule_grants(
+        app_root,
+        &root.authorized_keys_dir(),
+        &identity,
+        &trust_store,
+    )
+}
+
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -3495,6 +3654,7 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
         }
     }
     .context("ryeos start failed")?;
+    warn_if_last_capacity_incarnation(console, &report)?;
     if let Some(progress) = progress {
         progress.finish_start(&report)?;
         warn_if_stale_daemon(console, &report.status)?;
@@ -3509,6 +3669,36 @@ async fn run_start_command(argv: &[String], console: &crate::tty::Console) -> Re
         console.status(&status)?;
     }
     render_lifecycle_status(console, &report.status)?;
+    Ok(())
+}
+
+/// Warn when this start launched the node on its epoch's last native-capacity
+/// incarnation: the next start is refused until the operator re-issues.
+fn warn_if_last_capacity_incarnation(
+    console: &crate::tty::Console,
+    report: &ryeos_node::StartReport,
+) -> Result<()> {
+    if report.already_running {
+        return Ok(());
+    }
+    let LifecycleStatus::Running {
+        capacity: Some(capacity),
+        ..
+    } = &report.status
+    else {
+        return Ok(());
+    };
+    if capacity.incarnations_remaining != 0 {
+        return Ok(());
+    }
+    let mut diagnostic = crate::tty::Diagnostic::warning(format!(
+        "this start used the last native capacity incarnation of epoch {}",
+        capacity.epoch
+    ));
+    diagnostic.hint = Some(crate::tty::Hint::new(
+        "the next start is refused with native_capacity_exhausted; run `ryeos node capacity reissue --reason \"...\"` first",
+    ));
+    console.warning(&diagnostic)?;
     Ok(())
 }
 

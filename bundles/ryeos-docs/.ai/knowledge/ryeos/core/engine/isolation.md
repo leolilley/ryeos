@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:24bee098d4d4478564e2101886f88c461e8873a15aadaf63b106a3df6acc9f85:orMZPSlnfwFJTj65LFxRb2dsrr2gHQ1OipOtAGNjUVq/XuT58FiPfOXaGn6SmuVYQvdBSFTTosH7USuTzBcrDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:27:41Z:5364aa5f77c1626bcb68aba827d41eb2c88cd37bfb39731b33fb1689791c2bd7:Q6ejR8aRJlz+lfBo95IX6nq1i6kCw+cWIZDoNlMMsQB+QVEspJSSZwazg4DVQUiLYH8iAVVdA8nLkjrqG+r+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -43,7 +43,7 @@ except on one protocol class. A protocol may declare
 `captured_compatible_callback` with the digest of a closed callback
 method surface. The registry accepts the declaration only on the remote-consumer
 qualification callback protocol (never the scoped-producer one) with managed
-HTTP callbacks, a bounded single-call evidence projector, no session and no remote or detached dispatch. Admission then
+`runtime_socket` callbacks, a bounded single-call evidence projector, no session and no remote or detached dispatch. Admission then
 requires the declared digest to equal the digest of the surface the daemon
 itself issues for that authority. The sandbox then receives exactly the pinned
 daemon socket entry, read-only, and never its parent directory or any other

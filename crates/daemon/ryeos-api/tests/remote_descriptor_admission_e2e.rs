@@ -107,6 +107,7 @@ async fn remote_configure_descriptor_match_writes_config() {
             remote: None,
             url: None,
             descriptor: Some(descriptor_path),
+            expect_fingerprint: None,
         },
         Arc::new(local_state),
     )
@@ -133,6 +134,7 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
             remote: None,
             url: None,
             descriptor: Some(descriptor_path),
+            expect_fingerprint: None,
         },
         Arc::new(local_state),
     )
@@ -153,6 +155,7 @@ async fn remote_configure_rejects_credential_url_before_contact_or_persistence()
             remote: Some("unsafe".to_owned()),
             url: Some("https://user:do-not-retain@example.invalid".to_owned()),
             descriptor: None,
+            expect_fingerprint: None,
         },
         Arc::new(local_state),
     )
@@ -177,6 +180,7 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
             remote: Some("normalized".to_owned()),
             url: Some(format!("{url}/")),
             descriptor: None,
+            expect_fingerprint: None,
         },
         Arc::new(local_state),
     )

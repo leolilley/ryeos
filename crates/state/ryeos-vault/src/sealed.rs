@@ -68,6 +68,12 @@ pub fn with_store_lock<T>(store_path: &Path, operation: impl FnOnce() -> Result<
         .with_context(|| format!("lock sealed store {}", store_path.display()))
 }
 
+/// Whether an interrupted rewrap left its journal behind, so the next locked
+/// open of the store would first recover it. Reads only.
+pub fn rewrap_pending(store_path: &Path) -> bool {
+    rewrap_journal_path(store_path).exists()
+}
+
 /// Recover an interrupted key/store rotation while the caller holds the store
 /// lock. A readable current key/store pair is committed; otherwise the complete
 /// previous generation is restored from durable backups.

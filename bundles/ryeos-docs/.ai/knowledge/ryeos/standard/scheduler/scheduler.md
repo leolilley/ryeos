@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-10T19:41:37Z:79d4b4d16a05724bab767367e9801155b1f8534188f8fad8161f4e385ea8b235:qbZGNyPMABboNw2Apxh+6rj8mHRHPmzrRlR/55Jfyjdp1BTV9hC/Q4T9ZTdeIDHKYkE3NXwxDqNmBV5ErEQICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:22:04Z:e58b05f93ad1d1fa025d0678a01b9197f5fb82f827724bceddb7f482c0bd8d4d:qZyFp3iVCriit4mVZ73wqf88Izx6pHOm38n3dRFc9t3Pj+ff6riYTxg004/R3CI59y7KDCXDYar8JMEfaNB3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -24,6 +24,7 @@ their exact capability grants.
 | `scheduler/deregister` | `scheduler.deregister`| Remove a schedule              |
 | `scheduler/pause`      | `scheduler.pause`     | Pause a schedule               |
 | `scheduler/resume`     | `scheduler.resume`    | Resume a paused schedule       |
+| `scheduler/reauthorize` | `scheduler.reauthorize` | Re-pin a schedule to the owner's current grant generation |
 | `scheduler/explain`     | `scheduler.explain`   | Explain schedule timing and policy |
 | `scheduler/show_fires` | `scheduler.show_fires`| Show fire history for a schedule |
 
@@ -42,6 +43,7 @@ ryeos scheduler list                # List all schedules
 ryeos scheduler deregister <id>     # Remove a schedule
 ryeos scheduler pause <id>          # Pause execution
 ryeos scheduler resume <id>         # Resume after pause
+ryeos scheduler reauthorize <id>    # Re-pin to the current grant generation
 ryeos scheduler explain <id>        # Inspect timing and policy
 ryeos scheduler show-fires <id>     # View fire history
 ```
@@ -102,6 +104,41 @@ All fields are required except that `project_root` is omitted for an explicitly
 projectless policy. Policies are authored behavior: the daemon does not infer
 them or substitute defaults.
 
+### Bounds
+
+Three optional fields bound what a schedule may do. They are signed into the
+schedule's execution authority, and an absent field is no bound.
+
+- **`limits`** — a per-fire ceiling with any of `turns`, `tokens`,
+  `spend_usd` (a canonical decimal string), `spawns`, `depth` and
+  `duration_seconds`. Each fire's hard limits are computed from the item and
+  node configuration as for any root, then clamped under these values. A
+  ceiling can only tighten: it never raises an item's request or a node cap.
+  Every value must be positive; omit a field to leave that dimension alone.
+- **`max_fires`** — the schedule admits at most this many boundaries (1 to
+  10000), counted from registration whether each one ran or was skipped.
+- **`expires_at`** — an RFC 3339 instant; no boundary at or after it is
+  admitted. It must be in the future at registration.
+
+```yaml
+limits:
+  turns: 20
+  spend_usd: "0.50"
+  duration_seconds: 600
+max_fires: 30
+expires_at: "2027-01-01T00:00:00Z"
+```
+
+When the last admitted boundary has been recorded, the scheduler pauses the
+schedule itself through the same signed write `scheduler.pause` uses, and
+records why: `paused_reason` is `max_fires_reached` or `expired`.
+`scheduler.explain` reports `paused_reason` and a `lifetime` block
+(`max_fires`, `expires_at`, `last_admitted_boundary`, `exhausted`).
+`scheduler.resume` refuses a schedule whose lifetime is used up with the typed
+error `schedule_lifetime_exhausted`; register the schedule again with a new
+bound instead. A daemon that was down past the last admitted boundary still
+applies the misfire policy to that boundary and plans nothing after it.
+
 `live_direct` and `pinned` are separate supported lanes. Use `live_direct` when
 each fire is intentionally meant to see the then-current live tree. Use
 `pinned` with `source.kind: current_head` or an explicit snapshot hash when one
@@ -137,11 +174,60 @@ specified times. Each fire creates a new thread.
 - Result status (completed, failed, cancelled)
 - The schedule-spec hash, bound project authority, and admitted capsule hash
 
+## Schedule Authority
+
+Registration pins the exact authorized-key grant generation of the
+registering principal, and every fire proves that generation still holds
+before anything launches. When it does not, the fire is recorded as `failed`
+with a typed outcome instead of the generic `dispatch_failed`:
+
+| Outcome | Cause |
+|---|---|
+| `authority_revoked` | the principal's grant, or a forwarding node's grant, no longer exists |
+| `authority_changed` | a different grant generation, principal class or origin site; a node-owned schedule that no longer names this node |
+| `authority_narrowed` | the grant no longer covers a declared capability |
+
+The first such refusal pauses the schedule through the same signed write
+`scheduler.pause` uses, with `paused_reason` set to the outcome, so later
+boundaries do not fail one by one. `scheduler.explain` reports an `authority`
+block computed by the same revalidation: `valid`, the typed `refusal`
+(`grant_revoked`, `grant_generation_changed`, `class_or_origin_changed`,
+`capability_no_longer_covered`, `forwarding_grant_revoked`,
+`forwarding_grant_changed`, `forwarding_attestation_not_covered` or
+`node_authority_changed`), its `outcome`, and a `detail`. `scheduler.resume`
+refuses with `schedule_authority_invalid` until the authority holds again.
+
+### Reauthorize
+
+The generation pin is exact: re-issuing a grant, even with identical scopes,
+is a new generation, and the schedule's fires are refused until its owner
+re-pins it. `ryeos scheduler reauthorize <id>` (`scheduler.reauthorize`) does
+that without resubmitting the spec. Signed by the owner, it seals the grant
+generation that authenticated the request into the existing signed source;
+every other field, `registered_at` and the registration request digest are
+kept, and the enabled state is unchanged, so a paused schedule is then resumed
+with `scheduler.resume`. It is refused, and nothing is written, with:
+
+- `schedule_reauthorize_not_covered` when the current grant no longer covers
+  every capability the schedule declares (register it again with a narrower
+  capability set);
+- `schedule_reauthorize_class_or_origin_changed` when the current grant's
+  principal class or origin site differs from the pinned one;
+- `schedule_not_grant_bound` for a node-owned schedule, which pins no grant.
+
+A caller that does not own the schedule gets not-found, as for the other
+owner verbs. `ryeos node doctor` reports, under `schedule_authority`, every
+schedule whose pinned generation is missing or superseded, before its next
+fire refuses.
+
 ## Pause and Resume
 
 Pausing a schedule stops new fires from being created. Existing
 running threads are not affected. Resuming re-enables the schedule
-starting from the next scheduled time.
+starting from the next scheduled time. The scheduler also pauses a schedule
+by itself when its lifetime bounds are reached (see Bounds); it records the
+reason as `paused_reason`, which an operator pause leaves absent and resume
+clears.
 
 ## Use Cases
 

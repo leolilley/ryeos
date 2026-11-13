@@ -1,9 +1,10 @@
 //! Corpus + reference integrity validation.
 //!
 //! Errors are integrity violations that should block use of the corpus
-//! (missing roots, dangling edges, unparseable frontmatter). Warnings are
-//! quality signals (empty body, missing title/category/tags) that do not
-//! invalidate the corpus.
+//! (missing roots, dangling edges, unparseable frontmatter, unsigned items).
+//! Warnings are signals that do not invalidate the corpus: quality (empty
+//! body, missing title/category/tags) and trust (an `untrusted_project` item,
+//! signed by an unpinned key, which only node launch-trust policy admits).
 
 use ryeos_runtime::method_wire::TrustClass;
 
@@ -43,6 +44,14 @@ pub fn validate(payload: &ValidatePayload) -> Result<ValidateOutput, KnowledgeEr
         // unauthenticated members must not validate clean.
         if matches!(item.trust_class, TrustClass::Unsigned) {
             errors.push(format!("unsigned item in corpus: {item_ref}"));
+        }
+        // An item signed by an unpinned key is reported, not refused:
+        // admitting it is the launch gate's call, made by node policy.
+        if matches!(item.trust_class, TrustClass::UntrustedProject) {
+            warnings.push(format!(
+                "untrusted signer in corpus: {item_ref} (untrusted_project: signed by an \
+                 unpinned key; launches only where node launch_trust policy admits it)"
+            ));
         }
 
         match strip_frontmatter(&item.raw_content, item_ref) {
@@ -280,6 +289,33 @@ mod tests {
         let out = validate(&p).unwrap();
         assert!(!out.valid, "unsigned corpus member must invalidate");
         assert!(out.errors.iter().any(|e| e.contains("unsigned item")));
+    }
+
+    #[test]
+    fn untrusted_project_item_is_warning_not_error() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "k/a".to_string(),
+            VerifiedItem {
+                raw_content: "---\ntitle: A\ncategory: c\ntags: [t]\n---\nbody".into(),
+                raw_content_digest: "d".into(),
+                metadata: serde_json::json!({}),
+                trust_class: TrustClass::UntrustedProject,
+            },
+        );
+        let p = ValidatePayload {
+            items_by_ref: map,
+            edges: vec![],
+            args: crate::types::ValidateArgs { roots: vec![] },
+        };
+        let out = validate(&p).unwrap();
+        assert!(out.valid, "errors: {:?}", out.errors);
+        assert_eq!(out.warnings.len(), 1, "warnings: {:?}", out.warnings);
+        assert!(
+            out.warnings[0].starts_with("untrusted signer in corpus: k/a "),
+            "warnings: {:?}",
+            out.warnings
+        );
     }
 
     #[test]

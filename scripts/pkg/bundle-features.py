@@ -194,7 +194,8 @@ def verify_signed(raw, trust_path):
     """Verify a first-line signed text against the pinned publisher; return its body.
 
     The signature is Ed25519 over the ASCII hex sha256 of the body bytes
-    (everything after the first line), as scripts/dev/sign-dev.sh produces.
+    (everything after the first line), as .ai/tools/ryeos/development/maintainer/lib/sign-dev.sh
+    produces.
     """
     try:
         from cryptography.exceptions import InvalidSignature

@@ -29,22 +29,21 @@ pub async fn handle(
     let Request { name, value } = req;
     let value = Zeroizing::new(value);
 
-    // Vault writes are scoped to the caller's fingerprint — must be verified.
+    // The caller must be verified. The write is not scoped to the caller:
+    // the node has one shared operator store, guarded only by the
+    // `vault/set` capability.
     ctx.require_verified()?;
 
-    state
-        .vault
-        .set_secret(&ctx.fingerprint, &name, value.as_str())
-        .map_err(|e| {
-            // Vault validation errors (key name, blocked names) are user
-            // errors → 400. Anything else is 500.
-            let msg = format!("{e:#}");
-            if msg.starts_with("vault: key name") || msg.starts_with("vault: secret value") {
-                HandlerError::BadRequest(msg)
-            } else {
-                HandlerError::Internal(msg)
-            }
-        })?;
+    state.vault.set_secret(&name, value.as_str()).map_err(|e| {
+        // Vault validation errors (key name, blocked names) are user
+        // errors → 400. Anything else is 500.
+        let msg = format!("{e:#}");
+        if msg.starts_with("vault: key name") || msg.starts_with("vault: secret value") {
+            HandlerError::BadRequest(msg)
+        } else {
+            HandlerError::Internal(msg)
+        }
+    })?;
 
     let mut response = serde_json::json!({
         "name": name,

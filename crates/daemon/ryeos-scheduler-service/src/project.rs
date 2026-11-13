@@ -218,6 +218,14 @@ struct ScheduleDeclaration {
     project_root: Option<String>,
     params: Value,
     execution_policy: ryeos_engine::execution_contract::ExecutionPolicy,
+    // Optional schedule bounds. Omitted when absent so a declaration without
+    // them keeps its exact registration request digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limits: Option<ryeos_engine::scheduled_fire_context::ScheduleFireLimits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_fires: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
 }
 
 pub(crate) fn plan(ctx: &ProjectContext) -> Result<ScheduleDeployPlan> {
@@ -908,6 +916,12 @@ fn validate_schedule_declaration(
             schedule.schedule_id
         )
     })?;
+    ryeos_scheduler_contract::validate_schedule_bounds(
+        schedule.limits.as_ref(),
+        schedule.max_fires,
+        schedule.expires_at.as_deref(),
+    )
+    .with_context(|| format!("invalid bounds for schedule '{}'", schedule.schedule_id))?;
     if matches!(
         &schedule.execution_policy.project,
         ryeos_engine::execution_contract::ProjectExecutionPolicy::Projectless
@@ -1049,6 +1063,14 @@ fn write_reconciled_schedule(
         .request
         .caller
         .authenticated_execution_authority(registration_request_hash)?;
+    let execution = serde_json::to_value(ryeos_scheduler_contract::ScheduleExecution {
+        authority,
+        capabilities,
+        policy: schedule.execution_policy.clone(),
+        limits: schedule.limits.clone(),
+        max_fires: schedule.max_fires,
+        expires_at: schedule.expires_at.clone(),
+    })?;
     let body = serde_json::json!({
         "spec_version": 2,
         "schedule_id": schedule.schedule_id,
@@ -1064,11 +1086,7 @@ fn write_reconciled_schedule(
         "lateness_grace_secs": schedule.lateness_grace_secs,
         "params": schedule.params,
         "project_root": canonical_project_path,
-        "execution": {
-            "authority": authority,
-            "capabilities": capabilities,
-            "policy": schedule.execution_policy,
-        },
+        "execution": execution,
         "managed_by": {
             "type": MANAGED_BY_TYPE,
             "project_root": canonical_project_path,

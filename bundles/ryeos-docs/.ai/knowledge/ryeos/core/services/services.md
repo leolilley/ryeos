@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-06T00:23:47Z:6c86a40440df8ef28b1de8267cc272c262c7fb774b4664a3c49384631d8853d9:EibIvT1sUtTWj0ca7R74jIUoAb+OnUuwRTAENeqeZS8hRnW52k8RPIL24Smx0HwO5GThwwQI2OAB1ApHeNiuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:22:04Z:6bca7fa6adcbb4f9ac3d4ec028fe2438763bcbe1270381e96dd91b6310b88b70:4RsxuF4vMJdwAkC2KCX7lbJ86LWrRou8A8JevVwdcudRNzg1XjBz45bMpWu6sl8VEztYvOBdV7Oqns5T1UwqCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -175,6 +175,7 @@ The `threads/*`, `events/*` and `commands/*` services below are shipped by the c
 | `scheduler/deregister` | `scheduler.deregister` | `ryeos.execute.service.scheduler/deregister` |
 | `scheduler/pause` | `scheduler.pause` | `ryeos.execute.service.scheduler/pause` |
 | `scheduler/resume` | `scheduler.resume` | `ryeos.execute.service.scheduler/resume` |
+| `scheduler/reauthorize` | `scheduler.reauthorize` | `ryeos.execute.service.scheduler/reauthorize` |
 | `scheduler/show_fires` | `scheduler.show_fires` | `ryeos.execute.service.scheduler/show_fires` |
 
 Scheduler support is a node/runtime surface, not part of HTTP route

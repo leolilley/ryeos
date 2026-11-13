@@ -1681,20 +1681,33 @@ impl RemoteClient {
         parameters: &Value,
         call: Option<&ryeos_engine::method_call::MethodCall>,
         execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
-    ) -> Result<Value> {
+    ) -> Result<RemoteExecuteResponse> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
             "execution_policy": execution_policy,
+            // The remote signs its result for this exact request; the
+            // caller refuses an unsigned result.
+            "attest_result": true,
         });
         // Forward the `call` block only when it carries intent.
         if let Some(call) = call.filter(|c| !c.is_empty()) {
             body["call"] = serde_json::to_value(call)
                 .map_err(|e| anyhow::anyhow!("failed to serialize call block: {e}"))?;
         }
-        self.signed_post("/execute", &body).await
+        let (body, request_digest) = self
+            .signed_post_serializable_with_request_digest(
+                "/execute",
+                &body,
+                DEFAULT_JSON_RESPONSE_MAX_BYTES,
+            )
+            .await?;
+        Ok(RemoteExecuteResponse {
+            body,
+            request_digest,
+        })
     }
 
     /// POST /authorize-key (authenticated).
@@ -1873,6 +1886,19 @@ impl RemoteClient {
         body: &T,
         max_response_bytes: usize,
     ) -> Result<Value> {
+        self.signed_post_serializable_with_request_digest(path, body, max_response_bytes)
+            .await
+            .map(|(value, _request_digest)| value)
+    }
+
+    /// Signed POST that also returns the request digest it signed, for
+    /// callers that verify a response bound to the exact request.
+    async fn signed_post_serializable_with_request_digest<T: serde::Serialize + ?Sized>(
+        &self,
+        path: &str,
+        body: &T,
+        max_response_bytes: usize,
+    ) -> Result<(Value, String)> {
         let url = format!("{}{}", self.base_url, path);
         let body_bytes = serde_json::to_vec(body)?;
         let headers = self.sign_request("POST", path, &body_bytes)?;
@@ -1897,7 +1923,8 @@ impl RemoteClient {
             .await
             .with_context(|| format!("POST {} failed", url))?;
 
-        read_json_checked_with_limit("POST", &url, resp, max_response_bytes).await
+        let value = read_json_checked_with_limit("POST", &url, resp, max_response_bytes).await?;
+        Ok((value, headers.request_digest))
     }
 
     async fn signed_post_raw_with_response_limit(
@@ -2018,17 +2045,14 @@ impl RemoteClient {
         let body_hash = lillux::cas::sha256_hex(body);
         let canon_path = canonicalize_path(path_and_query);
 
-        let string_to_sign = format!(
-            "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-            method.to_uppercase(),
-            canon_path,
-            body_hash,
-            timestamp,
-            nonce,
-            self.audience,
+        let content_hash = crate::auth::request_content_hash(
+            method,
+            &canon_path,
+            &body_hash,
+            &timestamp.to_string(),
+            &nonce,
+            &self.audience,
         );
-
-        let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
         let sig =
             lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
@@ -2075,6 +2099,7 @@ impl RemoteClient {
             nonce,
             signature: sig_b64,
             forwarding,
+            request_digest: content_hash,
         })
     }
 }
@@ -2246,12 +2271,24 @@ fn admission_claim_string(
     )
 }
 
+/// A remote `/execute` response with the digest of the request that asked
+/// for it.
+pub struct RemoteExecuteResponse {
+    /// The remote's JSON response, including its `result_attestation`.
+    pub body: Value,
+    /// `ryeos-request-v1` content hash of the request this node signed.
+    pub request_digest: String,
+}
+
 struct SignedHeaders {
     key_id: String,
     timestamp: String,
     nonce: String,
     signature: String,
     forwarding: Option<ForwardingHeaders>,
+    /// `ryeos-request-v1` content hash of this exact request; a remote
+    /// result attestation binds it.
+    request_digest: String,
 }
 
 struct ForwardingHeaders {

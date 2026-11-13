@@ -434,6 +434,15 @@ mod tests {
                 admitted_capsule_hash: "44".repeat(32),
             })
         }
+
+        async fn auto_pause_schedule(
+            &self,
+            _schedule_id: &str,
+            _expected_spec_hash: &str,
+            _reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
+        }
     }
 
     #[tokio::test]

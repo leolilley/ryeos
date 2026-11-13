@@ -265,6 +265,12 @@ mod tests {
             ),
             (
                 "scheduling",
+                "scheduler-reauthorize.yaml",
+                vec!["nightly"],
+                serde_json::json!({"schedule_id": "nightly"}),
+            ),
+            (
+                "scheduling",
                 "scheduler-explain.yaml",
                 vec!["nightly"],
                 serde_json::json!({"schedule_id": "nightly"}),

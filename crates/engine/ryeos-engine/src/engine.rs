@@ -1053,6 +1053,20 @@ impl CheckedEngineGeneration<'_> {
         self.engine.effective_item_current(request)
     }
 
+    /// Resolve once and return the effective item together with the verified
+    /// resolution it was projected from, for inspection that reads the signed
+    /// bytes (such as authorship) without resolving the item a second time.
+    pub fn effective_item_with_resolution(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<(EffectiveItem, crate::resolution::ResolutionOutput), EngineError> {
+        let output = self.engine.effective_resolution_output_current(&request)?;
+        let item = self
+            .engine
+            .effective_item_from_output(request, output.clone())?;
+        Ok((item, output))
+    }
+
     /// Resolve once under this checked generation, then bound the exact resolved
     /// root body and composed JSON before a consumer decodes its own schema.
     /// Diagnostic source paths are never opened to measure content. The bounds

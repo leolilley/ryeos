@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:860ae7a8138d6e0f7a923ffc25448d7865c204725f6108c9be32181617b4ce46:Ncf88uSfgPrTnAS43KOD7ptcIDaJTRIEuKVXd0hVaEkZMCtxc9F0/S6NvIzaK6vvip8n6Hp/0lY668CAKjgRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:01:20Z:bb8e86ee14851697fa882b883067228ab50a95588fecc9403106071055b2d217:wQBtuOVtXEwAJTTT74kV2gp6rLROZVwgziZi+7+NqE1k4KyKQL8eEalCHMurZiXkn6hm1T5g6eZXYIOC+VxTCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -111,6 +111,7 @@ Default user system space:
 ```bash
 target/release/ryeos init \
   --source bundles \
+  --node-profile full --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
@@ -120,6 +121,7 @@ Repo-local dev app root:
 target/release/ryeos init \
   --app-root .local/ryeos \
   --source bundles \
+  --node-profile full --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start --app-root .local/ryeos
 ```
@@ -127,9 +129,13 @@ target/release/ryeos start --app-root .local/ryeos
 If a daemon is running against that system space, stop it before init and start
 it after. A running daemon keeps the old in-memory engine/registries.
 
+`--node-profile` is required on a fresh node, and `--host-class` goes with it.
+Use a profile and class that match your node (`ryeos init --help`).
+
 ```bash
 target/release/ryeos stop --force || true
-target/release/ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+target/release/ryeos init --source bundles --node-profile full --host-class local \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start
 ```
 

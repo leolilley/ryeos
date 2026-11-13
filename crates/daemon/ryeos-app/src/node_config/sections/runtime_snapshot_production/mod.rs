@@ -312,6 +312,9 @@ impl InstalledRuntimeSnapshotProductionBinding {
     pub(crate) fn adapter_artifact_hash(&self) -> &str {
         &self.document.adapter_artifact_hash
     }
+    pub(crate) fn credential_generation(&self) -> &str {
+        &self.document.credential_generation
+    }
     pub(crate) fn snapshot_spec_sha256(&self) -> &str {
         &self.document.snapshot_spec_sha256
     }
@@ -405,6 +408,12 @@ impl NodeConfigSection for RuntimeSnapshotProductionSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> Result<Box<dyn CompiledNodeConfigItem>> {
+        crate::node_config::coherence::require_admitted_binding_schema(
+            SECTION_NAME,
+            body,
+            &[1],
+            "ryeos.runtime-snapshot-production.v2",
+        )?;
         let document: ProductionDocument = serde_json::from_value(body.clone())
             .context("invalid runtime snapshot production binding")?;
         document.validate()?;

@@ -7,7 +7,7 @@ use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, SingleRootPayload, Verifie
 
 use crate::frontmatter::strip_frontmatter;
 use crate::ordering::{OrderedItem, extends_first};
-use crate::render::render_item;
+use crate::render::{render_item, trust_note};
 use crate::token_estimation::ResolvedTokenEstimator;
 use crate::types::{
     ComposeArgs, ComposeContextPayload, ComposeEdge, ComposeEdgeKind, ComposeItem, ComposeMeta,
@@ -81,7 +81,7 @@ fn compose_inner(
         let body = strip_frontmatter(&verified.raw_content, &item.ref_id)?;
 
         // Render
-        let rendered = render_item(item.role, &item.ref_id, &body);
+        let rendered = render_item(item.role, &item.ref_id, verified.trust_class, &body);
         let item_tokens = estimator.estimate(&rendered);
 
         // Budget check
@@ -100,6 +100,7 @@ fn compose_inner(
             role: item.role,
             depth: item.depth,
             tokens: item_tokens,
+            trust_class: trust_note(verified.trust_class).map(|_| verified.trust_class),
         });
     }
 
@@ -414,6 +415,62 @@ mod tests {
     }
 
     #[test]
+    fn compose_item_carries_trust_class() {
+        let mut items = BTreeMap::new();
+        items.insert("root".to_string(), make_item("root", "Root body").1);
+        let mut admitted = make_item("ref1", "Ref body").1;
+        admitted.trust_class = TrustClass::UntrustedProject;
+        items.insert("ref1".to_string(), admitted);
+
+        let payload = ComposePayload {
+            root: SingleRootPayload {
+                root_ref: "root".to_string(),
+                items_by_ref: items,
+                edges: vec![make_refs_edge("root", "ref1")],
+            },
+            args: ComposeArgs {
+                token_budget: 1000,
+                exclude_refs: vec![],
+                position: None,
+            },
+        };
+
+        let result = compose(&payload, &default_runtime_config()).unwrap();
+        assert!(
+            result.content.contains("## Primary: root\n\n"),
+            "the pinned root keeps its unlabelled header: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains(&format!(
+                "## Reference: ref1 ({})\n\n",
+                crate::render::UNTRUSTED_PROJECT_NOTE
+            )),
+            "the admitted reference is labelled: {}",
+            result.content
+        );
+        let by_id: BTreeMap<_, _> = result
+            .composition
+            .resolved_items
+            .iter()
+            .map(|item| (item.item_id.as_str(), item.trust_class))
+            .collect();
+        assert_eq!(by_id.get("root"), Some(&None));
+        assert_eq!(by_id.get("ref1"), Some(&Some(TrustClass::UntrustedProject)));
+        let meta = serde_json::to_value(&result.composition.resolved_items).unwrap();
+        let root_meta = meta
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["item_id"] == "root")
+            .unwrap();
+        assert!(
+            root_meta.get("trust_class").is_none(),
+            "pinned items serialize without trust_class: {meta}"
+        );
+    }
+
+    #[test]
     fn compose_exclude_refs() {
         let mut items = BTreeMap::new();
         items.insert("root".to_string(), make_item("root", "Root body").1);
@@ -468,7 +525,12 @@ mod tests {
     #[test]
     fn compose_includes_item_at_exact_budget_boundary() {
         let body = "Boundary body ".repeat(20);
-        let rendered = render_item(ComposeRole::Primary, "root", &body);
+        let rendered = render_item(
+            ComposeRole::Primary,
+            "root",
+            TrustClass::TrustedBundle,
+            &body,
+        );
         let exact_budget = crate::budget::estimate_tokens(&rendered);
 
         let mut items = BTreeMap::new();
@@ -495,7 +557,12 @@ mod tests {
     #[test]
     fn compose_omits_item_one_token_over_budget() {
         let body = "Boundary body ".repeat(20);
-        let rendered = render_item(ComposeRole::Primary, "root", &body);
+        let rendered = render_item(
+            ComposeRole::Primary,
+            "root",
+            TrustClass::TrustedBundle,
+            &body,
+        );
         let exact_budget = crate::budget::estimate_tokens(&rendered);
 
         let mut items = BTreeMap::new();

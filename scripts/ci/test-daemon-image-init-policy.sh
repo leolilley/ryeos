@@ -308,7 +308,7 @@ assert_runtime_init_profile Dockerfile.release f5r-controller ryeos-f5r-controll
 # holds. It describes where an image is deployed, so no image may preset it.
 for path in "$root"/Dockerfile*; do
     [[ -f "$path" ]] || continue
-    if dockerfile_instructions "$path" | grep -Eq '^(ENV|ARG) RYEOS_INIT_HOST_CLASS([= ]|$)'; then
+    if grep -Eq '^(ENV|ARG) RYEOS_INIT_HOST_CLASS([= ]|$)' <<<"$(dockerfile_instructions "$path")"; then
         echo "$(basename "$path") presets RYEOS_INIT_HOST_CLASS; the deployment must declare it" >&2
         exit 1
     fi
@@ -669,7 +669,7 @@ fi
     unset RYEOS_OPERATOR_HOLD
     [[ "$RESTART_INHIBITED_HOLD_SECONDS" -gt 0 && "$RESTART_INHIBITED_HOLD_SECONDS" -le 60 ]]
     grep -Fq 'exec ryeosd "${DAEMON_ARGS[@]}"' "$root/deploy/entrypoint.sh"
-    ! sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh" | grep -Fq -- '--bind'
+    ! grep -Fq -- '--bind' <<<"$(sed -n '/exec ryeosd/,$p' "$root/deploy/entrypoint.sh")"
 )
 
 # These current images require Python for readiness probes and admitted tools;
@@ -802,7 +802,7 @@ while IFS= read -r set_id; do
     }
 done < <(ryeos_bundle_set_ids)
 for listed_id in "${image_bundle_sets[@]}" "${no_image_bundle_sets[@]}"; do
-    ryeos_bundle_set_ids | grep -Fxq -- "$listed_id" || {
+    grep -Fxq -- "$listed_id" <<<"$(ryeos_bundle_set_ids)" || {
         echo "image inventory names $listed_id, which is not a bundle set" >&2
         exit 1
     }
@@ -822,7 +822,7 @@ while IFS= read -r target_name; do
         echo "composition Bake target $target_name names no Dockerfile.release stage" >&2
         exit 1
     }
-    printf '%s\n' "${release_daemon_stages[@]}" | grep -Fxq -- "$stage" || {
+    grep -Fxq -- "$stage" <<<"$(printf '%s\n' "${release_daemon_stages[@]}")" || {
         echo "composition Bake target $target_name names $stage, which is not a release daemon stage" >&2
         exit 1
     }
@@ -833,7 +833,7 @@ while IFS= read -r target_name; do
     bake_stages+=("$stage")
 done < <(sed -nE 's/^target "([^"]+)" \{$/\1/p' "$composition_bake")
 for stage in "${release_daemon_stages[@]}"; do
-    printf '%s\n' "${bake_stages[@]}" | grep -Fxq -- "$stage" || {
+    grep -Fxq -- "$stage" <<<"$(printf '%s\n' "${bake_stages[@]}")" || {
         echo "release daemon stage $stage has no composition Bake target" >&2
         exit 1
     }
@@ -914,13 +914,73 @@ fi
     exit 1
 }
 
-# A draft descriptor must never ship inside a signed bundle tree; drafts live
-# under authoring/ until they can be admitted.
-unsigned_drafts="$(grep -rEl --include='*.yaml' --include='*.yml' \
-    "^[[:space:]]*description:[[:space:]]*['\"]?UNSIGNED" "$root"/bundles/*/.ai || true)"
-[[ -z "$unsigned_drafts" ]] || {
-    echo "bundle trees must not ship unsigned draft descriptors:" >&2
-    echo "$unsigned_drafts" >&2
+# Only signed items ship inside a bundle's .ai/ tree; drafts live under
+# authoring/ until they can be admitted. The check reads the authored tree
+# (tracked files), not the objects/, refs/ and bin/ outputs a local populate
+# leaves there. No file may be marked UNSIGNED, and every file must carry a
+# signature line except the manifest source and the runtime support trees
+# (lib/, __pycache__/) that signed items load.
+shipped_bundle_tree_violations() {
+    local tree_root="$1" path
+    while IFS= read -r -d '' path; do
+        [[ -f "$tree_root/$path" ]] || continue
+        if grep -Eq "^[[:space:]]*(#|<!--)[[:space:]]*UNSIGNED|^[[:space:]]*description:[[:space:]]*['\"]?UNSIGNED" \
+            "$tree_root/$path"; then
+            printf '%s: marked UNSIGNED\n' "$path"
+            continue
+        fi
+        case "/$path/" in
+            */lib/* | */__pycache__/* | */.ai/manifest.source.yaml/) continue ;;
+        esac
+        grep -Fq 'ryeos:signed:' <<<"$(head -n 2 -- "$tree_root/$path")" ||
+            printf '%s: no signature line\n' "$path"
+    done < <(git -C "$tree_root" ls-files -z -- ':(glob)bundles/*/.ai/**')
+}
+
+(
+    fixture="$(mktemp -d)"
+    trap 'rm -rf "$fixture"' EXIT
+    git -C "$fixture" init -q
+    fixture_file() {
+        mkdir -p "$(dirname "$fixture/$1")"
+        printf '%b' "$2" >"$fixture/$1"
+        git -C "$fixture" add -- "$1"
+    }
+    expect_violation() {
+        fixture_file "$1" "$2"
+        grep -Fxq "$1: $3" <<<"$(shipped_bundle_tree_violations "$fixture")" || {
+            echo "shipped bundle tree check must report $1: $3" >&2
+            exit 1
+        }
+        git -C "$fixture" rm -q -f -- "$1"
+    }
+
+    fixture_file bundles/x/.ai/manifest.source.yaml 'name: x\n'
+    fixture_file bundles/x/.ai/config/x/item.yaml '# ryeos:signed:fixture\ncategory: x\n'
+    fixture_file bundles/x/.ai/tools/x/run/lib/helper.py 'VALUE = 1\n'
+    fixture_file bundles/x/authoring/drafts/config/x/draft.yaml '# UNSIGNED DRAFT: fixture\ncategory: x\n'
+    mkdir -p "$fixture/bundles/x/.ai/objects/aa"
+    printf 'populated output\n' >"$fixture/bundles/x/.ai/objects/aa/object"
+    [[ -z "$(shipped_bundle_tree_violations "$fixture")" ]] || {
+        echo "signed items, support files, drafts outside .ai/ and untracked outputs must pass" >&2
+        exit 1
+    }
+
+    expect_violation bundles/x/.ai/config/x/draft-header.yaml \
+        '# UNSIGNED DRAFT: fixture\ncategory: x\n' 'marked UNSIGNED'
+    expect_violation bundles/x/.ai/config/x/draft-description.yaml \
+        '# ryeos:signed:fixture\ndescription: UNSIGNED fixture\n' 'marked UNSIGNED'
+    expect_violation bundles/x/.ai/tools/x/run/lib/draft.py \
+        '# UNSIGNED DRAFT: fixture\n' 'marked UNSIGNED'
+    expect_violation bundles/x/.ai/graphs/x/plain.yaml 'category: x\n' 'no signature line'
+    expect_violation bundles/x/.ai/tools/x/run/tool.py \
+        'print(1)\nprint(2)\n# ryeos:signed:fixture\n' 'no signature line'
+)
+
+shipped_violations="$(shipped_bundle_tree_violations "$root")"
+[[ -z "$shipped_violations" ]] || {
+    echo "bundle trees must ship only signed items:" >&2
+    echo "$shipped_violations" >&2
     exit 1
 }
 

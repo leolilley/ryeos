@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 /// participant. A node's composition selects the scheduler exactly when it
 /// installs at least one of them. The refs are literal so the selection can be
 /// read by a build that does not compile the handlers.
-const SCHEDULER_SERVICE_REFS: [&str; 7] = [
+const SCHEDULER_SERVICE_REFS: [&str; 8] = [
     "service:scheduler/register",
     "service:scheduler/deregister",
     "service:scheduler/explain",
@@ -19,6 +19,7 @@ const SCHEDULER_SERVICE_REFS: [&str; 7] = [
     "service:scheduler/show_fires",
     "service:scheduler/pause",
     "service:scheduler/resume",
+    "service:scheduler/reauthorize",
 ];
 
 /// Combine the composition's selection with what this build can run. A build

@@ -17,6 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use anyhow::{Context, Result, anyhow, bail};
 use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
 use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::identity::authored_provenance::PROVENANCE_MARKER;
 use ryeos_engine::kind_registry::validate_metadata_anchoring;
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,6 @@ use serde_json::json;
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
 use crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY;
 use ryeos_node_runtime::identity::NodeIdentity;
-
-const PROVENANCE_MARKER: &str = "ryeos:authored:";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,12 +37,45 @@ pub struct RuntimeAuthorItemParams {
     pub mode: AuthorMode,
     #[serde(default)]
     pub format_ext: Option<String>,
-    /// Compare-and-swap guard for `mode: upsert`. When set, the upsert commits
-    /// only if the incumbent item's authored `content_digest` equals this value;
-    /// otherwise it fails with a conflict carrying the incumbent's provenance.
-    /// Absent = unguarded upsert (last-writer-wins).
+    /// Compare-and-swap guard for `mode: upsert`. An upsert over an existing
+    /// item requires it: the upsert commits only if the incumbent item's
+    /// authored `content_digest` equals this value, and otherwise fails with a
+    /// conflict carrying the incumbent's provenance. Absent is allowed only
+    /// when no item exists yet (the upsert then creates it); over an existing
+    /// item it is refused with [`AuthorItemRefusal::UpsertRequiresExpectedDigest`]
+    /// or [`AuthorItemRefusal::UpsertOverUnauthoredItem`].
     #[serde(default)]
     pub expected_digest: Option<String>,
+}
+
+/// A typed refusal of `runtime.author_item`. The callback surface reports it
+/// under [`AuthorItemRefusal::code`] rather than as a generic failure.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthorItemRefusal {
+    #[error(
+        "author_item refused: upsert over the existing item `{item_ref}` at {path} requires \
+         expected_digest; resend with expected_digest `{incumbent_digest}` (the incumbent's \
+         content_digest) to replace it, or use mode `create` for a new item"
+    )]
+    UpsertRequiresExpectedDigest {
+        item_ref: String,
+        path: String,
+        incumbent_digest: String,
+    },
+    #[error(
+        "author_item refused: upsert over the existing item `{item_ref}` at {path} requires \
+         expected_digest, and the incumbent has no runtime provenance (content_digest: none, not \
+         runtime-authored), so author_item cannot replace it; change it by editing and signing \
+         it as the operator"
+    )]
+    UpsertOverUnauthoredItem { item_ref: String, path: String },
+}
+
+impl AuthorItemRefusal {
+    /// Stable code for the callback error envelope.
+    pub fn code(&self) -> &'static str {
+        "author_item_expected_digest_required"
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -254,16 +286,23 @@ impl RuntimeItemAuthorService {
                 target.display()
             );
         }
-        if params.mode == AuthorMode::Upsert
-            && let Some(expected) = params.expected_digest.as_deref()
-        {
-            enforce_expected_digest_from_file(
-                incumbent.as_mut(),
-                &target,
-                expected,
-                &source_format.signature.prefix,
-                source_format.signature.suffix.as_deref(),
-            )?;
+        if params.mode == AuthorMode::Upsert {
+            match params.expected_digest.as_deref() {
+                Some(expected) => enforce_expected_digest_from_file(
+                    incumbent.as_mut(),
+                    &target,
+                    expected,
+                    &source_format.signature.prefix,
+                    source_format.signature.suffix.as_deref(),
+                )?,
+                None => require_no_incumbent_for_unguarded_upsert(
+                    incumbent.as_mut(),
+                    &target,
+                    &canonical.to_string(),
+                    &source_format.signature.prefix,
+                    source_format.signature.suffix.as_deref(),
+                )?,
+            }
         }
 
         write_atomic(
@@ -627,6 +666,38 @@ enum IncumbentState {
     },
 }
 
+/// An upsert without `expected_digest` may only create: over an existing item
+/// it is refused, naming the incumbent's `content_digest` when it has one so
+/// the caller can resend the upsert guarded by it.
+fn require_no_incumbent_for_unguarded_upsert(
+    incumbent: Option<&mut std::fs::File>,
+    target: &Path,
+    item_ref: &str,
+    prefix: &str,
+    suffix: Option<&str>,
+) -> Result<()> {
+    match read_incumbent_state_from_file(incumbent, target, prefix, suffix)? {
+        IncumbentState::Missing => Ok(()),
+        IncumbentState::Present {
+            content_digest: Some(incumbent_digest),
+            ..
+        } => Err(AuthorItemRefusal::UpsertRequiresExpectedDigest {
+            item_ref: item_ref.to_string(),
+            path: target.display().to_string(),
+            incumbent_digest,
+        }
+        .into()),
+        IncumbentState::Present {
+            content_digest: None,
+            ..
+        } => Err(AuthorItemRefusal::UpsertOverUnauthoredItem {
+            item_ref: item_ref.to_string(),
+            path: target.display().to_string(),
+        }
+        .into()),
+    }
+}
+
 /// Reject an upsert whose incumbent's authored `content_digest` does not match
 /// the caller's `expected_digest`. All three cases fail loudly as a conflict:
 /// missing target, missing/malformed incumbent provenance, digest mismatch.
@@ -762,8 +833,67 @@ fn enforce_expected_digest(
 }
 
 #[cfg(test)]
+fn require_no_incumbent(target: &Path, prefix: &str, suffix: Option<&str>) -> Result<()> {
+    let mut incumbent = match std::fs::File::open(target) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("open incumbent item {}", target.display()));
+        }
+    };
+    require_no_incumbent_for_unguarded_upsert(
+        incumbent.as_mut(),
+        target,
+        "knowledge:notes/x",
+        prefix,
+        suffix,
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unguarded_upsert_over_existing_item_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = append_provenance_comment("value: 1", "#", None, &provenance("digest-in"));
+        let target = write_file(dir.path(), "item.yaml", &body);
+        let err = require_no_incumbent(&target, "#", None).unwrap_err();
+        let refusal = err
+            .downcast_ref::<AuthorItemRefusal>()
+            .expect("a typed refusal");
+        assert!(matches!(
+            refusal,
+            AuthorItemRefusal::UpsertRequiresExpectedDigest { incumbent_digest, .. }
+                if incumbent_digest == "digest-in"
+        ));
+        assert_eq!(refusal.code(), "author_item_expected_digest_required");
+        let message = err.to_string();
+        assert!(
+            message.contains("expected_digest `digest-in`")
+                && message.contains("knowledge:notes/x"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn unguarded_upsert_over_operator_item_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = write_file(dir.path(), "plain.yaml", "value: 1\n");
+        let err = require_no_incumbent(&target, "#", None).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<AuthorItemRefusal>(),
+            Some(AuthorItemRefusal::UpsertOverUnauthoredItem { .. })
+        ));
+        assert!(err.to_string().contains("not runtime-authored"), "{err}");
+    }
+
+    #[test]
+    fn unguarded_upsert_without_incumbent_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        require_no_incumbent(&dir.path().join("absent.yaml"), "#", None).unwrap();
+    }
 
     fn write_file(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);

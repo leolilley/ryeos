@@ -368,6 +368,34 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         &config.db_path,
     ));
 
+    // A process-scope obligation no daemon recovery has retired, as a Q
+    // session ended by disconnect leaves behind on the current epoch.
+    {
+        let runtime = crate::runtime_db::test_native::TestRuntime::open(&config.db_path);
+        runtime
+            .with_sql_for_test(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO process_resource_reservation (
+                        reservation_id, owner_kind, owner_coordinate, reservation,
+                        created_at_ms, updated_at_ms
+                     ) VALUES ('R-unretired', 'dedicated_worker', 'worker-unretired', '{}', 1, 1)",
+                    [],
+                )?)
+            })
+            .unwrap();
+    }
+    let unretired_rows = || -> i64 {
+        crate::runtime_db::test_native::read_existing(&config.db_path, |connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM process_resource_reservation WHERE reservation_id='R-unretired'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+    };
+
+    // The already-current cut changes nothing, so it inspects no history and
+    // the unretired obligation cannot refuse it.
     let repeated = {
         let _serial = lillux_sqlite::test_host::serial();
         run_execution_history_reset(&options, None).unwrap()
@@ -382,6 +410,32 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         repeated.replay_indexes.scope,
         ryeos_state::operational::ReplayIndexResetScope::Unchanged
     );
+    assert_eq!(repeated.runtime_rows.total_rows(), Some(0));
+    assert_eq!(repeated.scheduler_rows.total_rows(), Some(0));
+    assert_eq!(repeated.chain_heads, 0);
+    assert_eq!(unretired_rows(), 1, "an already-current cut touches no row");
+
+    // Its preview is the same no-op.
+    let previewed = {
+        let _serial = lillux_sqlite::test_host::serial();
+        run_execution_history_reset(
+            &ExecutionHistoryResetOptions {
+                dry_run: true,
+                ..options.clone()
+            },
+            None,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        previewed.schema_cut.as_ref().unwrap().status,
+        ExecutionHistorySchemaCutStatus::AlreadyCurrent
+    );
+    assert_eq!(previewed.runtime_rows.total_rows(), Some(0));
+
+    // A reset that would mutate still inspects and refuses that obligation
+    // with `execution_history_scopes_unretired`; runtime_db's
+    // `check_closed_worker_scope_retirement` asserts the typed refusal.
     assert_eq!(
         std::fs::read(&config.node_signing_key_path).unwrap(),
         identity_bytes

@@ -9,6 +9,58 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub const SCHEDULED_FIRE_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
+/// Per-fire ceiling chosen by a schedule's owner.
+///
+/// The ceiling is one more cap layer: every fire's hard limits are computed
+/// from the item and node configuration as for any root, then clamped under
+/// these values. An absent field leaves that dimension to the item and node
+/// caps; a present field is a positive upper bound. Zero is refused because it
+/// is the "unlimited" sentinel in hard limits and would read as no ceiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleFireLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    /// Fixed-point USD as a canonical decimal string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_usd: Option<ryeos_accounting::UsdNanos>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u64>,
+}
+
+impl ScheduleFireLimits {
+    pub fn validate(&self) -> Result<()> {
+        let fields = [
+            ("turns", self.turns.map(u64::from)),
+            ("tokens", self.tokens),
+            (
+                "spend_usd",
+                self.spend_usd.map(|spend| spend.as_nanos().unsigned_abs()),
+            ),
+            ("spawns", self.spawns.map(u64::from)),
+            ("depth", self.depth.map(u64::from)),
+            ("duration_seconds", self.duration_seconds),
+        ];
+        if fields.iter().all(|(_, value)| value.is_none()) {
+            anyhow::bail!("schedule limits must set at least one ceiling");
+        }
+        for (name, value) in fields {
+            if value == Some(0) {
+                anyhow::bail!(
+                    "schedule limits.{name} must be positive; omit it to leave that dimension to the item and node caps"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScheduledFireContext {
     pub schema_version: u32,
@@ -20,6 +72,10 @@ pub struct ScheduledFireContext {
     pub first_dispatch_at_ms: i64,
     pub trigger_reason: String,
     pub schedule_spec_hash: String,
+    /// The schedule owner's per-fire ceiling, copied from the admitted spec.
+    /// Absent when the schedule sets none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ScheduleFireLimits>,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +88,8 @@ struct ScheduledFireContextWire {
     first_dispatch_at_ms: i64,
     trigger_reason: String,
     schedule_spec_hash: String,
+    #[serde(default)]
+    limits: Option<ScheduleFireLimits>,
 }
 
 impl ScheduledFireContext {
@@ -51,9 +109,17 @@ impl ScheduledFireContext {
             first_dispatch_at_ms,
             trigger_reason,
             schedule_spec_hash,
+            limits: None,
         };
         context.validate()?;
         Ok(context)
+    }
+
+    /// Carry the admitted schedule's per-fire ceiling into this fire.
+    pub fn with_limits(mut self, limits: Option<ScheduleFireLimits>) -> Result<Self> {
+        self.limits = limits;
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -91,6 +157,9 @@ impl ScheduledFireContext {
         if !is_lower_sha256(&self.schedule_spec_hash) {
             anyhow::bail!("scheduled fire schedule_spec_hash must be lowercase SHA-256 hex");
         }
+        if let Some(limits) = &self.limits {
+            limits.validate()?;
+        }
         Ok(())
     }
 }
@@ -121,6 +190,7 @@ impl<'de> Deserialize<'de> for ScheduledFireContext {
             first_dispatch_at_ms: wire.first_dispatch_at_ms,
             trigger_reason: wire.trigger_reason,
             schedule_spec_hash: wire.schedule_spec_hash,
+            limits: wire.limits,
         };
         context.validate().map_err(serde::de::Error::custom)?;
         Ok(context)
@@ -206,6 +276,36 @@ mod tests {
     fn decode_rejects_noncanonical_spec_hash() {
         let mut value = serde_json::to_value(context()).unwrap();
         value["schedule_spec_hash"] = json!("A".repeat(64));
+        assert!(serde_json::from_value::<ScheduledFireContext>(value).is_err());
+    }
+
+    #[test]
+    fn absent_limits_keep_the_original_wire_shape() {
+        let value = serde_json::to_value(context()).unwrap();
+        assert!(value.get("limits").is_none());
+    }
+
+    #[test]
+    fn limits_round_trip_and_reject_zero_or_empty_ceilings() {
+        let limited = context()
+            .with_limits(Some(ScheduleFireLimits {
+                turns: Some(3),
+                spend_usd: Some(ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap()),
+                ..ScheduleFireLimits::default()
+            }))
+            .unwrap();
+        let value = serde_json::to_value(&limited).unwrap();
+        assert_eq!(value["limits"]["spend_usd"], "0.25");
+        let observed: ScheduledFireContext = serde_json::from_value(value).unwrap();
+        assert_eq!(observed, limited);
+
+        assert!(
+            context()
+                .with_limits(Some(ScheduleFireLimits::default()))
+                .is_err()
+        );
+        let mut value = serde_json::to_value(context()).unwrap();
+        value["limits"] = json!({"turns": 0});
         assert!(serde_json::from_value::<ScheduledFireContext>(value).is_err());
     }
 

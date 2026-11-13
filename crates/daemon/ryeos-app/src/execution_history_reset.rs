@@ -2013,6 +2013,22 @@ impl std::error::Error for RuntimeInspectionReadFailure {
     }
 }
 
+/// Whether a named schema cut is already complete: the store holds the cut's
+/// target epoch, which this build owns, and no reset operation is active. Such
+/// a reset retires nothing, so it inspects no execution history either.
+fn schema_cut_names_current_epoch(
+    schema_cut: Option<ExecutionHistorySchemaCut>,
+    observed_epoch: u32,
+    operation_active: bool,
+) -> bool {
+    !operation_active
+        && schema_cut.is_some_and(|cut| {
+            cut.from != cut.to
+                && cut.to == RuntimeDb::current_operator_schema_epoch()
+                && observed_epoch == cut.to
+        })
+}
+
 fn run_execution_history_reset_inner(
     options: &ExecutionHistoryResetOptions,
     participant: Option<&dyn SchedulerHistoryResetParticipant>,
@@ -2237,6 +2253,15 @@ fn run_execution_history_reset_owned(
             let reset_required = db.requires_explicit_history_reset();
             let accounting = if reset_required {
                 RuntimeThreadHistoryAccounting::UnavailableIncompatibleSchema
+            } else if schema_cut_names_current_epoch(
+                options.schema_cut,
+                epoch,
+                active_operation.is_some(),
+            ) {
+                // An already-current cut retires nothing, so it reads no rows.
+                RuntimeThreadHistoryAccounting::Exact {
+                    counts: Default::default(),
+                }
             } else {
                 RuntimeThreadHistoryAccounting::Exact {
                     counts: db
@@ -2325,7 +2350,11 @@ fn run_execution_history_reset_owned(
                 observed_runtime_schema_epoch
             );
         }
-        observed_runtime_schema_epoch == schema_cut.to && active_operation.is_none()
+        schema_cut_names_current_epoch(
+            Some(schema_cut),
+            observed_runtime_schema_epoch,
+            active_operation.is_some(),
+        )
     } else {
         false
     };
@@ -2346,8 +2375,15 @@ fn run_execution_history_reset_owned(
             .context("validate scheduler namespace before reset inspection or restart")?,
         None => require_absent_scheduler_history(&config, &runtime_directory)?,
     }
+    // An already-current cut changes nothing, so it inspects no execution
+    // history: rows it would never touch (an unretired process scope, say)
+    // cannot refuse it. The namespace preflight above still ran.
     let scheduler_preview = if let Some(operation) = &active_operation {
         operation.accounting().clone()
+    } else if schema_cut_already_current {
+        ryeos_scheduler_contract::SchedulerFireHistoryAccounting::Exact {
+            counts: Default::default(),
+        }
     } else {
         match participant {
             Some(participant) => participant
@@ -2368,15 +2404,23 @@ fn run_execution_history_reset_owned(
     // Validate every participating namespace before publishing destructive
     // intent. The second pass performs the same descriptor-rooted checks while
     // mutating; no pathname-only deletion is used.
-    publish_progress(
-        &mut observer,
-        ExecutionHistoryResetPhase::InspectingHistory,
-        None,
-    );
-    let authoritative_preview = state_db
-        .discard_authoritative_thread_history_admitted(&cas_guard, true)
-        .context("inspect authoritative thread history")?;
-    let project_heads_preview = if options.discard_project_heads {
+    if !schema_cut_already_current {
+        publish_progress(
+            &mut observer,
+            ExecutionHistoryResetPhase::InspectingHistory,
+            None,
+        );
+    }
+    let authoritative_preview = if schema_cut_already_current {
+        Default::default()
+    } else {
+        state_db
+            .discard_authoritative_thread_history_admitted(&cas_guard, true)
+            .context("inspect authoritative thread history")?
+    };
+    let project_heads_preview = if schema_cut_already_current {
+        0
+    } else if options.discard_project_heads {
         state_db
             .discard_all_project_heads_admitted(&cas_guard, true)
             .context("inspect principal and deployed project HEADs")?
@@ -2385,6 +2429,10 @@ fn run_execution_history_reset_owned(
     };
     let runtime_preview = if let Some(accounting) = inspected_runtime_rows {
         accounting
+    } else if schema_cut_already_current {
+        RuntimeThreadHistoryAccounting::Exact {
+            counts: Default::default(),
+        }
     } else if runtime_schema_reset_required {
         // Incompatible layouts are never decoded to manufacture exact counts.
         RuntimeThreadHistoryAccounting::UnavailableIncompatibleSchema
@@ -2397,14 +2445,20 @@ fn run_execution_history_reset_owned(
                 .context("inspect daemon runtime thread rows")?,
         }
     };
-    let thread_runtime_preview = crate::state_store::discard_all_thread_runtime_files(
-        &config.app_root,
-        &runtime_directory,
-        true,
-    )
-    .context("inspect per-thread runtime files")?;
-    let scheduler_journal_preview = inspect_scheduler_fire_journals(&runtime_directory)
-        .context("inspect scheduler fire journals")?;
+    let (thread_runtime_preview, scheduler_journal_preview) = if schema_cut_already_current {
+        (0, 0)
+    } else {
+        (
+            crate::state_store::discard_all_thread_runtime_files(
+                &config.app_root,
+                &runtime_directory,
+                true,
+            )
+            .context("inspect per-thread runtime files")?,
+            inspect_scheduler_fire_journals(&runtime_directory)
+                .context("inspect scheduler fire journals")?,
+        )
+    };
 
     // Replay indexes are disposable execution authority; credentials are not.
     // Inspect both through the existing operational owner before dry-run can

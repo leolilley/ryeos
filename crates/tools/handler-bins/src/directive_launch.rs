@@ -444,8 +444,10 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
     if !model.required {
         return Err("ref_bindings.model must be required".to_string());
     }
-    if model.source != RefBindingSourceWire::Caller {
-        return Err("ref_bindings.model must be caller-sourced".to_string());
+    if model.source != RefBindingSourceWire::CallerOrPrimaryRef {
+        return Err(
+            "ref_bindings.model must be caller-sourced with the primary ref as default".to_string(),
+        );
     }
     if model.project_result_requirement != ryeos_handler_protocol::ProjectResultRequirement::None {
         return Err("ref_bindings.model must not require a retained project result".to_string());

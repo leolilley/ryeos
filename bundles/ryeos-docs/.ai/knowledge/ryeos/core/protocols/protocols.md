@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-06T01:55:11Z:faf00a85628597d873a9d51222b2e7c15c8a3d0296e847eff2a6a401b8974eb7:ju4FWqp+EiTeJadHUxJ6YAxQf7dVTcXS4SYb2S3S9RZ1xbWOeXf9kZ/Q36oDEUn5yU+WaPhLerq3N7BrpXGWAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:27:41Z:806e884f0b6d4eb5245fa6d02b277959a26dc8b5bf4320a303866ed6077b9903:DRiLENwby3vDxJGZ7bf715IR0VXvHvAGsJsBKyLgrc7wwWlT8VyDaoxRNMpKwYeEQ/pYxfsNVPt7SOXkANRJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]
@@ -24,7 +24,7 @@ output while making callback authority explicit in signed protocol data.
 | **stdout**  | `opaque_bytes` — raw bytes, terminal mode |
 | **env**     | `RYE_THREAD_ID`, `RYE_PROJECT_PATH`, plus declared `RYEOSD_*` socket/token/thread/state-scope/auth bindings |
 | **lifecycle** | `detached_ok` — process can outlive parent |
-| **callback**  | `http` — authenticated daemon callback channel |
+| **callback**  | `runtime_socket` — authenticated daemon callback channel |
 
 The executor plan supplies stdin bytes and the daemon reads opaque bytes from
 stdout. Default wrappers normally serialize params as JSON, while explicit
@@ -54,14 +54,15 @@ graph-runtime). Used by the `runtime` kind.
 | **stdout**  | `runtime_result` — structured result |
 | **env**     | `RYEOSD_SOCKET_PATH`, `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_ID`, `RYEOSD_PROJECT_STATE_SCOPE`, `RYEOSD_THREAD_AUTH_TOKEN` |
 | **lifecycle** | `managed` — daemon tracks process lifetime |
-| **callback**  | `http` — HTTP callback channel for async |
+| **callback**  | `runtime_socket` — daemon callback over the runtime Unix socket |
 
 The runtime receives a `LaunchEnvelope` on stdin containing the
 composed item, context blocks, parameters, and execution config.
 It returns a `RuntimeResult` on stdout.
 
-The HTTP callback channel allows the runtime to call back into the
-daemon for tool dispatch, event logging, and state persistence.
+The runtime socket callback channel (Unix socket, MessagePack frames) allows
+the runtime to call back into the daemon for tool dispatch, event logging,
+and state persistence.
 
 ## Method Runtime V1 (`protocol:ryeos/core/method_runtime`)
 
@@ -76,7 +77,7 @@ wire contract.
 | **stdout**  | `method_call_result` — structured terminal method result |
 | **env**     | declared daemon callback bindings, including `RYEOSD_THREAD_AUTH_TOKEN` |
 | **lifecycle** | `managed` — daemon tracks process lifetime |
-| **callback**  | `http` — authenticated daemon callback channel |
+| **callback**  | `runtime_socket` — authenticated daemon callback channel |
 
 Accepted-launch preflight, boot validation, and live dispatch all require this
 exact contract, including the canonical `RYEOSD_THREAD_AUTH_TOKEN` binding. A runtime

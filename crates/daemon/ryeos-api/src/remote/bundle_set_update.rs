@@ -111,11 +111,14 @@ impl RemoteAuthority {
         })
     }
 
+    /// Fetch the catalog closure and resolve it against `high_water`, the
+    /// active selection's high-water for the requested namespace.
     async fn fetch(
         &self,
         request: &StoppedBundleSetUpdateRequest,
+        high_water: Option<&consumer::CatalogPosition>,
         cas: &lillux::CasStore,
-    ) -> anyhow::Result<consumer::ResolvedSetCoordinate> {
+    ) -> anyhow::Result<consumer::CatalogResolution> {
         let client = RemoteClient::new(
             &self.remote.url,
             &self.remote.principal_id,
@@ -172,6 +175,7 @@ impl RemoteAuthority {
                 &request.catalog_namespace,
                 set_name,
                 channel,
+                high_water,
                 cas,
                 &self.policy,
             ),
@@ -193,10 +197,11 @@ impl RemoteAuthority {
                 consumer::verify_exact_coordinate(
                     &coordinate,
                     &request.catalog_namespace,
+                    high_water,
+                    request.allow_catalog_rollback,
                     cas,
                     &self.policy,
-                )?;
-                Ok(coordinate)
+                )
             }
         }
     }
@@ -249,7 +254,26 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
         let cas = Arc::new(ryeos_node::bundle_set_update::open_stopped_bundle_cas(
             app_root,
         )?);
-        let coordinate = self.fetch(request, &cas).await?;
+        let active =
+            ryeos_node::bundle_set_update::load_active_published_set(app_root, cas.as_ref())?;
+        let old_catalog_high_water = active
+            .as_ref()
+            .map(|(value, _, _)| value.catalog_high_water.clone())
+            .unwrap_or_default();
+        let resolution = self
+            .fetch(
+                request,
+                old_catalog_high_water.get(&request.catalog_namespace),
+                &cas,
+            )
+            .await?;
+        let coordinate = resolution.coordinate;
+        let mut new_catalog_high_water = old_catalog_high_water.clone();
+        new_catalog_high_water.insert(
+            request.catalog_namespace.clone(),
+            resolution.admission.high_water,
+        );
+        let catalog_rollback = resolution.admission.rollback;
         let binding = ryeos_app::bundle_publication::ReleasePolicyBinding {
             catalog_namespace: request.catalog_namespace.clone(),
             bundle_publication_policy_section_digest: self
@@ -276,8 +300,6 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
             self.substrate.protocol,
             env!("RYEOS_CONSUMER_TARGET"),
         )?;
-        let active =
-            ryeos_node::bundle_set_update::load_active_published_set(app_root, cas.as_ref())?;
         let live = self.live_identities()?;
         let installed = match active.as_ref() {
             Some((_, _, set)) => ryeos_node::bundle_set_update::installed_generation_map(Some(set)),
@@ -316,6 +338,8 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
                     .clone(),
                 node_policy_generation_digest: self.completion.policy_generation_digest.clone(),
                 expected_active_selection: expected_active.clone(),
+                catalog_publication_sequence: resolution.catalog_publication_sequence,
+                catalog_rollback: catalog_rollback.clone(),
                 issued_at: lillux::time::iso8601_now(),
             },
         )?;
@@ -482,10 +506,14 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
             new_completion_bytes: next_completion.bytes,
             old_installed_set_digest,
             new_installed_set_digest: new_installed_set_digest.clone(),
+            old_catalog_high_water,
+            new_catalog_high_water,
+            catalog_rollback,
             actions,
         };
         Ok(PreparedStoppedBundleSetUpdate {
             coordinate,
+            catalog_publication_sequence: resolution.catalog_publication_sequence,
             plan,
             apply,
             installed_set_digest: new_installed_set_digest,
@@ -499,6 +527,9 @@ impl StoppedBundleSetUpdateAuthority for RemoteAuthority {
     ) -> anyhow::Result<()> {
         if journal.selection_hash != prepared.apply.selection_hash
             || journal.new_installed_set_digest != prepared.installed_set_digest
+            || journal.old_catalog_high_water != prepared.apply.old_catalog_high_water
+            || journal.new_catalog_high_water != prepared.apply.new_catalog_high_water
+            || journal.catalog_rollback != prepared.apply.catalog_rollback
             || journal.actions.len() != prepared.plan.entries.len()
         {
             bail!("transaction journal differs from admitted exact-set plan");

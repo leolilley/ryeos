@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T23:12:22Z:9499b5ceb6586f643bf328cc74ed27b6e1915401b5f618ce5c14a735b96185b9:J6XkTU8HnGGlr7Z9LFA3vkbHgP699GbWb6eTrPBC7hlM7j+yq4iWz81br3b9maS/VnMxT3txxlYU2u1NQ4MDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:43:18Z:8e5aeaecc0b8fcae83af472675492063fc38dc31229ad0794cb50b00ead3d57c:4xTa8KFF1dQi0TRBrhf6A3qwgditY0m1kvasjtIXINw3OUE+Vk582uy/tGfWhfVXMnuDJPsTFFAiII33SmdnCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "central-auth"
 version: "0.1.0"
 description: "JSON-schema-style contract for central-auth realm policies."
@@ -7,6 +7,7 @@ type: object
 required:
   - roles
   - allowed_capabilities
+  - login_throttle
 properties:
   roles:
     type: object
@@ -23,3 +24,21 @@ properties:
     type: array
     items:
       type: string
+  login_throttle:
+    type: object
+    additionalProperties: false
+    required:
+      - max_failures
+      - window_secs
+      - lockout_secs
+    properties:
+      max_failures:
+        type: integer
+        minimum: 1
+        description: "Failed passphrase logins per principal (and per client_address, when given) within window_secs before a lockout."
+      window_secs:
+        type: integer
+        minimum: 1
+      lockout_secs:
+        type: integer
+        minimum: 1

@@ -6369,6 +6369,11 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     let period = Duration::from_secs(120);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Lives for this daemon generation only: a restart attempts every
+    // retained cleanup again.
+    let cleanup_backoff = Arc::new(Mutex::new(
+        ryeos_app::external_placement::cleanup_backoff::RetainedCleanupBackoff::default(),
+    ));
 
     loop {
         tokio::select! {
@@ -6376,7 +6381,7 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             _ = tick.tick() => {}
         }
 
-        let pass_result = run_periodic_recovery_pass(&state).await;
+        let pass_result = run_periodic_recovery_pass(&state, &cleanup_backoff).await;
         if let Err(error) = pass_result {
             tracing::error!(
                 error = %format!("{error:#}"),
@@ -6471,7 +6476,7 @@ async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()
 /// cannot hold the startup gate.
 async fn advance_external_candidate_cleanups_after_reconcile(state: &AppState) -> Result<()> {
     log_external_candidate_cleanup_recovery(
-        recover_external_candidate_cleanups_async(state.clone())
+        recover_external_candidate_cleanups_async(state.clone(), Default::default())
             .await
             .context("advance startup external candidate cleanup")?,
         "startup",
@@ -6497,7 +6502,12 @@ async fn run_cache_metric_flush_loop() -> Result<()> {
     }
 }
 
-async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+async fn run_periodic_recovery_pass(
+    state: &AppState,
+    cleanup_backoff: &Arc<
+        Mutex<ryeos_app::external_placement::cleanup_backoff::RetainedCleanupBackoff>,
+    >,
+) -> Result<()> {
     let recovered_project_applies =
         ryeos_api::handlers::project_apply_snapshot::retry_retained_project_snapshot_applies(state)
             .await
@@ -6519,7 +6529,7 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
         );
     }
     log_external_candidate_cleanup_recovery(
-        recover_external_candidate_cleanups_async(state.clone())
+        recover_external_candidate_cleanups_async(state.clone(), Arc::clone(cleanup_backoff))
             .await
             .context("periodic external candidate cleanup recovery")?,
         "periodic",
@@ -6633,11 +6643,19 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
 
 async fn recover_external_candidate_cleanups_async(
     state: AppState,
+    backoff: Arc<Mutex<ryeos_app::external_placement::cleanup_backoff::RetainedCleanupBackoff>>,
 ) -> Result<ryeos_app::external_placement::ExternalCandidateCleanupRecovery> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let task = lillux::task::spawn_host_task("external-cleanup-recovery", move || {
-        let _ =
-            sender.send(ryeos_app::external_placement::recover_external_candidate_cleanups(&state));
+        let mut backoff = backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = sender.send(
+            ryeos_app::external_placement::recover_external_candidate_cleanups(
+                &state,
+                &mut backoff,
+            ),
+        );
     })
     .context("start Lillux external cleanup recovery owner")?;
     task.detach();
@@ -6687,6 +6705,7 @@ fn log_external_candidate_cleanup_recovery(
             proved = report.proved,
             pending = report.pending,
             failures = report.failures.len(),
+            deferred = report.deferred.len(),
             "advanced retained external candidate cleanup obligations"
         );
     }

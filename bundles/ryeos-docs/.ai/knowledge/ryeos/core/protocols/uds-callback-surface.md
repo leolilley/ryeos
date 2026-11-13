@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-04T09:32:59Z:f0a84ce252fbd9b2ba7b98b87fbcf54f9c5e60b9cfb355fe57fa58c1cba235c0:3TAA9nDKhKxdPmrbHzAv2f2XBVUVQGCj5sViSELa5eX1KHAJi3Uox8HlL+A81ZvR/w4B6fyZG5//S1HgPLL5Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:27:41Z:fb489a090056ba98d62ca6da5a7b651d1b41f0c938396c25812378dcff0e811d:twgfiLAUPT0AN84AsH47ZB91bagDbbzTkYiOzpaiE6x//sroKNH7IZ0Gn3bi6jGA4q6hZQBv1HriXIdCa2pQBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
@@ -15,7 +15,9 @@ description: >
 The daemon's Unix-domain-socket RPC dispatcher gates every `runtime.*`
 method at the transport boundary — before the handler runs — in
 `crates/bin/daemon/src/uds/server.rs::dispatch_runtime_method`. This document
-records which tier gates each route. It is the route-level companion to
+records which tier gates each route. A protocol opts a subprocess into this
+surface with `callback_channel: runtime_socket`; `callback_channel: none`
+exposes no socket. It is the route-level companion to
 [callback-auth.md](callback-auth.md), which documents the token types,
 TTLs, env injection, and revocation.
 

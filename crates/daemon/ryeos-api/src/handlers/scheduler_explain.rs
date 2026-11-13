@@ -54,6 +54,14 @@ pub async fn handle(
         .filter(|cursor| cursor.spec_hash == spec.spec_hash);
     let now = lillux::time::timestamp_millis();
     let plan = planning::plan_schedule(&spec, last_fire.as_ref(), now);
+    let paused_reason = if spec.enabled {
+        None
+    } else {
+        super::scheduler_register::schedule_paused_reason(&scheduler, &spec)
+            .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
+    };
+    let lifetime_last_boundary = planning::lifetime_horizon(&spec).map(|(last, _)| last);
+    let authority = schedule_authority_view(state.as_ref(), &spec.execution);
 
     let last_fire_json = last_fire.as_ref().map(|f| {
         serde_json::json!({
@@ -102,7 +110,42 @@ pub async fn handle(
         "decision": plan.decision,
         "decision_reason": plan.decision_reason,
         "total_fires": total_fires,
+        "paused_reason": paused_reason,
+        "lifetime": {
+            "max_fires": spec.execution.max_fires,
+            "expires_at": spec.execution.expires_at,
+            "last_admitted_boundary": lifetime_last_boundary,
+            "exhausted": plan.lifetime_exhausted,
+        },
+        "limits": spec.execution.limits,
+        "authority": authority,
     }))
+}
+
+/// Whether the schedule's retained authority would admit a fire now, by the
+/// same revalidation every fire runs, read-only.
+pub(crate) fn schedule_authority_view(
+    state: &AppState,
+    execution: &ryeos_scheduler_contract::ScheduleExecution,
+) -> Value {
+    match ryeos_app::scheduled_execution_authority::revalidate_scheduled_execution(state, execution)
+    {
+        Ok(_) => serde_json::json!({"valid": true, "refusal": null}),
+        Err(error) => match ryeos_scheduler_contract::ScheduledAuthorityRefusal::find(&error) {
+            Some(refusal) => serde_json::json!({
+                "valid": false,
+                "refusal": refusal.kind,
+                "outcome": refusal.kind.fire_outcome(),
+                "detail": refusal.detail,
+            }),
+            // Not a typed refusal: the grants could not be read or verified.
+            None => serde_json::json!({
+                "valid": false,
+                "refusal": null,
+                "error": format!("{error:#}"),
+            }),
+        },
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

@@ -114,6 +114,19 @@ pub async fn start_with_endpoint_configuration(
 
     let mut initial = crate::status::status(env).await?;
     observe(&mut observer, &initial);
+    // A start on a spent capacity epoch would launch only to have the
+    // daemon's first debit refuse it. Refuse here instead, before any Up
+    // intent or endpoint change, recording no restart inhibition: re-issuing
+    // capacity stays an explicit operator act. A running node needs no new
+    // incarnation, so it is never refused here.
+    if matches!(
+        initial,
+        LifecycleStatus::Stopped { .. }
+            | LifecycleStatus::Failed { .. }
+            | LifecycleStatus::Stale { .. }
+    ) {
+        require_native_capacity_remaining(&original_config.app_root)?;
+    }
     let changes_endpoint = endpoints
         .bind
         .is_some_and(|bind| bind != original_config.bind)
@@ -461,6 +474,63 @@ fn require_start_not_inhibited(app_root: &Path) -> Result<()> {
     })
 }
 
+/// `ryeos start` found the native-capacity account with no incarnation left
+/// in its epoch: the daemon's first debit would refuse after launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeCapacityExhausted {
+    pub epoch: u64,
+    /// Whether the signed policy lets the operator re-issue capacity.
+    pub operator_reissue: bool,
+}
+
+impl NativeCapacityExhausted {
+    pub const CODE: &'static str = "native_capacity_exhausted";
+
+    /// The cure, as `ryeos node doctor` names it for the same account.
+    pub fn fix(&self) -> &'static str {
+        if self.operator_reissue {
+            "ryeos node capacity reissue --reason \"...\", then ryeos start"
+        } else {
+            "re-provision the node under a policy that pre-authorises renewal"
+        }
+    }
+
+    /// The refusal for `summary`, when it funds no further incarnation.
+    pub fn of(summary: &crate::native_capacity::CapacityAccountSummary) -> Option<Self> {
+        (summary.incarnations_remaining == 0).then_some(Self {
+            epoch: summary.epoch,
+            operator_reissue: summary.renewal.operator_reissue,
+        })
+    }
+}
+
+impl std::fmt::Display for NativeCapacityExhausted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: start refused before launch: the native capacity account has no incarnation \
+             left in epoch {}; no restart inhibition was recorded. Fix: {}",
+            Self::CODE,
+            self.epoch,
+            self.fix()
+        )
+    }
+}
+
+impl std::error::Error for NativeCapacityExhausted {}
+
+/// Refuse a start the capacity account cannot fund. An account that cannot
+/// be read here is left to the daemon, whose own recovery owns it.
+fn require_native_capacity_remaining(app_root: &Path) -> Result<()> {
+    let Ok(Some(summary)) = crate::native_capacity::inspect_capacity_account(app_root) else {
+        return Ok(());
+    };
+    match NativeCapacityExhausted::of(&summary) {
+        Some(refusal) => Err(refusal.into()),
+        None => Ok(()),
+    }
+}
+
 fn resolve_ryeosd() -> PathBuf {
     if let Ok(current) = std::env::current_exe()
         && let Some(dir) = current.parent()
@@ -582,6 +652,73 @@ mod tests {
         let _gate = LifecycleStartLock::try_acquire(&app_root)
             .unwrap()
             .expect("a refused start releases its lifecycle gate");
+    }
+
+    fn capacity_summary(
+        incarnations_remaining: u64,
+        operator_reissue: bool,
+    ) -> crate::native_capacity::CapacityAccountSummary {
+        crate::native_capacity::CapacityAccountSummary {
+            epoch: 2,
+            maximum_epochs: None,
+            sequence: 17,
+            outstanding_incarnation: false,
+            recovery_attempts_used: 0,
+            recovery_attempts_maximum: 32,
+            remaining:
+                ryeos_node_runtime::node_policy::sections::native_capacity::NativeCapacityUnits {
+                    storage_bytes: 0,
+                    host_control_storage_bytes: 0,
+                    allocator_steps: 0,
+                    connection_tickets: 0,
+                    cleanup_steps: 0,
+                },
+            incarnations_remaining,
+            last_operation: "debit".to_owned(),
+            renewal:
+                ryeos_node_runtime::node_policy::sections::native_capacity::NativeRenewalEnvelope {
+                    at_orderly_rollover: true,
+                    operator_reissue,
+                    maximum_epochs: None,
+                },
+        }
+    }
+
+    #[test]
+    fn start_refuses_a_spent_capacity_epoch_before_launch_without_inhibiting() {
+        assert_eq!(
+            NativeCapacityExhausted::of(&capacity_summary(1, true)),
+            None
+        );
+        let refusal =
+            NativeCapacityExhausted::of(&capacity_summary(0, true)).expect("a spent epoch refuses");
+        assert_eq!(
+            refusal,
+            NativeCapacityExhausted {
+                epoch: 2,
+                operator_reissue: true,
+            }
+        );
+        let message = refusal.to_string();
+        assert!(
+            message.starts_with(NativeCapacityExhausted::CODE),
+            "{message}"
+        );
+        assert!(message.contains("ryeos node capacity reissue"), "{message}");
+        assert!(message.contains("no restart inhibition"), "{message}");
+        let error = anyhow::Error::from(refusal);
+        assert!(error.downcast_ref::<NativeCapacityExhausted>().is_some());
+        let forbidden = NativeCapacityExhausted::of(&capacity_summary(0, false))
+            .expect("a spent epoch refuses");
+        assert!(
+            forbidden.to_string().contains("re-provision"),
+            "{forbidden}"
+        );
+
+        // An uninitialized root has no account, so nothing refuses the start
+        // here; its own checks decide.
+        let tmp = tempfile::tempdir().unwrap();
+        require_native_capacity_remaining(tmp.path()).unwrap();
     }
 
     #[test]
