@@ -88,7 +88,12 @@ const PORTABLE_EXECUTION_REF: &str = "worker_execution:handoff-fixture/session";
 const PORTABLE_CREDENTIAL_PROFILE_ID: &str = "credential:handoff-portable";
 const PORTABLE_TARGET_REMOTE: &str = "handoff-target";
 const PORTABLE_SOURCE_REMOTE: &str = "handoff-source";
+// The portable launch's project overlay includes the operator vault, so the
+// target delivers from its own vault only under a target grant that holds the
+// operator-vault capability. It stays first: revocation cases drop the last
+// scope.
 const PORTABLE_OPERATOR_HANDOFF_SCOPES: &[&str] = &[
+    "ryeos.use.vault.operator",
     "ryeos.runtime.dedicated_session.start",
     "ryeos.runtime.dedicated_session.command",
     "ryeos.runtime.dedicated_session.terminate",

@@ -38,6 +38,9 @@ pub const CAP_KIND_BUNDLE_EVENTS: &str = "bundle-events";
 pub const CAP_KIND_RUNTIME_VAULT: &str = "vault";
 /// Capability `kind` segment for project-snapshot authority.
 pub const CAP_KIND_PROJECT_SNAPSHOTS: &str = "project-snapshots";
+/// Capability verb of the node operator-vault exposure capability
+/// (`ryeos.use.vault.operator`).
+pub const OPERATOR_VAULT_CAP_VERB: &str = "use";
 
 /// The `(verb, kind)` surfaces a signed manifest can mint into, derived once from
 /// the runtime-authority families themselves so this classification cannot drift
@@ -60,6 +63,10 @@ fn authority_surfaces() -> &'static [(&'static str, &'static str)] {
         // is `ryeos.author.<kind>.<bare-id>`, so no composed grant may self-mint
         // it.
         surfaces.push(("author", "*"));
+        // Operator-vault exposure is node operator authority. A bundle route
+        // reaches it only through its signed route plus the manifest bound
+        // (`runtime_authority.operator_vault`); a composed grant never does.
+        surfaces.push((OPERATOR_VAULT_CAP_VERB, CAP_KIND_RUNTIME_VAULT));
         surfaces
     })
 }
@@ -190,6 +197,13 @@ impl RuntimeAuthorityDecls {
             && self.runtime_vault.is_empty()
             && self.item_authoring.is_empty()
             && self.project_snapshots.is_empty()
+            && !self.operator_vault
+    }
+
+    /// Whether this signed manifest allows its bundle's handler routes to
+    /// expose the node operator's vault. A route must still declare it.
+    pub fn allows_operator_vault_routes(&self) -> bool {
+        self.operator_vault
     }
 
     /// The full set of caps this manifest grants `bundle_id` as an authority
@@ -869,6 +883,39 @@ mod tests {
                 "should allow ordinary grant: {grant}"
             );
         }
+    }
+
+    #[test]
+    fn operator_vault_capability_is_reserved_from_composed_grants() {
+        assert_eq!(
+            ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY,
+            format!("ryeos.{OPERATOR_VAULT_CAP_VERB}.{CAP_KIND_RUNTIME_VAULT}.operator")
+        );
+        for grant in [
+            ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY,
+            "ryeos.use.vault.*",
+            "ryeos.use.*",
+        ] {
+            assert!(
+                composed_grant_overlaps_manifest_runtime_authority(grant),
+                "a composed grant must not self-grant operator-vault exposure: {grant}"
+            );
+        }
+        assert!(matches!(
+            reject_disallowed_composed_grants(&[
+                ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY.to_owned()
+            ]),
+            Err(ComposedGrantError::Reserved { .. })
+        ));
+        assert!(!RuntimeAuthorityDecls::default().allows_operator_vault_routes());
+        let allowed = RuntimeAuthorityDecls {
+            operator_vault: true,
+            ..Default::default()
+        };
+        assert!(allowed.allows_operator_vault_routes());
+        assert!(!allowed.is_empty());
+        // The bound is not itself a minted callback capability.
+        assert!(allowed.declared_caps("arc").is_empty());
     }
 
     #[test]

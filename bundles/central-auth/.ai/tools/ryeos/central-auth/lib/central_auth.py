@@ -30,6 +30,16 @@ PRINCIPAL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 CAPABILITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 SESSION_BYTES = 32
 PBKDF2_ITERATIONS = 210_000
+# Verified against when the principal is missing, disabled or has no usable
+# passphrase record, so a failed login costs one KDF run whatever the cause.
+DUMMY_KDF_SALT = b"central-auth-dummy-salt"
+# Expired sessions/invites/failure records examined per login or verify.
+OPPORTUNISTIC_GC_SAMPLE = 16
+# The node owns central-auth state: it lives under the app root the daemon
+# hands every launch as RYEOS_APP_ROOT, never at a caller-chosen location.
+STATE_HOME_PARTS = (".ai", "state", "central-auth")
+CALLER_STATE_LOCATION_KEYS = ("runtime_state_dir", "project_path")
+LOGIN_THROTTLE_FIELDS = ("max_failures", "window_secs", "lockout_secs")
 
 
 class AuthError(Exception):
@@ -158,23 +168,39 @@ def validate_capability(capability: str) -> str:
     return capability
 
 
+def state_home() -> Path:
+    raw = os.environ.get("RYEOS_APP_ROOT", "")
+    if not raw:
+        raise AuthError(
+            "app_root_unavailable",
+            "RYEOS_APP_ROOT is not set; central-auth state lives under the node app root",
+        )
+    app_root = Path(raw)
+    if not app_root.is_absolute():
+        raise AuthError("app_root_unavailable", f"RYEOS_APP_ROOT must be absolute, saw {raw!r}")
+    return app_root.joinpath(*STATE_HOME_PARTS)
+
+
 def resolve_realm_dir(data: dict[str, Any]) -> Path:
+    for key in CALLER_STATE_LOCATION_KEYS:
+        if key in data:
+            raise AuthError(
+                "caller_state_location_refused",
+                f"{key} is not accepted: central-auth state lives in the node-owned "
+                "<app_root>/.ai/state/central-auth",
+            )
     realm_id = validate_realm(require_str(data, "realm_id"))
-    runtime_state_dir = optional_str(data, "runtime_state_dir")
-    if runtime_state_dir:
-        root = Path(runtime_state_dir)
-        if not root.is_absolute():
-            raise AuthError("invalid_request", "runtime_state_dir must be absolute")
-    else:
-        project_path = Path(require_str(data, "project_path"))
-        if not project_path.is_absolute():
-            raise AuthError("invalid_request", "project_path must be absolute")
-        root = project_path / ".ai" / "state" / "central-auth"
-    return root / "realms" / realm_id
+    return state_home() / "realms" / realm_id
 
 
 def ensure_dirs(realm_dir: Path) -> None:
-    for path in [realm_dir, realm_dir / "principals", realm_dir / "sessions", realm_dir / "invites"]:
+    for path in [
+        realm_dir,
+        realm_dir / "principals",
+        realm_dir / "sessions",
+        realm_dir / "invites",
+        realm_dir / "failures",
+    ]:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         with contextlib.suppress(PermissionError):
             os.chmod(path, 0o700)
@@ -250,12 +276,39 @@ def invite_path(realm_dir: Path, invite_code: str) -> Path:
     return realm_dir / "invites" / f"{sha256_hex(invite_code)}.json"
 
 
+def failure_path(realm_dir: Path, subject: str) -> Path:
+    return realm_dir / "failures" / f"{sha256_hex(subject)}.json"
+
+
 def load_policy(realm_dir: Path) -> dict[str, Any]:
     policy = read_json_file(policy_path(realm_dir))
     if policy is None:
         return {"roles": {}, "allowed_capabilities": []}
-    validate_policy(policy)
-    return policy
+    return validate_policy(policy)
+
+
+def validate_login_throttle(value: Any) -> dict[str, int]:
+    if value is None:
+        raise AuthError(
+            "policy_missing_login_throttle",
+            "policy requires login_throttle {max_failures, window_secs, lockout_secs}",
+        )
+    if not isinstance(value, dict):
+        raise AuthError("invalid_policy", "login_throttle must be an object")
+    unknown = sorted(set(value) - set(LOGIN_THROTTLE_FIELDS))
+    if unknown:
+        raise AuthError("invalid_policy", f"login_throttle has unknown fields: {unknown}")
+    out: dict[str, int] = {}
+    for field in LOGIN_THROTTLE_FIELDS:
+        raw = value.get(field)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            raise AuthError("invalid_policy", f"login_throttle.{field} must be an integer >= 1")
+        out[field] = raw
+    return out
+
+
+def require_login_throttle(policy: dict[str, Any]) -> dict[str, int]:
+    return validate_login_throttle(policy.get("login_throttle"))
 
 
 def validate_policy(policy: Any) -> dict[str, Any]:
@@ -285,7 +338,11 @@ def validate_policy(policy: Any) -> dict[str, Any]:
                 raise AuthError("invalid_policy", f"role {role} references capability outside allowed_capabilities: {cap}")
             caps.append(cap)
         normalized_roles[role] = {"capabilities": sorted(set(caps))}
-    return {"roles": normalized_roles, "allowed_capabilities": sorted(allowed_set)}
+    return {
+        "roles": normalized_roles,
+        "allowed_capabilities": sorted(allowed_set),
+        "login_throttle": validate_login_throttle(policy.get("login_throttle")),
+    }
 
 
 def validate_grants(policy: dict[str, Any], roles: list[str], capabilities: list[str]) -> None:
@@ -333,17 +390,108 @@ def hash_passphrase(passphrase: str) -> dict[str, Any]:
     }
 
 
+def dummy_verify(passphrase: str) -> bool:
+    """Spend the same KDF work as a real check, then fail."""
+    hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), DUMMY_KDF_SALT, PBKDF2_ITERATIONS)
+    return False
+
+
 def verify_passphrase(passphrase: str, stored: dict[str, Any] | None) -> bool:
-    if not stored or stored.get("kdf") != "pbkdf2_hmac_sha256":
-        return False
+    """Constant-work check: every path that cannot match still runs one KDF."""
+    if not isinstance(stored, dict) or stored.get("kdf") != "pbkdf2_hmac_sha256":
+        return dummy_verify(passphrase)
     try:
         iterations = int(stored["iterations"])
         salt = base64.b64decode(stored["salt_b64"])
         expected = base64.b64decode(stored["hash_b64"])
     except Exception:
-        return False
+        return dummy_verify(passphrase)
+    if iterations < 1:
+        return dummy_verify(passphrase)
     actual = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, iterations)
     return hmac.compare_digest(actual, expected)
+
+
+def throttle_subjects(principal_id: str, client_address: str | None) -> list[str]:
+    subjects = [f"principal:{principal_id}"]
+    if client_address:
+        subjects.append(f"address:{client_address}")
+    return subjects
+
+
+def locked_retry_after(realm_dir: Path, subjects: list[str], n: int) -> int | None:
+    retry_after = 0
+    for subject in subjects:
+        record = read_json_file(failure_path(realm_dir, subject))
+        if record and int(record.get("locked_until", 0)) > n:
+            retry_after = max(retry_after, int(record["locked_until"]) - n)
+    return retry_after or None
+
+
+def record_login_failure(realm_dir: Path, subject: str, throttle: dict[str, int], n: int) -> None:
+    path = failure_path(realm_dir, subject)
+    record = read_json_file(path)
+    if not record or n - int(record.get("first_at", 0)) >= throttle["window_secs"]:
+        record = {"version": 1, "count": 0, "first_at": n, "locked_until": 0}
+    record["count"] = int(record.get("count", 0)) + 1
+    if record["count"] >= throttle["max_failures"]:
+        record = {"version": 1, "count": 0, "first_at": n, "locked_until": n + throttle["lockout_secs"]}
+    atomic_write_json(path, record)
+
+
+def clear_login_failures(realm_dir: Path, subject: str) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        failure_path(realm_dir, subject).unlink()
+
+
+def session_expired(doc: dict[str, Any], n: int) -> bool:
+    return doc.get("expires_at_unix", 0) <= n
+
+
+def invite_expired(doc: dict[str, Any], n: int) -> bool:
+    return doc.get("expires_at_unix", 0) <= n or doc.get("uses", 0) >= doc.get("max_uses", 1)
+
+
+def failure_expired(doc: dict[str, Any], n: int, throttle: dict[str, int] | None) -> bool:
+    if int(doc.get("locked_until", 0)) > n:
+        return False
+    if throttle is None:
+        return False
+    return n - int(doc.get("first_at", 0)) >= throttle["window_secs"]
+
+
+def purge_expired(realm_dir: Path, policy: dict[str, Any], n: int, sample: int | None) -> dict[str, int]:
+    """Remove expired sessions, spent invites and stale failure records.
+
+    With `sample`, examines at most that many random entries per directory, so
+    login and verify keep the realm bounded without walking it every call. The
+    caller holds the realm lock."""
+    throttle = policy.get("login_throttle")
+    checks = {
+        "sessions": session_expired,
+        "invites": invite_expired,
+        "failures": lambda doc, now: failure_expired(doc, now, throttle),
+    }
+    removed = {name: 0 for name in checks}
+    for name, expired in checks.items():
+        directory = realm_dir / name
+        try:
+            entries = [e for e in os.listdir(directory) if e.endswith(".json")]
+        except FileNotFoundError:
+            continue
+        if sample is not None and len(entries) > sample:
+            entries = secrets.SystemRandom().sample(entries, sample)
+        for entry in entries:
+            path = directory / entry
+            try:
+                doc = read_json_file(path)
+            except (AuthError, ValueError, OSError):
+                continue
+            if doc and expired(doc, n):
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                removed[name] += 1
+    return removed
 
 
 def issue_session(realm_dir: Path, policy: dict[str, Any], principal: dict[str, Any], ttl_secs: int) -> dict[str, Any]:
@@ -361,6 +509,7 @@ def issue_session(realm_dir: Path, policy: dict[str, Any], principal: dict[str, 
     }
     atomic_write_json(session_path(realm_dir, token), session)
     append_audit(realm_dir, "session.issue", {"principal_id": principal["id"], "expires_at": session["expires_at"]})
+    purge_expired(realm_dir, policy, now_unix(), OPPORTUNISTIC_GC_SAMPLE)
     return {
         "ok": True,
         "session_token": token,
@@ -452,12 +601,28 @@ def command_login(data: dict[str, Any]) -> dict[str, Any]:
     with realm_lock(realm_dir):
         policy = load_policy(realm_dir)
         if method == "passphrase":
+            throttle = require_login_throttle(policy)
             principal_id = validate_principal_id(require_str(data, "principal_id"))
-            principal = load_principal_for_login(realm_dir, principal_id)
+            client_address = optional_str(data, "client_address")
+            subjects = throttle_subjects(principal_id, client_address)
             passphrase = require_secret(data, "passphrase")
-            if not principal or principal.get("disabled") or not verify_passphrase(passphrase, principal.get("passphrase")):
+            n = now_unix()
+            retry_after = locked_retry_after(realm_dir, subjects, n)
+            if retry_after is not None:
+                append_audit(realm_dir, "login.locked", {"principal_id": principal_id})
+                return {"ok": False, "error": {"code": "locked", "retry_after_secs": retry_after}}
+            principal = load_principal_for_login(realm_dir, principal_id)
+            stored = principal.get("passphrase") if principal and not principal.get("disabled") else None
+            # Always run the KDF (verify_passphrase falls back to a dummy), so a
+            # missing or disabled principal costs the same as a wrong passphrase.
+            valid = verify_passphrase(passphrase, stored)
+            if not principal or principal.get("disabled") or not valid:
+                for subject in subjects:
+                    record_login_failure(realm_dir, subject, throttle, n)
+                append_audit(realm_dir, "login.failure", {"principal_id": principal_id})
                 return {"ok": False, "error": {"code": "invalid_credentials"}}
             effective_capabilities(policy, principal)
+            clear_login_failures(realm_dir, subjects[0])
             return issue_session(realm_dir, policy, principal, ttl_secs)
 
         invite_code = require_str(data, "invite_code")
@@ -496,8 +661,13 @@ def verify_session(data: dict[str, Any]) -> dict[str, Any]:
     required_capability = optional_str(data, "required_capability")
     with realm_lock(realm_dir):
         policy = load_policy(realm_dir)
-        session = read_json_file(session_path(realm_dir, session_token))
-        if not session or session.get("revoked_at") or session.get("expires_at_unix", 0) <= now_unix():
+        n = now_unix()
+        touched = session_path(realm_dir, session_token)
+        session = read_json_file(touched)
+        if session and session_expired(session, n):
+            touched.unlink()
+        purge_expired(realm_dir, policy, n, OPPORTUNISTIC_GC_SAMPLE)
+        if not session or session.get("revoked_at") or session_expired(session, n):
             return {"valid": False, "allowed": False, "error": {"code": "invalid_session"}}
         principal_id = session.get("principal_id")
         if not isinstance(principal_id, str):
@@ -550,23 +720,19 @@ def command_revoke_session(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def command_gc(data: dict[str, Any]) -> dict[str, Any]:
+    """Full sweep for operators. Login and verify also purge a bounded sample
+    on every call, so a realm stays bounded without anything scheduling this."""
     realm_dir = resolve_realm_dir(data)
-    removed_sessions = 0
-    removed_invites = 0
     with realm_lock(realm_dir):
-        n = now_unix()
-        for path in (realm_dir / "sessions").glob("*.json"):
-            doc = read_json_file(path)
-            if doc and doc.get("expires_at_unix", 0) <= n:
-                path.unlink()
-                removed_sessions += 1
-        for path in (realm_dir / "invites").glob("*.json"):
-            doc = read_json_file(path)
-            if doc and (doc.get("expires_at_unix", 0) <= n or doc.get("uses", 0) >= doc.get("max_uses", 1)):
-                path.unlink()
-                removed_invites += 1
-        append_audit(realm_dir, "gc", {"removed_sessions": removed_sessions, "removed_invites": removed_invites})
-    return {"ok": True, "removed_sessions": removed_sessions, "removed_invites": removed_invites}
+        policy = load_policy(realm_dir)
+        removed = purge_expired(realm_dir, policy, now_unix(), None)
+        fields = {
+            "removed_sessions": removed["sessions"],
+            "removed_invites": removed["invites"],
+            "removed_failures": removed["failures"],
+        }
+        append_audit(realm_dir, "gc", fields)
+    return {"ok": True, **fields}
 
 
 def command_list_principals(data: dict[str, Any]) -> dict[str, Any]:

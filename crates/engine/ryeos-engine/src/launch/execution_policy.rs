@@ -116,6 +116,26 @@ impl ResolvedExecutionPolicy {
         }
     }
 
+    /// The stop policy this resolved execution config grants a launch:
+    /// `cancellation_mode` (graceful when no layer sets it) with
+    /// `cancellation_grace_secs` (the contract default when no layer sets
+    /// it). The node still caps the grace when it stops the process.
+    pub fn stop_policy(&self) -> crate::contracts::CancellationMode {
+        match self.cancellation_mode.as_ref().map(|mode| &mode.value) {
+            Some(CancellationModeChoice::Hard) => crate::contracts::CancellationMode::Hard,
+            Some(CancellationModeChoice::Graceful) | None => {
+                crate::contracts::CancellationMode::Graceful {
+                    grace_secs: self
+                        .cancellation_grace_secs
+                        .as_ref()
+                        .map_or(crate::contracts::DEFAULT_CANCELLATION_GRACE_SECS, |grace| {
+                            grace.value
+                        }),
+                }
+            }
+        }
+    }
+
     pub fn source_for(&self, key: &str) -> Option<&PolicySource> {
         match key {
             "timeout" => self.timeout.as_ref().map(|v| &v.source),
@@ -697,6 +717,7 @@ mod tests {
             ],
         };
         let roots = ResolutionRoots {
+            owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
                 identity: crate::contracts::ItemSourceRoot::Project,
@@ -750,6 +771,7 @@ mod tests {
             }],
         };
         let roots = ResolutionRoots {
+            owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Node,
                 identity: crate::contracts::ItemSourceRoot::Node,
@@ -847,6 +869,46 @@ mod tests {
         .unwrap();
         assert_eq!(directive.timeout.unwrap().value, 300);
         assert_eq!(directive.max_steps.unwrap().value, 50);
+    }
+
+    #[test]
+    fn stop_policy_follows_the_resolved_execution_config() {
+        let directive_ref = CanonicalRef::parse("directive:x").unwrap();
+        let value = json!({
+            "defaults": { "cancellation_mode": "graceful", "cancellation_grace_secs": 5 },
+            "items": { "directive": { "x": { "cancellation_grace_secs": 2 } } }
+        });
+        let policy = ExecutionPolicyResolver::resolve_from_value_for_item(
+            &value,
+            &directive_ref,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.stop_policy(),
+            crate::contracts::CancellationMode::Graceful { grace_secs: 2 }
+        );
+
+        let hard = ExecutionPolicyResolver::resolve_from_value_for_item(
+            &json!({ "defaults": { "cancellation_mode": "hard" } }),
+            &directive_ref,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(hard.stop_policy(), crate::contracts::CancellationMode::Hard);
+    }
+
+    #[test]
+    fn stop_policy_without_any_layer_is_the_contract_default() {
+        let policy = ResolvedExecutionPolicy::empty(CanonicalRef::parse("graph:x").unwrap());
+        assert_eq!(
+            policy.stop_policy(),
+            crate::contracts::CancellationMode::Graceful {
+                grace_secs: crate::contracts::DEFAULT_CANCELLATION_GRACE_SECS,
+            }
+        );
     }
 
     #[test]

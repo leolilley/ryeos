@@ -415,7 +415,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         ("core-workflow", &both),
         ("core-knowledge", &both),
         ("standard", &both),
-        ("f5r-controller", &controller),
+        ("hosted-controller", &controller),
         ("standard-central-auth", &local_only),
         ("central-host", &local_only),
         ("bundle-source", &local_only),
@@ -562,7 +562,7 @@ fn the_release_authority_composition_needs_an_enclosure_limit_no_host_here_prove
 }
 
 #[test]
-fn the_f5r_controller_node_follows_the_host_class_matrix() {
+fn the_hosted_controller_node_follows_the_host_class_matrix() {
     let cases: Vec<(&str, Host, Expect)> = vec![
         ("hosted", local_docker(), Expect::Admit),
         ("hosted", hosted_volume(), Expect::Admit),
@@ -586,7 +586,7 @@ fn the_f5r_controller_node_follows_the_host_class_matrix() {
         ),
     ];
     for (class, host, expect) in &cases {
-        check("f5r-controller", class, host, expect);
+        check("hosted-controller", class, host, expect);
     }
 }
 
@@ -613,7 +613,7 @@ fn the_development_direct_class_admits_an_operator_host_without_a_scope_associat
 
 #[test]
 fn the_admission_names_the_proof_that_met_each_enclosure_entry() {
-    let profile = load_profile("f5r-controller");
+    let profile = load_profile("hosted-controller");
     let admission = match_floor(&floor(&profile, "hosted"), &hosted_volume().capabilities());
     assert!(admission.admitted, "{admission:#?}");
     let termination = &admission.met_by["termination:enclosure_trusted_init"];
@@ -650,8 +650,8 @@ fn every_shipped_profile_declares_valid_floors_that_a_runit_host_meets_in_its_lo
         }
         // The profiles that need an enclosure limit or a container enclosure
         // ask for more than a bare runit host proves.
-        let beyond_runit = ["release-authority", "f5r-controller"];
-        if name == "f5r-controller" {
+        let beyond_runit = ["release-authority", "hosted-controller"];
+        if name == "hosted-controller" {
             let admission = match_floor(&floor(&profile, "local"), &view);
             assert!(
                 !admission.admitted,

@@ -424,7 +424,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // Policy capability checks precede canonicalization or any other
         // caller-selected project filesystem access.
         preauthorize_execution_policy(&req.execution_policy, &principal_scopes, &ctx.state)
-            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+            .map_err(|error| {
+                crate::routes::response_modes::execute_mode::operator_vault_route_error(&error)
+                    .unwrap_or_else(|| RouteDispatchError::BadRequest(format!("{error:#}")))
+            })?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         if let Some(timings) = ctx.launch_timings.as_ref() {

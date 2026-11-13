@@ -165,19 +165,31 @@ pub async fn handle(
     names.dedup();
     // Describe what a standard local-live launch of this project would
     // deliver: its admitted project-overlay authority, not ambient sources.
+    // A caller without the operator-vault capability is told only about the
+    // project overlay; the operator vault is never read on its behalf.
     let project_authority = {
         use ryeos_app::execution_policy::ExecutionPolicyResolution as _;
-        ryeos_app::execution_policy::ExecutionPolicy::local_live(
+        let mut policy = ryeos_app::execution_policy::ExecutionPolicy::local_live(
             ryeos_app::execution_policy::ExecutionResponse::Wait,
+        );
+        if ryeos_app::execution_policy::authorize_operator_vault_exposure(
+            state.authorizer.as_ref(),
+            &ctx.scopes,
+            &policy.environment,
         )
-        .resolve_live_project_authority(
-            &project_path,
-            ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
-                state.isolation.inspection(),
-            ),
-            ctx.scopes.clone(),
-        )
-        .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
+        .is_err()
+        {
+            policy = policy.exclude_operator_vault();
+        }
+        policy
+            .resolve_live_project_authority(
+                &project_path,
+                ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
+                    state.isolation.inspection(),
+                ),
+                ctx.scopes.clone(),
+            )
+            .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
     };
     let report = ryeos_app::vault::report_secret_presence(
         &state.secret_sources(),

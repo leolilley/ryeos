@@ -24,6 +24,7 @@ pub(crate) enum LaunchTrustPosition<'a> {
     Root,
     Hop(&'a str),
     Ancestor(&'a str),
+    Reference(&'a str),
 }
 
 impl std::fmt::Display for LaunchTrustPosition<'_> {
@@ -32,6 +33,7 @@ impl std::fmt::Display for LaunchTrustPosition<'_> {
             Self::Root => formatter.write_str("the launch root"),
             Self::Hop(item) => write!(formatter, "executor hop `{item}`"),
             Self::Ancestor(item) => write!(formatter, "ancestor `{item}`"),
+            Self::Reference(item) => write!(formatter, "referenced item `{item}`"),
         }
     }
 }
@@ -367,6 +369,10 @@ composed_value_contract:
 ";
 
     fn service_kinds() -> (tempfile::TempDir, KindRegistry) {
+        kinds_with("service", SERVICE_KIND_SCHEMA)
+    }
+
+    fn kinds_with(kind: &str, schema: &str) -> (tempfile::TempDir, KindRegistry) {
         let key = lillux::crypto::SigningKey::from_bytes(&[7u8; 32]);
         let verifying_key = key.verifying_key();
         let trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![
@@ -377,11 +383,11 @@ composed_value_contract:
             },
         ]);
         let root = tempfile::tempdir().unwrap();
-        let kind_dir = root.path().join("service");
+        let kind_dir = root.path().join(kind);
         std::fs::create_dir_all(&kind_dir).unwrap();
         std::fs::write(
-            kind_dir.join("service.kind-schema.yaml"),
-            lillux::signature::sign_content(SERVICE_KIND_SCHEMA, &key, "#", None),
+            kind_dir.join(format!("{kind}.kind-schema.yaml")),
+            lillux::signature::sign_content(schema, &key, "#", None),
         )
         .unwrap();
         let kinds = KindRegistry::load_base(&[root.path().to_path_buf()], &trust_store).unwrap();
@@ -563,5 +569,147 @@ composed_value_contract:
             operator_policy(&snapshot),
             Err(DispatchError::Internal(_))
         ));
+    }
+
+    /// The knowledge kind's launch lists, on a schema the loader accepts.
+    const KNOWLEDGE_KIND_SCHEMA: &str = "location:
+  directory: knowledge
+effective_trust:
+  include_references: false
+resolution: []
+launch_trust:
+  allowed_spaces: [bundle, project]
+  allowed_trust: [trusted_bundle, trusted_project]
+  operator_may_admit: [untrusted_project]
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  thread_profile:
+    name: service_run
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+
+    fn knowledge_item(
+        item_ref: &str,
+        space: ItemSpace,
+        class: TrustClass,
+    ) -> ryeos_engine::resolution::ResolvedAncestor {
+        ryeos_engine::resolution::ResolvedAncestor {
+            requested_id: item_ref.to_owned(),
+            resolved_ref: item_ref.to_owned(),
+            source_path: format!("/root/.ai/{item_ref}.md").into(),
+            source_space: space,
+            source_root: match space {
+                ItemSpace::Project => ryeos_engine::contracts::ItemSourceRoot::Project,
+                _ => ryeos_engine::contracts::ItemSourceRoot::Bundle {
+                    name: "fixture".to_owned(),
+                },
+            },
+            trust_class: class,
+            signer_fingerprint: (class != TrustClass::Unsigned)
+                .then(|| "fixture-signer".to_owned()),
+            alias_resolution: None,
+            added_by: ryeos_engine::resolution::ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            source_content_digest: "digest".to_owned(),
+            raw_content_digest: "digest".to_owned(),
+        }
+    }
+
+    /// A pinned knowledge root that references one item of `class`.
+    fn referencing(class: TrustClass) -> ryeos_engine::resolution::ResolutionOutput {
+        ryeos_engine::resolution::ResolutionOutput {
+            root: knowledge_item(
+                "knowledge:notes/root",
+                ItemSpace::Project,
+                TrustClass::TrustedProject,
+            ),
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: vec![knowledge_item(
+                "knowledge:notes/referenced",
+                ItemSpace::Project,
+                class,
+            )],
+            step_outputs: Default::default(),
+            // References are not folded, exactly as the shipped kinds declare.
+            effective_trust_class: TrustClass::TrustedProject,
+            composed: ryeos_engine::resolution::KindComposedView::identity(serde_json::json!({})),
+        }
+    }
+
+    fn judge(
+        resolution: &ryeos_engine::resolution::ResolutionOutput,
+        operator: NodeLaunchTrustPolicy,
+    ) -> Result<(), DispatchError> {
+        let (_root, kinds) = kinds_with("knowledge", KNOWLEDGE_KIND_SCHEMA);
+        let policy = NodePolicySnapshot::from_test_records(vec![Arc::new(operator)]);
+        crate::execution::launch::enforce_effective_trust(
+            &kinds,
+            &policy,
+            resolution,
+            "knowledge:notes/root",
+            "knowledge",
+        )
+    }
+
+    fn no_admissions() -> NodeLaunchTrustPolicy {
+        NodeLaunchTrustPolicy::admitting_nothing()
+    }
+
+    #[test]
+    fn a_pinned_root_cannot_pull_in_a_reference_from_an_unpinned_signer() {
+        let Err(DispatchError::LaunchPolicyForbidden { code, message, .. }) =
+            judge(&referencing(TrustClass::UntrustedProject), no_admissions())
+        else {
+            panic!("expected a launch-policy refusal");
+        };
+        assert_eq!(code, "effective_trust_refused");
+        assert!(
+            message.contains("referenced item `knowledge:notes/referenced`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("trust class untrusted_project"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_operator_admission_for_the_kind_admits_the_reference() {
+        judge(
+            &referencing(TrustClass::UntrustedProject),
+            NodeLaunchTrustPolicy::admitting(&[("knowledge", &[TrustClass::UntrustedProject])]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_unsigned_reference_is_refused_with_the_unsigned_code() {
+        let Err(DispatchError::LaunchPolicyForbidden { code, message, .. }) =
+            judge(&referencing(TrustClass::Unsigned), no_admissions())
+        else {
+            panic!("expected a launch-policy refusal");
+        };
+        assert_eq!(code, "effective_trust_unsigned");
+        assert!(
+            message.contains("referenced item `knowledge:notes/referenced`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_reference_is_admitted() {
+        judge(&referencing(TrustClass::TrustedProject), no_admissions()).unwrap();
+        judge(&referencing(TrustClass::TrustedBundle), no_admissions()).unwrap();
     }
 }

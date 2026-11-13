@@ -8,9 +8,9 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result};
 use ryeos_engine::execution_contract::ProjectExecutionPolicy;
 use ryeos_scheduler_contract::{
-    ScheduleExecution, parse_misfire_policy, parse_overlap_policy, validate_expression,
-    validate_schedule_execution, validate_schedule_id, validate_schedule_ref_bindings,
-    validate_timezone,
+    ScheduleAutoPauseReason, ScheduleExecution, parse_misfire_policy, parse_overlap_policy,
+    validate_expression, validate_schedule_execution, validate_schedule_id,
+    validate_schedule_ref_bindings, validate_timezone,
 };
 
 pub const NODE_MAINTENANCE_POLICY_SOURCE: &str = "policies/maintenance.yaml";
@@ -40,6 +40,11 @@ pub struct ScheduleSourceRecord {
     pub registered_at: i64,
     pub execution: ScheduleExecution,
     pub managed_by: Option<ScheduleManagedBy>,
+    /// Why the scheduler paused this schedule by itself. Present only on a
+    /// disabled schedule the scheduler paused; an operator pause, a resume
+    /// and every registration leave it absent, which omits the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paused_reason: Option<ScheduleAutoPauseReason>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +68,9 @@ struct ScheduleSourceWire {
     registered_at: i64,
     execution: ScheduleExecution,
     managed_by: Value,
+    // Added after the first signed specs; absence is the ordinary state.
+    #[serde(default)]
+    paused_reason: Option<ScheduleAutoPauseReason>,
 }
 
 impl<'de> Deserialize<'de> for ScheduleSourceRecord {
@@ -92,6 +100,7 @@ impl<'de> Deserialize<'de> for ScheduleSourceRecord {
             registered_at: wire.registered_at,
             execution: wire.execution,
             managed_by,
+            paused_reason: wire.paused_reason,
         })
     }
 }
@@ -173,6 +182,9 @@ impl ScheduleSourceRecord {
         }
         if let Some(managed_by) = &self.managed_by {
             validate_managed_by(managed_by, self.project_root.as_deref())?;
+        }
+        if self.enabled && self.paused_reason.is_some() {
+            anyhow::bail!("an enabled schedule must not carry a paused_reason");
         }
         Ok(())
     }
@@ -480,9 +492,43 @@ mod tests {
                 },
                 capabilities: vec!["ryeos.execute.directive.test/job".to_string()],
                 policy,
+                limits: None,
+                max_fires: None,
+                expires_at: None,
             },
             managed_by: None,
+            paused_reason: None,
         }
+    }
+
+    #[test]
+    fn paused_reason_is_only_valid_on_a_disabled_schedule() {
+        let mut source = source_with_policy(
+            ryeos_engine::execution_contract::ExecutionPolicy::projectless(
+                ryeos_engine::execution_contract::ExecutionResponse::Accepted,
+            ),
+            None,
+        );
+        source.validate(None).unwrap();
+        assert!(
+            serde_json::to_value(&source)
+                .unwrap()
+                .get("paused_reason")
+                .is_none()
+        );
+
+        source.paused_reason = Some(ScheduleAutoPauseReason::MaxFiresReached);
+        assert!(source.validate(None).is_err());
+
+        source.enabled = false;
+        source.validate(None).unwrap();
+        let wire = serde_json::to_value(&source).unwrap();
+        assert_eq!(wire["paused_reason"], "max_fires_reached");
+        let decoded: ScheduleSourceRecord = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            decoded.paused_reason,
+            Some(ScheduleAutoPauseReason::MaxFiresReached)
+        );
     }
 
     #[test]

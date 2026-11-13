@@ -79,6 +79,10 @@ pub struct EffectiveItem {
     pub derived: std::collections::HashMap<String, Value>,
     pub policy_facts: std::collections::HashMap<String, Value>,
     pub diagnostics: Vec<EffectiveItemDiagnostic>,
+    /// True when the winner came from project space and a bundle also ships
+    /// an item under the same ref, so the project copy shadows the bundle's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shadows_bundle_item: bool,
 }
 
 /// Trust, parser dispatch, and the downstream cache fingerprint captured for
@@ -326,9 +330,17 @@ fn resolution_error_to_engine(
     error: crate::resolution::ResolutionError,
     requested_root: &CanonicalRef,
 ) -> EngineError {
-    use crate::resolution::ResolutionError;
+    use crate::resolution::{ResolutionError, ResolutionFailureClass};
 
     match error {
+        ResolutionError::StepFailed {
+            class: ResolutionFailureClass::ProcessCreationBusy,
+            reason,
+            ..
+        } => EngineError::ProcessCreationBusy {
+            subject: requested_root.to_string(),
+            detail: reason,
+        },
         ResolutionError::IntegrityFailure { item_ref, reason } => {
             EngineError::EffectiveItemUntrusted {
                 canonical_ref: item_ref,
@@ -1051,6 +1063,20 @@ impl CheckedEngineGeneration<'_> {
         request: EffectiveItemRequest,
     ) -> Result<EffectiveItem, EngineError> {
         self.engine.effective_item_current(request)
+    }
+
+    /// Resolve once and return the effective item together with the verified
+    /// resolution it was projected from, for inspection that reads the signed
+    /// bytes (such as authorship) without resolving the item a second time.
+    pub fn effective_item_with_resolution(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<(EffectiveItem, crate::resolution::ResolutionOutput), EngineError> {
+        let output = self.engine.effective_resolution_output_current(&request)?;
+        let item = self
+            .engine
+            .effective_item_from_output(request, output.clone())?;
+        Ok((item, output))
     }
 
     /// Resolve once under this checked generation, then bound the exact resolved
@@ -3976,6 +4002,19 @@ impl Engine {
             });
         }
 
+        let shadows_bundle_item = output.root.source_space == crate::contracts::ItemSpace::Project
+            && self
+                .kinds
+                .get(&request.item_ref.kind)
+                .is_some_and(|schema| {
+                    crate::item_resolution::resolve_item_full(
+                        &self.resolution_roots(None),
+                        schema,
+                        &request.item_ref,
+                    )
+                    .is_ok()
+                });
+
         Ok(EffectiveItem {
             requested_ref: request.item_ref.to_string(),
             canonical_ref: output.root.resolved_ref.clone(),
@@ -3994,6 +4033,7 @@ impl Engine {
             derived: output.composed.derived,
             policy_facts: output.composed.policy_facts,
             diagnostics,
+            shadows_bundle_item,
         })
     }
 
@@ -4447,14 +4487,20 @@ impl Engine {
     pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
         let mut ordered = roots.ordered.clone();
         let Some(node_config_root) = &self.node_config_root else {
-            return ResolutionRoots { ordered };
+            return ResolutionRoots {
+                owned_namespaces: roots.owned_namespaces.clone(),
+                ordered,
+            };
         };
         let node_config_ai_root = node_config_root.join(crate::AI_DIR);
         if ordered
             .iter()
             .any(|root| root.ai_root == node_config_ai_root)
         {
-            return ResolutionRoots { ordered };
+            return ResolutionRoots {
+                owned_namespaces: roots.owned_namespaces.clone(),
+                ordered,
+            };
         }
         let position = ordered
             .iter()
@@ -4470,7 +4516,10 @@ impl Engine {
                 content_root: Some(node_config_root.clone()),
             },
         );
-        ResolutionRoots { ordered }
+        ResolutionRoots {
+            owned_namespaces: roots.owned_namespaces.clone(),
+            ordered,
+        }
     }
 
     /// Composite cache fingerprint over the kind registry and the
@@ -4653,6 +4702,35 @@ mod tests {
     }
 
     #[test]
+    fn busy_resolution_step_is_typed_process_creation_busy() {
+        let root = CanonicalRef::parse("tool:hello").unwrap();
+        let error = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::ProcessCreationBusy,
+                reason: "composer handler subprocess failed: busy".to_string(),
+            },
+            &root,
+        );
+        assert!(error.is_process_creation_busy(), "{error}");
+        let expected_subject = root.to_string();
+        assert!(
+            matches!(&error, EngineError::ProcessCreationBusy { subject, .. } if *subject == expected_subject),
+            "{error}"
+        );
+        // Every other step failure keeps its composition-failure shape.
+        let other = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::DependencyUnavailable,
+                reason: "handler binary missing".to_string(),
+            },
+            &root,
+        );
+        assert!(!other.is_process_creation_busy(), "{other}");
+    }
+
+    #[test]
     fn effective_content_bounds_measure_exact_utf8_and_serialized_json() {
         let composed = serde_json::json!({ "text": "é\n" });
         let bytes = serde_json::to_vec(&composed).unwrap().len();
@@ -4705,6 +4783,20 @@ mod tests {
 
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    /// A project trust document for `key`, cross-signed by the test node key
+    /// (`test_signing_key`), as project trust documents must be.
+    fn node_vouched_project_trust_doc(key: &lillux::crypto::VerifyingKey) -> String {
+        let body = crate::trust::TrustedKeyDoc {
+            fingerprint: crate::trust::compute_fingerprint(key),
+            owner: "project".to_owned(),
+            version: "1.0.0".to_owned(),
+            attestation: None,
+            verifying_key: *key,
+        }
+        .to_toml();
+        lillux::signature::sign_content(&body, &test_signing_key(), "#", None)
     }
 
     fn test_trust_store() -> TrustStore {
@@ -4821,6 +4913,7 @@ formats:
         )
         .with_trust_store(trust_store)
         .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }]);
@@ -4938,10 +5031,12 @@ formats:
         .with_composers(composers)
         .with_registered_bundle_roots(vec![
             crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "early".to_owned(),
                 canonical_root: early_root,
             },
             crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "chosen".to_owned(),
                 canonical_root: chosen_root.clone(),
             },
@@ -5070,6 +5165,7 @@ formats:
         .with_node_trust_store(test_trust_store())
         .with_composers(composers)
         .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }]);
@@ -5341,6 +5437,7 @@ formats:
     #[test]
     fn retained_generation_identity_does_not_alias_same_registered_paths() {
         let roots = vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "same-name".to_string(),
             canonical_root: PathBuf::from("/same/canonical/root"),
         }];
@@ -5401,6 +5498,7 @@ formats:
     fn registered_resolution_roots_keep_project_ai_root_first() {
         let engine = test_engine().with_registered_bundle_roots(vec![
             crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "core".to_owned(),
                 canonical_root: PathBuf::from("/bundles/core"),
             },
@@ -5977,11 +6075,13 @@ formats:
         let signing_key = SigningKey::from_bytes(&[77u8; 32]);
         let verifying_key = signing_key.verifying_key();
         let fingerprint = crate::trust::compute_fingerprint(&verifying_key);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes());
-        let key_path = trusted_dir.join("project.pub");
-        fs::write(&key_path, encoded).unwrap();
+        let key_path = trusted_dir.join("project.toml");
+        fs::write(&key_path, node_vouched_project_trust_doc(&verifying_key)).unwrap();
 
-        let scoped = test_engine().for_project_root(&project_dir, None).unwrap();
+        let scoped = test_engine()
+            .with_node_trust_store(test_trust_store())
+            .for_project_root(&project_dir, None)
+            .unwrap();
         assert!(scoped.trust_store.is_trusted(&fingerprint));
         assert!(
             !scoped
@@ -6013,9 +6113,11 @@ formats:
         let project_fingerprint = crate::trust::compute_fingerprint(&project_verifying_key);
         let trusted_dir = project_root.join(AI_DIR).join(crate::TRUST_KEYS_DIR);
         fs::create_dir_all(&trusted_dir).unwrap();
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(project_verifying_key.as_bytes());
-        fs::write(trusted_dir.join("project.pub"), encoded).unwrap();
+        fs::write(
+            trusted_dir.join("project.toml"),
+            node_vouched_project_trust_doc(&project_verifying_key),
+        )
+        .unwrap();
 
         let source = "# ryeos-tool:\n#   note: project-only publisher\nprint('project trusted')\n";
         let signed_source =
@@ -6032,6 +6134,7 @@ formats:
         .with_trust_store(node_trust.clone())
         .with_node_trust_store(node_trust)
         .with_registered_bundle_roots(vec![crate::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }])

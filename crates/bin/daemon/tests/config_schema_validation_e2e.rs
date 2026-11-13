@@ -90,6 +90,7 @@ fn build_engine_against_bundle() -> Engine {
         .with_node_trust_store(trust_store)
         .with_composers(composers)
         .with_registered_bundle_roots(vec![RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: "core".to_owned(),
             canonical_root: bundle_root,
         }])

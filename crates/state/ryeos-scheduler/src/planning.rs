@@ -4,7 +4,7 @@
 //! diagnostics and, later, grace-aware dispatch/cursor rebuild. It does
 //! not mutate scheduler state and does not make idempotency decisions.
 
-use ryeos_scheduler_contract::parse_iso_ts;
+use ryeos_scheduler_contract::{ScheduleAutoPauseReason, parse_iso_ts};
 use serde::Serialize;
 
 use super::crontab;
@@ -20,6 +20,65 @@ pub struct SchedulePlan {
     pub next_fire_at: Option<i64>,
     pub decision: String,
     pub decision_reason: String,
+    /// Set when the schedule's signed lifetime bounds admit no further
+    /// boundary: the timer pauses the schedule with this reason.
+    pub lifetime_exhausted: Option<ScheduleAutoPauseReason>,
+}
+
+/// The last boundary a schedule's lifetime bounds admit (inclusive), and the
+/// bound that set it. `None` when the schedule declares no lifetime bound, or
+/// when `max_fires` names a boundary its expression never reaches and no
+/// `expires_at` is set.
+///
+/// `max_fires` counts boundaries from registration, exactly as the planner
+/// walks them: the first interval boundary is `registered_at + interval`,
+/// cron boundaries are strictly after `registered_at`, and a one-shot `at`
+/// schedule has one boundary. Each counts whether it ran or was skipped, so
+/// the bound does not depend on retained fire history.
+pub fn lifetime_horizon(spec: &ScheduleSpecRecord) -> Option<(i64, ScheduleAutoPauseReason)> {
+    let by_count = spec
+        .execution
+        .max_fires
+        .and_then(|max_fires| nth_boundary(spec, max_fires))
+        .map(|last| (last, ScheduleAutoPauseReason::MaxFiresReached));
+    let by_expiry = spec.execution.expires_at_ms().map(|expires_at| {
+        (
+            expires_at.saturating_sub(1),
+            ScheduleAutoPauseReason::Expired,
+        )
+    });
+    match (by_count, by_expiry) {
+        (Some(count), Some(expiry)) => Some(if count.0 <= expiry.0 { count } else { expiry }),
+        (count, expiry) => count.or(expiry),
+    }
+}
+
+fn nth_boundary(spec: &ScheduleSpecRecord, n: u32) -> Option<i64> {
+    if n == 0 {
+        return None;
+    }
+    match spec.schedule_type.as_str() {
+        "interval" => interval_ms(spec)?
+            .checked_mul(i64::from(n))?
+            .checked_add(spec.registered_at),
+        "cron" => crontab::nth_cron_boundary_after(
+            &spec.expression,
+            &spec.timezone,
+            spec.registered_at,
+            n,
+        ),
+        "at" => parse_iso_ts(&spec.expression),
+        _ => None,
+    }
+}
+
+/// Clamp an exclusive misfire horizon to the schedule's lifetime bounds, so
+/// misfire evaluation never plans a boundary the lifetime does not admit.
+pub fn clamp_to_lifetime_exclusive(spec: &ScheduleSpecRecord, horizon_exclusive: i64) -> i64 {
+    match lifetime_horizon(spec) {
+        Some((last, _)) => horizon_exclusive.min(last.saturating_add(1)),
+        None => horizon_exclusive,
+    }
 }
 
 /// Compute a read-only planning snapshot for a schedule at `now_ms`.
@@ -60,20 +119,31 @@ fn plan_schedule_from_boundaries(
             next_fire_at: None,
             decision: "disabled".to_string(),
             decision_reason: "schedule is disabled".to_string(),
+            lifetime_exhausted: None,
         };
     }
 
-    let current_due_at = compute_current_due_at(spec, last_scheduled_at, now_ms);
-    let next_fire_at = compute_next_planned_fire(spec, last_scheduled_at, now_ms, current_due_at);
+    // Lifetime bounds cap which boundaries exist at all. Planning as of
+    // `min(now, last admitted boundary)` makes the last admitted boundary the
+    // current one even when the daemon was down past it, so its misfire
+    // policy still decides it; nothing later is planned.
+    let horizon = lifetime_horizon(spec);
+    let admitted_now = horizon.map_or(now_ms, |(last, _)| now_ms.min(last));
+    let current_due_at = compute_current_due_at(spec, last_scheduled_at, admitted_now);
+    let next_fire_at = compute_next_planned_fire(spec, last_scheduled_at, now_ms, current_due_at)
+        .filter(|next| horizon.is_none_or(|(last, _)| *next <= last));
     let current_due_within_grace =
         current_due_at.map(|due| within_lateness_grace(spec, due, now_ms));
     let misfire_horizon_exclusive = current_due_at.map(|due| {
         if within_lateness_grace(spec, due, now_ms) {
             due
         } else {
-            now_ms
+            clamp_to_lifetime_exclusive(spec, now_ms)
         }
     });
+    let lifetime_exhausted = horizon
+        .filter(|_| current_due_at.is_none() && next_fire_at.is_none())
+        .map(|(_, reason)| reason);
 
     let (decision, decision_reason) = match (current_due_at, current_due_within_grace, next_fire_at)
     {
@@ -88,6 +158,13 @@ fn plan_schedule_from_boundaries(
         (None, _, Some(next)) if next > now_ms => (
             "waiting_for_next_boundary".to_string(),
             "next fire is in the future".to_string(),
+        ),
+        (None, _, None) if lifetime_exhausted.is_some() => (
+            "lifetime_exhausted".to_string(),
+            format!(
+                "schedule lifetime bound reached: {}",
+                lifetime_exhausted.expect("checked by the guard")
+            ),
         ),
         (None, _, None) if spec.schedule_type == "at" => (
             "exhausted".to_string(),
@@ -112,6 +189,7 @@ fn plan_schedule_from_boundaries(
         next_fire_at,
         decision,
         decision_reason,
+        lifetime_exhausted,
     }
 }
 
@@ -244,6 +322,9 @@ mod tests {
             policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
                 ryeos_engine::execution_contract::ExecutionResponse::Accepted,
             ),
+            limits: None,
+            max_fires: None,
+            expires_at: None,
         }
     }
 
@@ -357,6 +438,90 @@ mod tests {
         assert_eq!(plan.current_due_at, None);
         assert_eq!(plan.next_fire_at, Some(target));
         assert_eq!(plan.decision, "waiting_for_next_boundary");
+    }
+
+    #[test]
+    fn max_fires_stops_planning() {
+        let mut spec = make_spec("interval", "60", 1_000);
+        spec.execution.max_fires = Some(2);
+        assert_eq!(
+            lifetime_horizon(&spec),
+            Some((121_000, ScheduleAutoPauseReason::MaxFiresReached))
+        );
+
+        // The second boundary is still admitted.
+        let plan = plan_schedule(&spec, Some(&make_fire(61_000)), 121_500);
+        assert_eq!(plan.current_due_at, Some(121_000));
+        assert_eq!(plan.lifetime_exhausted, None);
+
+        // After it, nothing is planned and the schedule reports exhaustion.
+        let plan = plan_schedule(&spec, Some(&make_fire(121_000)), 121_500);
+        assert_eq!(plan.current_due_at, None);
+        assert_eq!(plan.next_fire_at, None);
+        assert_eq!(
+            plan.lifetime_exhausted,
+            Some(ScheduleAutoPauseReason::MaxFiresReached)
+        );
+        assert_eq!(plan.decision, "lifetime_exhausted");
+    }
+
+    #[test]
+    fn max_fires_keeps_the_last_admitted_boundary_after_downtime() {
+        let mut spec = make_spec("interval", "60", 1_000);
+        spec.execution.max_fires = Some(2);
+        // Down from just after the first fire until well past the bound: the
+        // second boundary is the current one and goes to misfire policy;
+        // later boundaries are never planned.
+        let plan = plan_schedule(&spec, Some(&make_fire(61_000)), 500_000);
+        assert_eq!(plan.current_due_at, Some(121_000));
+        assert_eq!(plan.current_due_within_grace, Some(false));
+        assert_eq!(plan.misfire_horizon_exclusive, Some(121_001));
+        assert_eq!(plan.next_fire_at, None);
+        assert_eq!(plan.lifetime_exhausted, None);
+    }
+
+    #[test]
+    fn expires_at_stops_planning() {
+        let mut spec = make_spec("interval", "60", 1_000);
+        spec.execution.expires_at = Some("1970-01-01T00:02:30Z".to_string());
+        assert_eq!(
+            lifetime_horizon(&spec),
+            Some((149_999, ScheduleAutoPauseReason::Expired))
+        );
+        let plan = plan_schedule(&spec, Some(&make_fire(61_000)), 100_000);
+        assert_eq!(plan.next_fire_at, Some(121_000));
+        let plan = plan_schedule(&spec, Some(&make_fire(121_000)), 200_000);
+        assert_eq!(plan.current_due_at, None);
+        assert_eq!(plan.next_fire_at, None);
+        assert_eq!(
+            plan.lifetime_exhausted,
+            Some(ScheduleAutoPauseReason::Expired)
+        );
+    }
+
+    #[test]
+    fn the_earlier_lifetime_bound_names_the_reason() {
+        let mut spec = make_spec("interval", "60", 1_000);
+        spec.execution.max_fires = Some(5);
+        spec.execution.expires_at = Some("1970-01-01T00:02:30Z".to_string());
+        assert_eq!(
+            lifetime_horizon(&spec).map(|(_, reason)| reason),
+            Some(ScheduleAutoPauseReason::Expired)
+        );
+        spec.execution.max_fires = Some(1);
+        assert_eq!(
+            lifetime_horizon(&spec),
+            Some((61_000, ScheduleAutoPauseReason::MaxFiresReached))
+        );
+    }
+
+    #[test]
+    fn unbounded_schedule_has_no_lifetime_horizon() {
+        let spec = make_spec("interval", "60", 1_000);
+        assert_eq!(lifetime_horizon(&spec), None);
+        assert_eq!(clamp_to_lifetime_exclusive(&spec, 9_000_000), 9_000_000);
+        let plan = plan_schedule(&spec, None, 500_000);
+        assert_eq!(plan.lifetime_exhausted, None);
     }
 
     #[test]

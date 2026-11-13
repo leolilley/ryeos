@@ -24,7 +24,10 @@ pub struct ProjectSnapshot {
     pub parent_hashes: Vec<String>,
     /// ISO-8601 timestamp of creation.
     pub created_at: String,
-    /// Source type (e.g. "fold_back", "manual_push").
+    /// What produced the snapshot (e.g. [`ProjectSnapshot::SOURCE_PUSH`],
+    /// [`ProjectSnapshot::SOURCE_SNAPSHOT_CREATE`], "fold_back"). Retention
+    /// keeps operator snapshots in their own bucket; see
+    /// [`ProjectSnapshot::is_operator_source`].
     pub source: String,
 }
 
@@ -45,6 +48,19 @@ impl ProjectSnapshot {
     /// Current immutable CAS wire schema for project snapshots. Earlier schema
     /// identifiers remain occupied even though no legacy reader is provided.
     pub const SCHEMA: u32 = 5;
+
+    /// Source of a snapshot pushed from a remote node by an operator.
+    pub const SOURCE_PUSH: &'static str = "push";
+    /// Source of a snapshot an operator made with `ryeos snapshot create`.
+    pub const SOURCE_SNAPSHOT_CREATE: &'static str = "snapshot_create";
+
+    /// Whether `source` is an operator's deliberate snapshot. Retention counts
+    /// these against `manual_pushes`; every other source (fold-backs, remote
+    /// sync, captures, and any unknown string) counts against
+    /// `auto_snapshots`.
+    pub fn is_operator_source(source: &str) -> bool {
+        source == Self::SOURCE_PUSH || source == Self::SOURCE_SNAPSHOT_CREATE
+    }
 
     /// Serialize to a CAS JSON object.
     pub fn to_value(&self) -> Value {

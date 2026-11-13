@@ -1,0 +1,26 @@
+[package]
+name = "ryeos-client-rune"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "RyeOS in Rune: the GPU renderer for the browser and, later, a native window, over the shared client runtime"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rune = { git = "https://github.com/leolilley/rune", rev = "453221e3b65d04f1428ed0491451eefbde35de65", default-features = false, features = ["embedded-fonts", "webgl"] }
+ryeos-client-base = { workspace = true }
+ryeos-client-runtime = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Exact: the wasm-bindgen CLI that packages this crate must be the same version.
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+
+[lints]
+workspace = true

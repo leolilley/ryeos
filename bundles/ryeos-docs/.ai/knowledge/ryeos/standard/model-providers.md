@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:c052f38cee75eae54835d7bfd1c174a0f17a0c0aa8f48b543946b72a2c96a7be:91YkfA1iiRXPLnrEo2AqRZFOx5c/MzH3G+rHyIKhjZ9NL86riF1+AY31ttV3caMagcyU19l6VMUwBbDQKZD9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:34:16Z:c94e8dde307fbc06262d1c0f672a5dbb04b3b592f1a9796cd5e9e78cfaaa0ed5:GDoLI8zllSxOjfWdzskYRO9bRRP5Ab3Y02wrzQjdOsy60E2PZBLiTvgXQ/+ClIMM8TobLhowZIFAfAHtI9jSBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
@@ -19,8 +19,9 @@ semantics.
 
 ## Execution identity
 
-A directive execution supplies its model identity through the directive
-runtime's required `model` reference binding:
+A directive execution takes its model identity from the directive runtime's
+required `model` reference binding. A caller may bind another directive that
+carries the model settings:
 
 ```json
 {
@@ -31,9 +32,12 @@ runtime's required `model` reference binding:
 }
 ```
 
-The binding is an independently authorized canonical ref. If one directive
-supplies both behavior and model settings, its canonical ref is repeated
-explicitly in the `model` slot.
+The binding is an independently authorized canonical ref. When the caller
+gives no `model` binding, the runtime's signed `caller_or_primary_ref` source
+binds the executed directive's own canonical ref, so a directive that carries
+both behavior and model settings needs no binding. The defaulted ref is
+authorized, resolved and trust-checked exactly like an explicit one, and an
+explicit binding always wins.
 
 ## Resolution order
 

@@ -331,7 +331,10 @@ mod tests {
         let parsers = dispatcher_with_canonical_bundle_descriptors();
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
-        let roots = ResolutionRoots { ordered: vec![] };
+        let roots = ResolutionRoots {
+            owned_namespaces: Vec::new(),
+            ordered: vec![],
+        };
         let host = HostEnvBindings::default();
         let params =
             json!({"execution_project_file":{"relative_path":"wrong.py","max_bytes":65536}});

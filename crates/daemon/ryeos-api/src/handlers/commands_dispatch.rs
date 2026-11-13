@@ -125,6 +125,7 @@ pub async fn handle(
         usage_subject: None,
         debug_raw: controls.debug_raw,
         state_root: controls.state_root,
+        attest_result: false,
     };
     let outcome = crate::routes::response_modes::execute_mode::admit_execution(
         request,

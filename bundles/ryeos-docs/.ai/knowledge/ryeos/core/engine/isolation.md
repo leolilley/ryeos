@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T03:26:26Z:9cbafc8f3673b56ac8c168134b29a4b61475df20ccfd8ad847699bfac4576652:zcn/trMqGSX8hm8T/n/9UoW8Ybyxc8Duu9R5SdI5vOcZSedSPBBFhsLc8O/NiSUm0FaxmVhP3ncayLGEbXRuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:27:41Z:5364aa5f77c1626bcb68aba827d41eb2c88cd37bfb39731b33fb1689791c2bd7:Q6ejR8aRJlz+lfBo95IX6nq1i6kCw+cWIZDoNlMMsQB+QVEspJSSZwazg4DVQUiLYH8iAVVdA8nLkjrqG+r+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -19,8 +19,9 @@ escalation, secret leakage, and environment-dependent behavior.
 ## Node-owned OS isolation
 
 Tool and runtime item launches can additionally pass through the immutable strict
-node isolation snapshot. The default mode is disabled. In enforce mode, the
-node—not the item—owns filesystem/network policy, environment filtering, and
+node isolation snapshot. The mode comes from the node's init profile; most
+packaged profiles' lanes select disabled. In enforce mode, the node—not the
+item—owns filesystem/network policy, environment filtering, and
 the Lillux open-file cap. Policy is resolved once at startup and shared across
 launch paths; edits require restart. Parser/composer handlers are trusted engine
 infrastructure and retain the hermetic handler boundary below.
@@ -42,7 +43,7 @@ except on one protocol class. A protocol may declare
 `captured_compatible_callback` with the digest of a closed callback
 method surface. The registry accepts the declaration only on the remote-consumer
 qualification callback protocol (never the scoped-producer one) with managed
-HTTP callbacks, a bounded single-call evidence projector, no session and no remote or detached dispatch. Admission then
+`runtime_socket` callbacks, a bounded single-call evidence projector, no session and no remote or detached dispatch. Admission then
 requires the declared digest to equal the digest of the surface the daemon
 itself issues for that authority. The sandbox then receives exactly the pinned
 daemon socket entry, read-only, and never its parent directory or any other

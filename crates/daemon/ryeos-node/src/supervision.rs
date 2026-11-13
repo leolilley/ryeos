@@ -475,6 +475,198 @@ pub fn exec_host_service(app_root: &Path) -> Result<std::convert::Infallible> {
     }
 }
 
+/// Native associations RyeOS host setup names `ryeos-<digest>`.
+const HOST_SERVICE_PREFIX: &str = "ryeos-";
+
+/// One native host-service association named like a RyeOS node service, read
+/// from its recorded launch only. Nothing here loads node configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeHostService {
+    pub name: String,
+    /// The app root the recorded launch serves, when it is a RyeOS node
+    /// host-service launch for exactly this association name.
+    pub app_root: Option<PathBuf>,
+    /// Whether the native service manager is set to supervise it.
+    pub activated: bool,
+    /// Why this association is not a RyeOS node service, when it is not.
+    pub problem: Option<String>,
+    launch: Option<lillux::HostServiceLaunch>,
+}
+
+impl NodeHostService {
+    /// Classify one native association by its recorded launch.
+    pub fn from_association(association: lillux::HostServiceAssociation) -> Self {
+        let lillux::HostServiceAssociation {
+            name,
+            launch,
+            activated,
+        } = association;
+        let classified = launch.map_err(anyhow::Error::msg).and_then(|launch| {
+            let app_root = recorded_app_root(&name, &launch)?;
+            Ok((app_root, launch))
+        });
+        match classified {
+            Ok((app_root, launch)) => Self {
+                name,
+                app_root: Some(app_root),
+                activated,
+                problem: None,
+                launch: Some(launch),
+            },
+            Err(error) => Self {
+                name,
+                app_root: None,
+                activated,
+                problem: Some(format!("{error:#}")),
+                launch: None,
+            },
+        }
+    }
+
+    /// The recorded app root no longer exists. Any other observation,
+    /// including an unreadable path, keeps the association.
+    pub fn orphaned(&self) -> bool {
+        self.app_root.as_deref().is_some_and(|root| {
+            matches!(
+                std::fs::symlink_metadata(root),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        })
+    }
+
+    fn retirable_launch(&self) -> Result<&lillux::HostServiceLaunch> {
+        match (&self.launch, &self.problem) {
+            (Some(launch), None) => Ok(launch),
+            (_, Some(problem)) => bail!(
+                "host service {} is not a RyeOS node service; refusing to retire it: {problem}",
+                self.name
+            ),
+            (None, None) => bail!("host service {} has no recorded launch", self.name),
+        }
+    }
+}
+
+/// A RyeOS node service records exactly `host-service --app-root <root>`,
+/// and its name is the digest of that root.
+fn recorded_app_root(name: &str, launch: &lillux::HostServiceLaunch) -> Result<PathBuf> {
+    let [verb, flag, root] = launch.arguments.as_slice() else {
+        bail!("recorded launch is not a RyeOS node host-service launch");
+    };
+    if verb != "host-service" || flag != "--app-root" {
+        bail!("recorded launch is not a RyeOS node host-service launch");
+    }
+    let root = PathBuf::from(root);
+    if service_name(&root)? != name {
+        bail!(
+            "recorded app root {} does not belong to association {name}",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
+/// Every native association named like a RyeOS node service. `None` means
+/// this host has no native service directory readable by the caller.
+pub fn host_services() -> Result<Option<Vec<NodeHostService>>> {
+    Ok(
+        lillux::list_host_services(HOST_SERVICE_PREFIX)?.map(|associations| {
+            associations
+                .into_iter()
+                .map(NodeHostService::from_association)
+                .collect()
+        }),
+    )
+}
+
+/// RyeOS node services whose recorded app root no longer exists.
+pub fn orphaned_host_services() -> Result<Option<Vec<NodeHostService>>> {
+    Ok(host_services()?.map(|services| {
+        services
+            .into_iter()
+            .filter(NodeHostService::orphaned)
+            .collect()
+    }))
+}
+
+/// Exclusion held while a node's host service is retired. Empty when the app
+/// root is gone: nothing can run from it.
+struct RetirementExclusion {
+    _lifecycle: Option<crate::LifecycleStartLock>,
+    _state: Option<ryeos_node_runtime::state_lock::StateLock>,
+}
+
+/// Prove the node stopped without writing in its app root: take the existing
+/// lifecycle lock and the existing daemon state lock, creating neither.
+fn require_stopped_for_retirement(app_root: &Path) -> Result<RetirementExclusion> {
+    match std::fs::symlink_metadata(app_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RetirementExclusion {
+                _lifecycle: None,
+                _state: None,
+            });
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect app root {}", app_root.display()));
+        }
+        Ok(_) => {}
+    }
+    let lifecycle = crate::LifecycleStartLock::try_acquire_existing(app_root)
+        .context("host retirement requires a stopped node")?;
+    let state_path = ryeos_node_runtime::state_lock::default_lock_path(app_root);
+    let state = match std::fs::symlink_metadata(&state_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        _ => Some(
+            ryeos_node_runtime::state_lock::StateLock::acquire_existing_read_only(&state_path)
+                .context("the node is running; stop it before retiring its host service")?,
+        ),
+    };
+    Ok(RetirementExclusion {
+        _lifecycle: lifecycle,
+        _state: state,
+    })
+}
+
+/// Administrator-only retirement of the host service associated with one app
+/// root. The node must be stopped; nothing is written in the app root.
+/// `Ok(false)` means no service is associated with it.
+pub fn retire_host_service(app_root: &Path) -> Result<bool> {
+    lillux::require_administrator()?;
+    let name = service_name(app_root)?;
+    let services = host_services()?
+        .context("this host has no readable native service directory; nothing to retire")?;
+    let Some(service) = services.into_iter().find(|service| service.name == name) else {
+        return Ok(false);
+    };
+    let launch = service.retirable_launch()?;
+    let _exclusion = require_stopped_for_retirement(app_root)?;
+    lillux::retire_host_service(&name, launch)
+}
+
+/// Administrator-only sweep: retire every RyeOS node service whose recorded
+/// app root no longer exists, re-checking each root just before retiring it.
+/// Returns the associations retired.
+pub fn retire_orphaned_host_services() -> Result<Vec<NodeHostService>> {
+    lillux::require_administrator()?;
+    let orphans = orphaned_host_services()?
+        .context("this host has no readable native service directory; nothing to retire")?;
+    let mut retired = Vec::new();
+    for service in orphans {
+        if !service.orphaned() {
+            continue;
+        }
+        let launch = service.retirable_launch()?;
+        lillux::retire_host_service(&service.name, launch).with_context(|| {
+            format!(
+                "retire orphaned host service {} ({} retired before it)",
+                service.name,
+                retired.len()
+            )
+        })?;
+        retired.push(service);
+    }
+    Ok(retired)
+}
+
 impl InstalledService {
     /// Prove that this package transaction replaces the executable selected
     /// by the administrator-owned host association. Package installation and
@@ -1316,6 +1508,109 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn node_launch(arguments: &[&str]) -> lillux::HostServiceLaunch {
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "executable": "/usr/bin/ryeosd",
+            "arguments": arguments,
+            "environment": {},
+            "account": {"implementation": "unix", "uid": 1000, "gid": 1000}
+        }))
+        .unwrap()
+    }
+
+    fn association(root: &Path) -> lillux::HostServiceAssociation {
+        lillux::HostServiceAssociation {
+            name: service_name(root).unwrap(),
+            launch: Ok(node_launch(&[
+                "host-service",
+                "--app-root",
+                root.to_str().unwrap(),
+            ])),
+            activated: true,
+        }
+    }
+
+    #[test]
+    fn orphan_list_excludes_existing_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join("live");
+        std::fs::create_dir(&live).unwrap();
+        let gone = tmp.path().join("gone");
+
+        let live = NodeHostService::from_association(association(&live));
+        assert_eq!(live.problem, None);
+        assert!(!live.orphaned());
+        let gone_service = NodeHostService::from_association(association(&gone));
+        assert_eq!(gone_service.app_root.as_deref(), Some(gone.as_path()));
+        assert!(gone_service.orphaned());
+        assert!(gone_service.retirable_launch().is_ok());
+
+        // A launch recorded under another association's name is not this
+        // node's service, even when its root is gone.
+        let mut renamed = association(&gone);
+        renamed.name = service_name(Path::new("/elsewhere")).unwrap();
+        let renamed = NodeHostService::from_association(renamed);
+        assert!(renamed.problem.is_some());
+        assert!(!renamed.orphaned());
+        assert!(renamed.retirable_launch().is_err());
+
+        // Not a RyeOS node host-service launch at all.
+        let mut foreign = association(&gone);
+        foreign.launch = Ok(node_launch(&["qualification", "--arg", "/gone"]));
+        let foreign = NodeHostService::from_association(foreign);
+        assert!(foreign.problem.is_some());
+        assert!(!foreign.orphaned());
+
+        // An unreadable launch record is reported, never retired.
+        let mut unreadable = association(&gone);
+        unreadable.launch = Err("host-service launch record is invalid".to_owned());
+        let unreadable = NodeHostService::from_association(unreadable);
+        assert!(unreadable.app_root.is_none());
+        assert!(unreadable.problem.unwrap().contains("invalid"));
+    }
+
+    #[test]
+    fn retire_requires_stopped_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("node");
+        std::fs::create_dir_all(app_root.join(ryeos_engine::AI_DIR).join("state")).unwrap();
+
+        // A root that is gone needs no exclusion.
+        require_stopped_for_retirement(&tmp.path().join("gone")).unwrap();
+
+        // A node that never ran: nothing to lock, and nothing is created.
+        require_stopped_for_retirement(&app_root).unwrap();
+        assert!(
+            !ryeos_engine::roots::RuntimeRoot::new(app_root.clone())
+                .daemon_lifecycle()
+                .exists()
+        );
+        assert!(!ryeos_node_runtime::state_lock::default_lock_path(&app_root).exists());
+
+        // An active lifecycle operation refuses.
+        let lifecycle = crate::LifecycleStartLock::try_acquire(&app_root)
+            .unwrap()
+            .unwrap();
+        let error = require_stopped_for_retirement(&app_root).err().unwrap();
+        assert!(format!("{error:#}").contains("stopped node"), "{error:#}");
+        drop(lifecycle);
+        require_stopped_for_retirement(&app_root).unwrap();
+
+        // A running daemon holds its state lock.
+        let state = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&app_root),
+        )
+        .unwrap();
+        let error = require_stopped_for_retirement(&app_root).err().unwrap();
+        assert!(
+            format!("{error:#}").contains("node is running"),
+            "{error:#}"
+        );
+        drop(state);
+        require_stopped_for_retirement(&app_root).unwrap();
     }
 
     #[test]

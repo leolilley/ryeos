@@ -50,12 +50,14 @@ pub mod external_content_product_offer;
 pub mod external_content_product_push;
 pub mod external_content_product_receive;
 pub mod external_content_products;
+pub mod external_content_rebind;
 pub mod external_content_release;
 pub mod external_content_scrub;
 pub mod external_execution_candidate_program;
 pub mod external_execution_channel;
 pub mod external_execution_product_program;
 pub mod external_execution_settle_unknown_allocation;
+pub mod external_execution_status;
 pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
@@ -116,6 +118,8 @@ pub mod scheduler_explain;
 pub mod scheduler_list;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_pause;
+#[cfg(feature = "scheduling")]
+pub mod scheduler_reauthorize;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_register;
 #[cfg(feature = "scheduling")]
@@ -227,6 +231,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     product_qualification_launch::CONTENT_DESCRIPTOR,
     external_content_activate::DESCRIPTOR,
     external_content_bind::DESCRIPTOR,
+    external_content_rebind::BINDINGS_DESCRIPTOR,
+    external_content_rebind::REBIND_DESCRIPTOR,
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
     external_execution_candidate_program::DESCRIPTOR,
@@ -243,6 +249,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     credential_profiles::GET_DESCRIPTOR,
     credential_profiles::LIST_DESCRIPTOR,
     credential_profiles::CONFIRM_DESCRIPTOR,
+    credential_profiles::ABANDON_LOGIN_DESCRIPTOR,
     credential_profiles::REVOKE_DESCRIPTOR,
     credential_profiles::DELETE_DESCRIPTOR,
     dedicated_sessions::STATUS_DESCRIPTOR,
@@ -303,6 +310,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_smoke::DESCRIPTOR,
     bundle_verify::DESCRIPTOR,
     external_execution_settle_unknown_allocation::DESCRIPTOR,
+    external_execution_status::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
     rebuild::VERIFY_DESCRIPTOR,
     rebuild::REBUILD_DESCRIPTOR,
@@ -325,6 +333,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     scheduler_pause::DESCRIPTOR,
     #[cfg(feature = "scheduling")]
     scheduler_resume::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
+    scheduler_reauthorize::DESCRIPTOR,
     sync_jobs_list::DESCRIPTOR,
     sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,

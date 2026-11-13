@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-08T08:44:51Z:c8846e091f680875c949564e8af881aee5436e40ece345c5b99297b06a712b9e:dXTZ9CPrRk4aATfm+AixdvvhYQqJlyU+0y2Ro+ukOPKy1HSTbJnA+Oy0lbLS/s1SvW7WyzKU61c9KS7oTztUBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:15:23Z:834e1bd5e0e66c652470992da76a90f4d79301e5a9fc02353221088a198a7933:cl+zvKU4vi7QN1PXLoH/WB+MTpNP/lj2S/4Jcd1R43iiA6OpkbZvVRWENfuR6PjowJm/At2UfOQISrb5fNbXDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/runtimes
 tags: [runtime, python, contract, tools]
@@ -93,13 +93,16 @@ The runtime invokes Python with `-I -B -u`: isolated mode ignores `PYTHONPATH`
 and user site-packages; `-B` explicitly suppresses bytecode even though isolated
 mode ignores Python environment options. The selected interpreter's own installed
 site-packages are not disabled by `-I`; their bytes belong to its runtime closure.
-The runtime then prepends,
+The launcher (`script.yaml` / `function.yaml` under
+`bundles/core/.ai/tools/ryeos/core/runtimes/python/`) then prepends,
 in order:
 
 1. the tool's own directory,
 2. the bundle tool root (the top-level dir under `.ai/tools/`),
-3. that bundle tool root's `lib/` directory,
-4. the runtime's own `lib/` directory.
+3. that bundle tool root's `lib/` directory.
+
+No other root is added; the runtime has no `lib/` directory of its own on
+`sys.path`.
 
 **The project root is deliberately NOT on `sys.path`.** To import your own
 code from a tool:
@@ -135,15 +138,27 @@ The shared runtime declares:
   the invocation; realization selection does not export a symbolic selector as
   an executable environment path.
 
+Python tools run under `tool_callback`, which also injects `RYE_THREAD_ID`,
+`RYE_PROJECT_PATH`, the callback socket and token, `RYEOSD_THREAD_ID`,
+`RYEOSD_PROJECT_STATE_SCOPE`, `RYEOSD_THREAD_AUTH_TOKEN` and
+`RYEOSD_ACTING_PRINCIPAL` (the principal the daemon authorized for the launch,
+for information; do not persist it as proof of who acted).
+
 plus any vault/host bindings the dispatch layer attaches.
 
 ## Entry points (script vs function)
 
-- **script**: the tool file is run as `__main__` (via `runpy`). Write
-  output to stdout yourself. Non-JSON stdout is captured as a string;
+Both launchers run the sealed tool bytes, not the live file. The launcher
+looks up the sealed path in `RYEOS_VERIFIED_CODE_MAP`, reads the sealed
+bytes, and refuses to run if their SHA-256 does not match the recorded
+content hash ("sealed tool digest mismatch"). It then runs those bytes
+with `exec(compile(...))` under the tool's logical path.
+
+- **script**: the sealed bytes run as `__main__` (`__name__ == "__main__"`,
+  `sys.argv` set as above). Write output to stdout yourself. Non-JSON stdout is captured as a string;
   JSON stdout is captured as structured data.
-- **function**: the runtime imports the tool module and calls
-  `execute(params, project_path)` — synchronous or `async def` (it is
+- **function**: the launcher executes the sealed bytes into a fresh module
+  and calls `execute(params, project_path)` — synchronous or `async def` (it is
   awaited). The **return value** is JSON-serialized as the tool result; a
   missing `execute` is a hard error.
 

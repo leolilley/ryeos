@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-08T06:41:16Z:147ef50ece4380b2d835585956a60410f7c091b0ef166390e734c9ec57346231:bLgZ28UTtFAefo/HWywkh8Vv8a0SCWd39fVObwDzIdHNyd3lL4M7vUxXlHWXW/0N71SfflfHNaHt2dlisKo0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T10:40:20Z:8b5f4414ec0432b1b6ff2d5f3c885b247850bce27fddc580a272260c7b59f48b:IUyyray/PDV2Emt3CTT0QnU/ado3JQP985FsHSZPOgoNLW1MHYur4YHev0TT2rtdF1J9ru+cluXMd6BV2NK9AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -33,6 +33,9 @@ mode flag.
 | `field` | multi-source entity/relation evidence field | `ryeos.ui.field.facts.v1` documents |
 
 Engine chrome (not content-targetable in v1): notice, dock/tile chrome.
+Navigation is not chrome: a list of destinations is an ordinary view placed in
+the layout or a slot like any other, so surfaces declare no separate
+navigation list and renderers draw no navigation rail.
 Input is no longer engine chrome: it is a content capability (the `input`
 block below), and a view's `completion` source drives the suggestion rows.
 

@@ -1689,7 +1689,7 @@ pub async fn prepare_managed_runtime_terminal_project_result(
             &launch_owner,
             head_ref,
             expected_hash,
-            pending.snapshot_hash(),
+            pending.generation(),
         )?;
     }
 
@@ -1795,7 +1795,7 @@ pub(crate) fn prepare_stopped_managed_runtime_terminal_project_result(
             launch_owner,
             head_ref,
             expected_hash,
-            &generation.snapshot_hash,
+            &generation,
         )?;
     }
     Ok(Some(generation))
@@ -1808,13 +1808,148 @@ fn select_stopped_managed_runtime_result(
     external_generation.map_or_else(capture_local_generation, Ok)
 }
 
+/// An `AdvanceHead` publication refused before any HEAD write. The frozen
+/// generation was already bound to the workspace journal (journal before
+/// contact), so it stays retained as the execution's result; only the HEAD
+/// did not move. A thread that hits this fails with
+/// [`HEAD_ADVANCE_NOT_APPLIED`] and reports the retained generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadAdvanceNotApplied {
+    pub refusal: ryeos_state::refs::ProjectHeadAdvanceRefusal,
+    pub expected_head: String,
+    pub retained: ryeos_state::objects::WorkspaceGenerationPair,
+}
+
+/// Outcome code of a thread whose requested HEAD advance was not applied.
+pub const HEAD_ADVANCE_NOT_APPLIED: &str = "head_advance_not_applied";
+
+impl HeadAdvanceNotApplied {
+    /// The typed refusal anywhere in an error chain.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.downcast_ref::<Self>()
+    }
+
+    /// Durable error payload of the failed thread.
+    pub fn error_payload(&self) -> serde_json::Value {
+        let observed_head = match &self.refusal {
+            ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict { observed, .. } => {
+                observed.clone()
+            }
+            _ => None,
+        };
+        serde_json::json!({
+            "code": HEAD_ADVANCE_NOT_APPLIED,
+            "reason": self.refusal.reason(),
+            "message": self.to_string(),
+            "expected_head": self.expected_head,
+            "observed_head": observed_head,
+            "retained_snapshot_hash": self.retained.snapshot_hash,
+            "retained_output_capture_hash": self.retained.output_capture_hash,
+        })
+    }
+}
+
+impl HeadAdvanceNotApplied {
+    /// The terminal completion of a managed runtime whose fold-back HEAD
+    /// advance was refused: `failed` with outcome
+    /// [`HEAD_ADVANCE_NOT_APPLIED`] and the retained-generation payload,
+    /// keeping the runtime's cost and its reported status as testimony. The
+    /// runtime's own result is not committed; its publication did not happen.
+    pub fn failed_completion(
+        &self,
+        reported: &ryeos_engine::contracts::ExecutionCompletion,
+    ) -> ryeos_engine::contracts::ExecutionCompletion {
+        let mut error = self.error_payload();
+        error
+            .as_object_mut()
+            .expect("head-advance payload is an object")
+            .insert(
+                "reported_status".into(),
+                serde_json::Value::String(reported.status.as_str().to_owned()),
+            );
+        ryeos_engine::contracts::ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Failed,
+            outcome_code: Some(HEAD_ADVANCE_NOT_APPLIED.to_owned()),
+            result: None,
+            error: Some(error),
+            artifacts: Vec::new(),
+            final_cost: reported.final_cost.clone(),
+            continuation_request: None,
+            metadata: None,
+        }
+    }
+}
+
+/// Outcome code of a run interrupted after its HEAD advance applied but
+/// before its own completion was confirmed.
+pub const HEAD_ADVANCED_BEFORE_INTERRUPTION: &str = "head_advanced_before_interruption";
+
+/// Outcome code and error payload of a run whose fold-back froze and bound a
+/// generation and was then interrupted. Recovery never publishes:
+/// - HEAD does not name the generation: [`HEAD_ADVANCE_NOT_APPLIED`] with
+///   reason `interrupted`;
+/// - HEAD already names it, so the advance applied before the interruption:
+///   [`HEAD_ADVANCED_BEFORE_INTERRUPTION`], recording the publication although
+///   the run's own completion was never confirmed.
+pub fn interrupted_head_advance_outcome(
+    expected_head: &str,
+    observed_head: Option<&str>,
+    retained: &ryeos_state::objects::WorkspaceGenerationPair,
+) -> (&'static str, serde_json::Value) {
+    if observed_head == Some(retained.snapshot_hash.as_str()) {
+        return (
+            HEAD_ADVANCED_BEFORE_INTERRUPTION,
+            serde_json::json!({
+                "code": HEAD_ADVANCED_BEFORE_INTERRUPTION,
+                "message": format!(
+                    "HEAD advanced from {expected_head} to the run's result generation {} \
+                     before the run was interrupted; its own completion was never confirmed",
+                    retained.snapshot_hash
+                ),
+                "advanced_from": expected_head,
+                "head": retained.snapshot_hash,
+                "snapshot_hash": retained.snapshot_hash,
+                "output_capture_hash": retained.output_capture_hash,
+            }),
+        );
+    }
+    (
+        HEAD_ADVANCE_NOT_APPLIED,
+        serde_json::json!({
+            "code": HEAD_ADVANCE_NOT_APPLIED,
+            "reason": "interrupted",
+            "message": format!(
+                "the run was interrupted after freezing its result generation {} and before \
+                 advancing HEAD; recovery never publishes, so the generation is retained",
+                retained.snapshot_hash
+            ),
+            "expected_head": expected_head,
+            "observed_head": observed_head,
+            "retained_snapshot_hash": retained.snapshot_hash,
+            "retained_output_capture_hash": retained.output_capture_hash,
+        }),
+    )
+}
+
+impl std::fmt::Display for HeadAdvanceNotApplied {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "HEAD advance not applied ({}); the result generation {} is retained",
+            self.refusal, self.retained.snapshot_hash
+        )
+    }
+}
+
+impl std::error::Error for HeadAdvanceNotApplied {}
+
 fn advance_head_to_frozen_runtime_result(
     state: &ryeos_app::state::AppState,
     thread_id: &str,
     launch_owner: &str,
     head_ref: &str,
     expected_hash: &str,
-    result_snapshot_hash: &str,
+    generation: &ryeos_state::objects::WorkspaceGenerationPair,
 ) -> Result<()> {
     let mut components = head_ref.split('/');
     let (Some("projects"), Some(principal_key), Some(project_hash), Some("head"), None) = (
@@ -1844,16 +1979,32 @@ fn advance_head_to_frozen_runtime_result(
         .acquire_with_timeout(ryeos_app::write_barrier::ONLINE_WRITE_PERMIT_TIMEOUT)
         .map_err(|error| anyhow::anyhow!("acquire result-generation write permit: {error}"))?;
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-    state.state_store.advance_project_head_ref_owned(
-        thread_id,
-        launch_owner,
-        principal_key,
-        project_hash,
-        result_snapshot_hash,
-        expected_hash,
-        &signer,
-        &cas_guard,
-    )
+    state
+        .state_store
+        .advance_project_head_ref_owned(
+            thread_id,
+            launch_owner,
+            principal_key,
+            project_hash,
+            &generation.snapshot_hash,
+            expected_hash,
+            &signer,
+            &cas_guard,
+        )
+        .map_err(|error| {
+            match error
+                .downcast_ref::<ryeos_state::refs::ProjectHeadAdvanceRefusal>()
+                .cloned()
+            {
+                Some(refusal) => HeadAdvanceNotApplied {
+                    refusal,
+                    expected_head: expected_hash.to_owned(),
+                    retained: generation.clone(),
+                }
+                .into(),
+                None => error,
+            }
+        })
 }
 
 /// Complete a write-ahead callback freeze whose runtime owner died after the
@@ -3106,6 +3257,127 @@ mod pinned_child_authority_tests {
         assert_eq!(
             terminal_publication,
             ryeos_state::objects::PinnedTerminalPublication::RetainResult
+        );
+    }
+}
+
+#[cfg(test)]
+mod head_advance_not_applied_tests {
+    use super::*;
+
+    fn not_applied(refusal: ryeos_state::refs::ProjectHeadAdvanceRefusal) -> HeadAdvanceNotApplied {
+        HeadAdvanceNotApplied {
+            refusal,
+            expected_head: "b".repeat(64),
+            retained: ryeos_state::objects::WorkspaceGenerationPair {
+                snapshot_hash: "c".repeat(64),
+                output_capture_hash: Some("d".repeat(64)),
+            },
+        }
+    }
+
+    #[test]
+    fn head_conflict_reports_the_retained_generation_and_observed_head() {
+        let error: anyhow::Error =
+            not_applied(ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict {
+                expected: "b".repeat(64),
+                observed: Some("e".repeat(64)),
+            })
+            .into();
+        let found = HeadAdvanceNotApplied::find(&error).expect("typed not-applied error");
+        let payload = found.error_payload();
+        assert_eq!(payload["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(payload["reason"], "head_moved");
+        assert_eq!(payload["expected_head"], "b".repeat(64));
+        assert_eq!(payload["observed_head"], "e".repeat(64));
+        assert_eq!(payload["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(payload["retained_output_capture_hash"], "d".repeat(64));
+    }
+
+    #[test]
+    fn failed_completion_replaces_a_reported_success_with_the_typed_failure() {
+        let reported = ryeos_engine::contracts::ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Completed,
+            outcome_code: Some("success".into()),
+            result: Some(serde_json::json!({"answer": 42})),
+            error: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: None,
+        };
+        let failed = not_applied(ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict {
+            expected: "b".repeat(64),
+            observed: Some("e".repeat(64)),
+        })
+        .failed_completion(&reported);
+        assert_eq!(
+            failed.status,
+            ryeos_engine::contracts::ThreadTerminalStatus::Failed
+        );
+        assert_eq!(
+            failed.outcome_code.as_deref(),
+            Some(HEAD_ADVANCE_NOT_APPLIED)
+        );
+        assert!(
+            failed.result.is_none(),
+            "the unpublished result is not committed"
+        );
+        let error = failed.error.unwrap();
+        assert_eq!(error["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(error["reported_status"], "completed");
+        assert_eq!(error["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(error["observed_head"], "e".repeat(64));
+    }
+
+    #[test]
+    fn an_interrupted_advance_is_not_applied_unless_head_names_the_generation() {
+        let retained = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: Some("d".repeat(64)),
+        };
+        let base = "b".repeat(64);
+        let (code, payload) = interrupted_head_advance_outcome(&base, Some(&base), &retained);
+        assert_eq!(code, HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(payload["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(payload["reason"], "interrupted");
+        assert_eq!(payload["expected_head"], base);
+        assert_eq!(payload["observed_head"], base);
+        assert_eq!(payload["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(payload["retained_output_capture_hash"], "d".repeat(64));
+        assert!(
+            interrupted_head_advance_outcome(&base, None, &retained).1["observed_head"].is_null()
+        );
+    }
+
+    #[test]
+    fn an_advance_applied_before_the_interruption_is_recorded_as_such() {
+        let retained = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: None,
+        };
+        let base = "b".repeat(64);
+        let (code, payload) =
+            interrupted_head_advance_outcome(&base, Some(&"c".repeat(64)), &retained);
+        assert_eq!(code, HEAD_ADVANCED_BEFORE_INTERRUPTION);
+        assert_eq!(payload["code"], HEAD_ADVANCED_BEFORE_INTERRUPTION);
+        assert_eq!(payload["advanced_from"], base);
+        assert_eq!(payload["head"], "c".repeat(64));
+        assert_eq!(payload["snapshot_hash"], "c".repeat(64));
+        assert!(payload["output_capture_hash"].is_null());
+    }
+
+    #[test]
+    fn other_pre_write_refusals_keep_their_reason_and_no_observed_head() {
+        let payload = not_applied(ryeos_state::refs::ProjectHeadAdvanceRefusal::Fenced(
+            "handoff reservation".into(),
+        ))
+        .error_payload();
+        assert_eq!(payload["reason"], "fenced");
+        assert!(payload["observed_head"].is_null());
+        assert!(
+            HeadAdvanceNotApplied::find(&anyhow::anyhow!("fold-back capture failed")).is_none(),
+            "an untyped fold-back failure stays foldback_failed"
         );
     }
 }

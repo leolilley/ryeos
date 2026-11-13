@@ -269,6 +269,16 @@ fn ref_binding_source_is_explicit_and_closed() {
     );
     assert!(parse_via_registry(&unknown).is_err());
 
+    let defaulted = FULL_RUNTIME_YAML.replace(
+        "      source:\n        kind: caller\n",
+        "      source:\n        kind: caller_or_primary_ref\n",
+    );
+    let yaml = parse_via_registry(&defaulted).expect("caller_or_primary_ref source parses");
+    assert_eq!(
+        yaml.launch_contract.ref_bindings["context"].source,
+        ryeos_engine::runtime_registry::RefBindingSource::CallerOrPrimaryRef
+    );
+
     let projected = FULL_RUNTIME_YAML.replace(
         "      source:\n        kind: caller\n",
         "      source:\n        kind: primary_field\n        path: [product_recipe]\n",

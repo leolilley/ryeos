@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T09:41:52Z:754c252f7537b4b0b822590530bcba257be0e64d15c755361cf1620238109095:gQtuMMxGhrBlcqxe4gvQ0WpuoyZDzf3qAtt/i4DMH31siw5ScUo7ppEcB6gRp4GXWUpPKa641v+qwqcXbjCjAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:14:08Z:c92f192f83b9bbacce20a926ad02929c8150a7836343ca3d9e450e2d1f9a1f31:drf8UJco2+hJFCkiWjMmrvHflvjKnfyVPhCRE5KeTa09wXNNqF6o5cGEBgaPiwH68ZI9htg05Tr9r3fTRqcjAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -127,9 +127,10 @@ those stages and their exact retained evidence during operational integration.
 - Do **not** confuse a successful long projection rebuild with a daemon startup
   failure.
 - Do **not** treat AUR as part of the release unless explicitly requested. The
-  active release path is GHCR. Do not publish/update AUR from GitHub's raw tag
-  archive unless the AUR artifact flow has been fixed; raw tag archives do not
-  contain ignored, generated bundle artifacts from `scripts/populate-bundles.sh`.
+  active release path is GHCR. If AUR is requested, follow §9: the `ryeos`
+  package needs the signed bundle artifact as well as the tag archive, because
+  raw tag archives do not contain the generated bundle artifacts from
+  `scripts/populate-bundles.sh`.
 - Do **not** stage unrelated untracked files, especially:
   - `.ai/knowledge/ryeos/future/portable-execution-white-paper-thesis.md`
 
@@ -517,15 +518,29 @@ published stage.
 AUR is not currently used for shipping RyeOS releases. Do not update AUR as part
 of the standard release flow.
 
-The checked-in AUR PKGBUILDs are not sufficient for an official release as-is
-because they source GitHub's raw tag archive. Raw tag archives omit ignored,
-generated bundle artifacts produced by `scripts/populate-bundles.sh`, including
-bundle-owned binaries, CAS objects/refs, populated manifests, and trust docs.
+The checked-in PKGBUILDs under `deploy/aur/` are templates, not publishable
+metadata: `pkgver` and the checksums are placeholders (`RELEASE_VERSION`,
+`RELEASE_ARCHIVE_SHA256`, `RELEASE_BUNDLE_ARCHIVE_SHA256`). The `ryeos`
+package has two immutable inputs, both listed in its `source=` with a pinned
+`sha256sums` entry each:
 
-Before any future AUR publication, create or automate an official populated
-release tarball, point `source=...` at that artifact instead of the raw tag
-archive, replace `sha256sums=('SKIP')` with a real checksum, and validate with a
-clean `makepkg` build/install/init.
+- the signed-tag source archive (GitHub's tag archive), used to build the host
+  binaries; and
+- `ryeos-bundles-<version>-x86_64.tar.gz`, the release asset produced by the
+  release workflow (`scripts/release/package-bundle-artifact.sh`) after
+  populating and signing the full bundle set with the official publisher key.
+
+The tag archive alone is not enough: it omits the ignored, generated bundle
+artifacts produced by `scripts/populate-bundles.sh` (bundle-owned binaries,
+CAS objects/refs, populated manifests, trust docs). The AUR build copies the
+bundle artifact verbatim into `/usr/share/ryeos` and never regenerates or
+re-signs it. `ryeos-mcp` has only the tag archive as input.
+
+If an AUR publication is requested, render the metadata with
+`scripts/release/prepare-aur.sh` (it verifies the signed tag and both archive
+digests and fills in the checksums), publish only the generated package
+directories, and validate with a clean `makepkg` build/install/init. See
+`deploy/aur/README.md` for the full command.
 
 ## 10. Local packaged-layout install validation
 

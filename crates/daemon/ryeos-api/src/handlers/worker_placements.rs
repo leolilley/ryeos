@@ -3281,6 +3281,19 @@ fn current_target_operator_authority(
     if let Some(parent_caps) = capsule.parent_delegation_caps.as_ref() {
         admitted.require_covers(parent_caps)?;
     }
+    // The target rebind keeps the source's operator-vault exposure, and the
+    // target then delivers from its own operator vault. That is the target
+    // operator's authority: the owner's current target grant must hold the
+    // capability itself, whatever the source admitted.
+    if capsule
+        .project_authority
+        .environment()
+        .exposes_operator_vault()
+    {
+        admitted
+            .require_covers(&[ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY.to_owned()])
+            .map_err(|_| ryeos_app::execution_policy::OperatorVaultCapabilityRequired)?;
+    }
     Ok(admitted)
 }
 

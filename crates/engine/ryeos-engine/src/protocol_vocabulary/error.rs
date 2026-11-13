@@ -31,9 +31,9 @@ pub enum VocabularyError {
         actual: bool,
     },
     #[error(
-        "callback_channel=http requires both callback_socket_path and callback_token env injection sources"
+        "callback_channel=runtime_socket requires both callback_socket_path and callback_token env injection sources"
     )]
-    HttpIncompleteCallbackTransport,
+    RuntimeSocketIncompleteCallbackTransport,
     #[error("env injection `{name}` has a callback source but callback_channel is none")]
     CallbackInjectionWithoutChannel { name: String },
 }

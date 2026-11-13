@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:3d7e3ae559afd0f34ef0f9e8b17a075be6ad4b321a63441d445e84c6207b32dc:pRZUCQMM5ZB7hqe5WHN0w97oYNHTwGCrcZOU1sh60E3Ck1o/egGj3BH0zw962u4Utq1/DtRmCYMQ3FT+B0aVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:46:00Z:ef0da4e9b3f2e5d7e9f9f88a8301d5187d8057cc2cee18ed4434d5e11ffe0ba0:cErDHbUYjgciBE5cLgqroLv8ulN4TGVKNpemuMGBdLjspvKv0RIDyZuEHTeBVrA9NI7cYZTbWtIvPOJl/cEJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -72,17 +72,56 @@ Events are stored as CAS objects in canonical JSON. Each event contains:
 | Tier | CAS Stored? | SQLite Indexed? | Survives Crash? | Use Cases |
 |---|---|---|---|---|
 | `Durable` | Yes | Yes | Yes | Lifecycle events, artifacts, tool dispatch |
-| `Journal` | Yes | No | Yes | Audit trail, progressive events |
-| `Ephemeral` | No | No | No | Token deltas, streaming snapshots |
+| `Journal` | Yes | No | Yes | Observations, foreach iteration results |
+| `Ephemeral` | No | No | No | Token deltas, streaming snapshots, reasoning |
 
 Only durable events appear in the SQLite projection. Journal events are
-recoverable from CAS during a projection rebuild but are not queryable
-at runtime. Ephemeral events are transient — they exist only in the
-broadcast stream and are not persisted.
+signed into the chain in CAS and survive a projection rebuild, but are not
+queryable through the projection. Ephemeral events are transient — they
+exist only in the broadcast stream and are not persisted.
 
-High-frequency progressive events are assigned journal tier:
-`token_delta`, `stream_snapshot`, `cognition_reasoning`,
-`graph_foreach_iteration`. All other events are durable.
+### Storage class is node policy
+
+The daemon stores each runtime-appended event under the node's signed
+`event_storage` policy section (`.ai/node/policies/event_storage.yaml`). A
+runtime's `runtime.append_event(s)` event carries only `event_type` and
+`payload`; one that also sends `storage_class` is refused. The section is
+mandatory and has no code
+fallback. Its floor is in code: only the progressive events take a class from
+policy, and the policy must name each of them exactly once. Every lifecycle,
+audit, launch, terminal and transcript event is always durable; a policy that
+names one is refused. A `cognition_out` streaming fragment (`delta`,
+`tool_use_partial`, mid-stream `tool_use`) is always ephemeral, because the
+turn-complete `cognition_out` is its durable record.
+
+Every shipped init profile carries this mapping:
+
+```yaml
+event_storage:
+  schema: 1
+  classes:
+    cognition_reasoning: ephemeral
+    graph_foreach_iteration: journal_only
+    observation: journal_only
+    stream_snapshot: ephemeral
+    token_delta: ephemeral
+```
+
+The split follows what each event would lose:
+
+- `token_delta`, `stream_snapshot` and `cognition_reasoning` are ephemeral.
+  The turn-complete `cognition_out` keeps the text and the reasoning, so
+  only their timing is lost.
+- `observation` and `graph_foreach_iteration` are journal-only (API storage
+  class `journal_only`, durability `journal`). Nothing else keeps what they
+  carry, so they are stored in CAS without being indexed.
+
+An operator may choose `ephemeral`, `journal_only` or `indexed` for each
+progressive event with `ryeos node policy-apply event_storage`. A node whose
+generation predates the section does not start; the daemon names the section
+and the cure, the stopped-node `ryeos node reset policy-generation`, which
+takes it from the release's profile (see
+[Operator Init](../node/operator-init.md)).
 
 ## Replay
 

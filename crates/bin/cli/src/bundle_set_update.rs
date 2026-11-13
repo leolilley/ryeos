@@ -13,6 +13,10 @@ struct Args {
     request: PathBuf,
     #[arg(long)]
     app_root: Option<PathBuf>,
+    /// Allow the exact coordinate in the request to sit below this node's
+    /// catalog high-water. The allowed rollback is recorded with the update.
+    #[arg(long)]
+    allow_catalog_rollback: bool,
     #[arg(long)]
     json: bool,
 }
@@ -28,8 +32,9 @@ pub(crate) async fn run(argv: &[String], console: &crate::tty::Console) -> Resul
     };
     let raw = lillux::read_regular_file_bounded_no_follow(&args.request, 64 * 1024)
         .with_context(|| format!("read exact update request {}", args.request.display()))?;
-    let request =
+    let mut request: ryeos_node::bundle_set_update::StoppedBundleSetUpdateRequest =
         serde_yaml::from_slice(&raw).context("parse strict stopped bundle-set update request")?;
+    request.allow_catalog_rollback = args.allow_catalog_rollback;
     let config =
         ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
             app_root: args.app_root,

@@ -313,7 +313,12 @@ impl<'a> NodeConfigLoader<'a> {
                                     section_name
                                 )
                             })?;
-                    verify_section_signer(section, &verified, &node_fingerprint)?;
+                    verify_section_signer(
+                        section,
+                        &verified,
+                        &node_fingerprint,
+                        &scan_root.source,
+                    )?;
                     let record = section
                         .parse(verified.context(), verified.body())
                         .with_context(|| {
@@ -384,21 +389,34 @@ fn section_scan_roots(
     Ok(roots)
 }
 
+/// Bind a node-config item to the one key allowed to sign it.
+///
+/// Every item under the app root's `.ai/node/` is node state, written only by
+/// the node, so it must be signed by the current node key whatever the
+/// section's policy. Bundle-root items of a `Trusted` section (routes and
+/// commands shipped by a publisher) keep their publisher signatures.
 fn verify_section_signer(
     section: &dyn NodeConfigSection,
     item: &VerifiedNodeConfigItem,
     node_fingerprint: &str,
+    source: &NodeConfigSource,
 ) -> Result<()> {
-    if section.load_spec().signer == SectionSignerPolicy::CurrentNode
-        && item.signer_fingerprint() != node_fingerprint
-    {
-        bail!(
-            "node-config item {} in section `{}` must be signed by current node {}; got {}",
-            item.path().display(),
-            section.name(),
+    let node_only = section.load_spec().signer == SectionSignerPolicy::CurrentNode
+        || matches!(source, NodeConfigSource::Node { .. });
+    if node_only {
+        ryeos_engine::trust::require_document_signer(
+            item.path(),
+            item.signer_fingerprint(),
             node_fingerprint,
-            item.signer_fingerprint()
-        );
+            "node",
+            ryeos_engine::trust::NODE_DOCUMENT_CURE,
+        )
+        .with_context(|| {
+            format!(
+                "node-config item in section `{}` must be signed by the current node",
+                section.name()
+            )
+        })?;
     }
     Ok(())
 }
@@ -742,12 +760,12 @@ mod tests {
         assert_eq!(section.source_scope(), NodeConfigSourceScope::AppRootOnly);
         let files = scan_yaml_files(&dir, false).unwrap();
         let verified = verify_and_parse(&files[0], &dir, SECTION_NAME, &trust).unwrap();
-        assert!(verify_section_signer(&section, &verified, &"f".repeat(64)).is_err());
-        let record = section.parse(verified.context(), verified.body()).unwrap();
-        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         let source = NodeConfigSource::Node {
             command_registration_caps: Vec::new(),
         };
+        assert!(verify_section_signer(&section, &verified, &"f".repeat(64), &source).is_err());
+        let record = section.parse(verified.context(), verified.body()).unwrap();
+        let mut builder = NodeConfigSnapshotBuilder::new(&[], command_policy([])).unwrap();
         builder.admit(record, &verified, &source).unwrap();
         assert!(
             builder

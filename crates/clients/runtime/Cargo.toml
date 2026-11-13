@@ -1,0 +1,35 @@
+[package]
+name = "ryeos-client-runtime"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Shared client runtime: seat protocol, exact JSON, effect inbox and retention, independent of any platform"
+
+[dependencies]
+ryeos-client-base = { workspace = true }
+ryeos-ui-presentation-contract = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dirs = { workspace = true }
+lillux = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
+ryeos-client-transport = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "AbortController", "AbortSignal", "Clipboard", "Crypto", "EventTarget", "Headers", "History", "Location", "Navigator",
+    "ReadableStream", "ReadableStreamDefaultReader", "Request", "RequestCredentials", "RequestInit",
+    "RequestRedirect", "Response", "Storage", "Url", "Window",
+] }
+
+[lints]
+workspace = true

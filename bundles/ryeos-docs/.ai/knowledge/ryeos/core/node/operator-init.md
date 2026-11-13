@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-28T22:45:28Z:8ee7ef27d88cec6d8bd0630ea9105bf56386b7123787c43c9c8362b1544a8d8b:d+xFg2Ki94nA4WQa4EEe/6p9sSS87Q3XzYR9Y0QIHq5u3yK+NcnR8id0NZVsu4HGaV3kFnq5CauMKQpB8mUNCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:46:00Z:b92548a27035786be24806b8616580c2ef9b15a0256846397ad4cd96e878a1a4:e3XK/Y6eaijJbyyMASQ0OWbzgjP222yNpn6NhSOElbn59Tp2A7jtxZpd4fcp2FPPONXQBUKeX5gZBQ4SKiQzDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -125,7 +125,11 @@ An execution-history schema cut is the offline operation
 the startup refusal reports. It runs only when the retained database is
 exactly `from` and the installed binary owns exactly `to`; every other pairing
 refuses. Project HEADs, node identity, trust, vault and stable credential
-profiles remain preserved.
+profiles remain preserved. Rerunning it once the database is already `to`
+reports `already_current`, changes nothing and inspects no history. A cut that
+would retire history refuses with `execution_history_scopes_unretired` while a
+process-scope obligation is unretired; start the node once so its recovery
+retires it, stop it, then rerun the cut.
 
 A startup does not re-seed a volume that is not fresh: when the installed
 bundle generation is absent but the app root holds a node identity or a
@@ -165,9 +169,36 @@ generation is intentionally undecodable and `policy-apply` cannot treat it as
 current authority. Use the explicit stopped-node
 `ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm` cutover
 against the trusted packaged source. There is no implicit migration or
-fallback.
+fallback. The cutover takes every section from the profile except those an
+operator applied, which carry forward after they are checked under the new
+schema; one that no longer validates refuses the cut by name until it is fixed
+or named with `--reset-section`. On a node whose generation predates the
+operator record, the cutover lists every section that differs from the
+profile and needs each named with `--keep-section` or `--reset-section`.
 
-The `ingest_ignore` schema-1 to schema-2 change is one such clean cut. Schema 1
+A cutover whose `native_capacity` differs from the capacity issuance in force
+amends the issuance in the same step. It refuses, before changing anything,
+while an incarnation debit is outstanding or the account's image does not fit
+the new policy; `ryeos node capacity reissue --reason "..."` settles the
+account, then the cutover is rerun.
+
+A node whose generation lacks a mandatory section does not start, and
+`ryeos node doctor` reports `node_policy_section_missing` with the section's
+name. The `event_storage` section is one such addition. Its replacement needs
+no other choice on a node with the operator record, because a section the
+installed generation lacks always comes from the profile:
+
+```bash
+ryeos node reset policy-generation --node-profile <name> --host-class <class> \
+  --source <source> --reset-section event_storage --confirm
+```
+
+`--reset-section event_storage` states that choice explicitly; the cut takes
+the profile's body without it too. `--keep-section event_storage` is refused,
+because there is no installed section to keep. On a node without the record,
+any other section that differs from the profile still needs its own choice.
+
+The `ingest_ignore` schema-1 to schema-2 change is another such clean cut. Schema 1
 only carried `additional_patterns`; schema 2 carries the complete canonical
 `patterns` policy. During a package-source installation of this cut, use:
 
@@ -179,6 +210,7 @@ sudo scripts/pkg/install-local-direct.sh \
 ```
 
 The installer maps the installed bundle set to its exact signed node profile
-and invokes the same explicit replacement boundary. It preserves node,
-operator, and vault identities and all non-policy state. Do not use the reset
+and invokes the same explicit replacement boundary, passing through any
+`--keep-section`/`--reset-section` choices. It preserves node, operator, and
+vault identities, operator-applied policy sections, and all non-policy state. Do not use the reset
 flag on a fresh node or a node whose generation is already current.

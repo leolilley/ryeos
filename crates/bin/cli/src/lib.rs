@@ -5,8 +5,10 @@
 pub mod arg_bind;
 mod bundle_set_update;
 mod client_handlers;
+mod codex_device_login;
 pub mod daemon_preflight;
 pub mod dispatcher;
+mod doctor_external_status;
 pub mod effective_metadata;
 pub mod error;
 pub mod exec_stream;

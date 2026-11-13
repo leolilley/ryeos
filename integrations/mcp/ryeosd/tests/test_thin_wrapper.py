@@ -347,3 +347,17 @@ async def test_exit_code_is_preserved(tmp_path, monkeypatch):
         assert payload["exit_code"] == code, (
             f"expected exit {code}, got {payload['exit_code']}"
         )
+
+
+def test_server_version_matches_package():
+    """The MCP server reports the package version, kept in one place
+    in `ryeosd_mcp/__init__.py` and matching `pyproject.toml`."""
+    import tomllib
+
+    import ryeosd_mcp
+    from ryeosd_mcp import server
+
+    assert server.__version__ == ryeosd_mcp.__version__
+    pyproject = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pyproject.toml")
+    with open(pyproject, "rb") as f:
+        assert tomllib.load(f)["project"]["version"] == ryeosd_mcp.__version__

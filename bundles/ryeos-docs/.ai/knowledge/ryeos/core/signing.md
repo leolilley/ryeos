@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-11-11T02:56:41Z:993f9a5af2cd25bf71ad03e6cf69375bc05026040a059f961196c307ff7601e2:ZZALqNRdWBkjL1C9fDQZ11kdnI04ghEkS1bmsss1cHkdfiG1PlI9yTXA683VQUKq7vSM+9ND8UbXuMF7BmWXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:25:09Z:5a88aa569327bbd6af3ee118ca926f94408f4cb3e611c12e4cfc6fba16e7ada9:JGQEhWqYHmVMgO6/fqzroSSvYb52LVtVoo0MJNfv69pfgA3+L+G3RYZbIlhCO51wyBXRsosQ1aVG2jXvxLC6AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [fundamentals, signing, trust, integrity, compilation]
-version: "3.1.0"
+version: "3.2.0"
 description: >
   How signing and trust work in Rye OS — Ed25519 signatures,
   content hashing, path anchoring, the trust store, the signed
@@ -120,9 +120,13 @@ that class may run:
 
 The rule holds on every path that runs something: direct tools, executor
 hops, in-process services, method dispatch (knowledge), compose, managed
-launches (directives, graphs), schedules and recovery. A refusal is a
-403 with code `effective_trust_unsigned` or `effective_trust_refused`,
-naming the class it saw and the classes admitted.
+launches (directives, graphs), schedules and recovery. It judges the
+launch root, each item it extends, and each item it references (for
+example knowledge pulled in through `references:`), every one against its
+own kind's lists: a pinned root cannot bring in an item its kind would not
+run. A refusal is a 403 with code `effective_trust_unsigned` or
+`effective_trust_refused`, naming the item, the class it saw and the
+classes admitted.
 
 **Each kind declares what it admits.** Every root-executable kind schema
 carries a signed `launch_trust` block:
@@ -155,15 +159,43 @@ Apply it to a stopped node with `ryeos node policy-apply launch_trust
 any key, in every project on the node. Withdrawing it also stops work
 admitted under it from resuming.
 
-**What this does not cover yet.** A key placed in a project's
-`.ai/config/keys/trusted/` counts as pinned for that project, so writing
-that directory is still enough to make an item `trusted_project`. Live
-runs may write `.ai/tools/` and `.ai/services/`: an item planted there is
-inert unless it is signed by a pinned key.
+**Project trust documents.** A key placed in a project's
+`.ai/config/keys/trusted/` counts for that project only when a key in the
+node's own trust store has signed its trust document, so writing that
+directory is no longer enough to make an item `trusted_project`. These are
+refused, and every resolution in that project fails until the file is
+fixed:
+
+| Code | What was found |
+|---|---|
+| `project_trust_document_unsigned` | no `# ryeos:signed:` line, or a raw `.pub`/`.key` file |
+| `project_trust_document_self_signed` | signed only by the key it declares, which the node does not hold |
+| `project_trust_document_untrusted_signer` | signed by a key outside the node's trust store (another project document never counts) |
+
+The cure is to have a node-trusted key (normally the operator's) sign the
+document, or to pin the key on the node instead with `ryeos-core-tools
+trust-pin --app-root <app_root> --from <PUBLISHER_TRUST.toml>` and delete
+the project copy. A project pushed to another node carries documents
+signed by the source node's keys; they count there only if the target
+node trusts the signer. The node's own trust directory is unchanged:
+`ryeos init` still writes the operator and node documents self-signed and
+publisher pins (the official key and each `--trust-file`) unsigned.
+
+Live runs may write `.ai/tools/` and `.ai/services/`: an item planted there
+is inert unless it is signed by a pinned key.
+
+**Bundle-owned namespaces cannot be shadowed.** A bundle's signed manifest
+can declare `owns_namespaces` (core owns `ryeos/core`). A project file inside
+an owned namespace, such as a copy of a core runtime at
+`.ai/tools/ryeos/core/runtimes/python/function.yaml`, is refused with a 409
+`reserved_namespace_shadow` instead of winning resolution, even when a pinned
+key signed it. See [Spaces](spaces.md).
 
 **One name, one item.** Two files with the same name and different
 formats in one folder (for example `x.py` and `x.yaml`) are refused as
-ambiguous rather than one silently winning.
+ambiguous rather than one silently winning. A launch refuses with 409
+`ambiguous_item_formats`, naming the item, the space and both candidate
+files; the cure is to keep exactly one of them.
 
 ## Trust Store
 
@@ -178,13 +210,26 @@ owner = "official-publisher"
 pem = "ed25519:MCowBQYDK2VwAyEA..."
 ```
 
-Each trust doc is self-signed (signed by the key it declares). During
-`ryeos init`, three entries are created:
+The node's own trust docs are written by `ryeos init`: the operator and
+node docs self-signed, publisher pins unsigned. Three entries are created:
 1. **Operator self-trust** — your own key
 2. **Node self-trust** — the daemon's key
 3. **Publisher trust** — the hardcoded official publisher key (or dev key)
 
 Additional publisher keys can be pinned with `ryeos trust pin`.
+
+Runtimes read trust documents with the daemon's own parser and checks
+(`ryeos_engine::trust`): a signed document whose content was changed, or
+whose signature line names a key the store does not hold, is refused in a
+runtime exactly as it is in the daemon. A runtime has no trust reader of
+its own.
+
+**Pinned is not the same as allowed to sign node state.** Item
+verification accepts any pinned key, but node state does not: node
+policy, schedules, bundle registrations and app-root node config verify
+only under the node key, and the init completion record only under the
+local operator key. Anything else is refused as
+`node_document_wrong_signer`. See [Identity Model](identity-model.md#who-signs-node-state).
 
 **Bundles do NOT ship trust docs.** The operator must pin publisher
 keys explicitly via `ryeos init` (official) or `ryeos trust pin`

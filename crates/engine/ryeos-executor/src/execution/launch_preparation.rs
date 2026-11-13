@@ -1367,9 +1367,12 @@ async fn launch_config_hit_status(
 /// Resolve the effective ref-binding coordinates under the runtime's signed
 /// source declaration. This performs no item resolution and grants no
 /// authority: the existing binding loop below still parses, authorizes,
-/// resolves, and trust-checks every resulting coordinate.
+/// resolves, and trust-checks every resulting coordinate. `primary_ref` is
+/// the verified primary's canonical ref, the default for a
+/// `caller_or_primary_ref` binding the caller leaves out.
 pub(crate) fn project_effective_ref_bindings(
     declarations: &BTreeMap<String, ryeos_engine::runtime_registry::RefBindingDecl>,
+    primary_ref: &str,
     primary: &Value,
     caller: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, DispatchError> {
@@ -1388,6 +1391,12 @@ pub(crate) fn project_effective_ref_bindings(
         use ryeos_engine::runtime_registry::RefBindingSource;
         let projected = match &declaration.source {
             RefBindingSource::Caller => caller.get(name).cloned(),
+            RefBindingSource::CallerOrPrimaryRef => Some(
+                caller
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| primary_ref.to_owned()),
+            ),
             RefBindingSource::PrimaryField { path } => {
                 let mut value = Some(primary);
                 for field in path {
@@ -1423,10 +1432,10 @@ pub(crate) fn project_effective_ref_bindings(
             }
         };
         match (&declaration.source, projected, caller.get(name)) {
-            (RefBindingSource::Caller, Some(value), _) => {
+            (RefBindingSource::Caller | RefBindingSource::CallerOrPrimaryRef, Some(value), _) => {
                 effective.insert(name.clone(), value);
             }
-            (RefBindingSource::Caller, None, _) => {}
+            (RefBindingSource::Caller | RefBindingSource::CallerOrPrimaryRef, None, _) => {}
             (RefBindingSource::PrimaryField { .. }, Some(projected), Some(supplied))
                 if supplied != &projected =>
             {
@@ -1460,8 +1469,7 @@ pub(crate) fn project_effective_ref_bindings(
                 format!(
                     "required ref binding `{name}` is missing; pass \
                      `--ref-binding {name}=<item ref>` on the CLI (or `ref_bindings` \
-                     `{{\"{name}\": \"<item ref>\"}}` in the request); a directive's \
-                     `model` binding is the directive's own ref"
+                     `{{\"{name}\": \"<item ref>\"}}` in the request)"
                 ),
                 LaunchPrepareErrorClass::Caller,
                 Some(name.clone()),
@@ -1520,6 +1528,7 @@ fn prepare_runtime_launch_inputs(
     )?;
     let effective_ref_bindings = project_effective_ref_bindings(
         &contract.ref_bindings,
+        &request.primary.root.resolved_ref,
         &request.primary.composed.composed,
         request.ref_bindings,
     )?;
@@ -3261,15 +3270,21 @@ mod ref_binding_projection_tests {
             ),
         )]);
         assert!(
-            project_effective_ref_bindings(&optional, &json!({}), &BTreeMap::new())
-                .unwrap()
-                .is_empty()
+            project_effective_ref_bindings(
+                &optional,
+                "directive:test/primary",
+                &json!({}),
+                &BTreeMap::new()
+            )
+            .unwrap()
+            .is_empty()
         );
         let mut required = optional;
         required.get_mut("recipe").unwrap().required = true;
         assert_eq!(
             code(project_effective_ref_bindings(
                 &required,
+                "directive:test/primary",
                 &json!({}),
                 &BTreeMap::new()
             )),
@@ -3291,6 +3306,7 @@ mod ref_binding_projection_tests {
         assert_eq!(
             code(project_effective_ref_bindings(
                 &declarations,
+                "directive:test/primary",
                 &json!({"selection":{"recipe":42}}),
                 &BTreeMap::new()
             )),
@@ -3303,6 +3319,7 @@ mod ref_binding_projection_tests {
             assert_eq!(
                 code(project_effective_ref_bindings(
                     &declarations,
+                    "directive:test/primary",
                     &primary,
                     &BTreeMap::new()
                 )),
@@ -3312,6 +3329,7 @@ mod ref_binding_projection_tests {
         assert_eq!(
             code(project_effective_ref_bindings(
                 &declarations,
+                "directive:test/primary",
                 &json!({"selection":{"recipe":"config:test/one"}}),
                 &BTreeMap::from([("recipe".to_owned(), "config:test/two".to_owned())])
             )),
@@ -3333,6 +3351,7 @@ mod ref_binding_projection_tests {
         let expected = "config:test/one".to_owned();
         let effective = project_effective_ref_bindings(
             &declarations,
+            "directive:test/primary",
             &json!({"product_recipe":expected}),
             &BTreeMap::from([("recipe".to_owned(), expected.clone())]),
         )
@@ -3341,10 +3360,57 @@ mod ref_binding_projection_tests {
         assert_eq!(
             code(project_effective_ref_bindings(
                 &declarations,
+                "directive:test/primary",
                 &json!({}),
                 &BTreeMap::from([("other".to_owned(), "config:test/one".to_owned())])
             )),
             "invalid_ref_binding"
+        );
+    }
+
+    #[test]
+    fn caller_or_primary_ref_defaults_to_the_primary_and_explicit_wins() {
+        let declarations = BTreeMap::from([(
+            "model".to_owned(),
+            declaration(true, RefBindingSource::CallerOrPrimaryRef),
+        )]);
+        assert_eq!(
+            project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &BTreeMap::new()
+            )
+            .unwrap(),
+            BTreeMap::from([("model".to_owned(), "directive:test/primary".to_owned())])
+        );
+        let explicit = BTreeMap::from([("model".to_owned(), "directive:test/model".to_owned())]);
+        assert_eq!(
+            project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &explicit
+            )
+            .unwrap(),
+            explicit
+        );
+    }
+
+    #[test]
+    fn plain_caller_source_gets_no_primary_default() {
+        let declarations = BTreeMap::from([(
+            "model".to_owned(),
+            declaration(true, RefBindingSource::Caller),
+        )]);
+        assert_eq!(
+            code(project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &BTreeMap::new()
+            )),
+            "ref_binding_required"
         );
     }
 
@@ -3356,7 +3422,13 @@ mod ref_binding_projection_tests {
         )]);
         let expected = BTreeMap::from([("model".to_owned(), "config:test/model".to_owned())]);
         assert_eq!(
-            project_effective_ref_bindings(&declarations, &json!({}), &expected).unwrap(),
+            project_effective_ref_bindings(
+                &declarations,
+                "directive:test/primary",
+                &json!({}),
+                &expected
+            )
+            .unwrap(),
             expected
         );
     }
@@ -3990,7 +4062,11 @@ fn map_binding_resolution_error(
 
             let classification = match class {
                 ResolutionFailureClass::InvalidDefinition => LaunchPrepareErrorClass::Configuration,
-                ResolutionFailureClass::DependencyUnavailable => {
+                // Binding resolution may follow admission, so a busy fork
+                // window stays the generic unavailable refusal here and is
+                // never offered for automatic retry.
+                ResolutionFailureClass::DependencyUnavailable
+                | ResolutionFailureClass::ProcessCreationBusy => {
                     return host_preparation_error_with_binding(
                         "ref_binding_resolution_failed",
                         format!(

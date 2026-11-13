@@ -10,7 +10,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
-use ryeos_app::bundle_publication::consumer::{ExactSetPlan, ResolvedSetCoordinate};
+use ryeos_app::bundle_publication::consumer::{
+    CatalogRollback, ExactSetPlan, ResolvedSetCoordinate,
+};
 use ryeos_app::bundle_set_transaction::StoppedBundleSetApplyRequest;
 use ryeos_bundle_publication_contract::{
     MigrationDecision, NODE_BUNDLE_SELECTION_KIND, NODE_BUNDLE_SELECTION_SCHEMA,
@@ -53,6 +55,11 @@ pub struct StoppedBundleSetUpdateRequest {
     /// Explicit operator custody. Environment/default-key discovery is not
     /// allowed for this mutating operation.
     pub operator_signing_key: PathBuf,
+    /// Operator permission to select an exact coordinate below the node's
+    /// catalog high-water. Only the command-line flag sets it; the request
+    /// document cannot carry it.
+    #[serde(skip)]
+    pub allow_catalog_rollback: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -66,6 +73,10 @@ pub struct StoppedBundleSetUpdateReport {
     pub catalog_remote: String,
     pub catalog_namespace: String,
     pub coordinate: ResolvedSetCoordinateReport,
+    pub catalog_publication_sequence: u64,
+    /// Present when an explicitly allowed exact coordinate sits below the
+    /// node's catalog high-water.
+    pub catalog_rollback: Option<CatalogRollback>,
     pub selection_hash: String,
     pub installed_set_digest: String,
     pub actions: ExactSetActionCounts,
@@ -95,6 +106,7 @@ pub struct ExactSetActionCounts {
 /// admit_node_bundle_selection}` and `prepare_bundle_set_init_completion`.
 pub struct PreparedStoppedBundleSetUpdate {
     pub coordinate: ResolvedSetCoordinate,
+    pub catalog_publication_sequence: u64,
     pub plan: ExactSetPlan,
     pub apply: StoppedBundleSetApplyRequest,
     pub installed_set_digest: String,
@@ -117,6 +129,8 @@ pub struct OfflineDeploymentSelectionInput {
     pub bundle_publication_policy_section_digest: String,
     pub node_policy_generation_digest: String,
     pub expected_active_selection: Option<String>,
+    pub catalog_publication_sequence: u64,
+    pub catalog_rollback: Option<CatalogRollback>,
     pub issued_at: String,
 }
 
@@ -246,6 +260,7 @@ pub fn prepare_offline_deployment_selection(
     let selection_value = selection.to_value()?;
     let selection_hash =
         lillux::cas::sha256_hex(lillux::canonical_json(&selection_value)?.as_bytes());
+    let catalog_rollback = serde_json::to_value(&input.catalog_rollback)?;
     let authorization = Attestation::unsigned(
         selection_hash.clone(),
         ryeos_app::bundle_publication::consumer::DEPLOYMENT_SELECTION_CLAIM.to_owned(),
@@ -255,9 +270,13 @@ pub fn prepare_offline_deployment_selection(
         serde_json::json!({
             "catalog_publication_attestation_hash": coordinate.catalog_publication_attestation_hash,
             "catalog_publication_hash": coordinate.catalog_publication_hash,
+            "catalog_publication_sequence": input.catalog_publication_sequence,
             "catalog_snapshot_hash": coordinate.catalog_snapshot_hash,
             "set_attestation_hash": coordinate.set_attestation_hash,
             "set_hash": coordinate.set_hash,
+            // The operator's signature over an allowed rollback is its
+            // durable record; the transaction journal is consumed on commit.
+            "catalog_rollback": catalog_rollback,
         }),
     )
     .sign(&signer)?;
@@ -305,6 +324,7 @@ pub async fn update_stopped_bundle_set(
         .await
         .context("prepare complete prospective bundle-set update")?;
     bind_requested_coordinate(&request.selection, &prepared.coordinate)?;
+    require_permitted_catalog_rollback(&request, &prepared)?;
     if !prepared.plan.requires_stopped_node
         || prepared.plan.set_hash != prepared.coordinate.set_hash
         || prepared.plan.set_attestation_hash != prepared.coordinate.set_attestation_hash
@@ -330,6 +350,8 @@ pub async fn update_stopped_bundle_set(
         catalog_remote: request.catalog_remote,
         catalog_namespace: request.catalog_namespace,
         coordinate: coordinate_report(prepared.coordinate),
+        catalog_publication_sequence: prepared.catalog_publication_sequence,
+        catalog_rollback: prepared.apply.catalog_rollback,
         selection_hash,
         installed_set_digest: prepared.installed_set_digest,
         actions: counts,
@@ -366,6 +388,46 @@ fn bind_requested_coordinate(
     }
 }
 
+/// The consumer refuses an unpermitted rollback when it resolves the catalog;
+/// the coordinator refuses one again before any local mutation. Every update
+/// records its namespace's high-water, and a rollback must be the exact
+/// coordinate the operator named with explicit permission.
+fn require_permitted_catalog_rollback(
+    request: &StoppedBundleSetUpdateRequest,
+    prepared: &PreparedStoppedBundleSetUpdate,
+) -> anyhow::Result<()> {
+    let Some(high_water) = prepared
+        .apply
+        .new_catalog_high_water
+        .get(&request.catalog_namespace)
+    else {
+        bail!("prepared update does not record the requested namespace's catalog high-water");
+    };
+    let Some(rollback) = &prepared.apply.catalog_rollback else {
+        if high_water.sequence != prepared.catalog_publication_sequence
+            || high_water.publication_attestation_hash
+                != prepared.coordinate.catalog_publication_attestation_hash
+        {
+            bail!("prepared catalog high-water is not the selected publication");
+        }
+        return Ok(());
+    };
+    if !request.allow_catalog_rollback
+        || !matches!(request.selection, BundleSetUpdateSelection::Exact { .. })
+    {
+        return Err(rollback.refusal().into());
+    }
+    if rollback.catalog_namespace != request.catalog_namespace
+        || rollback.selected.sequence != prepared.catalog_publication_sequence
+        || rollback.selected.publication_attestation_hash
+            != prepared.coordinate.catalog_publication_attestation_hash
+        || rollback.high_water != *high_water
+    {
+        bail!("prepared catalog rollback is not the selected exact coordinate");
+    }
+    Ok(())
+}
+
 fn ryeos_node_apply(
     app_root: &Path,
     request: StoppedBundleSetApplyRequest,
@@ -377,6 +439,11 @@ fn ryeos_node_apply(
 fn validate_request(request: &StoppedBundleSetUpdateRequest) -> anyhow::Result<()> {
     if request.schema != "ryeos.bundle-set-update-request.v1" {
         bail!("unsupported bundle-set update request schema");
+    }
+    if request.allow_catalog_rollback
+        && !matches!(request.selection, BundleSetUpdateSelection::Exact { .. })
+    {
+        bail!("--allow-catalog-rollback applies only to an exact catalog coordinate");
     }
     for (label, value) in [
         ("catalog remote", request.catalog_remote.as_str()),
@@ -497,5 +564,199 @@ mod cas_tests {
         std::os::unix::fs::symlink(outside.path(), temp.path().join(".ai/state")).unwrap();
         assert!(open_stopped_bundle_cas(temp.path()).is_err());
         assert!(!outside.path().join("objects").exists());
+    }
+}
+
+#[cfg(test)]
+mod catalog_rollback_tests {
+    use super::*;
+    use ryeos_app::bundle_publication::consumer::{CatalogPosition, CatalogRollbackRefusal};
+
+    fn hash(byte: char) -> String {
+        std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn position(sequence: u64, byte: char) -> CatalogPosition {
+        CatalogPosition {
+            sequence,
+            publication_attestation_hash: hash(byte),
+        }
+    }
+
+    fn coordinate() -> ResolvedSetCoordinate {
+        ResolvedSetCoordinate {
+            catalog_publication_attestation_hash: hash('b'),
+            catalog_publication_hash: hash('c'),
+            catalog_snapshot_hash: hash('d'),
+            set_attestation_hash: hash('e'),
+            set_hash: hash('f'),
+        }
+    }
+
+    fn rollback() -> CatalogRollback {
+        CatalogRollback {
+            catalog_namespace: "official".into(),
+            high_water: position(5, 'a'),
+            selected: position(3, 'b'),
+        }
+    }
+
+    /// Returns a prepared update that selects sequence 3 below a high-water
+    /// of 5. It never admits a journal: the coordinator must refuse first.
+    struct RollbackAuthority;
+
+    impl StoppedBundleSetUpdateAuthority for RollbackAuthority {
+        async fn prepare(
+            &self,
+            _app_root: &Path,
+            _request: &StoppedBundleSetUpdateRequest,
+        ) -> anyhow::Result<PreparedStoppedBundleSetUpdate> {
+            let high_water = BTreeMap::from([("official".to_owned(), position(5, 'a'))]);
+            Ok(PreparedStoppedBundleSetUpdate {
+                coordinate: coordinate(),
+                catalog_publication_sequence: 3,
+                plan: ExactSetPlan {
+                    set_attestation_hash: hash('e'),
+                    set_hash: hash('f'),
+                    entries: Vec::new(),
+                    requires_stopped_node: true,
+                },
+                apply: StoppedBundleSetApplyRequest {
+                    transaction_id: hash('1'),
+                    selection_hash: hash('2'),
+                    expected_active_selection: Some(hash('3')),
+                    old_completion_hash: hash('4'),
+                    old_completion_bytes: Vec::new(),
+                    new_completion_hash: hash('5'),
+                    new_completion_bytes: Vec::new(),
+                    old_installed_set_digest: hash('6'),
+                    new_installed_set_digest: hash('7'),
+                    old_catalog_high_water: high_water.clone(),
+                    new_catalog_high_water: high_water,
+                    catalog_rollback: Some(rollback()),
+                    actions: Vec::new(),
+                },
+                installed_set_digest: hash('7'),
+            })
+        }
+
+        fn admit_journal(
+            &self,
+            _prepared: &PreparedStoppedBundleSetUpdate,
+            _journal: &ryeos_app::bundle_set_transaction::BundleSetJournal,
+        ) -> anyhow::Result<()> {
+            panic!("an unpermitted catalog rollback must be refused before any journal");
+        }
+    }
+
+    fn request(
+        key: &Path,
+        selection: BundleSetUpdateSelection,
+        allow_catalog_rollback: bool,
+    ) -> StoppedBundleSetUpdateRequest {
+        StoppedBundleSetUpdateRequest {
+            schema: "ryeos.bundle-set-update-request.v1".into(),
+            operation: StoppedBundleSetUpdateOperation::StoppedExactSetUpdate,
+            catalog_remote: "origin".into(),
+            catalog_namespace: "official".into(),
+            selection,
+            operator_signing_key: key.to_owned(),
+            allow_catalog_rollback,
+        }
+    }
+
+    fn exact() -> BundleSetUpdateSelection {
+        let coordinate = coordinate();
+        BundleSetUpdateSelection::Exact {
+            catalog_publication_attestation_hash: coordinate.catalog_publication_attestation_hash,
+            catalog_publication_hash: coordinate.catalog_publication_hash,
+            catalog_snapshot_hash: coordinate.catalog_snapshot_hash,
+            set_attestation_hash: coordinate.set_attestation_hash,
+            set_hash: coordinate.set_hash,
+        }
+    }
+
+    fn channel() -> BundleSetUpdateSelection {
+        BundleSetUpdateSelection::Channel {
+            set_name: "standard".into(),
+            channel: "stable".into(),
+            expected_catalog_publication_attestation_hash: None,
+        }
+    }
+
+    fn assert_rollback_refused(error: anyhow::Error) {
+        let refusal = error
+            .downcast_ref::<CatalogRollbackRefusal>()
+            .unwrap_or_else(|| panic!("expected a typed catalog refusal, got {error:#}"));
+        assert_eq!(refusal.code(), "catalog_rollback_refused");
+        assert_eq!(refusal, &rollback().refusal());
+    }
+
+    #[tokio::test]
+    async fn stopped_update_refuses_exact_rollback_without_explicit_allow() {
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("operator.pem");
+        std::fs::write(&key, b"unused").unwrap();
+        let error = update_stopped_bundle_set(
+            root.path(),
+            request(&key, exact(), false),
+            &RollbackAuthority,
+        )
+        .await
+        .unwrap_err();
+        assert_rollback_refused(error);
+        assert!(!root.path().join(".ai").exists());
+    }
+
+    #[tokio::test]
+    async fn stopped_update_refuses_rollback_from_a_channel() {
+        let root = tempfile::tempdir().unwrap();
+        let key = root.path().join("operator.pem");
+        std::fs::write(&key, b"unused").unwrap();
+        let error = update_stopped_bundle_set(
+            root.path(),
+            request(&key, channel(), false),
+            &RollbackAuthority,
+        )
+        .await
+        .unwrap_err();
+        assert_rollback_refused(error);
+        assert!(!root.path().join(".ai").exists());
+    }
+
+    #[test]
+    fn allow_catalog_rollback_applies_only_to_an_exact_coordinate() {
+        let key = Path::new("/operator.pem");
+        assert!(validate_request(&request(key, exact(), true)).is_ok());
+        assert!(
+            validate_request(&request(key, channel(), true))
+                .unwrap_err()
+                .to_string()
+                .contains("exact catalog coordinate")
+        );
+    }
+
+    #[test]
+    fn allow_catalog_rollback_cannot_come_from_the_request_document() {
+        let mut document = serde_json::json!({
+            "schema": "ryeos.bundle-set-update-request.v1",
+            "operation": "stopped_exact_set_update",
+            "catalog_remote": "origin",
+            "catalog_namespace": "official",
+            "selection": {
+                "mode": "exact",
+                "catalog_publication_attestation_hash": hash('b'),
+                "catalog_publication_hash": hash('c'),
+                "catalog_snapshot_hash": hash('d'),
+                "set_attestation_hash": hash('e'),
+                "set_hash": hash('f'),
+            },
+            "operator_signing_key": "/operator.pem",
+        });
+        let parsed: StoppedBundleSetUpdateRequest =
+            serde_json::from_value(document.clone()).unwrap();
+        assert!(!parsed.allow_catalog_rollback);
+        document["allow_catalog_rollback"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<StoppedBundleSetUpdateRequest>(document).is_err());
     }
 }

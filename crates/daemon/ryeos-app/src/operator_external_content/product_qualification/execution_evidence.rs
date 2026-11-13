@@ -1426,7 +1426,7 @@ fn require_zero_participant_lane(
     if subordinate != protocol_authority
         || !matches!(
             (subordinate, callback_channel),
-            (None, CallbackChannel::None) | (Some(_), CallbackChannel::Http)
+            (None, CallbackChannel::None) | (Some(_), CallbackChannel::RuntimeSocket)
         )
     {
         bail!(
@@ -1707,7 +1707,7 @@ pub(in crate::operator_external_content) fn verify_current(
         let protocol = state.engine.protocols.require(protocol_ref)?;
         if protocol.descriptor.qualification_callback != Some(ryeos_engine::protocols::QualificationCallbackAuthority::ScopedProducer)
             || protocol.descriptor.callback_channel
-                != ryeos_engine::protocol_vocabulary::CallbackChannel::Http
+                != ryeos_engine::protocol_vocabulary::CallbackChannel::RuntimeSocket
             || scoped.callback_method_surface_digest
                 != crate::callback_token::CallbackRuntimeMethodSurface::qualification_scoped_producer()
                     .exact_surface_digest()?

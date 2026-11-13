@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T21:49:53Z:2d372df1ab755039a2ef05438991bf65ba2ddeae584f42ac53a24af576ce3f1f:Jkh3Q9e4c1o8GnyIlaXsdGwyllxMh4oJy/wCp43RUmztHY4oetH2YDA9P1v4ehBwnAyn+w+atUxpMJSwSJgpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:43:18Z:f3704756480f61a9c9e496c9b4cefa84fedbae2f049268be32af41813f772ab6:9EJx21gw2Z04QC9jzqAzxhI7ai7a0IjulVgXY9oNczPbCfG8Zt9EHg3130hvQVsNlR2bm2AwPO7TkefRNC7HDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "login"
@@ -18,12 +18,6 @@ config:
 config_schema:
   type: object
   properties:
-    project_path:
-      type: string
-      description: "Project root used for .ai/state/central-auth storage."
-    runtime_state_dir:
-      type: string
-      description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
       description: "Realm/app namespace, e.g. example-app."
@@ -38,6 +32,9 @@ config_schema:
       description: "Required for invite redemption."
     passphrase:
       type: string
+    client_address:
+      type: string
+      description: "Optional client network address seen by the app backend; throttled alongside principal_id."
     invite_code:
       type: string
       description: "Required for invite redemption."

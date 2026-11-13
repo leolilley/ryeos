@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:a23215f0eb5848eed81aacca934b6b496d0c177402f0ae76c854c39a47dfcfda:CjGUaAOdqDRKoV0sYb1K2yFPheerGiS4mj4XMW9snU+qwZfBD9MYxAD/unk0ETZ/H3yAy23QncJQlwVRK5o0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:25:09Z:43424218b2728651347c75c955c580a182df124b152032afcdf845362c6d19ea:pCEB5eu60oUTk7H7jdO6JFsQ4knaXQzB4sv/4xNTpCz2FHLw90l4di3PBaRFnUyFAzni2O4KA78IoxUPAf15Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -52,7 +52,7 @@ to delegated callers.
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
-| `ryeos remote pull` | `ryeos.execute.service.objects/get` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
+| `ryeos remote pull` | `ryeos.execute.service.remote/pull` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
 | `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
@@ -68,6 +68,12 @@ Notes:
   intentionally unauthenticated discovery endpoints.
 - `remote execute` must also satisfy the capabilities required by the
   executed item once the remote daemon dispatches `/execute`.
+- `remote execute` and `remote run` default to
+  `include_operator_vault: false`. A policy that exposes the target's operator
+  vault needs `ryeos.use.vault.operator` locally for the caller and in the
+  target grant of the principal that signs the request; the target refuses it
+  otherwise with `operator_vault_capability_required`. Do not add it to remote
+  caller node grants by default.
 - An accepted remote launch is not safely retryable from transport failure
   unless its exact owner can query the caller-retained `launch_id`. Include
   `service:launch/status` and `service:launch/cancel` in an exact remote grant
@@ -88,9 +94,18 @@ Notes:
 Add or update a named remote in local node config.
 
 ```bash
-ryeos remote configure --remote prod --url https://ryeos.example.com
 ryeos remote configure --descriptor ./prod.remote.yaml
+ryeos remote configure --remote prod --url https://ryeos.example.com \
+  --expect-fingerprint <64-hex node fingerprint>
 ```
+
+The remote node key must be pinned. Pass either `--descriptor` (a descriptor
+exported by the remote operator) or `--expect-fingerprint` (the remote node
+fingerprint, the SHA-256 hex of its Ed25519 public key, as `ryeos identity public-key`
+prints it on the remote). Get either one from the remote operator out of band.
+There is no trust-on-first-use: without a pin, configure refuses with
+`remote_key_unpinned` and names the fingerprint the live node reported, so you
+can check it with the remote operator and rerun with `--expect-fingerprint`.
 
 The command fetches the remote node public key, principal id, canonical site
 ID, vault fingerprint, and ingest-ignore rules. Results are stored in
@@ -117,6 +132,13 @@ Failure modes:
   canonical in a signed descriptor, uses non-loopback HTTP, or redirects
 - fails if the remote cannot be reached
 - fails if `/public-key` or `/ingest-ignore` returns invalid data
+- refuses with `remote_key_unpinned` (nothing written) when neither
+  `--descriptor` nor `--expect-fingerprint` is given; the refusal names the
+  fingerprint seen
+- refuses with `remote_expected_fingerprint_invalid` when
+  `--expect-fingerprint` is not 64 lowercase hex characters
+- refuses with `remote_key_pin_mismatch` when `--expect-fingerprint` differs
+  from the live node fingerprint
 - fails if a descriptor pins a different node key/fingerprint than the
   live remote reports
 - later signed requests fail if the remote's node key changes and the
@@ -422,8 +444,15 @@ Execution phases:
 
 1. Push a typed project snapshot, or an empty project snapshot in `--no-project`
    mode.
-2. Call remote `/execute` using the pushed project source.
-3. Pull result objects and apply changed project files locally.
+2. Call remote `/execute` using the pushed project source, asking the
+   remote to sign its result (`attest_result: true`).
+3. Verify the remote's `result_attestation`: signed by the pinned remote key,
+   bound to this exact request digest and the requested item ref, over the
+   returned result. An unsigned result is refused with
+   `remote_result_unsigned`; a mismatched or invalid one with
+   `remote_result_attestation_invalid`. Nothing is pulled after a refusal.
+   See [Result Verification](remote-operations.md#result-verification).
+4. Pull result objects and apply changed project files locally.
 
 Clean-base guard: if local tracked files changed since the push, the
 pull-back apply aborts without partial writes.
@@ -435,7 +464,10 @@ coordinate alongside the push, remote result, and pull summaries:
 {
   "job_id": "remote-execute:<uuid>",
   "push": { "snapshot_hash": "<source-snapshot>" },
-  "remote": { "snapshot_hash": "<result-snapshot>", "result": {} },
+  "remote": {
+    "snapshot_hash": "<result-snapshot>",
+    "result": { "thread": {}, "result": {}, "result_attestation": {} }
+  },
   "pull": { "snapshot_hash": "<result-snapshot>" }
 }
 ```
@@ -593,7 +625,8 @@ ryeos remote vault-delete --remote prod --name API_KEY
 - **401/403 from target daemon**: the caller node key is not authorized
   on the remote, or the authorized-key scopes do not include the route's
   required capability.
-- **signature/audience errors**: re-run `ryeos remote configure`; the
+- **signature/audience errors**: re-run `ryeos remote configure` with a
+  verified `--expect-fingerprint` or `--descriptor`; the
   target node key or principal id may have changed.
 - **push uses unexpected ignore rules**: re-run `ryeos remote configure`
   to refresh the cached remote ingest-ignore config.

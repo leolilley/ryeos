@@ -599,3 +599,69 @@ async fn stopped_node_services_reject_in_live_mode() {
         );
     }
 }
+
+// ── items/effective — authorship of runtime-authored items ──────────────
+
+/// Plant a project knowledge item whose body ends with the provenance line
+/// `runtime.author_item` appends, signed by `signer`.
+fn plant_knowledge_with_provenance(
+    project: &std::path::Path,
+    stem: &str,
+    signer: &lillux::crypto::SigningKey,
+) {
+    let path = project.join(format!(".ai/knowledge/notes/{stem}.md"));
+    std::fs::create_dir_all(path.parent().expect("knowledge parent dir"))
+        .expect("create knowledge dir");
+    let content = format!(
+        "```yaml\nname: {stem}\ncategory: \"notes\"\n```\n\nA note.\n\n\
+         <!-- ryeos:authored: {{\"authored_by\":\"runtime\",\"content_digest\":\"ab\"}} -->\n"
+    );
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content(&content, signer, "<!--", Some("-->")),
+    )
+    .expect("write knowledge item");
+}
+
+async fn root_authorship(h: &DaemonHarness, project: &std::path::Path, item_ref: &str) -> Value {
+    let (status, body) = exec(
+        h,
+        "service:items/effective",
+        json!({
+            "canonical_ref": item_ref,
+            "project_path": project.to_str().unwrap(),
+        }),
+    )
+    .await;
+    let result = unwrap_result(status, &body, "items.effective");
+    let rows = result
+        .get("authorship")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("items.effective must report authorship: {result}"));
+    rows.iter()
+        .find(|row| row["position"] == "root")
+        .cloned()
+        .unwrap_or_else(|| panic!("authorship must include the root: {result}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn items_effective_reports_a_node_signed_authored_item_as_runtime_authored() {
+    let (h, fixture) = DaemonHarness::start_fast_with(
+        |state, _, fixture| common::fast_fixture::register_workflow_bundles(state, fixture),
+        |_| {},
+    )
+    .await
+    .expect("start daemon with the workflow bundles");
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_knowledge_with_provenance(project.path(), "authored", &fixture.node);
+    plant_knowledge_with_provenance(project.path(), "operator", &fixture.user);
+
+    let authored = root_authorship(&h, project.path(), "knowledge:notes/authored").await;
+    assert_eq!(authored["signer_role"], "node", "{authored}");
+    assert_eq!(authored["runtime_authored"], true, "{authored}");
+
+    // The same line under the operator's key is not runtime authorship.
+    let operator = root_authorship(&h, project.path(), "knowledge:notes/operator").await;
+    assert_eq!(operator["signer_role"], "other", "{operator}");
+    assert_eq!(operator["runtime_authored"], false, "{operator}");
+}

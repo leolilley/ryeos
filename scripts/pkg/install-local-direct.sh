@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-11T02:56:41Z:8e4b617dcb804e06ecbcb3d4a3bf4ef68d6446882dd4be0e8708678921dc70bd:pQ+X6/yTLV+3ixQIBHRWKVUbin6bXTSyjctPruzYiShGWNWpo7kXfdNRhO/8PG6lAsXIO5E2nw5rjH82ZXB8DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T02:46:08Z:fafe9f7cc4e2cb4d720f021984b084102f8e6e956a1e1e59ee0e92db9a53d97a:1+6CYFkNTikQmFfynfI20eK+zUISu+7icDRTE8p01b5B6S9MCg7uncIy+nwRQUADmb906tw5qCyaMK4+aZMKDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -14,6 +14,11 @@
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
 # local repair/testing when you explicitly want to bypass the package build.
+#
+# --prefix DIR installs the same layout under a separate root-owned prefix
+# (DIR/bin, DIR/share/ryeos) for a development node beside a real install.
+# A prefix install is off PATH by design and always names its node with
+# --app-root; it never touches the default node.
 
 set -euo pipefail
 
@@ -50,10 +55,25 @@ Options:
                         Explicitly replace an obsolete complete node-policy
                         generation from this bundle set's signed init profile.
                         Requires init and preserves all non-policy node state.
+                        Sections an operator applied carry forward.
+  --keep-section NAME   With --reset-node-policy-generation: keep this
+                        section's installed policy (repeatable). Needed once
+                        for a node whose generation predates the operator
+                        record; the replacement names any section it needs.
+  --reset-section NAME  With --reset-node-policy-generation: take this section
+                        from the profile even if an operator applied it
+                        (repeatable).
   --app-root DIR        Select the exact existing node to initialize and manage.
                         This explicit value survives the root-owned package
                         transaction; no privileged re-exec inherits it from the
                         ambient environment.
+  --prefix DIR          Install under this absolute root-owned prefix instead
+                        of /usr: DIR/bin, DIR/share/ryeos, DIR/share/doc/ryeos.
+                        Requires --app-root naming a node other than
+                        ~/.local/share/ryeos. Every lifecycle call uses
+                        DIR/bin/ryeos; PATH shadows are left alone and PATH is
+                        not checked. /usr/local is refused (it shadows /usr/bin).
+                        (default: /usr)
   --key PATH            Publisher key for populate-bundles.sh
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
@@ -161,10 +181,12 @@ fi
 
 # Run `ryeos <args>` with a timeout, as the invoking user when under sudo so it
 # targets that user's app-root. `timeout` wraps the external command (sudo or
-# ryeos), never a shell function.
+# ryeos), never a shell function. The default /usr layout runs `ryeos` from
+# PATH; a prefix install runs its own absolute `$ryeos_cmd`.
 ryeos_user() {
     local secs="$1"
     shift
+    local selected_ryeos="${ryeos_cmd:-ryeos}"
     # Initialization already passes the selected app root explicitly. Carry
     # the same selection across sudo/login for lifecycle operations too;
     # otherwise an install targeting a second node can stop the primary node.
@@ -174,18 +196,122 @@ ryeos_user() {
         user_shell="$(getent passwd "$invoking_user" | cut -d: -f7)"
         [[ -x "$user_shell" ]] || user_shell="/bin/sh"
         if [[ -n "$selected_app_root" ]]; then
-            printf -v cmd 'exec env %q ryeos' "RYEOS_APP_ROOT=$selected_app_root"
+            printf -v cmd 'exec env %q %q' "RYEOS_APP_ROOT=$selected_app_root" "$selected_ryeos"
         else
-            printf -v cmd 'exec ryeos'
+            printf -v cmd 'exec %q' "$selected_ryeos"
         fi
         for a in "$@"; do printf -v cmd '%s %q' "$cmd" "$a"; done
         run_timeout "$secs" sudo -H -u "$invoking_user" "$user_shell" -lc "$cmd"
     else
         if [[ -n "$selected_app_root" ]]; then
-            RYEOS_APP_ROOT="$selected_app_root" run_timeout "$secs" ryeos "$@"
+            RYEOS_APP_ROOT="$selected_app_root" run_timeout "$secs" "$selected_ryeos" "$@"
         else
-            run_timeout "$secs" ryeos "$@"
+            run_timeout "$secs" "$selected_ryeos" "$@"
         fi
+    fi
+}
+
+# Resolve the installed layout from --prefix. The default /usr prefix is the
+# packaged AUR layout, found through PATH. Any other prefix is a separate,
+# off-PATH install that must name its own node: it can never fall back to the
+# default node at ~/.local/share/ryeos. Sets bin_dir, share_dir, doc_dir,
+# ryeos_cmd and install_on_path.
+resolve_install_layout() {
+    local prefix="$1" app_root="$2" default_app_root="$3"
+
+    if [[ "$prefix" != /* ]]; then
+        ryeos_term_fail "--prefix requires an absolute path: $prefix"
+        return 1
+    fi
+    while [[ "$prefix" == */ && "$prefix" != / ]]; do
+        prefix="${prefix%/}"
+    done
+    local dot_component='(^|/)\.\.?(/|$)'
+    if [[ "$prefix" == *//* || "$prefix" =~ $dot_component ]]; then
+        ryeos_term_fail "--prefix must be a normalized absolute path: $prefix"
+        return 1
+    fi
+    case "$prefix" in
+        /)
+            ryeos_term_fail "--prefix / would install into /bin and /share; name a dedicated prefix such as /opt/ryeos-dev"
+            return 1
+            ;;
+        /usr/local)
+            ryeos_term_fail "--prefix /usr/local is refused: /usr/local/bin shadows /usr/bin on PATH; use a dedicated prefix such as /opt/ryeos-dev"
+            return 1
+            ;;
+    esac
+
+    install_prefix="$prefix"
+    bin_dir="$prefix/bin"
+    share_dir="$prefix/share/ryeos"
+    doc_dir="$prefix/share/doc/ryeos"
+    if [[ "$prefix" == /usr ]]; then
+        ryeos_cmd="ryeos"
+        install_on_path=1
+        return 0
+    fi
+
+    if [[ -z "$app_root" ]]; then
+        ryeos_term_fail "--prefix $prefix requires --app-root naming the node this install manages"
+        return 1
+    fi
+    local selected="$app_root" default="$default_app_root"
+    while [[ "$selected" == */ && "$selected" != / ]]; do selected="${selected%/}"; done
+    while [[ "$default" == */ && "$default" != / ]]; do default="${default%/}"; done
+    if [[ "$selected" == "$default" ]]; then
+        ryeos_term_fail "--prefix $prefix refuses the default node $default_app_root; pass --app-root for a separate node"
+        return 1
+    fi
+    ryeos_cmd="$bin_dir/ryeos"
+    install_on_path=0
+}
+
+# Require every existing component from / to PATH to be a real directory owned
+# by root and not writable by group or others: the same boundary Lillux
+# enforces for the package namespace and the daemon enforces for supervised
+# binaries. With allow_missing=1 a missing tail is accepted (it will be created
+# by root); otherwise the whole path must exist.
+require_root_owned_hierarchy() {
+    local path="$1" allow_missing="$2"
+    local current=/ component
+    local -a components=()
+
+    [[ "$path" == /* ]] || {
+        ryeos_term_fail "root-owned hierarchy requires an absolute path: $path"
+        return 1
+    }
+    IFS=/ read -r -a components <<<"${path#/}"
+    require_root_owned_directory / || return 1
+    for component in "${components[@]}"; do
+        [[ -n "$component" ]] || continue
+        current="${current%/}/$component"
+        if [[ ! -e "$current" && ! -L "$current" ]]; then
+            [[ "$allow_missing" == 1 ]] && return 0
+            ryeos_term_fail "install prefix path is absent: $current"
+            return 1
+        fi
+        require_root_owned_directory "$current" || return 1
+    done
+}
+
+require_root_owned_directory() {
+    local directory="$1" owner mode
+    if [[ -L "$directory" || ! -d "$directory" ]]; then
+        ryeos_term_fail "install prefix path is not a real directory: $directory"
+        return 1
+    fi
+    read -r owner mode < <(stat -c '%u %a' -- "$directory") || {
+        ryeos_term_fail "cannot inspect install prefix path: $directory"
+        return 1
+    }
+    if [[ "$owner" != 0 ]]; then
+        ryeos_term_fail "install prefix path is not root-owned (uid $owner): $directory"
+        return 1
+    fi
+    if (( (8#$mode & 8#022) != 0 )); then
+        ryeos_term_fail "install prefix path is writable by group or others (mode $mode): $directory"
+        return 1
     fi
 }
 
@@ -513,7 +639,7 @@ prepare_host_upgrade() {
     esac
     [[ $restart_daemon -eq 1 && $run_init -eq 1 ]] || \
         die "supervised installation requires lifecycle management and installed-state verification; omit --no-daemon-restart and --no-init"
-    command -v ryeos >/dev/null 2>&1 || die "supervised installation requires the installed lifecycle client"
+    command -v "${ryeos_cmd:-ryeos}" >/dev/null 2>&1 || die "supervised installation requires the installed lifecycle client"
     command -v sha256sum >/dev/null 2>&1 || die "cannot measure staged daemon image before shutdown"
     host_upgrade_digest="$(sha256sum -- "$target_dir/ryeosd")" || die "cannot hash staged daemon"
     host_upgrade_digest="${host_upgrade_digest%% *}"
@@ -551,6 +677,7 @@ restart_daemon=1
 cleanup_shadows=1
 trust_source_publishers=0
 reset_node_policy_generation=0
+policy_carry_args=()
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="RyeOS Development"
 bundle_set="full"
@@ -562,6 +689,7 @@ crates=""          # forwarded to populate to rebuild only these Cargo packages
 populate_all=0     # explicit opt-in to rebuild the whole bundle set
 init_app_root="${RYEOS_APP_ROOT:-}"
 app_root_argument_present=0
+install_prefix_argument="/usr"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -589,6 +717,11 @@ while [[ $# -gt 0 ]]; do
             reset_node_policy_generation=1
             shift
             ;;
+        --keep-section|--reset-section)
+            [[ $# -ge 2 && "$2" =~ ^[a-z][a-z0-9_]*$ ]] || die "$1 requires a section name"
+            policy_carry_args+=("$1" "$2")
+            shift 2
+            ;;
         --app-root)
             [[ $# -ge 2 && -n "$2" ]] || die "--app-root requires a path"
             [[ "$2" == /* ]] || die "--app-root requires an absolute path"
@@ -597,6 +730,11 @@ while [[ $# -gt 0 ]]; do
             fi
             init_app_root="$2"
             app_root_argument_present=1
+            shift 2
+            ;;
+        --prefix)
+            [[ $# -ge 2 && -n "$2" ]] || die "--prefix requires a path"
+            install_prefix_argument="$2"
             shift 2
             ;;
         --key)
@@ -676,6 +814,9 @@ fi
 if [[ $reset_node_policy_generation -eq 1 && $run_init -eq 0 ]]; then
     die "--reset-node-policy-generation cannot be combined with --no-init"
 fi
+if [[ ${#policy_carry_args[@]} -gt 0 && $reset_node_policy_generation -eq 0 ]]; then
+    die "--keep-section and --reset-section require --reset-node-policy-generation"
+fi
 if [[ -n "$node_profile_override" && $run_init -eq 0 ]]; then
     die "--node-profile cannot be combined with --no-init"
 fi
@@ -712,9 +853,16 @@ if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
     ryeos_term_warn "--no-init installs lean sources only; existing local initialized state is not rewritten"
 fi
 
-bin_dir="/usr/bin"
-share_dir="/usr/share/ryeos"
-doc_dir="/usr/share/doc/ryeos"
+resolve_install_layout "$install_prefix_argument" "$init_app_root" \
+    "$invoking_user_home/.local/share/ryeos" || \
+    die "install prefix refused; nothing was changed"
+if [[ $install_on_path -eq 0 ]]; then
+    # Refuse a user-owned or group/world-writable prefix before any build,
+    # authorization or lifecycle change. Missing components are created by
+    # root just before the package transaction.
+    require_root_owned_hierarchy "$install_prefix" 1 || \
+        die "install prefix must be a root-owned hierarchy; nothing was changed"
+fi
 target_dir="$cargo_target_root/release"
 install_transaction_active=0
 
@@ -911,6 +1059,20 @@ preflight_bundle_set_host_install "$target_dir" "$bundle_set" "${required_bins[@
 # unprivileged build/closure checks before this root-owned entry acquires the
 # namespace lock. It then execs this script with an inherited descriptor; the
 # second pass validates it before any package mutation or skipped population.
+if [[ $install_transaction_active -eq 0 && $install_on_path -eq 0 ]]; then
+    # Lillux opens the package namespace's parent only through a root-owned
+    # hierarchy, so a fresh prefix needs DIR/share before the transaction.
+    for prefix_dir in "$install_prefix" "$install_prefix/share"; do
+        [[ -d "$prefix_dir" && ! -L "$prefix_dir" ]] && continue
+        if [[ $(id -u) -eq 0 ]]; then
+            install -d -m 0755 -- "$prefix_dir"
+        else
+            sudo install -d -m 0755 -- "$prefix_dir"
+        fi
+    done
+    require_root_owned_hierarchy "$install_prefix/share" 0 || \
+        die "install prefix is not a root-owned hierarchy after creation; node lifecycle was not changed"
+fi
 if [[ $install_transaction_active -eq 0 ]]; then
     ryeos_term_info "acquiring exclusive shared package installation transaction"
     installer_digest="$(sha256sum -- "$script_dir/install-local-direct.sh")" || \
@@ -929,6 +1091,13 @@ if [[ $install_transaction_active -eq 0 ]]; then
     fi
 fi
 
+if [[ $install_on_path -eq 0 ]]; then
+    require_root_owned_hierarchy "$install_prefix/share" 0 || \
+        die "install prefix is not a root-owned hierarchy; node lifecycle was not changed"
+    require_root_owned_hierarchy "$bin_dir" 1 || \
+        die "install prefix bin directory is not root-owned; node lifecycle was not changed"
+fi
+
 daemon_was_running=0
 prepare_host_upgrade
 if [[ "$host_upgrade_mode" == supervised ]]; then
@@ -938,7 +1107,7 @@ if [[ "$host_upgrade_mode" == supervised ]]; then
     host_upgrade_command --expected-daemon-sha256 "$host_upgrade_digest" replacement-safe || \
         die "host process tree is not settled; refusing replacement and retaining upgrade inhibition"
     [[ "$host_upgrade_desired" != up ]] || daemon_was_running=1
-elif [[ $restart_daemon -eq 1 ]] && command -v ryeos >/dev/null 2>&1; then
+elif [[ $restart_daemon -eq 1 ]] && command -v "$ryeos_cmd" >/dev/null 2>&1; then
     if stop_daemon_for_install; then
         daemon_was_running=1
     fi
@@ -1038,7 +1207,9 @@ for name in "${bundle_names[@]}"; do
 done
 sudo chown -R root:root "$share_dir"
 
-if [[ $cleanup_shadows -eq 1 ]]; then
+# A prefix install is off PATH by design: it has no PATH shadows to move and
+# nothing on PATH to check. Every lifecycle call names $ryeos_cmd instead.
+if [[ $cleanup_shadows -eq 1 && $install_on_path -eq 1 ]]; then
     ryeos_term_update "moving PATH shadows" "preserving stale entries"
     stamp="$(date +%Y%m%d%H%M%S)"
     user_backup_dir="$invoking_user_home/.local/bin/ryeos-shadow-backups-$stamp"
@@ -1071,6 +1242,11 @@ fi
 hash -r 2>/dev/null || true
 
 for b in "${installed_user_bins[@]}"; do
+    if [[ $install_on_path -eq 0 ]]; then
+        [[ -f "$bin_dir/$b" && ! -L "$bin_dir/$b" && -x "$bin_dir/$b" ]] || \
+            die "expected installed executable at $bin_dir/$b"
+        continue
+    fi
     resolved="$(command -v "$b" || true)"
     if [[ "$resolved" != "$bin_dir/$b" ]]; then
         type -a "$b" 2>/dev/null || true
@@ -1107,6 +1283,7 @@ if [[ $run_init -eq 1 ]]; then
         init_args+=(--app-root "$init_app_root")
     fi
     init_args+=("${INSTALL_INIT_PROFILE_ARGS[@]}")
+    init_args+=("${policy_carry_args[@]}")
     substrate_identity_path="$state_root/.ai/node/substrate-identity.json"
     if [[ ! -e "$substrate_identity_path" && ! -L "$substrate_identity_path" ]]; then
         native_substrate_sha256="$(native_substrate_digest)" || \
@@ -1119,7 +1296,7 @@ if [[ $run_init -eq 1 ]]; then
     fi
     init_status=0
     ryeos_term_suspend
-    "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}" || init_status=$?
+    "${init_as[@]}" "$ryeos_cmd" "${init_args[@]}" "${trust_args[@]}" || init_status=$?
     if (( init_status != 0 )); then
         ryeos_term_end failure "INSTALL FAILED" "initializing node state · exit status $init_status"
         exit "$init_status"
@@ -1133,10 +1310,14 @@ if [[ $run_init -eq 1 ]]; then
     done
     if [[ $INSTALL_PUBLISH_INITIAL_POLICY -eq 1 ]]; then
         selected_node_init_profile="$share_dir/.ai/node/init/profiles/$node_init_profile.yaml"
+        # Every generation this build publishes carries its signed operator
+        # record beside the profile's sections.
         expected_node_policies="$(
-            ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
-                | sed 's/$/.yaml/' \
-                | sort
+            {
+                ryeos_node_init_profile_policy_names "$selected_node_init_profile" \
+                    | sed 's/$/.yaml/'
+                printf '%s\n' _operator-sections.yaml
+            } | sort
         )"
         node_policy_dir="$state_root/.ai/node/policies"
         [[ -n "$expected_node_policies" && -d "$node_policy_dir" && ! -L "$node_policy_dir" ]] || \
@@ -1271,7 +1452,10 @@ else
     ryeos_term_end success "INSTALL COMPLETE" "local package layout ready" "$install_started"
 fi
 ryeos_term_section "installation"
-ryeos_term_row "ryeos" "$(command -v ryeos)"
+ryeos_term_row "ryeos" "$(command -v "$ryeos_cmd")"
+if [[ $install_on_path -eq 0 ]]; then
+    ryeos_term_row "prefix" "$install_prefix (off PATH)"
+fi
 ryeos_term_row "bundle set" "$bundle_set"
 ryeos_term_row "bundle src" "$share_dir/{$bundle_names_csv}"
 ryeos_term_row "app root" "${init_app_root:-$invoking_user_home/.local/share/ryeos}"

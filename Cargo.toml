@@ -12,6 +12,8 @@ members = [
     "crates/daemon/ryeos-ui",
     "crates/clients/base",
     "crates/clients/presentation-contract",
+    "crates/clients/rune",
+    "crates/clients/runtime",
     "crates/clients/terminal",
     "crates/clients/transport",
     "crates/clients/web",
@@ -63,7 +65,6 @@ members = [
     "crates/host-adapters/render-sandbox-adapter",
     "crates/tools/web-tools",
     "crates/tools/browser-tools",
-    "crates/tools/ui-contract-exporter",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
     "crates/host-adapters/modal-guest-launcher",
@@ -139,6 +140,7 @@ ryeos-node-runtime = { path = "crates/engine/ryeos-node-runtime" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
+ryeos-client-runtime = { path = "crates/clients/runtime" }
 ryeos-client-transport = { path = "crates/clients/transport" }
 ryeos-directive-definition = { path = "crates/kinds/directive-definition" }
 ryeos-expression = { path = "crates/engine/ryeos-expression" }

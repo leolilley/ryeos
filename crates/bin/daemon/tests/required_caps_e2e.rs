@@ -174,3 +174,32 @@ fn extract_required_caps_parses_json_array() {
     let caps = ryeos_api::registry::extract_required_caps(&extra);
     assert_eq!(caps, vec!["node.admin", "execute"]);
 }
+
+/// `remote.pull` is gated by its own capability, not by the object-read
+/// capability: reading objects from this node and making this node pull
+/// from a remote are different authorities.
+#[test]
+fn remote_pull_requires_remote_pull_cap() {
+    let engine = build_test_engine();
+    let ctx = local_plan_ctx();
+
+    let canonical = CanonicalRef::parse("service:remote/pull").unwrap();
+    let resolved = engine.resolve(&ctx, &canonical).expect("resolve");
+    let verified = engine.verify(&ctx, resolved).expect("verify");
+    let required = ryeos_api::registry::extract_required_caps(&verified.resolved.metadata.extra);
+    assert_eq!(required, vec!["ryeos.execute.service.remote/pull"]);
+
+    // A caller holding only objects/get is missing the required cap.
+    let objects_only = ["ryeos.execute.service.objects/get".to_string()];
+    assert!(
+        required.iter().any(|cap| !objects_only.contains(cap)),
+        "objects/get alone must not satisfy remote.pull"
+    );
+
+    // A caller holding remote/pull satisfies the cap gate.
+    let pull_scopes = ["ryeos.execute.service.remote/pull".to_string()];
+    assert!(
+        required.iter().all(|cap| pull_scopes.contains(cap)),
+        "remote/pull must satisfy remote.pull"
+    );
+}

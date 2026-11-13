@@ -92,18 +92,14 @@ pub async fn handle(
         .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let credential = match setup.credential {
         Some(credential) => Some(
-            ryeos_app::vault::read_named_secret(
-                state.vault.as_ref(),
-                &ctx.fingerprint,
-                &credential.secret_name,
-            )
-            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
-            .ok_or_else(|| {
-                HandlerError::BadRequest(format!(
-                    "provider '{}' credential '{}' is not configured",
-                    req.provider_id, credential.secret_name
-                ))
-            })?,
+            ryeos_app::vault::read_named_secret(state.vault.as_ref(), &credential.secret_name)
+                .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
+                .ok_or_else(|| {
+                    HandlerError::BadRequest(format!(
+                        "provider '{}' credential '{}' is not configured",
+                        req.provider_id, credential.secret_name
+                    ))
+                })?,
         ),
         None => None,
     };

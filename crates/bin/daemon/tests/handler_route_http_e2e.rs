@@ -936,3 +936,184 @@ async fn cross_bundle_handler_source_is_refused_at_startup() {
         "startup must report the exact bundle mismatch; got: {startup_error}"
     );
 }
+
+// ── operator-vault exposure of handler routes ──────────────────────────
+
+const VAULT_SECRET_NAME: &str = "HANDLER_FIXTURE_KEY";
+const VAULT_SECRET_VALUE: &str = "handler-fixture-operator-secret-5e1f";
+
+/// A handler that declares a required secret and reports, without echoing
+/// it, whether the operator's value reached its environment.
+fn secret_tool(bundle: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env python3
+# ryeos-tool:
+#   category: {bundle}/secret
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
+#   description: "Handler that needs an operator vault secret"
+#   required_secrets: ["{VAULT_SECRET_NAME}"]
+
+import json
+import os
+import sys
+
+print(json.dumps({{
+    "response": {{
+        "status": 200,
+        "json": {{
+            "operator_secret_delivered":
+                os.environ.get("{VAULT_SECRET_NAME}") == "{VAULT_SECRET_VALUE}",
+        }},
+    }}
+}}))
+sys.exit(0)
+"#
+    )
+}
+
+fn secret_route(bundle: &str, name: &str, declares_operator_vault: bool) -> String {
+    let authority = if declares_operator_vault {
+        "    authority:\n      operator_vault: true\n"
+    } else {
+        ""
+    };
+    format!(
+        "id: {bundle}/{name}\npath: /{bundle}/{name}\nmethods:\n  - GET\nauth: none\nlimits:\n  body_bytes_max: 0\n  timeout_ms: 30000\n  concurrent_max: 4\nresponse:\n  mode: handler\n  source: tool:{bundle}/secret/report\n  source_config:\n    request:\n      query: false\n{authority}"
+    )
+}
+
+/// Plant a registered bundle holding a secret-needing handler behind one
+/// undeclared and one declared route. Its signed manifest allows handler
+/// routes the operator vault only when `manifest_allows` is set.
+fn plant_vault_route_bundle(
+    state: &Path,
+    bundle: &str,
+    manifest_allows: bool,
+    fixture: &FastFixture,
+) -> anyhow::Result<()> {
+    let bundle_root = state.join(".ai/bundles").join(bundle);
+    let routes_dir = bundle_root.join(".ai/node/routes");
+    write_signed(
+        &routes_dir.join("undeclared.yaml"),
+        &secret_route(bundle, "undeclared", false),
+        fixture,
+    )?;
+    write_signed(
+        &routes_dir.join("declared.yaml"),
+        &secret_route(bundle, "declared", true),
+        fixture,
+    )?;
+    write_signed(
+        &bundle_root
+            .join(".ai/tools")
+            .join(bundle)
+            .join("secret/report.py"),
+        &secret_tool(bundle),
+        fixture,
+    )?;
+    let runtime_authority = if manifest_allows {
+        "runtime_authority:\n  operator_vault: true\n"
+    } else {
+        ""
+    };
+    write_signed(
+        &bundle_root.join(".ai/manifest.yaml"),
+        &format!(
+            "name: {bundle}\nversion: 1.0.0\ndescription: synthetic daemon integration fixture\nprovides_kinds: []\nrequires_kinds:\n  - handler\n  - parser\n  - runtime\nuses_kinds: []\n{runtime_authority}"
+        ),
+        fixture,
+    )?;
+    common::fast_fixture::register_presigned_fixture_bundle(state, bundle, &bundle_root, fixture)
+}
+
+/// Seal the operator vault before daemon boot so delivery has a value to read.
+fn plant_operator_vault_secret(state: &Path) -> anyhow::Result<()> {
+    let vault_dir = state.join(ryeos_engine::AI_DIR).join("node/vault");
+    let secret_key = lillux::vault::VaultSecretKey::generate();
+    lillux::vault::write_secret_key(&vault_dir.join("private_key.pem"), &secret_key)?;
+    let public_key = secret_key.public_key();
+    lillux::vault::write_public_key(&vault_dir.join("public_key.pem"), &public_key)?;
+    ryeos_app::vault::write_sealed_secrets(
+        &ryeos_app::vault::default_sealed_store_path(state),
+        &public_key,
+        &std::collections::HashMap::from([(
+            VAULT_SECRET_NAME.to_owned(),
+            VAULT_SECRET_VALUE.to_owned(),
+        )]),
+    )?;
+    Ok(())
+}
+
+fn assert_operator_vault_refusal(
+    status: reqwest::StatusCode,
+    body: &serde_json::Value,
+    text: &str,
+) {
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "the route must be refused before dispatch: {text}"
+    );
+    assert_eq!(
+        body["error_code"], "operator_vault_capability_required",
+        "the refusal must be the typed operator-vault error: {text}"
+    );
+    assert_eq!(
+        body["required_capability"],
+        ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY
+    );
+    assert!(
+        !text.contains(VAULT_SECRET_VALUE),
+        "a refusal never carries the secret: {text}"
+    );
+}
+
+/// A handler route reaches the operator vault only when its signed route
+/// declares `authority.operator_vault` and its bundle's signed manifest
+/// allows it. An undeclared route whose handler needs a secret, or a declared
+/// route its manifest does not back, gets the typed 403 before dispatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn handler_route_operator_vault_requires_route_declaration_and_manifest_bound() {
+    let (h, _fixture) = DaemonHarness::start_fast_with(
+        |state, _user, fixture| {
+            plant_operator_vault_secret(state)?;
+            plant_vault_route_bundle(state, "vault-allowed-fixture", true, fixture)?;
+            plant_vault_route_bundle(state, "vault-denied-fixture", false, fixture)
+        },
+        |_cmd| {},
+    )
+    .await
+    .expect("start daemon with operator-vault handler fixtures");
+    let client = non_following_client();
+
+    // Declared route, manifest allows: the handler receives the secret.
+    let (status, body, text) =
+        get_json(client.get(format!("http://{}/vault-allowed-fixture/declared", h.bind))).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "a declared route its manifest allows must run: {text}"
+    );
+    assert_eq!(
+        body["operator_secret_delivered"], true,
+        "the declared route's handler must receive the operator secret: {text}"
+    );
+
+    // Undeclared route: refused, even though the manifest would allow it.
+    let (status, body, text) = get_json(client.get(format!(
+        "http://{}/vault-allowed-fixture/undeclared",
+        h.bind
+    )))
+    .await;
+    assert_operator_vault_refusal(status, &body, &text);
+
+    // Declared route the signed manifest does not back: no self-grant.
+    let (status, body, text) =
+        get_json(client.get(format!("http://{}/vault-denied-fixture/declared", h.bind))).await;
+    assert_operator_vault_refusal(status, &body, &text);
+    let (status, body, text) =
+        get_json(client.get(format!("http://{}/vault-denied-fixture/undeclared", h.bind))).await;
+    assert_operator_vault_refusal(status, &body, &text);
+}

@@ -8,8 +8,10 @@
 //! lease's identity and ready deadline are bound) -> `admitted` (the adapter
 //! accepted the guest's first two frames). Any state may move to `refused`,
 //! which is terminal and carries its reason; a refused lease is never
-//! admitted later. The first two guest frames are held here, un-journalled,
-//! until the adapter's verdict decides whether they enter the channel journal.
+//! admitted later. The first two guest frames are stored durably in this row
+//! (`held_ready_frame`, `held_report_frame`, write-once), outside the channel
+//! journal. The adapter's verdict decides whether they enter the channel
+//! journal. They remain in the row afterwards as evidence.
 //!
 //! The row is never deleted: a refusal is durable evidence that outlives the
 //! allocation, and a restart reads it to refuse a stream of a lease it has

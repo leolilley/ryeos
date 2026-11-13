@@ -2482,3 +2482,226 @@ async fn terminal_root_replays_only_exact_authoritatively_settled_command() {
         "{unsettled:#}"
     );
 }
+
+struct ReservedApproval {
+    approval_id: String,
+    upstream_request_id: Value,
+    request_digest: String,
+    reservation_token: String,
+    decision_digest: String,
+}
+
+/// Reserve an owner decision on one pending approval of the fixture's running
+/// turn, exactly as the resolver does before contacting the worker.
+fn reserve_approval(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    pending: &PendingTurnFixture,
+    request: &str,
+) -> ReservedApproval {
+    let upstream_request_id = json!(request);
+    let request_digest =
+        ryeos_state::objects::canonical_value_digest(&json!({"fixture_request":request})).unwrap();
+    let approval_id = ryeos_state::objects::canonical_value_digest(&json!({
+        "worker_boot_epoch":1,
+        "upstream_request_id":upstream_request_id,
+        "request_digest":request_digest,
+    }))
+    .unwrap();
+    state
+        .state_store
+        .create_dedicated_session_approval(ryeos_app::state_store::NewDedicatedSessionApproval {
+            placement_thread_id: root,
+            approval_id: &approval_id,
+            worker_instance_id: &pending.worker_instance_id,
+            worker_boot_epoch: 1,
+            request_digest: &request_digest,
+            operation_class: "command_execution",
+            requested_authority: &json!({"request_id":upstream_request_id}),
+            expires_at_ms: lillux::time::timestamp_millis() as i64 + 60_000,
+        })
+        .unwrap();
+    let reservation_token = format!("reservation-{request}");
+    let decision = json!({
+        "kind":"approval_decision",
+        "request_id":upstream_request_id,
+        "request_digest":request_digest,
+        "decision":"decline",
+        "reservation_token":reservation_token,
+    });
+    let decision_digest = ryeos_state::objects::canonical_value_digest(&decision).unwrap();
+    state
+        .state_store
+        .reserve_dedicated_session_approval_decision(
+            root,
+            &approval_id,
+            1,
+            &request_digest,
+            "fp:test-operator",
+            &decision,
+            &decision_digest,
+            &reservation_token,
+        )
+        .unwrap();
+    ReservedApproval {
+        approval_id,
+        upstream_request_id,
+        request_digest,
+        reservation_token,
+        decision_digest,
+    }
+}
+
+/// The worker's pushed `approval.expired` observation, ingested and therefore
+/// acknowledged. Returns the batch digest.
+fn ingest_approval_expiry(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    turn_id: &str,
+    first_sequence: u64,
+    previous_digest: Option<&str>,
+    upstream_request_id: &Value,
+    request_digest: &str,
+) -> String {
+    let mut batch = json!({
+        "first_sequence":first_sequence,
+        "count":1,
+        "previous_digest":previous_digest,
+        "events":[{"event_type":"approval.expired","payload":{
+            "request_id":upstream_request_id,
+            "operation_class":"command_execution",
+            "upstream_session_id":"upstream-thread",
+            "operation_id":turn_id,
+            "request_digest":request_digest,
+        }}],
+        "session_observations":[],
+    });
+    let digest = ryeos_state::objects::canonical_value_digest(&batch).unwrap();
+    batch["batch_digest"] = Value::String(digest.clone());
+    ryeos_app::dedicated_session_service::ingest_observation_batch(state, root, 1, batch).unwrap();
+    digest
+}
+
+fn explain_absent(
+    state: &ryeos_app::state::AppState,
+    root: &str,
+    approval: &ReservedApproval,
+    worker_boot_epoch: u64,
+    upstream_request_id: &Value,
+) -> Option<ryeos_app::dedicated_session_service::ObservedApprovalExpiry> {
+    let session = state.state_store.dedicated_session(root).unwrap().unwrap();
+    ryeos_app::dedicated_session_service::observed_expiry_explaining_absent_delivery(
+        state,
+        &session,
+        &approval.approval_id,
+        worker_boot_epoch,
+        &approval.request_digest,
+        &approval.reservation_token,
+        &approval.decision_digest,
+        upstream_request_id,
+    )
+    .unwrap()
+}
+
+fn worker_state(
+    state: &ryeos_app::state::AppState,
+    worker_instance_id: &str,
+) -> WorkerProcessState {
+    state
+        .state_store
+        .worker_process(worker_instance_id)
+        .unwrap()
+        .unwrap()
+        .state
+}
+
+#[tokio::test]
+async fn absent_delivery_after_an_acknowledged_expiry_settles_as_expired() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-approval-absent-explained";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    project_turn_start(&state, root, &pending.turn_id);
+
+    // The owner reserves while the approval is still pending.
+    let approval = reserve_approval(&state, root, &pending, "approval-one");
+    // The worker then expires it and RyeOS records and acknowledges that
+    // expiry before the reserved decision reaches the worker.
+    let batch_digest = ingest_approval_expiry(
+        &state,
+        root,
+        &pending.turn_id,
+        1,
+        None,
+        &approval.upstream_request_id,
+        &approval.request_digest,
+    );
+    assert_eq!(
+        state
+            .state_store
+            .dedicated_session_approval(root, &approval.approval_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        "expired"
+    );
+
+    // The worker has forgotten the acknowledged expiry and answers `absent`.
+    // That answer is explained by the recorded expiry, which the resolver
+    // cites by its exact observation sequence instead of fencing the worker.
+    assert_eq!(
+        explain_absent(&state, root, &approval, 1, &approval.upstream_request_id),
+        Some(
+            ryeos_app::dedicated_session_service::ObservedApprovalExpiry {
+                batch_digest,
+                first_sequence: 1,
+                through_sequence: 1,
+                event_sequence: 1,
+            }
+        )
+    );
+    assert_eq!(
+        worker_state(&state, &pending.worker_instance_id),
+        WorkerProcessState::Attached
+    );
+}
+
+#[tokio::test]
+async fn absent_delivery_without_its_own_recorded_expiry_stays_unexplained() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    let root = "T-approval-absent-unexplained";
+    let pending = seed_pending_turn_fixture(&state, root, false);
+    project_turn_start(&state, root, &pending.turn_id);
+
+    // No expiry was ever recorded for this reserved decision.
+    let unexpired = reserve_approval(&state, root, &pending, "approval-unexpired");
+    assert_eq!(
+        explain_absent(&state, root, &unexpired, 1, &unexpired.upstream_request_id),
+        None
+    );
+
+    // An expiry recorded for a different request does not explain it either.
+    let other = reserve_approval(&state, root, &pending, "approval-other");
+    ingest_approval_expiry(
+        &state,
+        root,
+        &pending.turn_id,
+        1,
+        None,
+        &other.upstream_request_id,
+        &other.request_digest,
+    );
+    assert_eq!(
+        explain_absent(&state, root, &unexpired, 1, &unexpired.upstream_request_id),
+        None
+    );
+    // The recorded expiry is only for its exact request id and incarnation.
+    assert_eq!(
+        explain_absent(&state, root, &other, 1, &unexpired.upstream_request_id),
+        None
+    );
+    assert_eq!(
+        explain_absent(&state, root, &other, 2, &other.upstream_request_id),
+        None
+    );
+    assert!(explain_absent(&state, root, &other, 1, &other.upstream_request_id).is_some());
+}

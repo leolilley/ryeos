@@ -98,14 +98,14 @@ RUN mkdir -p /usr/local/cargo/git && \
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
     cargo chef cook --release --locked --recipe-path recipe.json --target x86_64-unknown-linux-gnu \
       --package ryeos-workload-client && \
-    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
-      --package ryeosd --package ryeos-cli && \
-    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
-      --package ryeosd --package ryeos-cli \
-      --features ryeosd/scheduling,ryeos-cli/scheduling && \
-    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
-      --package ryeosd --package ryeos-cli \
-      --features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling && \
+    for package in ryeosd ryeos-cli; do \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" && \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" --features scheduling && \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" --features model-provider-setup,scheduling || exit 1; \
+    done && \
     cargo chef cook --release --locked --recipe-path recipe.json \
       --package ryeos-core-tools
 
@@ -249,17 +249,19 @@ FROM ${PUBLICATION_STAGE} AS composition-publication
 FROM composition-publication AS scheduler-free-publication
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
     --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
     --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
     case "$BUNDLE_BUILD_PROFILE" in \
-      release) set -- ;; \
-      latency-profiling) set -- --features ryeosd/latency-profiling ;; \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "$@" && \
+    ryeos_build_daemon_pair scheduler-free-publication && \
     mkdir -p /build/target/scheduler-free && \
     cp /build/target-cache/release/ryeosd /build/target/scheduler-free/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/scheduler-free/ryeos
@@ -285,13 +287,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-pair && \
     mkdir -p /build/target/core && \
     cp /build/target-cache/release/ryeosd /build/target/core/ryeosd && \
     ryeos_assert_compiled_features core-pair /build/target/core/ryeosd && \
@@ -318,13 +314,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-scheduling-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-scheduling-pair && \
     mkdir -p /build/target/core-scheduling && \
     cp /build/target-cache/release/ryeosd /build/target/core-scheduling/ryeosd && \
     ryeos_assert_compiled_features core-scheduling-pair /build/target/core-scheduling/ryeosd && \
@@ -351,13 +341,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-workflow-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-workflow-pair && \
     mkdir -p /build/target/core-workflow && \
     cp /build/target-cache/release/ryeosd /build/target/core-workflow/ryeosd && \
     ryeos_assert_compiled_features core-workflow-pair /build/target/core-workflow/ryeosd && \
@@ -384,13 +368,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-knowledge-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-knowledge-pair && \
     mkdir -p /build/target/core-knowledge && \
     cp /build/target-cache/release/ryeosd /build/target/core-knowledge/ryeosd && \
     ryeos_assert_compiled_features core-knowledge-pair /build/target/core-knowledge/ryeosd && \
@@ -410,7 +388,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     source scripts/pkg/composition-features.sh && \
     features=() && \
     for package in ryeosd ryeos-cli; do \
-      selected="$(ryeos_bundle_set_cargo_features f5r-controller "$package")" || exit 1; \
+      selected="$(ryeos_bundle_set_cargo_features hosted-controller "$package")" || exit 1; \
       if [ -n "$selected" ]; then features+=("$selected"); fi; \
     done && \
     case "$BUNDLE_BUILD_PROFILE" in \
@@ -418,17 +396,11 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features f5r-controller-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
-    mkdir -p /build/target/f5r-controller && \
-    cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
-    ryeos_assert_compiled_features f5r-controller-pair /build/target/f5r-controller/ryeosd && \
-    cp /build/target-cache/release/ryeos /build/target/f5r-controller/ryeos
+    ryeos_build_daemon_pair hosted-controller-pair && \
+    mkdir -p /build/target/hosted-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-controller/ryeosd && \
+    ryeos_assert_compiled_features hosted-controller-pair /build/target/hosted-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-controller/ryeos
 
 # Standard: the scheduler (scheduling) and provider setup (directive) its bundles select.
 FROM composition-publication AS standard-pair
@@ -451,13 +423,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features standard-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair standard-pair && \
     mkdir -p /build/target/standard && \
     cp /build/target-cache/release/ryeosd /build/target/standard/ryeosd && \
     ryeos_assert_compiled_features standard-pair /build/target/standard/ryeosd && \
@@ -483,13 +449,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features central-host-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair central-host-pair && \
     mkdir -p /build/target/central-host && \
     cp /build/target-cache/release/ryeosd /build/target/central-host/ryeosd && \
     ryeos_assert_compiled_features central-host-pair /build/target/central-host/ryeosd && \
@@ -515,13 +475,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features local-inference-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair local-inference-pair && \
     mkdir -p /build/target/local-inference && \
     cp /build/target-cache/release/ryeosd /build/target/local-inference/ryeosd && \
     ryeos_assert_compiled_features local-inference-pair /build/target/local-inference/ryeosd && \
@@ -547,13 +501,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features hosted-workflow-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair hosted-workflow-pair && \
     mkdir -p /build/target/hosted-workflow && \
     cp /build/target-cache/release/ryeosd /build/target/hosted-workflow/ryeosd && \
     ryeos_assert_compiled_features hosted-workflow-pair /build/target/hosted-workflow/ryeosd && \
@@ -985,9 +933,9 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 # The remote-authoring controller runs Codex workers, so it uses the workflow
 # runtime with Node.js beside Python.
-FROM workflow-runtime AS ryeos-f5r-controller
-COPY --from=controller-pair /build/target/f5r-controller/ryeosd /usr/local/bin/ryeosd
-COPY --from=controller-pair /build/target/f5r-controller/ryeos  /usr/local/bin/ryeos
+FROM workflow-runtime AS ryeos-hosted-controller
+COPY --from=controller-pair /build/target/hosted-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-pair /build/target/hosted-controller/ryeos  /usr/local/bin/ryeos
 COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
 COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
@@ -998,7 +946,7 @@ COPY --from=composition-publication /build/bundles/render-sandbox /opt/ryeos/ren
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV RYEOS_APP_ROOT=/data/app
-ENV RYEOS_INIT_NODE_PROFILE=f5r-controller
+ENV RYEOS_INIT_NODE_PROFILE=hosted-controller
 EXPOSE 8000
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
@@ -1008,7 +956,7 @@ RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFIL
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
-LABEL io.ryeos.image="f5r-controller"
+LABEL io.ryeos.image="hosted-controller"
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
@@ -1054,7 +1002,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     source scripts/pkg/composition-features.sh && \
     features=() && \
     for package in ryeosd ryeos-cli; do \
-      selected="$(ryeos_bundle_set_cargo_features f5r-controller "$package")" || exit 1; \
+      selected="$(ryeos_bundle_set_cargo_features hosted-controller "$package")" || exit 1; \
       if [ -n "$selected" ]; then features+=("$selected"); fi; \
     done && \
     case "$BUNDLE_BUILD_PROFILE" in \
@@ -1062,30 +1010,24 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features f5r-controller-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair hosted-controller-pair && \
     RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
     cargo build --release --locked -p ryeos-core-tools && \
-    mkdir -p /build/target/f5r-controller && \
-    cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
-    ryeos_assert_compiled_features f5r-controller-pair /build/target/f5r-controller/ryeosd && \
-    cp /build/target-cache/release/ryeos /build/target/f5r-controller/ryeos && \
-    cp /build/target-cache/release/ryeos-core-tools /build/target/f5r-controller/ryeos-core-tools
+    mkdir -p /build/target/hosted-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-controller/ryeosd && \
+    ryeos_assert_compiled_features hosted-controller-pair /build/target/hosted-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-controller/ryeos && \
+    cp /build/target-cache/release/ryeos-core-tools /build/target/hosted-controller/ryeos-core-tools
 
-FROM workflow-runtime AS ryeos-f5r-controller-released
-COPY --from=controller-release-binaries /build/target/f5r-controller/ryeosd /usr/local/bin/ryeosd
-COPY --from=controller-release-binaries /build/target/f5r-controller/ryeos /usr/local/bin/ryeos
-COPY --from=controller-release-binaries /build/target/f5r-controller/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+FROM workflow-runtime AS ryeos-hosted-controller-released
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeos /usr/local/bin/ryeos
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=released-bundles / /opt/ryeos/
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV RYEOS_APP_ROOT=/data/app
-ENV RYEOS_INIT_NODE_PROFILE=f5r-controller
+ENV RYEOS_INIT_NODE_PROFILE=hosted-controller
 EXPOSE 8000
 ARG VERSION
 ARG VCS_REF=unknown
@@ -1116,7 +1058,7 @@ RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFIL
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
-LABEL io.ryeos.image="f5r-controller"
+LABEL io.ryeos.image="hosted-controller"
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"

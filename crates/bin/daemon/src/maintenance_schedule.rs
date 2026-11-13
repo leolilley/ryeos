@@ -335,17 +335,12 @@ fn load_managed_spec_file(
     // the existing node document without decoding its disposable execution
     // payload. Only pause and registration metadata survive regeneration;
     // all execution authority comes from the current signed node policy.
-    let verified = node_document::verify_pinned_signed_yaml(file, trust_store)
-        .with_context(|| format!("verify existing schedule {}", path.display()))?;
+    let verified =
+        node_document::verify_pinned_signed_yaml(file, trust_store, identity.fingerprint())
+            .with_context(|| format!("verify existing schedule {}", path.display()))?;
     let body = verified.body;
     if !is_managed_maintenance_spec(&body) {
         return Ok(None);
-    }
-    if verified.signer_fingerprint != identity.fingerprint() {
-        bail!(
-            "managed maintenance schedule {} is not signed by this node",
-            path.display()
-        );
     }
     let ownership: MaintenanceScheduleOwnership = serde_json::from_value(body.clone())
         .context("decode maintenance schedule ownership metadata")?;

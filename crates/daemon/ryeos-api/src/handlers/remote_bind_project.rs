@@ -32,23 +32,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let local_key = config::local_project_identity(&local)?.to_owned();
     let app_root = state.config.runtime_root();
 
+    // A project's remotes file is checked even though binding only writes
+    // node config: one naming remote trust material is refused here too.
+    config::load_remotes_layered_report(app_root.as_path(), Some(&local))?;
     let mut remotes = config::load_remotes(app_root.as_path())?;
-    if !remotes.contains_key(&req.remote) {
-        let report = config::load_remotes_layered_report(app_root.as_path(), Some(&local))?;
-        let loaded = config::get_loaded_remote(&report.remotes, &req.remote).map_err(|_| {
-            anyhow::anyhow!(
-                "remote '{}' not found in operator config; run `ryeos remote configure {}` first",
-                req.remote,
-                req.remote,
-            )
-        })?;
-        let mut cfg = loaded.config;
-        cfg.project_bindings.clear();
-        remotes.insert(req.remote.clone(), cfg);
-    }
-    let remote = remotes
-        .get_mut(&req.remote)
-        .expect("remote is present after read-through or prior user config load");
+    // Only the node's own remotes file defines a remote; a project's remotes
+    // file is never copied into it.
+    let Some(remote) = remotes.get_mut(&req.remote) else {
+        anyhow::bail!(
+            "remote '{}' not found in the node's remotes config; run `ryeos remote configure {} --url <https-url> --expect-fingerprint <fingerprint>` first",
+            req.remote,
+            req.remote,
+        );
+    };
     remote.project_bindings.insert(
         local_key.clone(),
         RemoteProjectBinding {

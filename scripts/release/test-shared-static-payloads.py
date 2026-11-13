@@ -61,7 +61,7 @@ class SharedStaticPayloads(unittest.TestCase):
         narrowed = copy.deepcopy(records)
         for record in narrowed:
             if record["binary"] == SUPERVISOR:
-                record["bundle_sets"] = ["f5r-controller"]
+                record["bundle_sets"] = ["hosted-controller"]
         with self.assertRaisesRegex(tool.Refused, "do not build its owner"):
             tool.validate(narrowed, shared, declared)
 

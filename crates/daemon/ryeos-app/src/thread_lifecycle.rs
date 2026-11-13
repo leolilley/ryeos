@@ -5199,6 +5199,30 @@ impl ThreadLifecycleService {
         self.finalize_thread_inner(params, None, None, Some(launch_owner))
     }
 
+    /// Unowned recovery counterpart of
+    /// [`Self::finalize_thread_owned_retaining_generation`].
+    pub fn finalize_thread_retaining_generation(
+        &self,
+        params: &ThreadFinalizeParams,
+        result_generation: &ryeos_state::objects::WorkspaceGenerationPair,
+    ) -> Result<ThreadDetail> {
+        self.finalize_thread_inner(params, None, Some(result_generation), None)
+    }
+
+    /// [`Self::finalize_thread_owned`] for a failed execution whose frozen
+    /// generation is retained as its result even though it was not
+    /// published (a refused HEAD advance). Committing the generation with the
+    /// terminal keeps it reachable from thread history once the workspace
+    /// journal closes.
+    pub fn finalize_thread_owned_retaining_generation(
+        &self,
+        params: &ThreadFinalizeParams,
+        launch_owner: &str,
+        result_generation: &ryeos_state::objects::WorkspaceGenerationPair,
+    ) -> Result<ThreadDetail> {
+        self.finalize_thread_inner(params, None, Some(result_generation), Some(launch_owner))
+    }
+
     /// Like [`Self::finalize_thread`], but carries the runtime's canonical managed
     /// envelope (outputs / warnings / raw cost). The executor-supervised fallback
     /// finalization uses this so a followed child's structured return survives even

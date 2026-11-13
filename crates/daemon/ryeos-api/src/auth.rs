@@ -189,6 +189,57 @@ fn canonical_path(uri: &axum::http::Uri) -> String {
     }
 }
 
+/// Content hash of a `ryeos-request-v1` signed request: the bytes the caller
+/// signs. It names one exact request (method, canonical path, body hash,
+/// timestamp, nonce, audience), so it is also the request digest a remote
+/// result attestation binds.
+pub(crate) fn request_content_hash(
+    method: &str,
+    canonical_path: &str,
+    body_hash: &str,
+    timestamp: &str,
+    nonce: &str,
+    audience: &str,
+) -> String {
+    let string_to_sign = format!(
+        "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        method.to_uppercase(),
+        canonical_path,
+        body_hash,
+        timestamp,
+        nonce,
+        audience,
+    );
+    lillux::cas::sha256_hex(string_to_sign.as_bytes())
+}
+
+/// Recompute the request digest of a signed request this node has already
+/// verified (`verify_request`). `None` when the signing headers are absent.
+pub(crate) fn signed_request_digest(
+    audience: &str,
+    method: &str,
+    uri: &axum::http::Uri,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> Option<String> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+    };
+    let timestamp = header("x-ryeos-timestamp")?;
+    let nonce = header("x-ryeos-nonce")?;
+    Some(request_content_hash(
+        method,
+        &canonical_path(uri),
+        &lillux::cas::sha256_hex(body),
+        timestamp,
+        nonce,
+        audience,
+    ))
+}
+
 /// Hash the exact request facts authenticated by a source-node forwarding
 /// co-signature. The primary signature is included so the source node attests
 /// to this operator authorization, not merely to a coincident request body.
@@ -299,16 +350,8 @@ pub(crate) fn verify_request(
     // Build string-to-sign
     let body_hash = lillux::cas::sha256_hex(body);
     let canon = canonical_path(uri);
-    let string_to_sign = format!(
-        "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-        method.to_uppercase(),
-        canon,
-        body_hash,
-        timestamp,
-        nonce,
-        audience,
-    );
-    let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
+    let content_hash =
+        request_content_hash(method, &canon, &body_hash, timestamp, nonce, &audience);
 
     // Verify signature
     let sig_bytes = base64::engine::general_purpose::STANDARD
@@ -968,6 +1011,7 @@ mod tests {
             node_policy: Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                     Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),
@@ -1108,6 +1152,50 @@ mod tests {
         headers.insert("x-ryeos-nonce", nonce.parse().unwrap());
         headers.insert("x-ryeos-signature", sig_b64.parse().unwrap());
         headers
+    }
+
+    #[test]
+    fn signed_request_digest_is_the_signed_content_hash() {
+        let client_key = SigningKey::from_bytes(&[31u8; 32]);
+        let uri: axum::http::Uri = "/execute?b=2&a=1".parse().unwrap();
+        let body = br#"{"item_ref":"tool:example/run"}"#;
+        let headers = signed_headers(
+            &client_key,
+            "client",
+            "POST",
+            &uri,
+            body,
+            1_700_000_000,
+            "nonce-request-digest",
+            "fp:audience",
+        );
+        let digest = signed_request_digest("fp:audience", "POST", &uri, &headers, body)
+            .expect("signed headers present");
+        let signature = base64::engine::general_purpose::STANDARD
+            .decode(headers.get("x-ryeos-signature").unwrap().to_str().unwrap())
+            .unwrap();
+        client_key
+            .verifying_key()
+            .verify(
+                digest.as_bytes(),
+                &Signature::from_slice(&signature).unwrap(),
+            )
+            .expect("the request digest is exactly what the caller signed");
+        assert_ne!(
+            signed_request_digest("fp:audience", "POST", &uri, &headers, b"{}"),
+            Some(digest),
+            "a different body is a different request"
+        );
+        assert!(
+            signed_request_digest(
+                "fp:audience",
+                "POST",
+                &uri,
+                &axum::http::HeaderMap::new(),
+                body
+            )
+            .is_none()
+        );
     }
 
     fn add_forwarding_proof(

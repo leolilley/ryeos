@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-10T02:15:34Z:9ff9c0aabc434de9850407a04b6b8f154bf806ed4fceaa8f3e45e32eae6db723:4Txon6+01vq/p8k4PWYMSMzPyyxjHpfmmYT83zS9eOZ9KMCmXvU3d9iJFFqWuOiBnPH2WZyCNw1biPpP1pftCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:46:52Z:66cedf2a36dcc958031760623072387c7fe2467ee95beb90cd756e0081c08998:BP9HSB7Vjhfmk+J8aWf123TzRe/NKV3BS1wMsO+ckOnJCKN2GiUa3cM9IloiQNrHzRVzmCVPB4ccLVs/mfMhAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
-version: "2.1.0"
+version: "2.1.1"
 description: >
   The four identity layers in ryEOS: publisher trust, user key, node key,
   and vault key; what each signs and who owns each artifact.
@@ -63,6 +63,29 @@ The node key normally signs outbound remote requests, signs authorized-key
 TOMLs, produces the node public identity document, and anchors the node
 self-trust doc. Daemon startup never auto-regenerates it, because doing so
 would invalidate operator trust and remote authorizations.
+
+### Who signs node state
+
+Node state verifies against exactly one key, never against every pinned
+key. A pinned publisher key is trusted for items, but it cannot sign node
+state:
+
+| Node document | Path | Only signer |
+|---|---|---|
+| Node policy generation (including `native_capacity`) | `<system>/.ai/node/policies/` | node key |
+| Schedules | `<system>/.ai/node/schedules/` | node key |
+| Bundle registrations | `<system>/.ai/node/bundles/` | node key |
+| Any other node config under the app root (routes, commands, external execution, runtime snapshots) | `<system>/.ai/node/<section>/` | node key |
+| Authorized-key grants | `<system>/.ai/node/auth/authorized_keys/` | node key |
+| Init completion record | `<system>/.ai/config/onboarding/init-completion.json` | the local operator key (`.ai/config/keys/signing/`) |
+| Offline operation requests | request envelope | the local operator key, or an operator granted by the node |
+
+Routes and commands shipped inside a bundle root keep their publisher
+signatures. A node document signed by any other key is refused with
+`node_document_wrong_signer`, naming the file, the signer it found and the
+key it expected. The cure is to remove the file: node state is written only
+by the node's own commands (`ryeos init`, `ryeos bundle install`,
+`ryeos node policy-apply`, schedule registration).
 
 Ordinary remote operations authorize the caller's node key, not the user's
 CLI key:

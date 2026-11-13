@@ -34,17 +34,16 @@ mod reservation;
 pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
-pub(crate) use account::capacity_issuance_published;
 pub(crate) use account::load_existing_capacity_binding;
-pub(crate) use account::prepare_initial_capacity_binding;
-pub use account::reanchor::{
-    CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport, CapacityPolicyAmendmentRequest,
-    CapacityReanchorEvidence, POLICY_AMENDMENT_EVIDENCE_LOG, PreparedCapacityPolicyAmendment,
-    ReanchorReport, ReanchorRequest, amend_capacity_policy, prepare_capacity_policy_amendment,
-    read_capacity_policy_amendments, read_capacity_reanchors, reanchor_capacity,
-};
 #[cfg(test)]
 pub(crate) use account::reissue::leave_outstanding_debit;
+pub(crate) use account::prepare_initial_capacity_binding;
+pub use account::reanchor::{
+    CapacityPolicyAmendmentCheck, CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport,
+    CapacityPolicyAmendmentRequest, CapacityReanchorEvidence, POLICY_AMENDMENT_EVIDENCE_LOG,
+    ReanchorReport, ReanchorRequest, amend_capacity_policy, check_capacity_policy_amendment,
+    read_capacity_policy_amendments, read_capacity_reanchors, reanchor_capacity,
+};
 pub use account::reissue::{
     CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances,
     reissue_capacity,
@@ -535,6 +534,7 @@ impl LiveNativeCapacityInputs {
         let verified = ryeos_node_runtime::node_document::verify_pinned_signed_yaml(
             &policy_file.file,
             &trust,
+            &report.node_fingerprint,
         )?;
         ensure!(
             verified.signer_fingerprint == report.node_fingerprint,

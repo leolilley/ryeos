@@ -146,7 +146,7 @@ inputs:
 model:
   tier: general
 ---
-Say hello to {{{{ name }}}}.
+Say hello to ${{inputs.name}}.
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));

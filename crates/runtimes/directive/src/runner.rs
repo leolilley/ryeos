@@ -3349,7 +3349,7 @@ impl Runner {
                             // Hook events ("before_step", "after_step", …)
                             // are not in the daemon's event-vocabulary
                             // allow-list; map them to `cognition_reasoning`
-                            // (journal_only) and stash the original hook name
+                            // (ephemeral) and stash the original hook name
                             // in the payload so consumers can still
                             // discriminate.
                             record_callback_warning(
@@ -6297,13 +6297,7 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
-        async fn append_event(
-            &self,
-            _: &str,
-            _: &str,
-            _: Value,
-            _: &str,
-        ) -> Result<Value, CallbackError> {
+        async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {

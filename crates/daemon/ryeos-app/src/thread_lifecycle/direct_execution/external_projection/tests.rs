@@ -1345,7 +1345,7 @@ fn external_direct_projection_refuses_protocol_controller_authority_and_env_subs
     );
     assert!(authority.compile().is_err());
     let mut callback = Fixture::new();
-    callback.protocol.descriptor.callback_channel = CallbackChannel::Http;
+    callback.protocol.descriptor.callback_channel = CallbackChannel::RuntimeSocket;
     assert!(callback.compile().is_err());
     let mut session = Fixture::new();
     session.protocol.descriptor.session=Some(serde_json::from_value(json!({

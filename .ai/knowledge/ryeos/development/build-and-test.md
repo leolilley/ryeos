@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:fd35e5b39449dcd03da6acd6ee9fd5edfaa02e9760e511e444c0f5f96aebdac1:3T4XO2S3U/RUulP9h5qH6zhplz+tGCtzTuH71fGPoxKCEaMlK7R9JBj/DpxvhP+CGtd2VAyc1E/BXUkw/VDbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:01:20Z:bb8e86ee14851697fa882b883067228ab50a95588fecc9403106071055b2d217:wQBtuOVtXEwAJTTT74kV2gp6rLROZVwgziZi+7+NqE1k4KyKQL8eEalCHMurZiXkn6hm1T5g6eZXYIOC+VxTCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -111,6 +111,7 @@ Default user system space:
 ```bash
 target/release/ryeos init \
   --source bundles \
+  --node-profile full --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
@@ -120,6 +121,7 @@ Repo-local dev app root:
 target/release/ryeos init \
   --app-root .local/ryeos \
   --source bundles \
+  --node-profile full --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start --app-root .local/ryeos
 ```
@@ -127,9 +129,13 @@ target/release/ryeos start --app-root .local/ryeos
 If a daemon is running against that system space, stop it before init and start
 it after. A running daemon keeps the old in-memory engine/registries.
 
+`--node-profile` is required on a fresh node, and `--host-class` goes with it.
+Use a profile and class that match your node (`ryeos init --help`).
+
 ```bash
 target/release/ryeos stop --force || true
-target/release/ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+target/release/ryeos init --source bundles --node-profile full --host-class local \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start
 ```
 
@@ -211,7 +217,10 @@ ryeos execute tool:ryeos/core/identity/public_key
 script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
 
-The generated isolation policy is disabled by default. `node doctor` uses the
+The isolation mode comes from the init profile passed as `--node-profile`.
+`install-local-direct.sh` passes its bundle set's profile (`full` by default,
+whose `local` lane selects disabled); `--node-profile development` selects
+enforce. `node doctor` uses the
 production policy loader; after changing mode or policy contents, restart the
 node before judging execution behavior. See [Execution
 Isolation](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md).

@@ -101,9 +101,9 @@ pub struct SecretSources<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultScope {
-    OperatorEnv {
-        principal: String,
-    },
+    /// The operator's sealed secrets: one store shared by every principal
+    /// holding the vault service caps, not a per-principal namespace.
+    OperatorEnv,
     RuntimeBundle {
         bundle_id: String,
         namespace: String,
@@ -111,10 +111,8 @@ pub enum VaultScope {
 }
 
 impl VaultScope {
-    pub fn operator_env(principal: impl Into<String>) -> Self {
-        Self::OperatorEnv {
-            principal: principal.into(),
-        }
+    pub fn operator_env() -> Self {
+        Self::OperatorEnv
     }
 
     pub fn runtime_bundle(
@@ -191,12 +189,12 @@ mod read_all_token {
 /// Crate-private whole-store read. Delivering callers outside this crate
 /// receive declared names only through the authority readers.
 pub(crate) trait NodeVaultReadAll {
-    fn read_all(&self, principal: &str) -> Result<HashMap<String, String>>;
+    fn read_all(&self) -> Result<HashMap<String, String>>;
 }
 
 impl<V: NodeVault + ?Sized> NodeVaultReadAll for V {
-    fn read_all(&self, principal: &str) -> Result<HashMap<String, String>> {
-        self.read_all_entries(principal, read_all_token::CrateOnly(()))
+    fn read_all(&self) -> Result<HashMap<String, String>> {
+        self.read_all_entries(read_all_token::CrateOnly(()))
     }
 }
 
@@ -297,49 +295,47 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
     ) -> Result<()> {
         bail!("vault backend does not support protected placement credentials")
     }
-    /// Return the secrets the given principal is allowed to see.
+    /// Return every operator secret in the store. The store is one shared
+    /// set per node, not scoped per principal.
     ///
     /// Only this crate can call it: the token is unnameable elsewhere, and
     /// in-crate callers use [`NodeVaultReadAll::read_all`]. External callers
     /// go through the authority readers, which return declared names only.
-    fn read_all_entries(
-        &self,
-        principal: &str,
-        token: read_all_token::CrateOnly,
-    ) -> Result<HashMap<String, String>>;
+    fn read_all_entries(&self, token: read_all_token::CrateOnly)
+    -> Result<HashMap<String, String>>;
 
     /// Set a secret. Server-side sealing: the daemon re-encrypts the
-    /// entire store. The `principal` param is accepted but ignored in v1
-    /// (single shared store per trust boundary).
-    fn set_secret(&self, principal: &str, name: &str, value: &str) -> Result<()>;
+    /// entire store. There is one shared store per node: a secret set by
+    /// one principal is listed, replaced and delivered for every other.
+    fn set_secret(&self, name: &str, value: &str) -> Result<()>;
 
     /// List secret key names (never values).
-    fn list_keys(&self, principal: &str) -> Result<Vec<String>>;
+    fn list_keys(&self) -> Result<Vec<String>>;
 
     /// Delete a secret by name. Returns `true` if the key existed.
-    fn delete_secret(&self, principal: &str, name: &str) -> Result<bool>;
+    fn delete_secret(&self, name: &str) -> Result<bool>;
 
     fn put_scoped_secret(&self, scope: &VaultScope, key: &str, value: &str) -> Result<()> {
         match scope {
-            VaultScope::OperatorEnv { principal } => self.set_secret(principal, key, value),
+            VaultScope::OperatorEnv => self.set_secret(key, value),
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
-            } => self.set_secret("", &runtime_physical_key(bundle_id, namespace, key)?, value),
+            } => self.set_secret(&runtime_physical_key(bundle_id, namespace, key)?, value),
         }
     }
 
     fn get_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<Option<String>> {
         match scope {
-            VaultScope::OperatorEnv { principal } => {
+            VaultScope::OperatorEnv => {
                 validate_operator_secret_name(key)?;
-                Ok(self.read_all(principal)?.get(key).cloned())
+                Ok(self.read_all()?.get(key).cloned())
             }
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
             } => Ok(self
-                .read_all("")?
+                .read_all()?
                 .get(&runtime_physical_key(bundle_id, namespace, key)?)
                 .cloned()),
         }
@@ -347,24 +343,24 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
 
     fn delete_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<bool> {
         match scope {
-            VaultScope::OperatorEnv { principal } => self.delete_secret(principal, key),
+            VaultScope::OperatorEnv => self.delete_secret(key),
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
-            } => self.delete_secret("", &runtime_physical_key(bundle_id, namespace, key)?),
+            } => self.delete_secret(&runtime_physical_key(bundle_id, namespace, key)?),
         }
     }
 
     fn list_scoped_secret_keys(&self, scope: &VaultScope) -> Result<Vec<String>> {
         match scope {
-            VaultScope::OperatorEnv { principal } => self.list_keys(principal),
+            VaultScope::OperatorEnv => self.list_keys(),
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
             } => {
                 let prefix = runtime_physical_prefix(bundle_id, namespace)?;
                 let mut keys: Vec<String> = self
-                    .list_keys("")?
+                    .list_keys()?
                     .into_iter()
                     .filter_map(|name| name.strip_prefix(&prefix).map(str::to_string))
                     .collect();
@@ -639,7 +635,7 @@ fn read_authorized_secret_values(
                 )));
             }
             let mut upstream = if *include_operator_vault {
-                vault.read_all(principal)?
+                vault.read_all()?
             } else {
                 HashMap::new()
             };
@@ -668,7 +664,7 @@ fn read_authorized_secret_values(
                     "unsupported vault namespace {namespace:?}; this node exposes only the explicit operator namespace"
                 )));
             }
-            vault.read_all(principal)?
+            vault.read_all()?
         }
         ryeos_state::objects::EnvironmentAuthority::Delegated {
             provider, grant_id, ..
@@ -719,21 +715,20 @@ pub struct EmptyVault;
 impl NodeVault for EmptyVault {
     fn read_all_entries(
         &self,
-        _principal: &str,
         _token: read_all_token::CrateOnly,
     ) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
     }
 
-    fn set_secret(&self, _principal: &str, _name: &str, _value: &str) -> Result<()> {
+    fn set_secret(&self, _name: &str, _value: &str) -> Result<()> {
         bail!("vault: EmptyVault does not support writes")
     }
 
-    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+    fn list_keys(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 
-    fn delete_secret(&self, _principal: &str, _name: &str) -> Result<bool> {
+    fn delete_secret(&self, _name: &str) -> Result<bool> {
         Ok(false)
     }
 }
@@ -838,21 +833,20 @@ impl NodeVault for CountingRefusingVault {
 
     fn read_all_entries(
         &self,
-        _principal: &str,
         _token: read_all_token::CrateOnly,
     ) -> Result<HashMap<String, String>> {
         self.refuse("read_all_entries")
     }
 
-    fn set_secret(&self, _principal: &str, _name: &str, _value: &str) -> Result<()> {
+    fn set_secret(&self, _name: &str, _value: &str) -> Result<()> {
         self.refuse("set_secret")
     }
 
-    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+    fn list_keys(&self) -> Result<Vec<String>> {
         self.refuse("list_keys")
     }
 
-    fn delete_secret(&self, _principal: &str, _name: &str) -> Result<bool> {
+    fn delete_secret(&self, _name: &str) -> Result<bool> {
         self.refuse("delete_secret")
     }
 }
@@ -1281,7 +1275,6 @@ impl NodeVault for SealedEnvelopeVault {
 
     fn read_all_entries(
         &self,
-        _principal: &str,
         _token: read_all_token::CrateOnly,
     ) -> Result<HashMap<String, String>> {
         Ok(self
@@ -1291,7 +1284,7 @@ impl NodeVault for SealedEnvelopeVault {
             .collect())
     }
 
-    fn set_secret(&self, _principal: &str, name: &str, value: &str) -> Result<()> {
+    fn set_secret(&self, name: &str, value: &str) -> Result<()> {
         validate_operator_secret_name(name)?;
         // Validate key name
         validate_key_name(name)?;
@@ -1302,7 +1295,7 @@ impl NodeVault for SealedEnvelopeVault {
         })
     }
 
-    fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
+    fn list_keys(&self) -> Result<Vec<String>> {
         let map = self.read_all_internal()?;
         let mut keys: Vec<String> = map
             .into_keys()
@@ -1312,7 +1305,7 @@ impl NodeVault for SealedEnvelopeVault {
         Ok(keys)
     }
 
-    fn delete_secret(&self, _principal: &str, name: &str) -> Result<bool> {
+    fn delete_secret(&self, name: &str) -> Result<bool> {
         validate_operator_secret_name(name)?;
         // Validate key name before attempting delete
         validate_key_name(name)?;
@@ -1321,7 +1314,7 @@ impl NodeVault for SealedEnvelopeVault {
 
     fn put_scoped_secret(&self, scope: &VaultScope, key: &str, value: &str) -> Result<()> {
         match scope {
-            VaultScope::OperatorEnv { principal } => self.set_secret(principal, key, value),
+            VaultScope::OperatorEnv => self.set_secret(key, value),
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
@@ -1338,8 +1331,9 @@ impl NodeVault for SealedEnvelopeVault {
 
     fn get_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<Option<String>> {
         match scope {
-            VaultScope::OperatorEnv { principal } => Ok(read_named_secret(self, principal, key)?
-                .map(|mut value| std::mem::take(&mut *value))),
+            VaultScope::OperatorEnv => {
+                Ok(read_named_secret(self, key)?.map(|mut value| std::mem::take(&mut *value)))
+            }
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
@@ -1352,7 +1346,7 @@ impl NodeVault for SealedEnvelopeVault {
 
     fn delete_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<bool> {
         match scope {
-            VaultScope::OperatorEnv { principal } => self.delete_secret(principal, key),
+            VaultScope::OperatorEnv => self.delete_secret(key),
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
@@ -1365,7 +1359,7 @@ impl NodeVault for SealedEnvelopeVault {
 
     fn list_scoped_secret_keys(&self, scope: &VaultScope) -> Result<Vec<String>> {
         match scope {
-            VaultScope::OperatorEnv { principal } => self.list_keys(principal),
+            VaultScope::OperatorEnv => self.list_keys(),
             VaultScope::RuntimeBundle {
                 bundle_id,
                 namespace,
@@ -1383,17 +1377,83 @@ impl NodeVault for SealedEnvelopeVault {
     }
 }
 
+/// Read-only view of the node's sealed store, for diagnostics such as
+/// `ryeos node doctor`. Opening it never runs rewrap recovery, and no method
+/// writes the store, its keys or a rewrap file: a pending rewrap is reported,
+/// not completed.
+#[derive(Debug, Clone)]
+pub struct ReadOnlySealedVault {
+    store_path: PathBuf,
+    secret_path: PathBuf,
+    rewrap_pending: bool,
+}
+
+impl SealedEnvelopeVault {
+    /// Open the vault of `app_root` for reading only. See
+    /// [`ReadOnlySealedVault`].
+    pub fn open_read_only(app_root: &Path) -> ReadOnlySealedVault {
+        let store_path = default_sealed_store_path(app_root);
+        ReadOnlySealedVault {
+            rewrap_pending: ryeos_vault::sealed::rewrap_pending(&store_path),
+            secret_path: ryeos_vault::paths::default_vault_secret_key_path(app_root),
+            store_path,
+        }
+    }
+}
+
+impl ReadOnlySealedVault {
+    /// Whether an interrupted rewrap waits for the next vault open to
+    /// recover it. While it does, the store is not read.
+    pub fn rewrap_pending(&self) -> bool {
+        self.rewrap_pending
+    }
+
+    /// Whether the store holds this exact placement credential generation.
+    /// The decrypted map, the matched value included, is zeroized before
+    /// this returns; only presence leaves.
+    pub fn placement_credential_present(&self, access: &PlacementCredentialAccess) -> Result<bool> {
+        if self.rewrap_pending {
+            bail!("vault rewrap is pending; the next daemon start or vault operation recovers it");
+        }
+        if !self.store_path.exists() {
+            return Ok(false);
+        }
+        with_store_lock(&self.store_path, || {
+            let secret_key = lillux::vault::read_secret_key(&self.secret_path).map_err(|e| {
+                anyhow!(
+                    "vault: load secret key {}: {e:#}",
+                    self.secret_path.display()
+                )
+            })?;
+            let mut entries =
+                ryeos_vault::sealed::read_sealed_secrets(&self.store_path, &secret_key).map_err(
+                    |error| {
+                        anyhow!(
+                            "vault: read sealed store {}: {error:#}",
+                            self.store_path.display()
+                        )
+                    },
+                )?;
+            let present = entries.contains_key(access.physical_key());
+            use zeroize::Zeroize as _;
+            for value in entries.values_mut() {
+                value.zeroize();
+            }
+            Ok(present)
+        })
+    }
+}
+
 /// Read a single named secret from the vault. Returns `Ok(Some(value))`
 /// when present and `Ok(None)` when absent. Generic launch preparation uses
 /// this only after validating a symbolic requirement against the signed
 /// runtime contract.
 pub fn read_named_secret(
     vault: &dyn NodeVault,
-    principal: &str,
     name: &str,
 ) -> Result<Option<zeroize::Zeroizing<String>>> {
     validate_operator_secret_name(name)?;
-    let mut map = vault.read_all(principal)?;
+    let mut map = vault.read_all()?;
     let selected = map.remove(name).map(zeroize::Zeroizing::new);
     zeroize_secret_values(&mut map);
     Ok(selected)
@@ -1417,7 +1477,7 @@ mod tests {
 
     #[test]
     fn empty_vault_trait_returns_empty() {
-        assert!(EmptyVault.read_all("op").unwrap().is_empty());
+        assert!(EmptyVault.read_all().unwrap().is_empty());
     }
 
     /// Test fixture: a vault that returns a fixed map.
@@ -1938,22 +1998,21 @@ mod tests {
     impl NodeVault for FixedVault {
         fn read_all_entries(
             &self,
-            _principal: &str,
             _token: read_all_token::CrateOnly,
         ) -> Result<HashMap<String, String>> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self.0.clone())
         }
-        fn set_secret(&self, _: &str, _: &str, _: &str) -> Result<()> {
+        fn set_secret(&self, _: &str, _: &str) -> Result<()> {
             bail!("FixedVault does not support writes")
         }
-        fn list_keys(&self, principal: &str) -> Result<Vec<String>> {
-            let map = self.read_all(principal)?;
+        fn list_keys(&self) -> Result<Vec<String>> {
+            let map = self.read_all()?;
             let mut keys: Vec<String> = map.into_keys().collect();
             keys.sort();
             Ok(keys)
         }
-        fn delete_secret(&self, _: &str, _: &str) -> Result<bool> {
+        fn delete_secret(&self, _: &str) -> Result<bool> {
             bail!("FixedVault does not support writes")
         }
     }
@@ -1967,7 +2026,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let sk = lillux::vault::VaultSecretKey::generate();
         let v = SealedEnvelopeVault::new(tmp.join("store.enc"), sk);
-        assert!(v.read_all("op").unwrap().is_empty());
+        assert!(v.read_all().unwrap().is_empty());
     }
 
     #[test]
@@ -1978,12 +2037,9 @@ mod tests {
             lillux::vault::VaultSecretKey::generate(),
         );
         for name in ["LD_PRELOAD", "PATH"] {
-            assert!(
-                v.set_secret("op", name, "value").is_err(),
-                "{name} was stored"
-            );
+            assert!(v.set_secret(name, "value").is_err(), "{name} was stored");
         }
-        assert!(v.list_keys("op").unwrap().is_empty());
+        assert!(v.list_keys().unwrap().is_empty());
     }
 
     #[test]
@@ -1999,7 +2055,7 @@ mod tests {
         write_sealed_secrets(&store_path, &pk, &secrets).unwrap();
 
         let v = SealedEnvelopeVault::new(store_path.clone(), sk);
-        let got = v.read_all("op").unwrap();
+        let got = v.read_all().unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got.get("OPENAI_API_KEY").unwrap(), "sk-1");
         assert_eq!(got.get("DATABASE_URL").unwrap(), "postgres://u@h/db");
@@ -2017,7 +2073,7 @@ mod tests {
         write_sealed_secrets(&store_path, &sk_writer.public_key(), &secrets).unwrap();
 
         let v = SealedEnvelopeVault::new(store_path, sk_reader);
-        let err = v.read_all("op").unwrap_err();
+        let err = v.read_all().unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("fingerprint") || msg.contains("AEAD"),
@@ -2070,7 +2126,7 @@ mod tests {
         write_sealed_secrets(&store_path, &pk, &secrets).unwrap();
 
         let v = SealedEnvelopeVault::new(store_path, sk);
-        let got = v.read_all("op").unwrap();
+        let got = v.read_all().unwrap();
         for (k, v) in &secrets {
             assert_eq!(got.get(k), Some(v), "round-trip mismatch for {k}");
         }
@@ -2109,7 +2165,7 @@ mod tests {
         write_sealed_secrets(&store_path, &old_key.public_key(), &initial).unwrap();
 
         let vault = SealedEnvelopeVault::load(state).unwrap();
-        assert_eq!(vault.read_all("op").unwrap(), initial);
+        assert_eq!(vault.read_all().unwrap(), initial);
 
         let new_key = lillux::vault::VaultSecretKey::generate();
         let mut rotated = HashMap::new();
@@ -2121,8 +2177,8 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(vault.read_all("op").unwrap(), rotated);
-        vault.set_secret("op", "ADDED", "after-rotation").unwrap();
+        assert_eq!(vault.read_all().unwrap(), rotated);
+        vault.set_secret("ADDED", "after-rotation").unwrap();
         let persisted = ryeos_vault::sealed::read_sealed_secrets(&store_path, &new_key).unwrap();
         assert_eq!(persisted.get("TOKEN").map(String::as_str), Some("rotated"));
         assert_eq!(
@@ -2142,14 +2198,14 @@ mod tests {
     #[test]
     fn read_named_secret_present() {
         let v = fixed_vault(&[("ZEN_API_KEY", "sk-zen"), ("OTHER", "other-val")]);
-        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        let result = read_named_secret(&v, "ZEN_API_KEY").unwrap();
         assert_eq!(result.as_deref().map(String::as_str), Some("sk-zen"));
     }
 
     #[test]
     fn read_named_secret_absent() {
         let v = fixed_vault(&[("OTHER", "other-val")]);
-        let result = read_named_secret(&v, "op", "ZEN_API_KEY").unwrap();
+        let result = read_named_secret(&v, "ZEN_API_KEY").unwrap();
         assert!(result.is_none());
     }
 
@@ -2163,29 +2219,29 @@ mod tests {
         let v = SealedEnvelopeVault::new(store_path, sk);
 
         // Set secrets
-        v.set_secret("op", "API_KEY", "sk-123").unwrap();
-        v.set_secret("op", "DB_URL", "postgres://host/db").unwrap();
+        v.set_secret("API_KEY", "sk-123").unwrap();
+        v.set_secret("DB_URL", "postgres://host/db").unwrap();
 
         // List keys
-        let mut keys = v.list_keys("op").unwrap();
+        let mut keys = v.list_keys().unwrap();
         keys.sort();
         assert_eq!(keys, vec!["API_KEY", "DB_URL"]);
 
         // Read back
-        let all = v.read_all("op").unwrap();
+        let all = v.read_all().unwrap();
         assert_eq!(all.get("API_KEY"), Some(&"sk-123".to_string()));
         assert_eq!(all.get("DB_URL"), Some(&"postgres://host/db".to_string()));
 
         // Delete one
-        let deleted = v.delete_secret("op", "API_KEY").unwrap();
+        let deleted = v.delete_secret("API_KEY").unwrap();
         assert!(deleted, "should return true for existing key");
 
         // Verify deleted
-        let keys = v.list_keys("op").unwrap();
+        let keys = v.list_keys().unwrap();
         assert_eq!(keys, vec!["DB_URL"]);
 
         // Delete non-existent returns false
-        let deleted = v.delete_secret("op", "NOPE").unwrap();
+        let deleted = v.delete_secret("NOPE").unwrap();
         assert!(!deleted, "should return false for missing key");
     }
 
@@ -2197,7 +2253,7 @@ mod tests {
         let v = SealedEnvelopeVault::new(store_path, sk);
 
         // Hyphens are not allowed (only [A-Za-z0-9_])
-        let err = v.set_secret("op", "my-key", "val").unwrap_err();
+        let err = v.set_secret("my-key", "val").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("key name"),
@@ -2205,7 +2261,7 @@ mod tests {
         );
 
         // Blocked name
-        let err = v.set_secret("op", "PATH", "/evil").unwrap_err();
+        let err = v.set_secret("PATH", "/evil").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("blocked"),
@@ -2213,7 +2269,7 @@ mod tests {
         );
 
         // Empty name
-        let err = v.set_secret("op", "", "val").unwrap_err();
+        let err = v.set_secret("", "val").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("empty"), "expected empty error, got: {msg}");
     }
@@ -2225,7 +2281,7 @@ mod tests {
         let sk = lillux::vault::VaultSecretKey::generate();
         let v = SealedEnvelopeVault::new(store_path, sk);
 
-        let err = v.delete_secret("op", "bad-key").unwrap_err();
+        let err = v.delete_secret("bad-key").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("key name"),
@@ -2240,10 +2296,10 @@ mod tests {
         let sk = lillux::vault::VaultSecretKey::generate();
         let v = SealedEnvelopeVault::new(store_path, sk);
 
-        v.set_secret("op", "KEY", "old").unwrap();
-        v.set_secret("op", "KEY", "new").unwrap();
+        v.set_secret("KEY", "old").unwrap();
+        v.set_secret("KEY", "new").unwrap();
 
-        let all = v.read_all("op").unwrap();
+        let all = v.read_all().unwrap();
         assert_eq!(all.get("KEY"), Some(&"new".to_string()));
         assert_eq!(all.len(), 1, "should have exactly one key");
     }
@@ -2258,31 +2314,31 @@ mod tests {
 
         v.put_scoped_secret(&scope, "google_account_123", "refresh-token")
             .unwrap();
-        v.set_secret("op", "OPENAI_API_KEY", "sk-op").unwrap();
+        v.set_secret("OPENAI_API_KEY", "sk-op").unwrap();
 
         assert_eq!(
             v.get_scoped_secret(&scope, "google_account_123").unwrap(),
             Some("refresh-token".to_string())
         );
         assert_eq!(
-            read_named_secret(&v, "op", "OPENAI_API_KEY")
+            read_named_secret(&v, "OPENAI_API_KEY")
                 .unwrap()
                 .as_deref()
                 .map(String::as_str),
             Some("sk-op")
         );
         assert_eq!(
-            read_named_secret(&v, "op", "google_account_123")
+            read_named_secret(&v, "google_account_123")
                 .unwrap()
                 .as_deref()
                 .map(String::as_str),
             None
         );
         assert_eq!(
-            v.read_all("op").unwrap(),
+            v.read_all().unwrap(),
             HashMap::from([("OPENAI_API_KEY".to_string(), "sk-op".to_string())])
         );
-        assert_eq!(v.list_keys("op").unwrap(), vec!["OPENAI_API_KEY"]);
+        assert_eq!(v.list_keys().unwrap(), vec!["OPENAI_API_KEY"]);
     }
 
     #[test]
@@ -2325,7 +2381,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("reserved internal runtime vault prefix"));
-        let err = read_named_secret(&v, "op", &name).unwrap_err();
+        let err = read_named_secret(&v, &name).unwrap_err();
         assert!(format!("{err:#}").contains("reserved internal runtime vault prefix"));
     }
 
@@ -2342,41 +2398,144 @@ mod tests {
         let vault = SealedEnvelopeVault::new(store_path, sk);
 
         // Simulate vault_set("API_KEY", "sk-secret-123")
-        vault
-            .set_secret("caller", "API_KEY", "sk-secret-123")
-            .unwrap();
+        vault.set_secret("API_KEY", "sk-secret-123").unwrap();
         // Simulate vault_set("DB_URL", "postgres://localhost/db")
         vault
-            .set_secret("caller", "DB_URL", "postgres://localhost/db")
+            .set_secret("DB_URL", "postgres://localhost/db")
             .unwrap();
 
         // Simulate vault_list
-        let mut keys = vault.list_keys("caller").unwrap();
+        let mut keys = vault.list_keys().unwrap();
         keys.sort();
         assert_eq!(keys, vec!["API_KEY", "DB_URL"]);
 
         // Simulate vault_set overwriting (handler returns vault_fingerprint)
-        vault.set_secret("caller", "API_KEY", "sk-new-key").unwrap();
+        vault.set_secret("API_KEY", "sk-new-key").unwrap();
 
         // Verify overwrite
-        let all = vault.read_all("caller").unwrap();
+        let all = vault.read_all().unwrap();
         assert_eq!(all.get("API_KEY"), Some(&"sk-new-key".to_string()));
         assert_eq!(all.len(), 2);
 
         // Simulate vault_delete
-        let deleted = vault.delete_secret("caller", "API_KEY").unwrap();
+        let deleted = vault.delete_secret("API_KEY").unwrap();
         assert!(deleted);
 
         // Verify deleted
-        let keys = vault.list_keys("caller").unwrap();
+        let keys = vault.list_keys().unwrap();
         assert_eq!(keys, vec!["DB_URL"]);
 
         // Simulate vault_delete with invalid name (handler returns 400)
-        let err = vault.delete_secret("caller", "bad-key").unwrap_err();
+        let err = vault.delete_secret("bad-key").unwrap_err();
         assert!(format!("{err:#}").contains("key name"));
 
         // Simulate vault_set with blocked name (handler returns 400)
-        let err = vault.set_secret("caller", "PATH", "/evil").unwrap_err();
+        let err = vault.set_secret("PATH", "/evil").unwrap_err();
         assert!(format!("{err:#}").contains("blocked"));
+    }
+
+    // ── read-only open ──
+
+    fn placement_vault_fixture(state: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let key_path = ryeos_vault::paths::default_vault_secret_key_path(state);
+        let public_path = ryeos_vault::paths::default_vault_public_key_path(state);
+        let store_path = default_sealed_store_path(state);
+        std::fs::create_dir_all(store_path.parent().unwrap().parent().unwrap()).unwrap();
+        let key = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&key_path, &key).unwrap();
+        lillux::vault::write_public_key(&public_path, &key.public_key()).unwrap();
+        let mut initial = HashMap::new();
+        initial.insert("TOKEN".to_string(), "value".to_string());
+        write_sealed_secrets(&store_path, &key.public_key(), &initial).unwrap();
+        (key_path, public_path, store_path)
+    }
+
+    fn placement_access(generation: char) -> PlacementCredentialAccess {
+        PlacementCredentialAccess::new(
+            &"1".repeat(64),
+            &generation.to_string().repeat(64),
+            "test-backend",
+            "test-account",
+        )
+        .unwrap()
+    }
+
+    fn file_facts(path: &Path) -> (Vec<u8>, std::time::SystemTime) {
+        (
+            std::fs::read(path).unwrap(),
+            std::fs::metadata(path).unwrap().modified().unwrap(),
+        )
+    }
+
+    #[test]
+    fn credential_presence_matches_provision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        placement_vault_fixture(state);
+        let provisioned = placement_access('a');
+        let vault = SealedEnvelopeVault::load(state).unwrap();
+        vault
+            .provision_placement_credential(&provisioned, &provisioned.test_value("secret"))
+            .unwrap();
+
+        let read_only = SealedEnvelopeVault::open_read_only(state);
+        assert!(!read_only.rewrap_pending());
+        assert!(
+            read_only
+                .placement_credential_present(&provisioned)
+                .unwrap()
+        );
+        assert!(
+            !read_only
+                .placement_credential_present(&placement_access('b'))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn read_only_open_never_writes_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        let (key_path, public_path, store_path) = placement_vault_fixture(state);
+        let before = [
+            file_facts(&key_path),
+            file_facts(&public_path),
+            file_facts(&store_path),
+        ];
+
+        let read_only = SealedEnvelopeVault::open_read_only(state);
+        assert!(
+            !read_only
+                .placement_credential_present(&placement_access('a'))
+                .unwrap()
+        );
+        let after = [
+            file_facts(&key_path),
+            file_facts(&public_path),
+            file_facts(&store_path),
+        ];
+        assert_eq!(before, after);
+
+        // An interrupted rewrap stays exactly as it was: the read-only open
+        // reports it and neither recovers it nor reads the store.
+        let journal = store_path.with_extension("rewrap-journal.toml");
+        std::fs::write(&journal, "version = 1\nstore_present = true\n").unwrap();
+        let journal_before = file_facts(&journal);
+        let read_only = SealedEnvelopeVault::open_read_only(state);
+        assert!(read_only.rewrap_pending());
+        let error = read_only
+            .placement_credential_present(&placement_access('a'))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("rewrap is pending"),
+            "{error:#}"
+        );
+        assert_eq!(file_facts(&journal), journal_before);
+        let after = [
+            file_facts(&key_path),
+            file_facts(&public_path),
+            file_facts(&store_path),
+        ];
+        assert_eq!(before, after);
     }
 }

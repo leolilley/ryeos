@@ -81,7 +81,7 @@ async fn live_presentation_in_project(
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_ref: "config:test/presentation".into(),
+            root_ref: "config:test/presentation".into(),
             project_path: Some(spelling.display().to_string()),
             user_principal_id: Some(principal.clone()),
         },
@@ -142,7 +142,7 @@ pub async fn live_shipped_presentation_in_project(
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_ref: "config:ryeos/ui/presentation".into(),
+            root_ref: "config:ryeos/ui/presentation".into(),
             project_path: Some(project_root.display().to_string()),
             user_principal_id: Some(principal.clone()),
         },
@@ -169,7 +169,7 @@ pub async fn live_shipped_presentation(
     let minted = crate::handlers::ui_launch_mint::handle(
         crate::handlers::ui_launch_mint::Request {
             ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-            surface_ref: "config:ryeos/ui/presentation".into(),
+            root_ref: "config:ryeos/ui/presentation".into(),
             project_path: None,
             user_principal_id: Some(principal.clone()),
         },
@@ -497,19 +497,11 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, TestStateStor
     let (store_owner, node) = native.into_parts();
     let (config, identity, write_barrier) = node.into_parts();
     let engine = Arc::new(build_live_bundle_engine());
-    let kind_profiles = Arc::new(
-        ryeos_app::kind_profiles::KindProfileRegistry::build(Some(&engine.kinds))
-            .with_test_profile(
-                "seat_session",
-                ryeos_app::kind_profiles::ThreadKindProfile {
-                    root_executable: false,
-                    supports_interrupt: false,
-                    supports_continuation: false,
-                    supports_operator_followup: false,
-                    retirement_fence: true,
-                },
-            ),
-    );
+    // The seat profile comes from the signed surface kind, exactly as on a
+    // node: nothing is injected here.
+    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));
@@ -670,6 +662,7 @@ fn build_app_state(
         node_policy: Arc::new(
             ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                 ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
                 ),

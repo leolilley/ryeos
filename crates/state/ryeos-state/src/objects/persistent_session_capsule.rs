@@ -42,7 +42,11 @@ pub const PERSISTENT_SESSION_CAPSULE_KIND: &str = "persistent_session_capsule";
 // admitted launch capsules; signed init-v2 remains an independent wire contract.
 // v24 makes the remote-testimony lane of the guest-runtime proof an explicit
 // required-nullable field; a local qualification is never inferred from absence.
-pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 24;
+// v25 retains remote qualification acceptance evidence v4, and a remote
+// runtime-content testimony retains the receiver's own activation join (its
+// receipt, binding and node) beside the origin's evidence. A v24 capsule's
+// acceptance stated a different contract and is not reinterpreted.
+pub const PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION: u32 = 25;
 pub const MAX_PERSISTENT_SESSION_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_EXECUTABLE_SEARCH_PATH_ENTRIES: usize = 32;
 pub const MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES: usize = 32;
@@ -801,6 +805,14 @@ pub struct RetainedExternalRuntimeContentQualification {
     /// is this ref.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub remote_testimony: Option<RetainedRemoteQualificationTestimony>,
+    /// Required nullable, present exactly with `remote_testimony`: the
+    /// receiver's own activation of the content the origin qualified, as its
+    /// launch authenticated it. The origin's evidence names the origin's
+    /// receipt, binding and node; this names this node's. A local
+    /// qualification's evidence already names the local join, so it is null.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub receiver_join:
+        Option<crate::external_content::qualification_subject::ContentQualificationLocalJoin>,
 }
 
 impl RetainedExternalRuntimeContentQualification {
@@ -826,6 +838,14 @@ impl RetainedExternalRuntimeContentQualification {
                 != self.coordinate_id
         {
             anyhow::bail!("retained session-runtime content differs from its exact testimony");
+        }
+        if self.remote_testimony.is_some() != self.receiver_join.is_some() {
+            anyhow::bail!(
+                "retained runtime content carries a receiver join exactly for a remote testimony"
+            );
+        }
+        if let Some(join) = &self.receiver_join {
+            join.validate()?;
         }
         if let Some(testimony) = &self.remote_testimony {
             testimony.validate()?;
@@ -1196,7 +1216,36 @@ pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
 /// without accepting an unbounded document before parsing.
 pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
 /// Current signed source and retained compiled profile vocabulary.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 11;
+/// v12 removes the approval `cancel` response template: RyeOS records only
+/// `accept` and `decline`, so no decision can render it.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 12;
+
+/// A signed structured-session profile whose `schema_version` is not the
+/// current one. There is no compatibility reader: an older profile is refused
+/// and the message names the migration that cures it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructuredSessionProfileSchemaRefusal {
+    pub found: Option<u64>,
+}
+
+impl std::fmt::Display for StructuredSessionProfileSchemaRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let found = self
+            .found
+            .map_or_else(|| "missing".to_owned(), |version| version.to_string());
+        write!(
+            formatter,
+            "structured-session profile schema_version {found} is not admitted; current is \
+             {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION}. Cure: migrate the profile to \
+             schema_version {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION} (v12 removes every \
+             server request's `cancel` response template), then update its Worker's source \
+             digest and re-sign the Worker"
+        )
+    }
+}
+
+impl std::error::Error for StructuredSessionProfileSchemaRefusal {}
+
 pub const MAX_SESSION_AUXILIARY_CONFIGS: usize = 16;
 
 /// Immutable data from captured worker source, mounted at an exact path in
@@ -2089,5 +2138,53 @@ mod tests {
             },
         )]);
         assert!(validate_session_process_environment(&oversized).is_err());
+    }
+
+    #[test]
+    fn retained_remote_content_carries_a_receiver_join_exactly_when_remote() {
+        use super::*;
+        use crate::external_content::qualification_subject::ContentQualificationLocalJoin;
+        let capsule =
+            crate::external_execution::admission::test_support::content_candidate_capsule(
+                &"a".repeat(64),
+            )
+            .unwrap();
+        let local = capsule
+            .retained_external_runtime_content_qualification
+            .unwrap();
+        local.validate().unwrap();
+        assert!(local.remote_testimony.is_none() && local.receiver_join.is_none());
+        let join = ContentQualificationLocalJoin {
+            activation_receipt_hash: "b".repeat(64),
+            binding_hash: "c".repeat(64),
+            target_node_fingerprint: "d".repeat(64),
+        };
+        // A local qualification's evidence already names its own join.
+        let mut joined_local = local.clone();
+        joined_local.receiver_join = Some(join.clone());
+        let error = joined_local.validate().unwrap_err().to_string();
+        assert!(error.contains("receiver join"), "{error}");
+        // A remote testimony without the receiver's join is refused before
+        // its acceptance is read.
+        let mut unjoined_remote = local.clone();
+        unjoined_remote.remote_testimony = Some(RetainedRemoteQualificationTestimony {
+            acceptance_hash: "e".repeat(64),
+            acceptance:
+                crate::external_content::products::qualification_testimony::tests::product_acceptance_evidence(
+                    &"f".repeat(64),
+                ),
+        });
+        let error = unjoined_remote.validate().unwrap_err().to_string();
+        assert!(error.contains("receiver join"), "{error}");
+        // The field is required even when null.
+        let mut value = serde_json::to_value(&local).unwrap();
+        value.as_object_mut().unwrap().remove("receiver_join");
+        assert!(
+            serde_json::from_value::<RetainedExternalRuntimeContentQualification>(value).is_err()
+        );
+        // A noncanonical join is refused.
+        let mut bad = join;
+        bad.binding_hash = "x".into();
+        assert!(bad.validate().is_err());
     }
 }

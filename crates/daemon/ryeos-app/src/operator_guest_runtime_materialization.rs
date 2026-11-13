@@ -869,6 +869,7 @@ mod tests {
                 provides_kinds: vec![],
                 requires_kinds: vec![],
                 uses_kinds: vec![],
+                owns_namespaces: vec![],
             },
             signed_bytes: signed_bundle.into_bytes(),
         };

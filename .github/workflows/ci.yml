@@ -26,6 +26,11 @@ on:
         required: true
         default: false
         type: boolean
+      browser_smoke:
+        description: "Run the installed browser client smoke in headless Chromium (expensive)"
+        required: true
+        default: false
+        type: boolean
       rust_2024_audit:
         description: "Inventory Rust 2024 compatibility diagnostics"
         required: true
@@ -67,7 +72,7 @@ env:
 jobs:
   static-policy:
     name: Static repository policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -114,9 +119,49 @@ jobs:
           python3 tests/development/hosted_oci_runtime_verifier.py
           python3 tests/development/oci_hook_contract.py
           python3 tests/development/contained_workflow_products.py
+          python3 -B tests/development/prove_contained_oci_provider.py
+
+      - name: Check build-support input rebuild planning
+        run: python3 -B tests/e2e/authoring-environment/test_rebuild_build_support_inputs.py
+
+      - name: Check development host tools
+        run: python3 tests/development/dev_host_tools.py
 
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
+
+      - name: Check native bundle publication inventories
+        run: python3 -B scripts/release/test-native-bundle-wp0.py
+
+      - name: Check installer lifecycle boundaries
+        run: bash scripts/pkg/test-install-lifecycle.sh
+
+      - name: Check contained Docker host setup
+        run: |
+          python3 -B scripts/pkg/test-contained-docker-node.py
+          python3 -B scripts/pkg/test-contained-docker-runtime.py
+          python3 -B scripts/release/test-contained-oci-hook-artifact.py
+
+      - name: Check workspace version gate
+        run: python3 -B scripts/release/test-check-workspace-versions.py
+
+      - name: Check development registry bootstrap entry
+        run: python3 -B scripts/release/test-development-registry.py
+
+      - name: Check bundle-release sources
+        run: |
+          for test in bundles/bundle-release/tests/test-*.py; do
+            echo "::group::$test"
+            python3 -B "$test"
+            echo "::endgroup::"
+          done
+
+      - name: Check release-candidate inspection tooling
+        run: |
+          python3 -B scripts/release/test-audit-bundle-generation.py
+          python3 -B scripts/release/test-inspect-core-native-set.py
+          python3 -B scripts/release/test-inspect-native-bundle-input.py
+          python3 -B scripts/release/test-release-candidate.py
 
       - name: Check Codex authored contract
         run: python3 bundles/codex/test_contract.py
@@ -147,26 +192,9 @@ jobs:
       - name: Check workspace dependency direction
         run: python3 .ai/tools/ryeos/development/repository-validation/dependency-layers.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
-      - name: Use the browser adapter's pinned Node
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: crates/clients/web/package.json
-          cache: npm
-          cache-dependency-path: crates/clients/web/package-lock.json
-
-      - name: Install browser adapter test dependencies
-        working-directory: crates/clients/web
-        run: |
-          npm install --global "npm@$(node -p "require('./package.json').engines.npm")"
-          npm ci
-
-      - name: Check browser key adapter
-        working-directory: crates/clients/web
-        run: npm test
-
   rust-policy:
     name: Rust formatting, lint, and dependency policy
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Check out repository
@@ -175,13 +203,14 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
@@ -201,15 +230,22 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check test-support features stay out of shipped builds
+        run: ./scripts/ci/check-test-support-feature-leak.sh
+
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # The browser renderer's page entry and the runtime's web platform compile only for wasm32.
+      - name: Check browser renderer Clippy policy
+        run: cargo clippy --locked -p ryeos-client-rune --target wasm32-unknown-unknown -- -D warnings
 
       - name: Check dependency advisories, licenses, and sources
         run: cargo deny check
 
   secrets:
     name: Secret scan
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Check out repository history
@@ -261,7 +297,7 @@ jobs:
 
   bundles:
     name: Bundle refresh for tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
@@ -271,7 +307,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -308,7 +344,7 @@ jobs:
 
   workspace-archive:
     name: Workspace test archive
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
@@ -318,7 +354,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -370,7 +406,7 @@ jobs:
   test-shard:
     name: Workspace tests shard ${{ matrix.shard }}/8
     needs: [bundles, workspace-archive]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -386,7 +422,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -447,7 +483,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Show the coreutils under test
         run: |
@@ -490,7 +526,7 @@ jobs:
 
   scheduler-compositions:
     name: Scheduler composition checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # Three no-default-features checks at -j 1 take 20-30 minutes on a runner; the
     # job ceiling, not a step, bounds a stuck compilation.
     timeout-minutes: 60
@@ -502,7 +538,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -581,7 +617,7 @@ jobs:
     # Aggregates the build, shards and composition checks so the required
     # check keeps its name and fails if any part failed or was skipped.
     needs: [bundles, workspace-archive, test-shard, multicall-coreutils, scheduler-compositions]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
     steps:
@@ -594,7 +630,7 @@ jobs:
 
   crash-archive:
     name: Crash qualification build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
@@ -604,7 +640,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -650,7 +686,7 @@ jobs:
   crash-phase:
     name: Crash recovery ${{ matrix.label }}
     needs: [bundles, crash-archive]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # The serial two-node handoff matrix takes roughly 15 minutes of test time
     # on a runner by itself; every phase gets a runner of its own and keeps its
     # single test thread.
@@ -680,7 +716,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -736,7 +772,7 @@ jobs:
   crash-qualification:
     name: Crash recovery qualification
     needs: [bundles, crash-archive, crash-phase]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.run_tests) }}
     steps:
@@ -749,7 +785,7 @@ jobs:
 
   bundle-refresh:
     name: Bundle refresh
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_bundles }}
     steps:
@@ -759,7 +795,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -785,7 +821,7 @@ jobs:
 
   installed-resume-smoke:
     name: Installed restart/resume smoke
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.installed_resume_smoke }}
     steps:
@@ -795,7 +831,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -821,9 +857,60 @@ jobs:
           RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
         run: ./tests/e2e/installed-resume/smoke.sh
 
+  browser-smoke:
+    name: Installed browser client smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_smoke }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build and install full distribution
+        run: |
+          CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --populate --all --bundle-set full --no-init --no-daemon-restart
+
+      - name: Install headless Chromium for the smoke driver
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/playwright" @playwright/test@1.58.2
+          "$RUNNER_TEMP/playwright/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Exercise the browser client
+        env:
+          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_SHOTS: ${{ runner.temp }}/browser-smoke
+          PLAYWRIGHT_ROOT: ${{ runner.temp }}/playwright
+        run: ./tests/e2e/browser-smoke/smoke.sh
+
+      - name: Keep the smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: browser-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/browser-smoke
+          if-no-files-found: ignore
+          retention-days: 14
+
   rust-2024-audit:
     name: Rust 2024 compatibility audit
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_2024_audit }}
     steps:
@@ -833,7 +920,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -874,25 +961,12 @@ jobs:
           set +e
           CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
           RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked -p ryeos-client-web \
+            cargo check --locked -p ryeos-client-rune -p ryeos-client-runtime \
               --target wasm32-unknown-unknown --lib --message-format=json \
               >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
               2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"
           printf '%s\n' "$?" \
             >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.status"
-
-      - name: Audit excluded bubblewrap adapter
-        run: |
-          set +e
-          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-adapter-target" \
-          RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked \
-              --manifest-path bundles/sandbox-linux-bubblewrap/adapter/Cargo.toml \
-              --all-targets --message-format=json \
-              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.jsonl" \
-              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.stderr"
-          printf '%s\n' "$?" \
-            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.status"
 
       - name: Upload compatibility diagnostics
         if: ${{ always() }}
@@ -906,7 +980,7 @@ jobs:
       - name: Require every audit surface to compile
         run: |
           failed=0
-          for surface in workspace doctest wasm adapter; do
+          for surface in workspace doctest wasm; do
             status="$(cat "$RUNNER_TEMP/ryeos-rust-2024-diagnostics/$surface.status")"
             if [[ "$status" != 0 ]]; then
               echo "::error::$surface compatibility audit exited with status $status"

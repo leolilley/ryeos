@@ -234,13 +234,64 @@ async fn confirm(
             req.login_epoch,
             &req.expected_account_digest,
         )
-        .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
+        .map_err(ceremony_error)?;
     Ok(json!({
         "profile_id":req.profile_id,
         "state":"active",
         "credential_generation":generation,
         "confirmed_account_digest":req.expected_account_digest,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbandonLoginRequest {
+    profile_id: String,
+    login_epoch: u64,
+}
+
+/// Clear an expired, unlocked login the operator names by epoch. The profile
+/// returns to `unauthenticated` so a new login can begin; nothing else moves.
+async fn abandon_login(
+    req: AbandonLoginRequest,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    let owner = require_operator(&state, &ctx)?.to_owned();
+    let _operation_guard =
+        ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
+            .await
+            .map_err(internal)?;
+    let profile = state
+        .state_store
+        .credential_profile(&req.profile_id)
+        .map_err(internal)?
+        .ok_or(HandlerError::NotFound)?;
+    ctx.require_owner(Some(&profile.owner_principal))?;
+    let authority_revision = state
+        .state_store
+        .abandon_credential_enrollment(&req.profile_id, &owner, req.login_epoch)
+        .map_err(ceremony_error)?;
+    Ok(json!({
+        "profile_id":req.profile_id,
+        "state":"unauthenticated",
+        "abandoned_login_epoch":req.login_epoch,
+        "authority_revision":authority_revision,
+        "credential_generation":profile.credential_generation,
+    }))
+}
+
+/// Ceremony refusals are state conflicts the operator can act on: 409 with
+/// the stable code. Anything else keeps the earlier 400 shape.
+fn ceremony_error(error: anyhow::Error) -> HandlerError {
+    match error.downcast_ref::<ryeos_app::runtime_db::CredentialCeremonyRefusal>() {
+        Some(refusal) => HandlerError::Structured {
+            code: refusal.code().to_string(),
+            status: 409,
+            body: refusal.body(),
+        },
+        None => HandlerError::BadRequest(format!("{error:#}")),
+    }
 }
 
 async fn revoke(
@@ -601,6 +652,19 @@ pub const CONFIRM_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
+pub const ABANDON_LOGIN_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:credential-profiles/abandon-login",
+    endpoint: "credential-profiles.abandon-login",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.credential-profiles/abandon-login"],
+    handler: |params, ctx, state| {
+        Box::pin(async move {
+            let req: AbandonLoginRequest = crate::handler_error::parse_request(params)?;
+            abandon_login(req, ctx, state).await.map_err(Into::into)
+        })
+    },
+};
+
 pub const DELETE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:credential-profiles/delete",
     endpoint: "credential-profiles.delete",
@@ -613,3 +677,49 @@ pub const DELETE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_app::runtime_db::CredentialCeremonyRefusal;
+
+    #[test]
+    fn confirm_errors_are_409_with_code() {
+        let refusals = [
+            CredentialCeremonyRefusal::ConfirmLockHeld {
+                profile_id: "p".into(),
+                login_epoch: 1,
+                lock_owner: "worker".into(),
+                holding_chain_root_id: Some("T-login".into()),
+            },
+            CredentialCeremonyRefusal::ConfirmExpired {
+                profile_id: "p".into(),
+                login_epoch: 1,
+                lock_owner: None,
+            },
+            CredentialCeremonyRefusal::ConfirmWrongState {
+                profile_id: "p".into(),
+                state: "active".into(),
+                current_login_epoch: 2,
+                requested_login_epoch: 1,
+            },
+        ];
+        for refusal in refusals {
+            let expected = refusal.code();
+            match ceremony_error(anyhow::Error::new(refusal).context("confirm")) {
+                HandlerError::Structured { code, status, body } => {
+                    assert_eq!(code, expected);
+                    assert_eq!(status, 409);
+                    assert_eq!(body["code"], expected);
+                }
+                other => panic!("expected a structured 409, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            ceremony_error(anyhow::anyhow!(
+                "credential confirmation account digest changed"
+            )),
+            HandlerError::BadRequest(_)
+        ));
+    }
+}

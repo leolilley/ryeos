@@ -55,8 +55,12 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
     if drained > 0 {
         tracing::info!(drained, "scheduler: recovered durable fire-journal outbox");
     }
-    let live_ids =
-        projection::rebuild_specs_from_dir(&schedules_dir, &db, ctx.schedule_trust_store())?;
+    let live_ids = projection::rebuild_specs_from_dir(
+        &schedules_dir,
+        &db,
+        ctx.schedule_trust_store(),
+        ctx.schedule_signer_fingerprint(),
+    )?;
 
     let specs = db.list_specs(false, None)?;
     let now = lillux::time::timestamp_millis();
@@ -393,6 +397,10 @@ mod tests {
             &self.trust
         }
 
+        fn schedule_signer_fingerprint(&self) -> &str {
+            ""
+        }
+
         fn get_thread_status(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
             Ok(self.statuses.lock().unwrap().get(thread_id).cloned())
         }
@@ -433,6 +441,15 @@ mod tests {
                 thread_id: _thread_id.to_string(),
                 admitted_capsule_hash: "44".repeat(32),
             })
+        }
+
+        async fn auto_pause_schedule(
+            &self,
+            _schedule_id: &str,
+            _expected_spec_hash: &str,
+            _reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+        ) -> anyhow::Result<bool> {
+            Ok(false)
         }
     }
 

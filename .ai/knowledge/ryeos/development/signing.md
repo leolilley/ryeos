@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:827122e65cde22c98b3249a4b90bd9075f48d8fd1962b7a516de5c1ed20d39f9:JEhFYu8S4tQX/Bamsk7TTDFv8yy8tTLDKBfySHT/uXIHCNE8DyQSAlTL+fHDT/SI3C18Ud2DsOGM9dGPACyJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:09:46Z:59dd1e8f3f5565f38bcc452d8776fd03546e3f8cf5b0f6bff433a00dc775cc34:XY7i/Gy8gk25/YYGZyBzasEzhOdJ133JYfuVoJQuVJw/wt0q9L1EfefuHtKKE+xri1TpUB7Mcit36s0hZQ23Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -98,7 +98,7 @@ public development publisher fixture, as specified in
 `source-local-bundle-development.md`. Sign selected edited items in place:
 
 ```bash
-scripts/dev/sign-dev.sh .ai/knowledge/ryeos/development/<entry>.md
+.ai/tools/ryeos/development/maintainer/lib/sign-dev.sh .ai/knowledge/ryeos/development/<entry>.md
 ```
 
 This existing source-authoring entry does not need an installed node, runtime

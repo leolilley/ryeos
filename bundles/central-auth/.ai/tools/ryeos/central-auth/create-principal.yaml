@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T21:49:53Z:2c50a1308867421f2d60603b78af700952296a6d0e24ae79cdb06beef242830f:a1xp/mecdmFE9XwO/t2e5lxUkHr4m3NtZ9X16Xk6k9WYRnNBS5tYJYzenfLFsiYBU/hgw8ebs0iUcJeBKiI+Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:43:18Z:8c9a82cb301c029b3e6c6eaac365aab1eaacbf4e41c088c1ef34a2a94c363214:x53a9hqPZgl8Zw6chMXu9sDo7RW3n41q7QH813ENPns3JvbqPkKw5ElR9vzaGBnOn9hD93DpuDcv0rU/tzZtCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-principal"
@@ -18,12 +18,6 @@ config:
 config_schema:
   type: object
   properties:
-    project_path:
-      type: string
-      description: "Project root used for .ai/state/central-auth storage."
-    runtime_state_dir:
-      type: string
-      description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
       description: "Realm/app namespace, e.g. example-app."

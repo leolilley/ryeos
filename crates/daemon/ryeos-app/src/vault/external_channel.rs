@@ -218,12 +218,12 @@ mod tests {
         assert_eq!(first.as_str(), second.as_str());
         let decoded = access.decode(second).unwrap();
         assert!(lillux::valid_hash(&decoded.bootstrap_capability_hash()));
-        assert!(vault.read_all("operator").unwrap().is_empty());
-        assert!(vault.list_keys("operator").unwrap().is_empty());
+        assert!(vault.read_all().unwrap().is_empty());
+        assert!(vault.list_keys().unwrap().is_empty());
         assert!(
             vault
                 .get_scoped_secret(
-                    &crate::vault::VaultScope::operator_env("operator"),
+                    &crate::vault::VaultScope::operator_env(),
                     access.physical_key(),
                 )
                 .is_err()
@@ -236,16 +236,8 @@ mod tests {
                 )
                 .is_err()
         );
-        assert!(
-            vault
-                .set_secret("operator", access.physical_key(), "forged")
-                .is_err()
-        );
-        assert!(
-            vault
-                .delete_secret("operator", access.physical_key())
-                .is_err()
-        );
+        assert!(vault.set_secret(access.physical_key(), "forged").is_err());
+        assert!(vault.delete_secret(access.physical_key()).is_err());
 
         let different = access.generate_value().unwrap();
         assert!(
@@ -290,9 +282,6 @@ mod tests {
             .map(|handle| handle.join().unwrap())
             .collect();
         assert!(digests.iter().all(|digest| digest == &digests[0]));
-        assert_eq!(
-            vault.read_all("operator").unwrap(),
-            std::collections::HashMap::new()
-        );
+        assert_eq!(vault.read_all().unwrap(), std::collections::HashMap::new());
     }
 }

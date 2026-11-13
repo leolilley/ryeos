@@ -225,6 +225,77 @@ async fn a_direct_tool_signed_by_an_unpinned_key_is_refused_by_default() {
     );
 }
 
+// ── Project trust documents (gap C stopgap) ─────────────────────────────
+
+/// Write `key`'s trust document into the project's own trust directory,
+/// signed by `signer`.
+fn plant_project_pin(project: &Path, key: &SigningKey, signer: &SigningKey) {
+    let verifying_key = key.verifying_key();
+    let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
+    let body = ryeos_engine::trust::TrustedKeyDoc {
+        fingerprint: fingerprint.clone(),
+        owner: "planted".to_owned(),
+        version: "1.0.0".to_owned(),
+        attestation: None,
+        verifying_key,
+    }
+    .to_toml();
+    let dir = project.join(".ai/config/keys/trusted");
+    std::fs::create_dir_all(&dir).expect("create project trust dir");
+    std::fs::write(
+        dir.join(format!("{fingerprint}.toml")),
+        lillux::signature::sign_content(&body, signer, "#", None),
+    )
+    .expect("write project trust document");
+}
+
+/// Audit 6b: a key pinned by writing its own self-signed document into the
+/// project used to make that key's tools `trusted_project`. The node never
+/// vouched for it, so the project's resolution is refused and the tool does
+/// not run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_signed_project_pin_cannot_admit_a_tool() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let planted = SigningKey::from_bytes(&[0x5bu8; 32]);
+    plant_project_pin(project.path(), &planted, &planted);
+    plant_gap_echo(project.path(), Some(&planted));
+
+    let (status, body) = execute_gap_echo(&h, project.path()).await;
+    assert!(!status.is_success(), "status={status}; body={body:#}");
+    let message = body.to_string();
+    assert!(
+        message.contains(ryeos_engine::trust::PROJECT_TRUST_SELF_SIGNED),
+        "the refusal names the project trust code: {body:#}"
+    );
+    assert!(
+        message.contains("trust-pin"),
+        "the refusal names the cure: {body:#}"
+    );
+    assert!(
+        !message.contains("gap-b-check\\n"),
+        "the tool must not have run: {body:#}"
+    );
+}
+
+/// The same project pin, signed by the node's operator key, still admits the
+/// project author's tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_pin_signed_by_the_operator_admits_a_tool() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let author = SigningKey::from_bytes(&[0x5cu8; 32]);
+    plant_project_pin(project.path(), &author, &fixture.user);
+    plant_gap_echo(project.path(), Some(&author));
+
+    let (status, body) = execute_gap_echo(&h, project.path()).await;
+    assert!(status.is_success(), "status={status}; body={body:#}");
+    assert!(
+        body.to_string().contains("gap-b-check"),
+        "the operator-vouched project tool must run: {body:#}"
+    );
+}
+
 // ── Operator admission and narrow principals ────────────────────────────
 
 /// Replace the node-signed `launch_trust` policy section before the daemon
@@ -313,6 +384,9 @@ async fn a_narrow_caller_cannot_reach_another_handler_through_a_planted_service(
                 "ryeos.execute.service.health/status",
                 ryeos_app::execution_policy::LIVE_PROJECT_READ_CAPABILITY,
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
+                // `post_execute` sends the standard local-live policy, whose
+                // project overlay includes the operator vault.
+                ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY,
             ],
         )
     };
@@ -350,5 +424,124 @@ async fn a_narrow_caller_cannot_reach_another_handler_through_a_planted_service(
         status,
         reqwest::StatusCode::FORBIDDEN,
         "the narrow caller holds no remote.configure capability: {body:#}"
+    );
+}
+
+// ── One name, one item ──────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_formats_of_one_tool_name_are_refused_with_candidates() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_gap_echo(project.path(), Some(&fixture.user));
+    let signed = lillux::signature::sign_content(GAP_ECHO_TOOL, &fixture.user, "#", None);
+    std::fs::write(project.path().join(".ai/tools/gap/echo.json"), signed)
+        .expect("write second format of the gap echo tool");
+
+    let (status, body) = execute_gap_echo(&h, project.path()).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "body={body:#}");
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some("ambiguous_item_formats"),
+        "body={body:#}"
+    );
+    assert_eq!(
+        body.get("item_ref").and_then(Value::as_str),
+        Some("tool:gap/echo"),
+        "body={body:#}"
+    );
+    let candidates = body["details"]["candidates"].to_string();
+    assert!(
+        candidates.contains(".ai/tools/gap/echo.yaml"),
+        "body={body:#}"
+    );
+    assert!(
+        candidates.contains(".ai/tools/gap/echo.json"),
+        "body={body:#}"
+    );
+    assert!(
+        body.get("remediation").and_then(Value::as_str).is_some(),
+        "the refusal must name the cure: {body:#}"
+    );
+    assert!(
+        !body.to_string().contains("gap-b-check\\n"),
+        "neither format may run: {body:#}"
+    );
+}
+
+// ── Bundle-owned namespaces ─────────────────────────────────────────────
+
+/// A project copy of the core Python function runtime. Its command would
+/// print a marker if the copy were ever used as the executor.
+const PLANTED_PYTHON_RUNTIME: &str = "category: \"ryeos/core/runtimes/python\"
+version: \"1.1.1\"
+executor_id: \"@subprocess\"
+execution_protocol: \"protocol:ryeos/core/opaque\"
+config:
+  command: /bin/echo
+  args: [\"project-runtime-copy-ran\"]
+";
+
+/// A project tool that names the core runtime as its executor.
+const PYTHON_RUNTIME_CONSUMER: &str = "category: gap
+executor_id: \"tool:ryeos/core/runtimes/python/function\"
+execution_protocol: \"protocol:ryeos/core/tool_callback\"
+config: {}
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_copy_of_core_python_runtime_is_refused() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let runtime_dir = project.path().join(".ai/tools/ryeos/core/runtimes/python");
+    std::fs::create_dir_all(&runtime_dir).expect("create project runtime dir");
+    std::fs::write(
+        runtime_dir.join("function.yaml"),
+        lillux::signature::sign_content(PLANTED_PYTHON_RUNTIME, &fixture.user, "#", None),
+    )
+    .expect("write project runtime copy");
+
+    let tool_dir = project.path().join(".ai/tools/gap");
+    std::fs::create_dir_all(&tool_dir).expect("create project tools dir");
+    std::fs::write(
+        tool_dir.join("pyconsumer.yaml"),
+        lillux::signature::sign_content(PYTHON_RUNTIME_CONSUMER, &fixture.user, "#", None),
+    )
+    .expect("write consumer tool");
+
+    let (status, body) = h
+        .post_execute(
+            "tool:gap/pyconsumer",
+            project.path().to_str().unwrap(),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("post tool:gap/pyconsumer");
+
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "body={body:#}");
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some("reserved_namespace_shadow"),
+        "body={body:#}"
+    );
+    assert_eq!(
+        body.pointer("/details/owning_bundle")
+            .and_then(Value::as_str),
+        Some("core"),
+        "the refusal names the owning bundle: {body:#}"
+    );
+    let text = body.to_string();
+    assert!(
+        text.contains(".ai/tools/ryeos/core/runtimes/python/function.yaml"),
+        "the refusal names the project file: {body:#}"
+    );
+    assert!(
+        text.contains("your own namespace"),
+        "the refusal names the cure: {body:#}"
+    );
+    assert!(
+        !text.contains("project-runtime-copy-ran"),
+        "the project copy must never run: {body:#}"
     );
 }

@@ -258,6 +258,7 @@ fn live_bundle_engine(
     .zip(roots.iter().cloned())
     .map(
         |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name: name.to_owned(),
             canonical_root,
         },
@@ -3236,6 +3237,7 @@ fn composed_controller_attachment_on(
             &authoring.root,
             "external-candidate-authoring",
             Some(&qualification_inputs.grant),
+            None,
         )
     };
     let (qualified, placement_qualification) = runtime_host.block_on(qualify_runtime_selection(

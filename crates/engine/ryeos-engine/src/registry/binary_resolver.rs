@@ -269,6 +269,9 @@ struct VerifiedBundleExecutorSet {
     /// Signed executor item ref to the hash of its ItemSource object, which
     /// commits the content blob hash, mode and item ref.
     item_sources: HashMap<String, String>,
+    /// Signed executor item ref to the verified content hash of its
+    /// installed executable bytes.
+    content_hashes: std::collections::BTreeMap<String, String>,
 }
 
 /// Capture exact signed executable bytes and retain a private witness of this
@@ -1207,6 +1210,24 @@ pub fn verify_bundle_executor_manifest_ref_identity(
     }))
 }
 
+/// Content identity of every signed executable one bundle ships, for every
+/// target triple, keyed by executor item ref (`bin/<triple>/<name>`). The
+/// bundle passes the same complete verification as
+/// [`verify_bundle_executor_manifest`] first. Reads only: nothing is copied,
+/// sealed or executed.
+pub fn verified_bundle_payload_hashes(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<std::collections::BTreeMap<String, String>, EngineError> {
+    verify_bundle_executor_manifest_items(bundle_root, node_trust_store)
+        .map(|verified| verified.content_hashes)
+}
+
+/// The executor item ref a bundle's `bin:<name>` resolves to on this host.
+pub fn host_executor_item_ref(name: &str) -> String {
+    format!("bin/{}/{name}", env!("RYEOS_ENGINE_HOST_TRIPLE"))
+}
+
 /// Verify every admitted bundle's executable set and require each
 /// native-executor identity to resolve to exactly one signed executable.
 ///
@@ -1306,6 +1327,7 @@ fn verify_bundle_executor_manifest_items(
         return Ok(VerifiedBundleExecutorSet {
             identity: None,
             item_sources: HashMap::new(),
+            content_hashes: std::collections::BTreeMap::new(),
         });
     }
     if !manifest_ref_exists {
@@ -1373,6 +1395,7 @@ fn verify_bundle_executor_manifest_items(
     let expected_item_refs: HashSet<String> = item_source_hashes.keys().cloned().collect();
     let mut ordered_item_refs: Vec<&String> = item_source_hashes.keys().collect();
     ordered_item_refs.sort_unstable();
+    let mut content_hashes = std::collections::BTreeMap::new();
     for item_ref in ordered_item_refs {
         let (triple, bin_name) = parse_executor_item_ref(item_ref).map_err(|detail| {
             bundle_executor_error(
@@ -1467,6 +1490,7 @@ fn verify_bundle_executor_manifest_items(
                 computed: installed_hash,
             });
         }
+        content_hashes.insert(item_ref.clone(), blob_hash);
     }
 
     let mut installed_item_refs = HashSet::new();
@@ -1556,6 +1580,7 @@ fn verify_bundle_executor_manifest_items(
             .iter()
             .map(|(item_ref, hash)| (item_ref.clone(), hash.clone()))
             .collect(),
+        content_hashes,
     })
 }
 
@@ -2916,6 +2941,7 @@ mod tests {
 
     fn roots_for(bundle_roots: &[&Path]) -> ResolutionRoots {
         ResolutionRoots {
+            owned_namespaces: Vec::new(),
             ordered: bundle_roots
                 .iter()
                 .map(|root| {

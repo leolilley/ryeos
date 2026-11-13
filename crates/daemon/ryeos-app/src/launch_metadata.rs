@@ -58,7 +58,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// authority shape bumps it; a stored record of any other version is refused
 /// before its nested authority is decoded, and the execution-history reset
 /// discards it.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 36;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 37;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -137,9 +137,13 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub in_process_lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
 
-    /// Cancellation policy resolved at decorate-spec time and snapshotted
-    /// here so the daemon can route cancellation without re-loading the spec.
-    /// `None` = use the default 3s graceful shutdown.
+    /// Stop policy resolved for this launch and snapshotted here so the
+    /// daemon can route cancellation without re-loading the spec: the
+    /// `native_async` declaration, else the signed execution config's
+    /// `cancellation_mode` / `cancellation_grace_secs`. Every managed launch
+    /// records one. `None` remains only where no subprocess policy applies
+    /// (in-process handlers, metadata-free attaches); a stop then uses the
+    /// node's named fallback, `process::UNRECORDED_STOP_POLICY_GRACE_SECS`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cancellation_mode: Option<CancellationMode>,
 
@@ -242,6 +246,27 @@ pub struct RuntimeLaunchMetadata {
     /// authority, never a producer parameter or producer stdout field.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub effect_authority: Option<ryeos_effect_contract::PreparedEffectDispatchAuthority>,
+
+    /// The principal whose scopes covered this thread's declared capabilities
+    /// at admission, and the authorized-key grant it authenticated under.
+    /// Recorded so live work can be found when a grant is revoked or replaced.
+    /// An operator follow-up records its own sender; machine continuations
+    /// keep the admitting principal. `None` for launches that no
+    /// grant-bearing caller admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covering_authority: Option<CoveringAuthority>,
+}
+
+/// The caller that lent a thread its declared capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoveringAuthority {
+    /// Fingerprint of the covering principal.
+    pub principal: String,
+    /// Digest (`source_file_hash`) of the authorized-key grant the principal
+    /// authenticated under; `None` when the caller was not grant-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +311,7 @@ impl Default for RuntimeLaunchMetadata {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: None,
         }
     }
 }
@@ -868,6 +894,11 @@ impl RuntimeLaunchMetadata {
                 &self.effect_authority,
                 &attempt.effect_authority,
             )?,
+            covering_authority: exact(
+                "covering authority",
+                &self.covering_authority,
+                &attempt.covering_authority,
+            )?,
         };
         merged.validate()?;
         Ok(merged)
@@ -1019,8 +1050,9 @@ impl RuntimeLaunchMetadata {
 
     /// Build metadata from a finalized engine `SubprocessSpec`.
     ///
-    /// Captures the `native_async` cancellation policy and the
-    /// `native_resume` policy, both of which are spec-level
+    /// Captures the compiled stop policy (`native_async`, else the
+    /// execution-config policy) and the `native_resume` policy, both of
+    /// which are spec-level
     /// `DecorateSpec`-phase outputs the daemon needs to route
     /// shutdown / resume without re-loading the spec.
     ///
@@ -1036,11 +1068,7 @@ impl RuntimeLaunchMetadata {
             // DirectItemExecutor before thread birth.
             launch_driver: None,
             in_process_lifecycle_authority: None,
-            cancellation_mode: spec
-                .execution
-                .native_async
-                .as_ref()
-                .map(|na| na.cancellation_mode),
+            cancellation_mode: spec.execution.stop_policy(),
             native_resume: spec.execution.native_resume.clone(),
             checkpoint_dir: None,
             resume_context: None,
@@ -1057,6 +1085,7 @@ impl RuntimeLaunchMetadata {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: None,
         }
     }
 
@@ -1318,6 +1347,7 @@ impl RuntimeLaunchMetadata {
             // (no allowance reset).
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
+            covering_authority: self.covering_authority.clone(),
         }
     }
 
@@ -1354,8 +1384,16 @@ impl RuntimeLaunchMetadata {
             // ledger exists to prevent (plan constraint 6, §10.3).
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
+            covering_authority: self.covering_authority.clone(),
             ..Self::default()
         }
+    }
+
+    /// Record the principal (and grant digest, when grant-backed) that covered
+    /// this thread's declared capabilities.
+    pub fn with_covering_authority(mut self, authority: CoveringAuthority) -> Self {
+        self.covering_authority = Some(authority);
+        self
     }
 
     pub fn with_sealed_root_request(mut self, request: SealedRootExecutionRequest) -> Self {
@@ -1862,6 +1900,28 @@ mod tests {
     }
 
     #[test]
+    fn from_spec_without_native_async_records_execution_config_policy() {
+        let mut spec = empty_spec();
+        spec.execution.cancellation_mode = Some(CancellationMode::Graceful { grace_secs: 2 });
+        let m = RuntimeLaunchMetadata::from_spec(&spec);
+        assert_eq!(
+            m.cancellation_mode,
+            Some(CancellationMode::Graceful { grace_secs: 2 })
+        );
+    }
+
+    #[test]
+    fn from_spec_native_async_declaration_owns_the_stop_policy() {
+        let mut spec = empty_spec();
+        spec.execution.native_async = Some(NativeAsyncSpec {
+            cancellation_mode: CancellationMode::Hard,
+        });
+        spec.execution.cancellation_mode = Some(CancellationMode::Graceful { grace_secs: 2 });
+        let m = RuntimeLaunchMetadata::from_spec(&spec);
+        assert_eq!(m.cancellation_mode, Some(CancellationMode::Hard));
+    }
+
+    #[test]
     fn from_spec_native_async_hard_propagates() {
         let mut spec = empty_spec();
         spec.execution.native_async = Some(NativeAsyncSpec {
@@ -1907,6 +1967,10 @@ mod tests {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: Some(CoveringAuthority {
+                principal: "fp:caller".to_string(),
+                grant_digest: Some("a".repeat(64)),
+            }),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
@@ -2074,7 +2138,10 @@ mod tests {
         let live_dir = tempfile::tempdir().unwrap();
         let live_authority = crate::execution_policy::resolve_standard_local_live_authority(
             live_dir.path(),
-            vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            vec![
+                crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+                crate::execution_policy::OPERATOR_VAULT_CAPABILITY.to_string(),
+            ],
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap()

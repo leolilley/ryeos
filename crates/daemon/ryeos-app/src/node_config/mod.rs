@@ -21,6 +21,7 @@
 //! Trust model: signed-required, fail-closed. Unsigned, tampered, or
 //! untrusted-signer items are startup errors.
 
+pub mod coherence;
 pub mod loader;
 pub mod sections;
 

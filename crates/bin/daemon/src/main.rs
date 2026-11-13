@@ -3616,6 +3616,36 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    if let Some(config::DaemonCommand::HostRetire { app_root, orphaned }) = &cli.command {
+        lillux::require_administrator()?;
+        if *orphaned {
+            let retired = ryeos_node::supervision::retire_orphaned_host_services()?;
+            if retired.is_empty() {
+                println!("no orphaned host services");
+            }
+            for service in &retired {
+                println!(
+                    "retired host service {} (app root gone: {})",
+                    service.name,
+                    service
+                        .app_root
+                        .as_deref()
+                        .map(|root| root.display().to_string())
+                        .unwrap_or_default()
+                );
+            }
+        } else {
+            let app_root = app_root
+                .as_deref()
+                .context("host-retire requires --app-root or --orphaned")?;
+            if ryeos_node::supervision::retire_host_service(app_root)? {
+                println!("retired the host service of {}", app_root.display());
+            } else {
+                println!("no host service is associated with {}", app_root.display());
+            }
+        }
+        return Ok(());
+    }
     if let Some(config::DaemonCommand::HostInstall {
         package_root,
         action,
@@ -3965,7 +3995,8 @@ async fn run(
     // their own state lock and must not conflict with the daemon's.
     if let Some(ref cmd) = cli.command {
         match cmd {
-            config::DaemonCommand::HostProvision { .. } => {
+            config::DaemonCommand::HostProvision { .. }
+            | config::DaemonCommand::HostRetire { .. } => {
                 unreachable!("handled before node startup")
             }
             config::DaemonCommand::InitPolicyPreflight { .. }
@@ -6240,7 +6271,7 @@ async fn dispatch_follow_actions(
                 )
             }
             reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
-                // Reconcile parity: a fresh relaunch, no parent clamp/depth.
+                // Relaunch under the persisted parent context (clamp and depth).
                 let outcome =
                     launch_follow_child(state.clone(), &child_thread_id, None, None).await;
                 (
@@ -6369,14 +6400,22 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
     let period = Duration::from_secs(120);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Lives for this daemon generation only: a restart attempts every
+    // retained cleanup again.
+    let cleanup_backoff = Arc::new(Mutex::new(
+        ryeos_app::external_placement::cleanup_backoff::RetainedCleanupBackoff::default(),
+    ));
 
     loop {
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
             _ = tick.tick() => {}
+            // A stop left for recovery to settle wakes the pass at once
+            // instead of waiting out the period.
+            _ = ryeos_app::recovery_nudge::nudged() => {}
         }
 
-        let pass_result = run_periodic_recovery_pass(&state).await;
+        let pass_result = run_periodic_recovery_pass(&state, &cleanup_backoff).await;
         if let Err(error) = pass_result {
             tracing::error!(
                 error = %format!("{error:#}"),
@@ -6471,7 +6510,7 @@ async fn recover_external_candidates_before_ready(state: &AppState) -> Result<()
 /// cannot hold the startup gate.
 async fn advance_external_candidate_cleanups_after_reconcile(state: &AppState) -> Result<()> {
     log_external_candidate_cleanup_recovery(
-        recover_external_candidate_cleanups_async(state.clone())
+        recover_external_candidate_cleanups_async(state.clone(), Default::default())
             .await
             .context("advance startup external candidate cleanup")?,
         "startup",
@@ -6497,7 +6536,12 @@ async fn run_cache_metric_flush_loop() -> Result<()> {
     }
 }
 
-async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+async fn run_periodic_recovery_pass(
+    state: &AppState,
+    cleanup_backoff: &Arc<
+        Mutex<ryeos_app::external_placement::cleanup_backoff::RetainedCleanupBackoff>,
+    >,
+) -> Result<()> {
     let recovered_project_applies =
         ryeos_api::handlers::project_apply_snapshot::retry_retained_project_snapshot_applies(state)
             .await
@@ -6519,7 +6563,7 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
         );
     }
     log_external_candidate_cleanup_recovery(
-        recover_external_candidate_cleanups_async(state.clone())
+        recover_external_candidate_cleanups_async(state.clone(), Arc::clone(cleanup_backoff))
             .await
             .context("periodic external candidate cleanup recovery")?,
         "periodic",
@@ -6588,6 +6632,7 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
     let active = reconcile::reconcile_live_threads(state)
         .await
         .context("periodic active-thread reconcile")?;
+    ryeos_api::handlers::dedicated_sessions::mirror_stale_publication_report(state);
     let mut targets = active.active_thread_ids;
     dispatch_resume_intents(state, active.resume_intents)
         .await
@@ -6633,11 +6678,19 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
 
 async fn recover_external_candidate_cleanups_async(
     state: AppState,
+    backoff: Arc<Mutex<ryeos_app::external_placement::cleanup_backoff::RetainedCleanupBackoff>>,
 ) -> Result<ryeos_app::external_placement::ExternalCandidateCleanupRecovery> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let task = lillux::task::spawn_host_task("external-cleanup-recovery", move || {
-        let _ =
-            sender.send(ryeos_app::external_placement::recover_external_candidate_cleanups(&state));
+        let mut backoff = backoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = sender.send(
+            ryeos_app::external_placement::recover_external_candidate_cleanups(
+                &state,
+                &mut backoff,
+            ),
+        );
     })
     .context("start Lillux external cleanup recovery owner")?;
     task.detach();
@@ -6687,6 +6740,7 @@ fn log_external_candidate_cleanup_recovery(
             proved = report.proved,
             pending = report.pending,
             failures = report.failures.len(),
+            deferred = report.deferred.len(),
             "advanced retained external candidate cleanup obligations"
         );
     }
@@ -9349,10 +9403,12 @@ mod shutdown_mapping_tests {
     }
 
     #[test]
-    fn no_mode_falls_back_to_three_second_default() {
+    fn no_mode_uses_named_node_fallback() {
         assert_eq!(
             resolve_shutdown_action(None),
-            ShutdownAction::Graceful(Duration::from_secs(3))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
         );
     }
 

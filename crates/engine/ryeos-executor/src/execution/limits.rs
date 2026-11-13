@@ -231,6 +231,26 @@ pub fn compute_effective_limits(
     hard
 }
 
+/// Clamp a fire's hard limits under its schedule owner's per-fire ceiling.
+///
+/// This is one more cap layer after item, node caps and parent: a present
+/// ceiling field bounds that dimension, an absent one leaves it alone. The
+/// aggregate execution-tree ceilings and runtime-declared dimensions are not
+/// part of a schedule ceiling.
+pub fn clamp_to_schedule_ceiling(
+    mut hard: HardLimits,
+    ceiling: &ryeos_engine::scheduled_fire_context::ScheduleFireLimits,
+) -> HardLimits {
+    hard.turns = sentinel_clamp(hard.turns, ceiling.turns.unwrap_or(0));
+    hard.tokens = sentinel_clamp(hard.tokens, ceiling.tokens.unwrap_or(0));
+    hard.spend_usd = sentinel_clamp(hard.spend_usd, ceiling.spend_usd.unwrap_or(UsdNanos::ZERO));
+    hard.spawns = sentinel_clamp(hard.spawns, ceiling.spawns.unwrap_or(0));
+    hard.depth = sentinel_clamp(hard.depth, ceiling.depth.unwrap_or(0));
+    hard.duration_seconds =
+        sentinel_clamp(hard.duration_seconds, ceiling.duration_seconds.unwrap_or(0));
+    hard
+}
+
 fn clamp_runtime_dimensions<'a>(
     requested: &BTreeMap<String, u64>,
     caps: &BTreeMap<String, u64>,
@@ -654,6 +674,48 @@ mod tests {
             &runtime_declaration(),
         );
         assert_eq!(hard.turns, 30);
+    }
+
+    #[test]
+    fn schedule_limits_clamp_below_item_and_node_caps() {
+        let requested = LimitValues {
+            turns: 100,
+            tokens: 50_000,
+            duration_seconds: 0,
+            spend_usd: UsdNanos::parse_canonical("5").unwrap(),
+            ..Default::default()
+        };
+        let caps = LimitCaps {
+            turns: Some(30),
+            duration_seconds: Some(600),
+            ..Default::default()
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &caps,
+            None,
+            &runtime_declaration(),
+        );
+        assert_eq!((hard.turns, hard.duration_seconds), (30, 600));
+
+        let ceiling = ryeos_engine::scheduled_fire_context::ScheduleFireLimits {
+            // Tighter than the node cap and the item request.
+            turns: Some(5),
+            // Tighter than the node cap on an item that asked for unlimited.
+            duration_seconds: Some(120),
+            // Looser than the item request: the request stays.
+            tokens: Some(1_000_000),
+            spend_usd: Some(UsdNanos::parse_canonical("0.5").unwrap()),
+            ..Default::default()
+        };
+        let clamped = clamp_to_schedule_ceiling(hard, &ceiling);
+        assert_eq!(clamped.turns, 5);
+        assert_eq!(clamped.duration_seconds, 120);
+        assert_eq!(clamped.tokens, 50_000);
+        assert_eq!(clamped.spend_usd, UsdNanos::parse_canonical("0.5").unwrap());
+        // Dimensions the ceiling leaves out keep their computed value.
+        assert_eq!(clamped.spawns, 0);
     }
 
     #[test]

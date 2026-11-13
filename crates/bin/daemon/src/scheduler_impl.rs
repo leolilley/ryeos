@@ -42,6 +42,9 @@ impl AppSchedulerContext {
         if fire.schedule_id != spec.schedule_id || fire.schedule_spec_hash != spec.spec_hash {
             bail!("scheduled fire context does not identify the admitted schedule generation");
         }
+        if fire.limits != spec.execution.limits {
+            bail!("scheduled fire context does not carry the admitted schedule's limits");
+        }
         Ok(())
     }
 
@@ -227,6 +230,10 @@ impl SchedulerContext for AppSchedulerContext {
 
     fn schedule_trust_store(&self) -> &ryeos_engine::trust::TrustStore {
         self.1.trust_store()
+    }
+
+    fn schedule_signer_fingerprint(&self) -> &str {
+        self.1.identity().fingerprint()
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {
@@ -418,6 +425,21 @@ impl SchedulerContext for AppSchedulerContext {
                 .await
             }
         }
+    }
+
+    async fn auto_pause_schedule(
+        &self,
+        schedule_id: &str,
+        expected_spec_hash: &str,
+        reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+    ) -> Result<bool> {
+        ryeos_api::handlers::scheduler_register::auto_pause_schedule(
+            &self.1,
+            schedule_id,
+            expected_spec_hash,
+            reason,
+        )
+        .await
     }
 
     async fn dispatch_scheduled_item(

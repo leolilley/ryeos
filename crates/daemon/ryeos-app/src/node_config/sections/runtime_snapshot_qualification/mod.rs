@@ -112,6 +112,44 @@ pub struct InstalledRuntimeSnapshotQualificationBinding {
 }
 
 impl InstalledRuntimeSnapshotQualificationBinding {
+    /// A qualification binding that names the given producer and pins the
+    /// given verifier and provider spec, for tests that compare pins with
+    /// installed artifacts. Its own digest is a fixed stand-in, not a signed
+    /// source digest.
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        production_binding_id: &str,
+        production_binding_digest: &str,
+        provider_spec_digest: &str,
+        verifier_artifact_hash: &str,
+        consumer_verifiers: BTreeMap<String, ConsumerRuntimeVerifierSelection>,
+    ) -> Self {
+        let settings = serde_json::json!({"schema":1,"owner_id":"owner-1"});
+        let document = QualificationDocument {
+            kind: "node".into(),
+            schema: 4,
+            protocol: "ryeos.runtime-snapshot-qualification.v4".into(),
+            production_binding_id: production_binding_id.to_owned(),
+            production_binding_digest: production_binding_digest.to_owned(),
+            provider_spec_digest: provider_spec_digest.to_owned(),
+            settings_digest: lillux::sha256_hex(
+                lillux::canonical_json(&settings).unwrap().as_bytes(),
+            ),
+            settings,
+            verifier_artifact_hash: verifier_artifact_hash.to_owned(),
+            consumer_verifiers,
+            contact_timeout_seconds: 60,
+            delivery_timeout_seconds: 600,
+            maximum_lifetime_seconds: 900,
+        };
+        document.validate().unwrap();
+        Self {
+            id: "snapshot-qualification".into(),
+            document,
+            digest: "9".repeat(64),
+        }
+    }
+
     pub(crate) fn consumer_verifier(
         &self,
         coordinate: &ConsumerRuntimeVerificationCoordinate,
@@ -164,6 +202,9 @@ impl InstalledRuntimeSnapshotQualificationBinding {
     }
     pub(crate) fn verifier_artifact_hash(&self) -> &str {
         &self.document.verifier_artifact_hash
+    }
+    pub(crate) fn consumer_verifiers(&self) -> &BTreeMap<String, ConsumerRuntimeVerifierSelection> {
+        &self.document.consumer_verifiers
     }
     pub(crate) fn contact_timeout_seconds(&self) -> u32 {
         self.document.contact_timeout_seconds
@@ -226,6 +267,12 @@ impl NodeConfigSection for RuntimeSnapshotQualificationSection {
         ctx: &NodeItemContext,
         body: &Value,
     ) -> Result<Box<dyn CompiledNodeConfigItem>> {
+        crate::node_config::coherence::require_admitted_binding_schema(
+            SECTION_NAME,
+            body,
+            &[4],
+            "ryeos.runtime-snapshot-qualification.v4",
+        )?;
         let document: QualificationDocument = serde_json::from_value(body.clone())
             .context("invalid runtime snapshot qualification binding")?;
         document.validate()?;

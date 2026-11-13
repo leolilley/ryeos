@@ -1,0 +1,215 @@
+[
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "exact",
+    "input": {
+      "response": {
+        "presentation_id": "A",
+        "thread_id": "thread-A",
+        "touched": true
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "renewed",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "wrapped in result",
+    "input": {
+      "response": {
+        "result": {
+          "presentation_id": "A",
+          "thread_id": "thread-A",
+          "touched": true
+        }
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "renewed",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "touched false",
+    "input": {
+      "response": {
+        "presentation_id": "A",
+        "thread_id": "thread-A",
+        "touched": false
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "other thread",
+    "input": {
+      "response": {
+        "presentation_id": "A",
+        "thread_id": "thread-B",
+        "touched": true
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "other presentation",
+    "input": {
+      "response": {
+        "presentation_id": "B",
+        "thread_id": "thread-A",
+        "touched": true
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "extra field",
+    "input": {
+      "response": {
+        "presentation_id": "A",
+        "thread_id": "thread-A",
+        "touched": true,
+        "extra": 1
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "extra field inside result",
+    "input": {
+      "response": {
+        "result": {
+          "presentation_id": "A",
+          "thread_id": "thread-A",
+          "touched": true,
+          "extra": 1
+        }
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "null",
+    "input": {
+      "response": null,
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchResponse",
+    "name": "result-in-result also unwraps",
+    "input": {
+      "response": {
+        "result": {
+          "result": {
+            "presentation_id": "A",
+            "thread_id": "thread-A",
+            "touched": true
+          }
+        }
+      },
+      "presentation_id": "A",
+      "thread_id": "thread-A"
+    },
+    "expected": "renewed",
+    "provenance": "derived (computed by running the TS function)"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "HttpResponseError 403",
+    "input": {
+      "http_status": 403
+    },
+    "expected": "refused",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "HttpResponseError 404",
+    "input": {
+      "http_status": 404
+    },
+    "expected": "refused",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "HttpResponseError 409",
+    "input": {
+      "http_status": 409
+    },
+    "expected": "refused",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "HttpResponseError 410",
+    "input": {
+      "http_status": 410
+    },
+    "expected": "refused",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "HttpResponseError 400",
+    "input": {
+      "http_status": 400
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "HttpResponseError 429",
+    "input": {
+      "http_status": 429
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "HttpResponseError 500",
+    "input": {
+      "http_status": 500
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  },
+  {
+    "function": "classifySeatTouchError",
+    "name": "non-HTTP error",
+    "input": {
+      "error": "Error('offline')"
+    },
+    "expected": "retry",
+    "provenance": "test-verbatim"
+  }
+]

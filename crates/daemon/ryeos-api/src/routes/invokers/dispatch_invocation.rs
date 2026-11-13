@@ -133,6 +133,9 @@ impl PinnedDispatchSubject {
 pub(crate) struct FixedPrincipalConfinement {
     pub subject: PinnedDispatchSubject,
     pub workspace: std::path::PathBuf,
+    /// The project environment the route admitted: the operator vault only
+    /// when the signed route declares it and its signed manifest allows it.
+    pub environment: ryeos_app::execution_policy::LocalLiveEnvironment,
 }
 
 /// A dispatch whose input, authority, project and (for a fixed principal)
@@ -311,8 +314,18 @@ impl CompiledDispatchInvoker {
                 })?;
         }
 
-        ryeos_app::execution_policy::authorize_standard_local_live_execution(&principal_scopes)
-            .map_err(|error| RouteDispatchError::Forbidden(format!("{error:#}")))?;
+        // A caller principal runs the standard profile, operator vault
+        // included; a fixed route principal runs exactly what its route
+        // admitted.
+        let environment = confinement.map_or(
+            ryeos_app::execution_policy::LocalLiveEnvironment::OverlayWithOperatorVault,
+            |confinement| confinement.environment,
+        );
+        ryeos_app::execution_policy::authorize_local_live_execution(&principal_scopes, environment)
+            .map_err(|error| {
+                crate::routes::response_modes::execute_mode::operator_vault_route_error(&error)
+                    .unwrap_or_else(|| RouteDispatchError::Forbidden(format!("{error:#}")))
+            })?;
         let site_id = ctx.state.threads.site_id().to_string();
         let origin_site_id = authenticated_origin_site_id.unwrap_or_else(|| site_id.clone());
         let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
@@ -344,13 +357,13 @@ impl CompiledDispatchInvoker {
             validate_only: false,
         };
 
-        let resolved_authority =
-            ryeos_app::execution_policy::resolve_standard_local_live_authority(
-                &project_ctx.effective_path,
-                principal_scopes.clone(),
-                &ctx.state.isolation,
-            )
-            .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
+        let resolved_authority = ryeos_app::execution_policy::resolve_local_live_authority(
+            &project_ctx.effective_path,
+            principal_scopes.clone(),
+            &ctx.state.isolation,
+            environment,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;
         if let Some(confinement) = confinement {
             // Callbacks (snapshot create, item authoring, child spawn) take
             // their project root and write ceiling from this sealed record,

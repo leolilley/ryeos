@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T23:03:08Z:839704d8564382359a0257e35886cdfc7f4ceb5f579cb54b31ab28474639ea61:AwJvQIgi+hshAiH66eukV7LOtZpqfWy13SpvMu55jK5dvO07fOfxlmBYq3o3E3eUyIpc5bhU3IWYpwthgYvKAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:50:13Z:32d0eb761d3954d8ad07b3ad9f30cb6fa360db7556266d21158212a35edaf97e:ncbIUxE/ND9aZAz6ca4DXsT/NBurMdHn9T2AJ+ZN8eO9tY2LMGMjjrWeDijgILUYHqwEkTaHhUY1kzLmJPNoDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -87,6 +87,17 @@ are never reinterpreted. Each channel has one exact child descriptor and hidden
 environment binding in both disabled and enforced modes; fd 0 is a deliberate
 full-duplex primary channel, not a sentinel. Parent protocol code retains a
 typed Lillux byte-stream endpoint and never recovers a raw Unix socket.
+
+The adapter does not know the project's ignore policy, so it never refuses an
+upper-layer entry for being unrepresentable: an absolute or otherwise
+unportable symlink target, a socket, FIFO or device, or a name that is not
+UTF-8 is reported as a typed `unrepresentable` mutation naming its path (a
+non-UTF-8 name with each invalid byte as U+FFFD, never descended into) and its
+reason. At seal, RyeOS skips such an entry when the snapshot policy ignores its
+path, exactly as copy-based capture skips it, and refuses the seal naming the
+path and reason when the path is included. Relative symlinks, regular files
+and directories in ignored paths are skipped the same way. This is part of the
+v15 adapter contract; an older adapter is refused by the protocol version.
 
 Argument entries and environment values are exact process data: an empty
 string remains present and empty through plan validation, serialization and
@@ -186,8 +197,9 @@ installed runtime node-trusted.
 
 The policy has two modes:
 
-- `mode: disabled` does not wrap the subprocess in an isolation adapter. This is the
-  default and does not require the selected bundle. Node-owned stdout/stderr retention
+- `mode: disabled` does not wrap the subprocess in an isolation adapter. Profiles
+  select it per host class (the `standard` profile's `local` and `hosted` lanes
+  do). It does not require the selected bundle. Node-owned stdout/stderr retention
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement. Verification-to-exec is still pinned: an
   admitted command runs only from a retained descriptor carrying its exact
@@ -264,6 +276,28 @@ restart the node.
 `--pin-project` remains the explicit complete-project snapshot/COW workflow. It
 does not control ordinary admitted source or external-content delivery, and is
 not required merely to run a definition that already retains those exact bytes.
+A pinned execution whose terminal publication advances HEAD freezes its result
+generation, binds it to the workspace journal, and only then compare-and-swaps
+HEAD from the admitted base. Three outcomes follow: HEAD advances (published);
+the CAS is refused before any write, most often because HEAD moved off the
+base, and the thread fails with outcome `head_advance_not_applied` in every
+lane (direct item, managed runtime callback, and a managed runtime that exited
+before its callback), its error naming the reason, expected and observed HEAD,
+the runtime's reported status where there is one, and the retained
+`retained_snapshot_hash` / `retained_output_capture_hash`. The retained
+generation joins the failed terminal, so it stays reachable after the
+workspace closes, and a parent following the thread receives a failure
+envelope; or fold-back itself breaks, which stays `foldback_failed`. Recovery
+never publishes. A run interrupted after its freeze has the generation bound by
+recovery; if it cannot resume it fails `head_advance_not_applied` with reason
+`interrupted` (expected and, if readable, observed HEAD and the retained
+hashes) and the generation joins that failed terminal, while a resumable run
+relaunches and its next finish takes the normal path. If HEAD already names
+the recovered generation, the advance applied before the interruption: the
+thread fails `head_advanced_before_interruption`, recording the generation,
+the new HEAD and the base it advanced from, with the generation joined to the
+terminal, since the run never confirmed its own completion. A not-applied result is never retried or
+merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
 publication. Their writes are discarded at process cleanup and never fold back
 to the live project. Durable outputs use structured results or explicit
@@ -393,8 +427,9 @@ artificial dependency on the selected bundle.
 
 Re-init validates the complete source generation even when ordinary preflight
 is skipped. It also re-resolves the selected backend from its completed staging
-tree before that tree can be atomically activated. First init has no policy and
-uses the compiled disabled default until it creates the policy once.
+tree before that tree can be atomically activated. First init has no policy. It
+requires an explicit `--node-profile` and creates the policy from that profile's
+selected host-class lane; there is no compiled default.
 
 ## Filesystem authority
 
@@ -622,6 +657,14 @@ down, so provisioning does not unexpectedly start a node. That native boot
 disposition remains inert after a host reboot; an operator explicitly uses
 `ryeos start` when the node should run again.
 
+The association is removed by the matching administrator transition,
+`ryeos node host retire --confirm [--app-root <existing-node-root>]`, while the
+node is stopped. Lillux brings the native service down, deactivates it, waits
+for the service manager to release it, and removes the service definition and
+its logs. It retires only an association whose recorded launch is the RyeOS
+node launch for that exact app root. An association left behind by a deleted
+app root is retired with `ryeos node host retire --orphaned --confirm`.
+
 The native adapter is a Lillux concern. Its first qualified implementation is
 the local Artix/runit adapter; systemd, launchd and Windows require their own
 Lillux adapter and host qualification before RyeOS claims support. Manager
@@ -718,7 +761,20 @@ daemon exit, the exclusive state lock proves that any still-live, exactly
 matched attachment belongs to the previous daemon; startup kills that group
 before recovery launches a replacement. A same-boot attachment whose leader
 birth identity can no longer be proven is quarantined rather than cleared or
-signalled.
+signalled. The quarantine is recorded on the thread's runtime row
+(`process_quarantine`: reason `same_boot_group_present` or
+`boot_comparison_unavailable`, first seen, last checked). `thread get` shows it
+under `runtime`, `ryeos node doctor` lists it as a `process_quarantine`
+finding, and it clears with the identity once a later recovery pass proves the
+group gone.
+
+A graceful stop sends SIGTERM to the exact target only, never to its process
+group or scope. The retained launcher stays alive to publish the real exit, and
+the target owns cooperative cancellation of its own children: it forwards
+SIGTERM or stops them at its own boundary. The node's guarantee is the SIGKILL
+of the whole pinned group (or the kernel kill of the scope) at the grace
+deadline, which reaches every descendant the target did not stop. A hard stop
+skips SIGTERM and kills the group at once.
 
 The native pre-exec hold removes the former local spawn-to-attachment crash
 window. Parent death before durable attachment kills the still-held direct
@@ -814,8 +870,9 @@ healthy inactive opt-out without resolving the selected backend. Enforce mode ve
 backend availability and capture digest, and reports filesystem, network,
 environment, open-file, captured-output, and verified-artifact-limit posture.
 
-The published container runs the default disabled profile without extra
-capabilities. Enforce mode requires a separately installed selected signed
+Images that initialize from a profile whose selected lane is disabled (for
+example `standard`) run without extra capabilities. The `contained-workflow`
+image requires enforce. Enforce mode requires a separately installed selected signed
 backend bundle and every host facility needed by its declared capabilities.
 Setuid, setgid, and file-capability adapter or external artifact executables are
 refused, and verified bytes execute from sealed private captures.
@@ -841,7 +898,7 @@ authorization, and capability checks remain active.
 
 ## Local use, hosted nodes, and Docker
 
-For a trusted, single-user local node, keeping the default disabled mode is a
+For a trusted, single-user local node, choosing a profile lane with disabled mode is a
 reasonable choice. It avoids namespace requirements while retaining RyeOS's
 normal signed-item and capability model. Enforcement becomes important when a
 node executes bundles for another person, accepts remotely supplied projects,

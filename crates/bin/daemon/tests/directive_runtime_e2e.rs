@@ -221,7 +221,7 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     plant_directive(
         project.path(),
         "test/hello",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         &[],
         &fixture.publisher,
     )
@@ -297,6 +297,27 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     assert!(
         result.get("warnings").is_some(),
         "result envelope must surface `warnings` (extended in launch.rs for P3b); got: {body:#}"
+    );
+
+    // The body template substitutes the input: the provider sees the
+    // rendered prompt, not the `${inputs.name}` expression or an appended
+    // inputs block.
+    let bodies = mock.captured_bodies().await;
+    assert_eq!(bodies.len(), 1, "exactly one provider request: {bodies:#?}");
+    let user_text = bodies[0]["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|message| message["role"] == "user")
+                .and_then(|message| message["content"].as_str())
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        user_text.trim_end(),
+        "Say hello to World.",
+        "the directive body must render its input; got request {:#}",
+        bodies[0]
     );
 
     drop(project);
@@ -700,7 +721,7 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     plant_directive(
         project.path(),
         "cont/dir",
-        "Answer {{ name }}.",
+        "Answer ${inputs.name}.",
         &[],
         &fixture.publisher,
     )
@@ -933,7 +954,7 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     plant_directive_with_spend_limit(
         project.path(),
         "test/hard_ok",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         "1",
         &fixture.publisher,
     )
@@ -1043,7 +1064,7 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     plant_directive_with_spend_limit(
         project.path(),
         "test/hard_denied",
-        "Say hello to {{ name }}.",
+        "Say hello to ${inputs.name}.",
         "0.5",
         &fixture.publisher,
     )

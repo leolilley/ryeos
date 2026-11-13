@@ -55,6 +55,10 @@ pub struct StructuredErrorPayload {
     pub installed_bundles: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// Transient-refusal hint: how long to wait before reissuing the same
+    /// request (`process_creation_busy`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl StructuredErrorPayload {
@@ -76,6 +80,7 @@ impl StructuredErrorPayload {
             item_ref: None,
             installed_bundles: None,
             hint: None,
+            retry_after_ms: None,
         }
     }
 
@@ -180,6 +185,39 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 remediation: Some(remediation.clone()),
                 ..Self::generic(public_error.code(), public_error.to_string())
             },
+            DispatchError::AmbiguousItemFormats {
+                item_ref,
+                space,
+                candidates,
+            } => Self {
+                item_ref: Some(item_ref.clone()),
+                details: Some(serde_json::json!({
+                    "space": space,
+                    "candidates": candidates,
+                })),
+                remediation: Some(format!(
+                    "keep exactly one of these files and remove the others: {}",
+                    candidates.join(", ")
+                )),
+                ..Self::generic(public_error.code(), public_error.to_string())
+            },
+            DispatchError::ReservedNamespaceShadow {
+                item_ref,
+                namespace,
+                bundle,
+                project_path,
+            } => Self {
+                item_ref: Some(item_ref.clone()),
+                details: Some(serde_json::json!({
+                    "namespace": namespace,
+                    "owning_bundle": bundle,
+                    "project_file": project_path,
+                })),
+                remediation: Some(format!(
+                    "move {project_path} to your own namespace, e.g. .ai/tools/<project>/runtimes/..., and point executor_id at it; the '{namespace}' namespace is owned by bundle '{bundle}' and resolves from the bundle only"
+                )),
+                ..Self::generic(public_error.code(), public_error.to_string())
+            },
             DispatchError::MissingCap { required } => {
                 Self::missing_cap(public_error.to_string(), required)
             }
@@ -217,6 +255,10 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 binding: binding.clone(),
                 ..Self::generic(code, public_error.to_string())
             },
+            DispatchError::ProcessCreationBusy { .. } => Self {
+                retry_after_ms: Some(crate::dispatch_error::PROCESS_CREATION_BUSY_RETRY_AFTER_MS),
+                ..Self::generic(public_error.code(), public_error.to_string())
+            },
             _ => Self::generic(public_error.code(), public_error.to_string()),
         };
         payload.retryable = public_error.retryable();
@@ -238,6 +280,59 @@ mod tests {
             v.get("details").is_none(),
             "generic must not include details"
         );
+    }
+
+    #[test]
+    fn ambiguous_formats_map_to_typed_conflict_with_candidates_and_cure() {
+        let error = crate::dispatch_error::DispatchError::AmbiguousItemFormats {
+            item_ref: "tool:demo/x".to_string(),
+            space: "project (project)".to_string(),
+            candidates: vec![
+                ".ai/tools/demo/x.py".to_string(),
+                ".ai/tools/demo/x.yaml".to_string(),
+            ],
+        };
+        assert_eq!(error.http_status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.code(), "ambiguous_item_formats");
+        assert!(!error.retryable());
+
+        let v = dispatch_error_value(&error);
+        assert_eq!(v["code"], "ambiguous_item_formats");
+        assert_eq!(v["item_ref"], "tool:demo/x");
+        assert_eq!(v["details"]["space"], "project (project)");
+        assert_eq!(
+            v["details"]["candidates"],
+            serde_json::json!([".ai/tools/demo/x.py", ".ai/tools/demo/x.yaml"])
+        );
+        let remediation = v["remediation"].as_str().expect("remediation present");
+        assert!(remediation.contains(".ai/tools/demo/x.py"));
+        assert!(remediation.contains(".ai/tools/demo/x.yaml"));
+    }
+
+    #[test]
+    fn reserved_namespace_shadow_maps_to_typed_conflict_with_cure() {
+        let error = crate::dispatch_error::DispatchError::ReservedNamespaceShadow {
+            item_ref: "tool:ryeos/core/runtimes/python/function".to_string(),
+            namespace: "ryeos/core".to_string(),
+            bundle: "core".to_string(),
+            project_path: ".ai/tools/ryeos/core/runtimes/python/function.yaml".to_string(),
+        };
+        assert_eq!(error.http_status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.code(), "reserved_namespace_shadow");
+        assert!(!error.retryable());
+
+        let v = dispatch_error_value(&error);
+        assert_eq!(v["code"], "reserved_namespace_shadow");
+        assert_eq!(v["item_ref"], "tool:ryeos/core/runtimes/python/function");
+        assert_eq!(v["details"]["namespace"], "ryeos/core");
+        assert_eq!(v["details"]["owning_bundle"], "core");
+        assert_eq!(
+            v["details"]["project_file"],
+            ".ai/tools/ryeos/core/runtimes/python/function.yaml"
+        );
+        let remediation = v["remediation"].as_str().expect("remediation present");
+        assert!(remediation.contains("your own namespace"));
+        assert!(remediation.contains("executor_id"));
     }
 
     #[test]
@@ -318,6 +413,28 @@ mod tests {
         let p = StructuredErrorPayload::from(&de);
         assert_eq!(p.code, "invalid_ref");
         assert!(p.details.is_none());
+    }
+
+    #[test]
+    fn process_creation_busy_is_503_with_code_and_retry_after() {
+        let error = crate::dispatch_error::DispatchError::ProcessCreationBusy {
+            detail: "retained scopes: ThreadId(7): crates/x.rs:1:1 (1 scope)".to_owned(),
+        };
+        assert_eq!(
+            error.http_status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let value = dispatch_error_value(&error);
+        assert_eq!(value["code"], "process_creation_busy");
+        assert_eq!(value["retryable"], true);
+        assert_eq!(
+            value["retry_after_ms"],
+            crate::dispatch_error::PROCESS_CREATION_BUSY_RETRY_AFTER_MS
+        );
+        // The holder sites go to the daemon log, never to the caller.
+        let message = value["error"].as_str().unwrap();
+        assert!(!message.contains("retained scopes"), "{message}");
+        assert!(!message.contains("crates/x.rs"), "{message}");
     }
 
     #[test]

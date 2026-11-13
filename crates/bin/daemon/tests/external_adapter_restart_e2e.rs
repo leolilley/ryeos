@@ -141,6 +141,7 @@ fn admit_signed_codex_worker() -> anyhow::Result<admitted_worker_evidence::Admit
         .zip(roots.iter().cloned())
         .map(
             |(name, canonical_root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: name.to_owned(),
                 canonical_root,
             },

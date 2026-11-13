@@ -13,29 +13,25 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const SHARED_PRESENTATION_SCHEMA: u32 = 1;
 
-/// Requested root selection, not provenance or admission. The daemon resolves
-/// this exact kind and retains the resulting engine identity independently.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum UiCompositionSelection {
-    SharedPresentation { config_ref: String },
-    Surface { surface_ref: String },
-}
-
-impl UiCompositionSelection {
-    pub fn item_ref(&self) -> &str {
-        match self {
-            Self::SharedPresentation { config_ref } => config_ref,
-            Self::Surface { surface_ref } => surface_ref,
-        }
+/// Body of `ui.launch.mint`, shared by every launcher. `root_ref` is one
+/// canonical ref; the daemon selects the composition by its kind, a shared
+/// presentation `config:` or a `surface:`. Absent options are omitted.
+pub fn launch_mint_body(
+    root_ref: &str,
+    project_path: Option<&str>,
+    user_principal_id: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
+        "root_ref": root_ref,
+    });
+    if let Some(project_path) = project_path {
+        body["project_path"] = project_path.into();
     }
-
-    pub fn expected_kind(&self) -> &'static str {
-        match self {
-            Self::SharedPresentation { .. } => "config",
-            Self::Surface { .. } => "surface",
-        }
+    if let Some(user_principal_id) = user_principal_id {
+        body["user_principal_id"] = user_principal_id.into();
     }
+    body
 }
 
 /// Actual signed composition declaration. Shared Config is never a hidden
@@ -438,5 +434,25 @@ mod tests {
         assert!(spec.referenced_views().contains("view:ryeos/terminal"));
         spec.docks.left.as_mut().unwrap().size = 0;
         assert!(spec.validate(limits(), reference).is_err());
+    }
+
+    #[test]
+    fn launch_mint_body_names_one_root_and_omits_absent_options() {
+        let bare = launch_mint_body("config:ryeos/ui/presentation", None, None);
+        assert_eq!(
+            bare,
+            serde_json::json!({
+                "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
+                "root_ref": "config:ryeos/ui/presentation",
+            })
+        );
+        let bound = launch_mint_body(
+            "surface:ryeos/ui/base",
+            Some("/tmp/proj"),
+            Some("fp:operator"),
+        );
+        assert_eq!(bound["root_ref"], "surface:ryeos/ui/base");
+        assert_eq!(bound["project_path"], "/tmp/proj");
+        assert_eq!(bound["user_principal_id"], "fp:operator");
     }
 }

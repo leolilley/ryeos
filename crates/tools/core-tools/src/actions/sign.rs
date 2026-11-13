@@ -1468,6 +1468,7 @@ mod tests {
             .zip(["core", "knowledge", "directive", "graph"])
             .map(
                 |(root, name)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: name.to_owned(),
                     canonical_root: root.clone(),
                 },
@@ -1499,7 +1500,19 @@ mod tests {
             .join(ryeos_engine::AI_DIR)
             .join(ryeos_engine::TRUST_KEYS_DIR);
         std::fs::create_dir_all(&trust_dir).unwrap();
-        std::fs::write(trust_dir.join("operator.toml"), doc.to_toml()).unwrap();
+        // A project trust document counts only when a node-trusted key signed
+        // it; the live node trust store holds the dev publisher.
+        use lillux::crypto::DecodePrivateKey as _;
+        let dev_pem = std::fs::read_to_string(
+            ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+        )
+        .unwrap();
+        let dev_key = SigningKey::from_pkcs8_pem(&dev_pem).unwrap();
+        std::fs::write(
+            trust_dir.join("operator.toml"),
+            lillux::signature::sign_content(&doc.to_toml(), &dev_key, "#", None),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1823,6 +1836,7 @@ printf '%s\n' fixture
             effective_trust: Default::default(),
             content: None,
             execution: None,
+            thread_profile: None,
             composed_value_contract: ryeos_engine::contracts::ValueShape::any_mapping(),
             composer: "handler:ryeos/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,

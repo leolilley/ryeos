@@ -861,6 +861,16 @@ pub(crate) fn compile_with_handlers_and_execution_root(
         }
     }
 
+    // Every subprocess carries a stop policy. A `native_async` declaration
+    // owns it; otherwise the signed execution config decides it here, so the
+    // daemon never falls back to an undeclared grace when it stops this
+    // process.
+    if ctx.spec_overrides.execution.native_async.is_none() && !chain.is_empty() {
+        ctx.current_index = 0;
+        ctx.spec_overrides.execution.cancellation_mode =
+            Some(handlers::native_async::resolve_execution_stop_policy(&ctx)?);
+    }
+
     // Now build the spec. command/args/stdin must come from a handler
     // (currently the `config` handler). Templates expanded against
     // the populated template context.
@@ -1049,7 +1059,10 @@ mod tests {
         let parsers = crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
-        let roots = ResolutionRoots { ordered: vec![] };
+        let roots = ResolutionRoots {
+            owned_namespaces: Vec::new(),
+            ordered: vec![],
+        };
         let spec = compile_with_handlers_and_execution_root(
             &chain,
             source_path,

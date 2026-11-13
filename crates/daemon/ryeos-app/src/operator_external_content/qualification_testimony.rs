@@ -8,6 +8,15 @@
 //! attester, and publishes its own node-signed acceptance in a namespace that
 //! no local-qualification reader consults. A remote testimony is therefore
 //! never returned as, or counted as, a local qualification witness.
+//!
+//! The content lane is portable between nodes. The receiver activates the same
+//! signed release itself, and every use prepares that activation freshly and
+//! requires its subject to equal the origin's in portable form: the origin's
+//! receipt, binding and node fingerprint are the origin's own records, and the
+//! receiver's freshly authenticated equivalents take their place. Each way the
+//! receiver's content, policy, producer recipes or verifier can differ from
+//! what the origin qualified is a [`RemoteContentTestimonyRefusal`] naming the
+//! field and its fix.
 
 use anyhow::{Context as _, bail, ensure};
 use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
@@ -28,8 +37,9 @@ use ryeos_state::external_content::products::qualification_testimony::{
     REMOTE_QUALIFICATION_ACCEPTANCE_CLAIM, REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA,
     REMOTE_QUALIFICATION_ACCEPTANCE_POLICY, REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE,
     RemoteQualificationAcceptanceEvidence, RemoteQualificationAcceptancePolicy,
-    RemoteQualificationEvidence, RemoteQualificationTestimonyBody,
-    VerifiedRemoteQualificationTestimony, admit, verify_remote_qualification_testimony,
+    RemoteQualificationAcceptanceSuperseded, RemoteQualificationEvidence,
+    RemoteQualificationTestimonyBody, VerifiedRemoteQualificationTestimony, admit,
+    verify_remote_qualification_testimony,
 };
 use ryeos_state::external_content::products::transfer::{
     MAX_PRODUCT_ADMISSION_ATTESTATION_BYTES, ProductWitnessSource, RECEIVED_PRODUCT_POLICY,
@@ -44,7 +54,9 @@ use ryeos_state::objects::{
 };
 use ryeos_state::{CasMutationGuard, PinnedStateAuthority};
 
-use super::content_qualification::{load_current_qualified_content, prepare_source};
+use super::content_qualification::{
+    PreparedContentQualificationSource, load_current_qualified_content, prepare_receiver_source,
+};
 use super::product_qualification::{
     QualificationOrigin, load_current_qualification,
     require_current_consumer_content_for_selection, require_unguarded_resolution,
@@ -54,7 +66,6 @@ use super::product_qualification::{
 };
 use super::product_receipt::{ProductSourceVerification, load_product_source};
 use crate::handler_context::HandlerContext;
-use crate::managed_external_content_operation::AcquisitionMode;
 use crate::node_config::sections::external_execution::{
     ExternalRuntimeContentQualificationBinding, ExternalRuntimeQualificationBinding,
 };
@@ -106,6 +117,200 @@ pub(crate) struct VerifiedRemoteRuntimeContentTestimony {
     pub(crate) qualification_attestation_hash: String,
     /// The origin's evidence, unmodified.
     pub(crate) evidence: ContentQualificationEvidence,
+    /// This node's own fresh preparation of the same content. Its subject
+    /// equals the origin's in portable form; its local join names this node's
+    /// receipt and binding.
+    pub(crate) receiver_source: PreparedContentQualificationSource,
+}
+
+/// Why this node refuses to use a remote content testimony for its own
+/// activation. Each refusal names what was seen on both sides and the
+/// operator's fix; `code` is stable for clients to branch on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteContentTestimonyRefusal {
+    /// This node holds no completed activation of the program it resolves
+    /// for the testimony's activation.
+    NoLocalActivation { activation_ref: String },
+    /// This node's activated content differs from the origin's in portable
+    /// form. `fields` names every differing portable field.
+    IdentityDiffers {
+        fields: Vec<&'static str>,
+        origin_activation_program_digest: String,
+        receiver_activation_program_digest: String,
+        origin_manifest_hash: String,
+        receiver_manifest_hash: String,
+    },
+    /// The qualification policy (or the required claims of the signed
+    /// allowance) this node resolves is not what the origin qualified under.
+    PolicyDiffers {
+        policy_ref: String,
+        origin_effective_definition_digest: String,
+        receiver_effective_definition_digest: String,
+        origin_required_claims: Vec<String>,
+        receiver_required_claims: Vec<String>,
+    },
+    /// A producer recipe differs by signed content, or exists on one side
+    /// only. Digests are of the recipe's content identity.
+    ProducerDiffers {
+        scenario: String,
+        origin_recipe: Option<String>,
+        receiver_recipe: Option<String>,
+    },
+    /// The verifier this node resolves is not the one the origin ran.
+    VerifierDiffers {
+        origin_admitted: String,
+        receiver_admitted: String,
+        origin_realized: String,
+        receiver_realized: String,
+    },
+    /// The acceptance was recorded under a superseded acceptance schema.
+    AcceptanceSuperseded { recorded_schema: String },
+}
+
+impl RemoteContentTestimonyRefusal {
+    pub(crate) fn policy_differs(
+        origin: &ProductQualificationPolicySource,
+        origin_required_claims: &[String],
+        receiver: &ProductQualificationPolicySource,
+        receiver_required_claims: &[String],
+    ) -> Self {
+        Self::PolicyDiffers {
+            policy_ref: origin.canonical_ref.clone(),
+            origin_effective_definition_digest: origin.effective_definition_digest.clone(),
+            receiver_effective_definition_digest: receiver.effective_definition_digest.clone(),
+            origin_required_claims: origin_required_claims.to_vec(),
+            receiver_required_claims: receiver_required_claims.to_vec(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoLocalActivation { .. } => "remote_content_no_local_activation",
+            Self::IdentityDiffers { .. } => "remote_content_identity_differs",
+            Self::PolicyDiffers { .. } => "remote_content_policy_differs",
+            Self::ProducerDiffers { .. } => "remote_content_producer_differs",
+            Self::VerifierDiffers { .. } => "remote_content_verifier_differs",
+            Self::AcceptanceSuperseded { .. } => "remote_content_acceptance_superseded",
+        }
+    }
+
+    pub fn fix(&self) -> String {
+        match self {
+            Self::NoLocalActivation { activation_ref } => format!(
+                "activate the same signed release on this node first (`ryeos external-content activate {activation_ref} <online|offline> [offline-archive-root]`), then retry"
+            ),
+            Self::IdentityDiffers {
+                origin_activation_program_digest,
+                receiver_activation_program_digest,
+                ..
+            } => format!(
+                "install and activate the signed Bundle release the origin qualified (activation program {origin_activation_program_digest}), or re-qualify at the origin against the release this node runs (activation program {receiver_activation_program_digest}) and export that testimony"
+            ),
+            Self::PolicyDiffers {
+                policy_ref,
+                origin_effective_definition_digest,
+                ..
+            } => format!(
+                "install the signed qualification policy and consumer allowance the origin qualified under ({policy_ref}, effective definition {origin_effective_definition_digest}), or re-qualify at the origin under what this node resolves"
+            ),
+            Self::ProducerDiffers { scenario, .. } => format!(
+                "install the producer recipe the origin qualified for scenario {scenario}, or re-qualify at the origin under the recipe this node resolves"
+            ),
+            Self::VerifierDiffers {
+                origin_admitted,
+                origin_realized,
+                ..
+            } => format!(
+                "install the verifier the acceptance policy pins (admitted definition {origin_admitted}, realized definition {origin_realized}) with its pinned content resident and bound on this node, or re-qualify at the origin with the verifier this node resolves"
+            ),
+            Self::AcceptanceSuperseded { recorded_schema } => {
+                RemoteQualificationAcceptanceSuperseded {
+                    recorded_schema: recorded_schema.clone(),
+                }
+                .fix()
+                .to_owned()
+            }
+        }
+    }
+
+    fn seen(&self) -> String {
+        match self {
+            Self::NoLocalActivation { activation_ref } => format!(
+                "this node holds no completed activation of {activation_ref} for the program it resolves"
+            ),
+            Self::IdentityDiffers {
+                fields,
+                origin_activation_program_digest,
+                receiver_activation_program_digest,
+                origin_manifest_hash,
+                receiver_manifest_hash,
+            } => format!(
+                "this node's activated content differs from the qualified content in {}: activation program origin {origin_activation_program_digest} here {receiver_activation_program_digest}, manifest origin {origin_manifest_hash} here {receiver_manifest_hash}",
+                fields.join(", ")
+            ),
+            Self::PolicyDiffers {
+                policy_ref,
+                origin_effective_definition_digest,
+                receiver_effective_definition_digest,
+                origin_required_claims,
+                receiver_required_claims,
+            } => format!(
+                "qualification policy {policy_ref} differs: effective definition origin {origin_effective_definition_digest} here {receiver_effective_definition_digest}, required claims origin [{}] here [{}]",
+                origin_required_claims.join(", "),
+                receiver_required_claims.join(", ")
+            ),
+            Self::ProducerDiffers {
+                scenario,
+                origin_recipe,
+                receiver_recipe,
+            } => format!(
+                "producer recipe for scenario {scenario} differs: origin {} here {}",
+                origin_recipe.as_deref().unwrap_or("absent"),
+                receiver_recipe.as_deref().unwrap_or("absent")
+            ),
+            Self::VerifierDiffers {
+                origin_admitted,
+                receiver_admitted,
+                origin_realized,
+                receiver_realized,
+            } => format!(
+                "verifier differs: admitted definition origin {origin_admitted} here {receiver_admitted}, realized definition origin {origin_realized} here {receiver_realized}"
+            ),
+            Self::AcceptanceSuperseded { recorded_schema } => format!(
+                "the acceptance was recorded under {recorded_schema}, not {REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA}"
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for RemoteContentTestimonyRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: {}. Fix: {}",
+            self.code(),
+            self.seen(),
+            self.fix()
+        )
+    }
+}
+
+impl std::error::Error for RemoteContentTestimonyRefusal {}
+
+/// A superseded acceptance met on the content lane is reported in that
+/// lane's own vocabulary; every other error passes through unchanged.
+fn content_acceptance_refusal(error: anyhow::Error) -> anyhow::Error {
+    let superseded = error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<RemoteQualificationAcceptanceSuperseded>()
+            .map(|refusal| refusal.recorded_schema.clone())
+    });
+    match superseded {
+        Some(recorded_schema) => {
+            RemoteContentTestimonyRefusal::AcceptanceSuperseded { recorded_schema }.into()
+        }
+        None => error,
+    }
 }
 
 /// Origin side, blocking. The origin signs only what it would itself launch
@@ -721,9 +926,12 @@ pub(crate) fn verify_current_remote_selection_testimony(
 /// It re-reads the attester's current grant, the published acceptance, the
 /// receiver's acceptance policy and the origin's qualification policy, and
 /// re-admits the testimony. It never runs a verifier. What acceptance left to
-/// use is done here: the receiver's own activation is prepared against the
-/// evidence's sealed purpose, so the content the controller will run is the
-/// content that was qualified. `context` is the attester's admitted authority.
+/// use is done here: this node's own activation is prepared freshly and its
+/// subject must equal the origin's in portable form, with the same policy,
+/// claims, producer recipes and verifier, so the content the controller will
+/// run is the content that was qualified. The binding's activation ref is
+/// thereby rebound to the origin's activation program, not taken on the
+/// attester's word. `context` is the attester's admitted authority.
 pub(crate) fn verify_current_remote_runtime_content_testimony(
     state: &AppState,
     context: &HandlerContext,
@@ -755,7 +963,8 @@ pub(crate) fn verify_current_remote_runtime_content_testimony(
             &binding.owner_principal,
             &remote.acceptance_hash,
         )
-    })?;
+    })
+    .map_err(content_acceptance_refusal)?;
     ensure!(
         loaded.evidence.acceptance_policy_ref == remote.acceptance_policy_ref,
         "remote qualification acceptance was made under a different policy"
@@ -781,11 +990,37 @@ pub(crate) fn verify_current_remote_runtime_content_testimony(
         live.body.qualification_attestation_hash == binding.attestation_hash
             && live.coordinate_id == binding.coordinate_id
             && live.testimony.issuer == binding.owner_principal
-            && live.body.activation_ref.as_deref() == Some(binding.activation_ref.as_str())
-            && content.manifest_hash == expected_manifest_hash
+            && live.body.activation_ref.as_deref() == Some(binding.activation_ref.as_str()),
+        "remote content qualification differs from the signed runtime binding"
+    );
+    // Acceptance proved the origin's attestation and the receiver's policy.
+    // Whether this node's own activation of the content is the qualified
+    // content is established here: the receiver prepares its own activation
+    // and compares it with the sealed purpose in portable form. The content
+    // comparison comes first, so a different release is named as such rather
+    // than as one of its consequences.
+    let receiver_source = prepare_receiver_source(
+        state,
+        context,
+        &binding.activation_ref,
+        &content.declaration_id,
+    )?;
+    receiver_source
+        .validate_remote_purpose(&live_evidence.purpose, state.identity.fingerprint())?;
+    ensure!(
+        receiver_source.subject.manifest_hash == expected_manifest_hash
             && live_evidence.result.subject_manifest_hash == expected_manifest_hash,
         "remote content qualification differs from the signed runtime binding"
     );
+    if live_evidence.purpose.policy_source != origin_policy {
+        return Err(RemoteContentTestimonyRefusal::policy_differs(
+            &live_evidence.purpose.policy_source,
+            &live_evidence.purpose.required_claims,
+            &origin_policy,
+            &receiver_source.allowance.required_claims,
+        )
+        .into());
+    }
     require_origin_policy(&live.evidence, &origin_policy, &binding.required_claims)?;
     admit(
         &acceptance_policy,
@@ -795,22 +1030,6 @@ pub(crate) fn verify_current_remote_runtime_content_testimony(
         policy_ref,
         &binding.required_claims,
         &lillux::time::iso8601_now(),
-    )?;
-    // Acceptance proved the origin's attestation and the receiver's policy.
-    // Whether this node's own activation of the content is the qualified
-    // content is established here, against the sealed purpose.
-    prepare_source(
-        state,
-        context,
-        &binding.activation_ref,
-        AcquisitionMode::Offline,
-        &content.realization,
-    )?
-    .require_current_consumer(
-        state,
-        context,
-        AcquisitionMode::Offline,
-        &live_evidence.purpose,
     )?;
     let (current, current_product) = with_state_guard(&authority, |guard| {
         read_published_acceptance(
@@ -833,6 +1052,7 @@ pub(crate) fn verify_current_remote_runtime_content_testimony(
         coordinate_id: live.coordinate_id,
         qualification_attestation_hash: live.body.qualification_attestation_hash,
         evidence: live_evidence,
+        receiver_source,
     })
 }
 
@@ -883,7 +1103,9 @@ pub(crate) fn verify_retained_remote_testimony_guarded(
 /// Recovery check for a retained remote content testimony under the caller's
 /// CAS guard, mirroring the product lane: only the retained keys and the
 /// signed acceptance are used, with no current grant, policy, source or
-/// wall-clock eligibility reapplied.
+/// wall-clock eligibility reapplied. The retained receiver join must name this
+/// node, and the activation receipt it names must be this node's signed
+/// record of the same activation program and consumer the origin qualified.
 pub(crate) fn verify_retained_remote_content_testimony_guarded(
     state: &AppState,
     authority: &PinnedStateAuthority,
@@ -908,6 +1130,36 @@ pub(crate) fn verify_retained_remote_content_testimony_guarded(
                 == Some(retained.activation_ref.as_str())
             && loaded.verified.testimony.issuer == retained.evidence.purpose.owner_fingerprint,
         "retained remote content testimony differs from its authenticated acceptance"
+    );
+    let join = retained
+        .receiver_join
+        .as_ref()
+        .context("retained remote runtime content has no receiver join")?;
+    ensure!(
+        join.target_node_fingerprint == state.identity.fingerprint(),
+        "retained remote runtime content was activated on another node"
+    );
+    let QualificationSubject::ActivatedContent { content } = &retained.evidence.purpose.subject
+    else {
+        bail!("retained remote content qualification has no activated content subject");
+    };
+    let value = load_exact_cas_object_with_cas(
+        &authority.cas_store()?,
+        &join.activation_receipt_hash,
+        limits.max_object_bytes,
+    )?;
+    let receipt = ryeos_state::objects::ExternalContentActivationReceipt::from_value(&value)?;
+    ensure!(
+        receipt.node_fingerprint == state.identity.fingerprint()
+            && receipt.activation_ref == retained.activation_ref
+            && receipt.activation_program_digest == content.activation_program_digest
+            && receipt.consumer_ref == content.consumer_ref
+            && receipt
+                .components
+                .iter()
+                .any(|component| component.id == content.declaration_id
+                    && component.binding_hash == join.binding_hash),
+        "retained receiver activation differs from the remote content it ran"
     );
     Ok(())
 }

@@ -746,7 +746,8 @@ pub struct CapacityPolicyAmendmentReport {
     pub policy_digest: String,
     pub already_applied: bool,
     /// The dead incarnation whose debit was settled before the amendment,
-    /// as the next start would have settled it; absent when none was owed.
+    /// exactly as the next start would have settled it; absent when none was
+    /// owed.
     pub settled_incarnation: Option<String>,
 }
 
@@ -793,15 +794,6 @@ pub(super) struct AmendmentPlaces {
 pub fn amend_capacity_policy(
     request: CapacityPolicyAmendmentRequest<'_>,
 ) -> Result<CapacityPolicyAmendmentReport> {
-    prepare_capacity_policy_amendment(request)?.apply()
-}
-
-/// Check every precondition of [`amend_capacity_policy`] and decide what it
-/// would write, writing nothing. A caller that must refuse before its own
-/// first change prepares here, and applies only once its own checks pass.
-pub fn prepare_capacity_policy_amendment(
-    request: CapacityPolicyAmendmentRequest<'_>,
-) -> Result<PreparedCapacityPolicyAmendment<'_>> {
     let CapacityPolicyAmendmentRequest {
         app_root,
         state_lock,
@@ -816,6 +808,68 @@ pub fn prepare_capacity_policy_amendment(
             "capacity policy amendment refused before any write: the acting account cannot be recorded as its evidence actor ({error}); run it as the node account"
         )
     })?;
+    let AmendmentInputs {
+        prior,
+        places,
+        operator_fingerprint,
+        node_fingerprint,
+    } = amendment_inputs(app_root, operator_key)?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    amend_policy_at(
+        places,
+        &prior,
+        policy,
+        &AmendmentIdentity {
+            operator_key,
+            operator_fingerprint,
+            node_fingerprint,
+        },
+        actor,
+        reason,
+        command,
+    )
+}
+
+/// What amending a stopped node's capacity issuance to one policy would do,
+/// decided by reading only. A refusal is an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityPolicyAmendmentCheck {
+    /// The policy is already the one in force; there is nothing to amend.
+    AlreadyApplied,
+    /// The account admits the amendment: no incarnation debit is
+    /// outstanding, or only a provably dead incarnation's (which the
+    /// amendment settles first, as a start would), and its image fits the
+    /// new policy.
+    Needed,
+}
+
+/// Decide, without writing, whether [`amend_capacity_policy`] to `policy`
+/// would be already applied, needed, or refused. It runs the amendment's own
+/// read-only checks, so a caller can refuse before changing anything else
+/// and amend later under the same lock.
+pub fn check_capacity_policy_amendment(
+    app_root: &Path,
+    state_lock: &StateLock,
+    operator_key: &SigningKey,
+    policy: &NodeNativeCapacityPolicy,
+) -> Result<CapacityPolicyAmendmentCheck> {
+    state_lock.ensure_protects_app_root(app_root)?;
+    let AmendmentInputs { prior, places, .. } = amendment_inputs(app_root, operator_key)?;
+    let check = check_policy_amendment_at(&places, &prior, policy)?;
+    state_lock.ensure_protects_app_root(app_root)?;
+    Ok(check)
+}
+
+/// The issuance in force and the places an amendment acts on, read and
+/// authenticated without writing.
+struct AmendmentInputs {
+    prior: NativeCapacityAccountBinding,
+    places: AmendmentPlaces,
+    operator_fingerprint: String,
+    node_fingerprint: String,
+}
+
+fn amendment_inputs(app_root: &Path, operator_key: &SigningKey) -> Result<AmendmentInputs> {
     let operator = operator_key.verifying_key();
     let operator_fingerprint = ryeos_engine::trust::compute_fingerprint(&operator);
     let node_identity_path = app_root
@@ -842,171 +896,54 @@ pub fn prepare_capacity_policy_amendment(
         state: PinnedDirectory::open(&app_root.join(".ai/state"))?
             .context("capacity runtime absent")?,
     };
-    state_lock.ensure_protects_app_root(app_root)?;
-    let identity = AmendmentIdentity {
-        operator_key,
+    Ok(AmendmentInputs {
+        prior,
+        places,
         operator_fingerprint,
         node_fingerprint,
-    };
-    let plan = plan_policy_at(&places, &prior, policy, &identity, reason)?;
-    Ok(PreparedCapacityPolicyAmendment {
-        places,
-        identity,
-        actor,
-        command,
-        plan,
     })
 }
 
-/// A policy amendment whose preconditions all held when it was prepared;
-/// [`PreparedCapacityPolicyAmendment::apply`] performs its writes.
-pub struct PreparedCapacityPolicyAmendment<'a> {
-    places: AmendmentPlaces,
-    identity: AmendmentIdentity<'a>,
-    actor: lillux::process_control::ControllerAccount,
-    command: &'a str,
-    plan: PlannedPolicyAmendment,
-}
-
-impl PreparedCapacityPolicyAmendment<'_> {
-    /// Whether the policy is or will be in force through a policy amendment
-    /// document: false only when the binding in force already carries the
-    /// policy without one, as the original issuance or after a plain move.
-    pub fn involves_amendment(&self) -> bool {
-        match &self.plan.outcome {
-            PolicyAmendmentOutcome::InForce { owed, .. } => owed.is_some(),
-            PolicyAmendmentOutcome::Amend { .. } | PolicyAmendmentOutcome::SettleFirst { .. } => {
-                true
-            }
-        }
-    }
-
-    /// Publish the amendment document and its evidence line, or only the
-    /// line a document published by an interrupted run still owes.
-    pub fn apply(self) -> Result<CapacityPolicyAmendmentReport> {
-        self.plan
-            .write(&self.places, &self.identity, self.actor, self.command)
-    }
-}
-
-/// [`amend_capacity_policy`] below the app-root plumbing: `prior` is the
-/// binding in force (the issuance as amended by its chain) and `places` are
-/// its directories.
-#[cfg(test)]
-pub(super) fn amend_policy_at(
-    places: AmendmentPlaces,
-    prior: &NativeCapacityAccountBinding,
-    policy: &NodeNativeCapacityPolicy,
-    identity: &AmendmentIdentity<'_>,
-    actor: lillux::process_control::ControllerAccount,
-    reason: &str,
-    command: &str,
-) -> Result<CapacityPolicyAmendmentReport> {
-    plan_policy_at(&places, prior, policy, identity, reason)?
-        .write(&places, identity, actor, command)
-}
-
-/// What an amendment writes, decided with every precondition checked.
-struct PlannedPolicyAmendment {
-    policy_digest: String,
-    outcome: PolicyAmendmentOutcome,
-}
-
-enum PolicyAmendmentOutcome {
-    /// The policy is already in force. `owed` names the policy document that
-    /// carries it, whose evidence line is appended unless already recorded
-    /// (a run interrupted after the document owes it); it is absent when no
-    /// policy document carries the policy.
-    InForce {
-        document_digest: Option<String>,
-        owed: Option<OwedPolicyEvidence>,
-    },
-    /// A new document replaces `prior_binding_digest`'s policy.
-    Amend {
-        body: Box<ReanchorBody>,
-        prior_binding_digest: String,
-        reason: String,
-    },
-    /// The account carries a dead incarnation's debit. A node stopped by its
-    /// host without a clean shutdown always does, and a node whose new binary
-    /// cannot start under the old generation can never settle it by
-    /// restarting. The write settles it exactly as that start would, then
-    /// plans again from the settled position, whose anchor the document names.
-    SettleFirst {
-        prior: Box<NativeCapacityAccountBinding>,
-        policy: Box<NodeNativeCapacityPolicy>,
-        reason: String,
-    },
-}
-
-struct OwedPolicyEvidence {
-    document_digest: String,
-    prior_binding_digest: String,
-    reason: String,
-}
-
-/// Every check an amendment makes before its first write: the policy and
-/// reason bounds, the evidence log it must extend, and, when the policy is
-/// not yet in force, that the account carries no outstanding debit, or only a
-/// provably dead incarnation's (settled by the write, as a start would), and
-/// that its current image fits the new policy.
-fn plan_policy_at(
+/// [`check_capacity_policy_amendment`] below the app-root plumbing.
+pub(super) fn check_policy_amendment_at(
     places: &AmendmentPlaces,
     prior: &NativeCapacityAccountBinding,
     policy: &NodeNativeCapacityPolicy,
-    identity: &AmendmentIdentity<'_>,
-    reason: &str,
-) -> Result<PlannedPolicyAmendment> {
+) -> Result<CapacityPolicyAmendmentCheck> {
     policy.validate()?;
-    ensure!(
-        reason.chars().count() <= REASON_BOUND_CHARS,
-        "capacity policy amendment reason exceeds its bound"
-    );
-    let policy_digest =
-        sha256_hex(lillux::canonical_json(&serde_json::to_value(policy)?)?.as_bytes());
-    // The log this run must end by extending is checked before the first
-    // write, so a refused log never leaves an amendment without evidence.
-    if let Some(log) = places
-        .state
-        .open_pinned_regular(OsStr::new(POLICY_AMENDMENT_EVIDENCE_LOG), false)?
+    if prior.policy == *policy {
+        return Ok(CapacityPolicyAmendmentCheck::AlreadyApplied);
+    }
+    require_policy_amendment_log(&places.state)?;
+    admit_policy_amendment(places, prior, policy)?;
+    Ok(CapacityPolicyAmendmentCheck::Needed)
+}
+
+/// The log an amendment must end by extending, checked before its first
+/// write so a refused log never leaves an amendment without evidence.
+fn require_policy_amendment_log(state: &PinnedDirectory) -> Result<()> {
+    if let Some(log) =
+        state.open_pinned_regular(OsStr::new(POLICY_AMENDMENT_EVIDENCE_LOG), false)?
     {
         require_owned_log(&log, POLICY_AMENDMENT_EVIDENCE_LOG, "policy amendment")?;
     }
-    let operator = identity.operator_key.verifying_key();
-    if prior.policy == *policy {
-        // Already in force. A rerun after the document but before the
-        // evidence line owes the line, and only when the document in force
-        // is a policy amendment rather than a move.
-        let document_digest = prior
-            .reanchor
-            .as_ref()
-            .map(|marker| marker.document_digest.clone());
-        let owed = match &document_digest {
-            Some(document_digest) => {
-                let bytes = read_named(&places.onboarding, document_digest)?
-                    .context("the document the binding names is absent")?;
-                let body = verify_document(
-                    &bytes,
-                    &operator,
-                    &identity.operator_fingerprint,
-                    &identity.node_fingerprint,
-                )?;
-                body.policy.is_some().then(|| OwedPolicyEvidence {
-                    document_digest: document_digest.clone(),
-                    prior_binding_digest: body.prior_binding_digest,
-                    reason: body.reason,
-                })
-            }
-            None => None,
-        };
-        return Ok(PlannedPolicyAmendment {
-            policy_digest,
-            outcome: PolicyAmendmentOutcome::InForce {
-                document_digest,
-                owed,
-            },
-        });
-    }
+    Ok(())
+}
+
+/// Refuse, before any write, an amendment the account cannot take: one with
+/// a live or unproved incarnation debit outstanding, or whose current image
+/// does not fit the new policy. Returns where the account stands for the
+/// signed document, or `None` when the account first owes the cold
+/// settlement a start would perform: a dead incarnation's debit (a host that
+/// kills the daemon instead of stopping it always leaves one, and a new
+/// binary cannot start under the old generation to settle it) or an image a
+/// published redo has not reached. The settled image, recovery charge
+/// included, must fit the new policy as well.
+fn admit_policy_amendment(
+    places: &AmendmentPlaces,
+    prior: &NativeCapacityAccountBinding,
+    policy: &NodeNativeCapacityPolicy,
+) -> Result<Option<AccountPosition>> {
     let issuance = prior.issuance_digest()?;
     ensure!(
         places.directory.identity()? == prior.account_directory_identity,
@@ -1031,26 +968,101 @@ fn plan_policy_at(
         policy,
     )?;
     if owner.owes_cold_settlement(&prior.policy)? {
-        // The settled image, recovery charge included, must fit the new
-        // policy too, or the re-plan after the settlement write would refuse.
         fit.owes_cold_settlement(policy).context(
             "the capacity account, once its dead incarnation is settled, does not fit the new \
              policy; open a fresh epoch with `ryeos node capacity reissue` first, then apply the policy",
         )?;
-        return Ok(PlannedPolicyAmendment {
-            policy_digest,
-            outcome: PolicyAmendmentOutcome::SettleFirst {
-                prior: Box::new(prior.clone()),
-                policy: Box::new(policy.clone()),
-                reason: reason.to_owned(),
-            },
-        });
+        return Ok(None);
     }
     let position = owner.require_no_outstanding_debit(&prior.policy)?;
     fit.require_no_outstanding_debit(policy).context(
         "the capacity account's current image does not fit the new policy; open a fresh epoch \
          with `ryeos node capacity reissue` first, then apply the policy",
     )?;
+    Ok(Some(position))
+}
+
+/// [`amend_capacity_policy`] below the app-root plumbing: `prior` is the
+/// binding in force (the issuance as amended by its chain) and `places` are
+/// its directories.
+pub(super) fn amend_policy_at(
+    places: AmendmentPlaces,
+    prior: &NativeCapacityAccountBinding,
+    policy: &NodeNativeCapacityPolicy,
+    identity: &AmendmentIdentity<'_>,
+    actor: lillux::process_control::ControllerAccount,
+    reason: &str,
+    command: &str,
+) -> Result<CapacityPolicyAmendmentReport> {
+    policy.validate()?;
+    ensure!(
+        reason.chars().count() <= REASON_BOUND_CHARS,
+        "capacity policy amendment reason exceeds its bound"
+    );
+    let policy_digest =
+        sha256_hex(lillux::canonical_json(&serde_json::to_value(policy)?)?.as_bytes());
+    // The log this run must end by extending is checked before the first
+    // write, so a refused log never leaves an amendment without evidence.
+    require_policy_amendment_log(&places.state)?;
+    let operator = identity.operator_key.verifying_key();
+    if prior.policy == *policy {
+        // Already in force. A rerun after the document but before the
+        // evidence line owes the line, and only when the document in force
+        // is a policy amendment rather than a move.
+        let document_digest = prior
+            .reanchor
+            .as_ref()
+            .map(|marker| marker.document_digest.clone());
+        if let Some(document_digest) = &document_digest {
+            let bytes = read_named(&places.onboarding, document_digest)?
+                .context("the document the binding names is absent")?;
+            let body = verify_document(
+                &bytes,
+                &operator,
+                &identity.operator_fingerprint,
+                &identity.node_fingerprint,
+            )?;
+            if body.policy.is_some() {
+                append_policy_evidence_once(
+                    &places.state,
+                    &CapacityPolicyAmendmentEvidence {
+                        document_digest: document_digest.clone(),
+                        prior_binding_digest: body.prior_binding_digest,
+                        policy_digest: policy_digest.clone(),
+                        reason: body.reason,
+                        recorded_at: lillux::time::iso8601_now(),
+                        actor,
+                        command: command.to_owned(),
+                    },
+                )?;
+            }
+        }
+        return Ok(CapacityPolicyAmendmentReport {
+            document_digest,
+            prior_binding_digest: None,
+            policy_digest,
+            already_applied: true,
+            settled_incarnation: None,
+        });
+    }
+    let issuance = prior.issuance_digest()?;
+    // A dead incarnation's debit is settled first, exactly as the next start
+    // would; the document then names the settled anchor. A run interrupted
+    // anywhere in the settlement converges on rerun.
+    let settled_incarnation = match admit_policy_amendment(&places, prior, policy)? {
+        Some(_) => None,
+        None => StoppedCapacityAccount::open(
+            places.directory.try_clone()?,
+            prior.account_identity,
+            places.onboarding.try_clone()?,
+            places.state.try_clone()?,
+            issuance,
+            &prior.policy,
+        )?
+        .settle_cold(&prior.policy)?,
+    };
+    let position = admit_policy_amendment(&places, prior, policy)?
+        .context("the capacity account still owes a settlement after its cold settlement")?;
     let prior_binding_digest = prior.binding_digest()?;
     let body = ReanchorBody {
         schema: REANCHOR_SCHEMA.to_owned(),
@@ -1073,109 +1085,26 @@ fn plan_policy_at(
         reason: reason.to_owned(),
         anchored_at: lillux::time::iso8601_now(),
     };
-    Ok(PlannedPolicyAmendment {
-        policy_digest,
-        outcome: PolicyAmendmentOutcome::Amend {
-            body: Box::new(body),
-            prior_binding_digest,
+    let document_digest = publish_or_adopt(&places.onboarding, body, identity)?;
+    append_policy_evidence_once(
+        &places.state,
+        &CapacityPolicyAmendmentEvidence {
+            document_digest: document_digest.clone(),
+            prior_binding_digest: prior_binding_digest.clone(),
+            policy_digest: policy_digest.clone(),
             reason: reason.to_owned(),
+            recorded_at: lillux::time::iso8601_now(),
+            actor,
+            command: command.to_owned(),
         },
+    )?;
+    Ok(CapacityPolicyAmendmentReport {
+        document_digest: Some(document_digest),
+        prior_binding_digest: Some(prior_binding_digest),
+        policy_digest,
+        already_applied: false,
+        settled_incarnation,
     })
-}
-
-impl PlannedPolicyAmendment {
-    fn write(
-        self,
-        places: &AmendmentPlaces,
-        identity: &AmendmentIdentity<'_>,
-        actor: lillux::process_control::ControllerAccount,
-        command: &str,
-    ) -> Result<CapacityPolicyAmendmentReport> {
-        let Self {
-            policy_digest,
-            outcome,
-        } = self;
-        match outcome {
-            PolicyAmendmentOutcome::InForce {
-                document_digest,
-                owed,
-            } => {
-                if let Some(owed) = owed {
-                    append_policy_evidence_once(
-                        &places.state,
-                        &CapacityPolicyAmendmentEvidence {
-                            document_digest: owed.document_digest,
-                            prior_binding_digest: owed.prior_binding_digest,
-                            policy_digest: policy_digest.clone(),
-                            reason: owed.reason,
-                            recorded_at: lillux::time::iso8601_now(),
-                            actor,
-                            command: command.to_owned(),
-                        },
-                    )?;
-                }
-                Ok(CapacityPolicyAmendmentReport {
-                    document_digest,
-                    prior_binding_digest: None,
-                    policy_digest,
-                    already_applied: true,
-                    settled_incarnation: None,
-                })
-            }
-            PolicyAmendmentOutcome::Amend {
-                body,
-                prior_binding_digest,
-                reason,
-            } => {
-                let document_digest = publish_or_adopt(&places.onboarding, *body, identity)?;
-                append_policy_evidence_once(
-                    &places.state,
-                    &CapacityPolicyAmendmentEvidence {
-                        document_digest: document_digest.clone(),
-                        prior_binding_digest: prior_binding_digest.clone(),
-                        policy_digest: policy_digest.clone(),
-                        reason,
-                        recorded_at: lillux::time::iso8601_now(),
-                        actor,
-                        command: command.to_owned(),
-                    },
-                )?;
-                Ok(CapacityPolicyAmendmentReport {
-                    document_digest: Some(document_digest),
-                    prior_binding_digest: Some(prior_binding_digest),
-                    policy_digest,
-                    already_applied: false,
-                    settled_incarnation: None,
-                })
-            }
-            PolicyAmendmentOutcome::SettleFirst {
-                prior,
-                policy,
-                reason,
-            } => {
-                let settled = StoppedCapacityAccount::open(
-                    places.directory.try_clone()?,
-                    prior.account_identity,
-                    places.onboarding.try_clone()?,
-                    places.state.try_clone()?,
-                    prior.issuance_digest()?,
-                    &prior.policy,
-                )?
-                .settle_cold(&prior.policy)?;
-                let replanned = plan_policy_at(places, &prior, &policy, identity, &reason)?;
-                ensure!(
-                    !matches!(
-                        replanned.outcome,
-                        PolicyAmendmentOutcome::SettleFirst { .. }
-                    ),
-                    "the capacity account still carries a debit after its dead-incarnation settlement"
-                );
-                let mut report = replanned.write(places, identity, actor, command)?;
-                report.settled_incarnation = settled;
-                Ok(report)
-            }
-        }
-    }
 }
 
 /// Publish `body` as a content-addressed document, or adopt a published one
@@ -1970,5 +1899,43 @@ mod controls {
         assert!(published_digests(&f.onboarding).unwrap().is_empty());
         assert!(f.evidence().is_empty());
         assert_eq!(f.in_force(), f.binding);
+    }
+
+    #[test]
+    fn the_amendment_check_writes_nothing() {
+        let f = AccountFixture::new();
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &f.binding.policy).unwrap(),
+            CapacityPolicyAmendmentCheck::AlreadyApplied
+        );
+        let mut amended = f.binding.policy.clone();
+        amended.incarnation.rollover_work_margin_steps = amended
+            .incarnation
+            .rollover_work_margin_steps
+            .map(|margin| margin + 1);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.binding, &amended).unwrap(),
+            CapacityPolicyAmendmentCheck::Needed
+        );
+        let mut too_small = f.binding.policy.clone();
+        too_small.allowance.storage_bytes = 70_000;
+        too_small.incarnation.units.storage_bytes = 70_000;
+        too_small.validate().unwrap();
+        let error = check_policy_amendment_at(&f.places, &f.binding, &too_small).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("does not fit the new policy"),
+            "{error:#}"
+        );
+        // No check published a document or wrote evidence.
+        assert!(published_digests(&f.onboarding).unwrap().is_empty());
+        assert!(f.evidence().is_empty());
+        assert_eq!(f.in_force(), f.binding);
+        // The amendment the check admitted applies, after which the same
+        // check finds it in force.
+        assert!(!f.amend(&f.binding, &amended).unwrap().already_applied);
+        assert_eq!(
+            check_policy_amendment_at(&f.places, &f.in_force(), &amended).unwrap(),
+            CapacityPolicyAmendmentCheck::AlreadyApplied
+        );
     }
 }

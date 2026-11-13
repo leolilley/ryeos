@@ -69,6 +69,10 @@ pub(super) struct SpawnRuntimeParams<'a> {
     /// later same-thread restart budget is a distinct recovery coordinate.
     pub rearm_native_resume_budget_after_attach: bool,
     pub selected_resources: ryeos_app::execution_resources::SelectedExecutionResources,
+    /// Stop policy recorded in launch metadata at attachment: the policy the
+    /// row already carries, else the one resolved from the signed execution
+    /// config for this launch.
+    pub stop_policy: ryeos_engine::contracts::CancellationMode,
 }
 
 pub(super) struct SpawnedRuntime {
@@ -213,6 +217,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         is_resume,
         rearm_native_resume_budget_after_attach,
         selected_resources,
+        stop_policy,
     } = params;
     // Only this bounded protocol/environment construction precedes all
     // isolation setup and process contact. An arbitrary error returned later
@@ -631,8 +636,9 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     };
     // The runtime cannot self-attach before release. An existing identity at
     // this boundary is therefore an invariant violation, not an adoption race.
-    // Spawn metadata was seeded before launch; the empty attach metadata
-    // preserves it while establishing the immutable process identity.
+    // Spawn metadata was seeded before launch; the attach metadata carries
+    // only the stop policy, which merges into it while establishing the
+    // immutable process identity.
     let resource_occupancy_limit = process_identity.resource_occupancy_limit.clone();
     let resource_cleanup_allowance_ms = process_identity.resource_cleanup_allowance_ms;
     let held = HeldLaunch::new(
@@ -648,7 +654,10 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         .attach(AttachOptions {
             workspace_lifeline: workspace_lifeline.as_ref(),
             owns_workspace,
-            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+                cancellation_mode: Some(stop_policy),
+                ..ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            },
             rearm_resume_budget: rearm_native_resume_budget_after_attach,
         })
         .and_then(AttachedLaunch::authorize_release)

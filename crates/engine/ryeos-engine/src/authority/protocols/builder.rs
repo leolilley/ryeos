@@ -354,7 +354,7 @@ mod tests {
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
-            callback_channel: CallbackChannel::Http,
+            callback_channel: CallbackChannel::RuntimeSocket,
             qualification_callback: None,
             captured_compatible_callback: None,
             session: None,
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(env_map["RYEOSD_THREAD_ID"], "T-test-thread");
 
         // Assert callback_channel and stdout_shape propagated.
-        assert_eq!(spec.callback_channel, CallbackChannel::Http);
+        assert_eq!(spec.callback_channel, CallbackChannel::RuntimeSocket);
         assert_eq!(spec.stdout_shape, StdoutShape::RuntimeResult);
 
         // Assert stdin parses back as the launch envelope.

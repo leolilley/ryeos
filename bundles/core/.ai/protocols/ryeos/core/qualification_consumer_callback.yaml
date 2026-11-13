@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-05T03:59:09Z:d519f83363ce0059233d87691d62f3bd1b6cc5b66e53375ef5abba617f467690:e4RaiLw7kG9ICt7JTj0+6zGARv84aaALbKmovqdn5pqsNLYyrnt4TICWjVYSbfDJICoyhShkOgNARuB1KceiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:27:41Z:5318b7bc52641f25f629135f4986b1778ab9ab1d73e1cdf0e2fdc81cddd7f845:W0CE0rqx/oLjH10lUhtOQX0VQHPCKtPj9Jr5fX3Fj4UmZ+3ZsfTlpxKgxaOF6DrWSvhINzTiteE2N225dyMLBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: qualification_consumer_callback
 category: ryeos/core
@@ -28,7 +28,7 @@ capabilities:
   allows_detached: false
 lifecycle:
   mode: managed
-callback_channel: http
+callback_channel: runtime_socket
 qualification_callback: remote_consumer
 # Admits this protocol to captured execution. The digest is the identity of the closed four-method
 # consumer-verification surface the daemon issues for `remote_consumer`; admission refuses any mismatch.

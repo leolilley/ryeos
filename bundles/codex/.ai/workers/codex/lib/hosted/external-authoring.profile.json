@@ -1,5 +1,5 @@
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "external_candidate": {
     "schema": 7,
     "runtime_authority": "captured_product",
@@ -1688,12 +1688,6 @@
             "decision": "accept"
           }
         },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "decision": "cancel"
-          }
-        },
         "decline": {
           "op": "literal",
           "value": {
@@ -1772,12 +1766,6 @@
             "decision": "accept"
           }
         },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "decision": "cancel"
-          }
-        },
         "decline": {
           "op": "literal",
           "value": {
@@ -1832,17 +1820,6 @@
       },
       "responses": {
         "accept": {
-          "op": "literal",
-          "value": {
-            "permissions": {
-              "fileSystem": null,
-              "network": null
-            },
-            "scope": "turn",
-            "strictAutoReview": true
-          }
-        },
-        "cancel": {
           "op": "literal",
           "value": {
             "permissions": {

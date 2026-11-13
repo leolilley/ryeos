@@ -1390,6 +1390,7 @@ mod tests {
             node_policy: std::sync::Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                     std::sync::Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),

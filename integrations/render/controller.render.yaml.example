@@ -17,7 +17,7 @@ services:
     name: ryeos-farm-controller
     runtime: image
     image:
-      url: ghcr.io/leolilley/ryeos-f5r-controller@sha256:<DIGEST>
+      url: ghcr.io/leolilley/ryeos-hosted-controller@sha256:<DIGEST>
     plan: 1c-2g
     region: singapore
     numInstances: 1
@@ -28,6 +28,6 @@ services:
       sizeGB: 10
     envVars:
       - key: RYEOS_SUBSTRATE_IMAGE
-        value: ghcr.io/leolilley/ryeos-f5r-controller@sha256:<DIGEST>
+        value: ghcr.io/leolilley/ryeos-hosted-controller@sha256:<DIGEST>
       - key: RYEOS_SUBSTRATE_PROTOCOL
         value: "1"

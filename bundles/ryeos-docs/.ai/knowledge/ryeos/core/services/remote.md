@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-09-04T08:52:01Z:102960bb09ea79cdebc81449d50099bcb2e5c0a9bf27a45b6857f7f78937aecb:yLuE+qfkAvWKHeRG63GDPzx8M+VIIsuejZHdbTwCFq5bjgcB6muwtJqwxoqlRVG+3KRFxwz9+D0vDs/kTVcWAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:25:09Z:fa61d1d18d450e130e0c415a1f5a3bd9570a81c74997254f65db28f1422806c1:j7IbfzTAe60EZ4hEfwOFQOJVsVYEATaUY1nDSd75ckUoShorq5cdo9xVs4aDwarpKM4W7uy/V4wRb9xxy+VjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
-version: "1.1.1"
+version: "1.1.2"
 description: Remote service reference.
 ---
 
@@ -29,7 +29,7 @@ The authoritative matrix is in
 | `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
 | `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
 | `remote/reconcile-project-head` | `remote.reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` |
-| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
+| `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
@@ -50,10 +50,20 @@ The authoritative matrix is in
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.
-- `remote configure` may import a remote descriptor. The descriptor is a
-  trust pin/discovery record, not a credential; configure still reads the
-  live `/public-key` document and refuses to write config if the live node
-  key or fingerprint does not match the descriptor.
+- Remote identity comes only from that node file. A project's
+  `.ai/config/remotes/remotes.yaml` cannot define or override a remote; one
+  that names `signing_key`, `principal_id`, `fingerprint`,
+  `vault_fingerprint` or `descriptor` refuses remote operations for that
+  project with `project_remote_trust_material` (409), naming
+  `ryeos remote configure <name> --url <https-url> --expect-fingerprint <fingerprint>`
+  as the cure.
+- `remote configure` requires a pin for the remote node key: a remote
+  descriptor or an `expect_fingerprint` (64 lowercase hex). Without either it
+  refuses with `remote_key_unpinned` and names the fingerprint seen; there is
+  no trust-on-first-use. The descriptor is a trust pin/discovery record, not a
+  credential; configure still reads the live `/public-key` document and
+  refuses to write config if the live node key or fingerprint does not match
+  the descriptor or the expected fingerprint (`remote_key_pin_mismatch`).
 - Initial remote authorization can use `admission/claim` when the target
   node has a one-time local admission token. Claiming the token creates a
   normal authorized-key grant on the target node; execution traffic still

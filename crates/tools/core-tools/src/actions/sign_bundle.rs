@@ -513,6 +513,7 @@ fn bundle_authoring_resolution_roots(
             );
         }
         registered.push(ryeos_engine::item_resolution::RegisteredBundleRoot {
+            owned_namespaces: Vec::new(),
             name,
             canonical_root,
         });

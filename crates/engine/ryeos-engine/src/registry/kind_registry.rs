@@ -1,6 +1,8 @@
 //! Unified kind registry — one validated `KindSchema` per kind.
 //!
-//! Loaded from `*.kind-schema.yaml` files across the 3-tier space.
+//! Loaded from `*.kind-schema.yaml` files under each bundle root's
+//! `.ai/node/engine/kinds/`. Kind schemas are node-tier items; there is
+//! no project overlay.
 //! This is the single source of truth for kind metadata: directory name,
 //! default executor, file extensions, parsers, signature envelopes, and
 //! daemon resolution pipeline steps.
@@ -1011,6 +1013,13 @@ pub struct EffectiveValidatorDecl {
 #[serde(deny_unknown_fields)]
 pub struct EffectClassCeilingDecl {
     pub path: Vec<String>,
+    /// The highest class this kind admits on the authored field alone. A
+    /// subject that projects above it keeps its authored ceiling, but a
+    /// request for a class above this cap is refused
+    /// (`durable_effect_sealed_unqualified`) until qualification evidence for
+    /// the subject exists. Absent, the projected class is admitted as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unproven_max: Option<ryeos_effect_contract::EffectClass>,
 }
 
 /// Workspace relationship selected by an exact signed child definition.
@@ -1632,6 +1641,12 @@ pub struct KindSchema {
     /// Execution configuration (dispatch, methods, aliases).
     /// `None` if this kind is not executable (e.g., config kind).
     pub execution: Option<ExecutionSchema>,
+    /// The thread profile of roots a daemon subsystem opens on items of a
+    /// non-executable kind (an operator seat presenting a surface). Never
+    /// root-executable, and only on a kind without `execution`, so that the
+    /// presence of `execution` stays the one statement of executability.
+    /// Executable kinds declare theirs under `execution.thread_profile`.
+    pub thread_profile: Option<ThreadProfileDecl>,
     /// Declared shape contract on the final composed `Value` for this
     /// kind. REQUIRED on every kind schema. Kinds with no field-level
     /// constraint must declare an explicit empty contract
@@ -1844,6 +1859,15 @@ impl KindSchema {
         self.execution.as_ref()
     }
 
+    /// The thread profile this kind declares: under `execution` for an
+    /// executable kind, at the top level for a non-executable one.
+    pub fn thread_profile(&self) -> Option<&ThreadProfileDecl> {
+        self.execution
+            .as_ref()
+            .and_then(|execution| execution.thread_profile.as_ref())
+            .or(self.thread_profile.as_ref())
+    }
+
     /// Resolve the one kind-owned external-content contract without coupling
     /// content authority to dispatchability.
     pub fn external_content_contract(&self) -> Option<&KindExternalContentDecl> {
@@ -1870,9 +1894,9 @@ impl KindSchema {
 
 /// Unified kind registry — maps kind strings to `KindSchema`.
 ///
-/// Built in two stages:
-///   1. Base registry from bundle roots at engine startup
-///   2. Project overlay per request after `ProjectContext` materialization
+/// Built once, from bundle roots at engine startup (`load_base`).
+/// There is no per-project overlay stage; the project overlay path was
+/// removed.
 ///
 /// The loader uses raw filesystem paths — it must NOT depend on
 /// normal item resolution to avoid a bootstrap cycle.
@@ -2255,6 +2279,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
     let resolution = parse_top_level_resolution(&data, display)?;
     let effective_trust = parse_effective_trust_policy(&data, display)?;
     let execution = parse_execution_schema(&data, display)?;
+    let thread_profile = parse_non_execution_thread_profile(&data, execution.is_some(), display)?;
     let content = parse_kind_content_schema(&data, display)?;
     if content.is_some()
         && execution
@@ -2442,6 +2467,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         effective_trust,
         content,
         execution,
+        thread_profile,
         composed_value_contract,
         composer,
         composer_config,
@@ -2451,6 +2477,48 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
         inventory_policy,
         launch_trust,
     })
+}
+
+/// Parse a non-executable kind's top-level `thread_profile`. Refused on an
+/// executable kind (its profile lives under `execution`) and when it claims
+/// root execution, which only an `execution` block can route.
+fn parse_non_execution_thread_profile(
+    data: &serde_yaml::Value,
+    executable: bool,
+    display: &str,
+) -> Result<Option<ThreadProfileDecl>, EngineError> {
+    let Some(value) = data.get("thread_profile") else {
+        return Ok(None);
+    };
+    if executable {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: an executable kind declares its thread profile under \
+                 `execution.thread_profile`, not at the top level"
+            ),
+        });
+    }
+    if !value.is_mapping() {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: `thread_profile` must be a mapping with explicit lifecycle flags"
+            ),
+        });
+    }
+    let profile = serde_yaml::from_value::<ThreadProfileDecl>(value.clone()).map_err(|e| {
+        EngineError::SchemaLoaderError {
+            reason: format!("{display}: invalid `thread_profile`: {e}"),
+        }
+    })?;
+    if profile.root_executable {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: a non-executable kind's `thread_profile` must declare \
+                 `root_executable: false`"
+            ),
+        });
+    }
+    Ok(Some(profile))
 }
 
 /// Every top-level key a kind schema may carry. A key outside this list is
@@ -2475,6 +2543,7 @@ const KIND_SCHEMA_KEYS: &[&str] = &[
     "inventory_schema_keys",
     "inventory_policy",
     "launch_trust",
+    "thread_profile",
 ];
 
 fn refuse_unknown_kind_schema_keys(
@@ -5182,6 +5251,65 @@ execution:
     // node-tier items, not project+bundle-resolved. There is no project
     // overlay path; `with_project_overlay` was deleted.
 
+    const DATA_KIND: &str = "\
+location:
+  directory: surfaces
+resolution: []
+effective_trust:
+  include_references: false
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+";
+
+    #[test]
+    fn a_non_executable_kind_declares_the_profile_of_the_roots_opened_on_it() {
+        let yaml = format!(
+            "{DATA_KIND}thread_profile:\n  name: seat_session\n  root_executable: false\n  \
+             supports_interrupt: false\n  supports_continuation: false\n  \
+             supports_operator_followup: false\n  retirement_fence: true\n"
+        );
+        let schema = parse_kind_schema_content("surface.yaml", &yaml).unwrap();
+        assert!(
+            schema.execution().is_none(),
+            "the kind stays non-executable"
+        );
+        let profile = schema.thread_profile().expect("declared profile");
+        assert_eq!(profile.name, "seat_session");
+        assert!(!profile.root_executable);
+        assert!(profile.retirement_fence);
+    }
+
+    #[test]
+    fn a_non_executable_profile_may_not_claim_root_execution() {
+        let yaml =
+            format!("{DATA_KIND}thread_profile:\n  name: seat_session\n  root_executable: true\n");
+        let error = parse_kind_schema_content("surface.yaml", &yaml).unwrap_err();
+        assert!(
+            error.to_string().contains("root_executable: false"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_executable_kind_keeps_its_profile_under_execution() {
+        let yaml = format!(
+            "{DATA_KIND}execution:\n  delegate:\n    via: runtime_registry\n\
+             thread_profile:\n  name: seat_session\n  root_executable: false\n"
+        );
+        let error = parse_kind_schema_content("surface.yaml", &yaml).unwrap_err();
+        assert!(
+            error.to_string().contains("execution.thread_profile"),
+            "{error}"
+        );
+    }
+
     fn parse_exec(yaml: &str) -> Result<Option<ExecutionSchema>, EngineError> {
         let v: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         parse_execution_schema(&v, "test.yaml")
@@ -5602,6 +5730,61 @@ execution:
         match delegation.via {
             DelegationVia::RuntimeRegistry { serves_kind } => {
                 assert_eq!(serves_kind.as_deref(), Some("directive"));
+            }
+        }
+    }
+
+    #[test]
+    fn effect_class_ceiling_unproven_max_parses() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+    unproven_max: recorded
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        let ceiling = exec.effect_class_ceiling.expect("ceiling declared");
+        assert_eq!(ceiling.path, vec!["effects".to_owned()]);
+        assert_eq!(
+            ceiling.unproven_max,
+            Some(ryeos_effect_contract::EffectClass::Recorded)
+        );
+
+        let without = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+";
+        let exec = parse_exec(without).unwrap().expect("execution present");
+        assert_eq!(exec.effect_class_ceiling.unwrap().unproven_max, None);
+    }
+
+    #[test]
+    fn effect_class_ceiling_unproven_max_rejects_unknown_class() {
+        for unknown in ["live", "proven", "\"\""] {
+            let yaml = format!(
+                "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+    unproven_max: {unknown}
+"
+            );
+            match parse_exec(&yaml).unwrap_err() {
+                EngineError::SchemaLoaderError { reason } => assert!(
+                    reason.contains("invalid execution.effect_class_ceiling declaration"),
+                    "{unknown}: {reason}"
+                ),
+                other => panic!("{unknown}: unexpected error {other:?}"),
             }
         }
     }

@@ -52,7 +52,7 @@ pub const KEY: &str = "native_async";
 /// resolved system execution config (`config/execution/execution.yaml`)
 /// supplies a value. Mirrors the conservative default in
 /// `CancellationMode::default()` on the contracts side.
-const DEFAULT_GRACEFUL_SECS: u64 = 5;
+const DEFAULT_GRACEFUL_SECS: u64 = crate::contracts::DEFAULT_CANCELLATION_GRACE_SECS;
 
 /// Resolved cancellation policy from `execution.yaml`. Looked up
 /// from `ctx.params["resolved_config"]` (populated by
@@ -164,6 +164,45 @@ fn resolve_policy_from_config(
         grace_secs: grace,
         grace_source,
     })
+}
+
+/// Stop policy for a subprocess whose chain declares no `native_async`
+/// block. The same signed execution config the bool shorthand reads decides
+/// it (`defaults`, then exact item overrides, then direct
+/// `cancellation_*` params); the contract default applies only when no layer
+/// supplies a value. The daemon records the result in launch metadata, so
+/// every managed stop uses a declared policy rather than a hidden constant.
+pub(crate) fn resolve_execution_stop_policy(
+    ctx: &CompileContext<'_>,
+) -> Result<CancellationMode, EngineError> {
+    let policy = resolve_policy_from_config(ctx, "graceful", DEFAULT_GRACEFUL_SECS, true)?;
+    let cancellation_mode = match policy.mode.as_str() {
+        "hard" => CancellationMode::Hard,
+        "graceful" => CancellationMode::Graceful {
+            grace_secs: policy.grace_secs,
+        },
+        other => {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: ctx.chain[ctx.current_index]
+                    .source_path
+                    .display()
+                    .to_string(),
+                reason: format!(
+                    "unknown cancellation_mode `{other}` in resolved \
+                     execution config (expected `graceful` | `hard`)"
+                ),
+            });
+        }
+    };
+    tracing::debug!(
+        root_item_ref = %ctx.chain[0].resolved_ref,
+        cancellation_mode = %policy.mode,
+        mode_source = policy.mode_source,
+        grace_secs = policy.grace_secs,
+        grace_source = policy.grace_source,
+        "execution-config stop policy resolved"
+    );
+    Ok(cancellation_mode)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -373,7 +412,10 @@ mod tests {
         let parsers = dispatcher_with_canonical_bundle_descriptors();
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
-        let roots = ResolutionRoots { ordered: vec![] };
+        let roots = ResolutionRoots {
+            owned_namespaces: Vec::new(),
+            ordered: vec![],
+        };
         let mut ctx = CompileContext {
             template_ctx: TemplateContext::new(PathBuf::from("/dev/null")),
             env: HashMap::new(),

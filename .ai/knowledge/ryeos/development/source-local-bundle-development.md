@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:26:29Z:e2a2b3347e8ee4d32edf0ac0e5dff0f02e6db912245d2afc65989c67b75e1fb0:eT8t7bvnY33PzJEaCpl2CQvPu7y+4CH7aEhuQtONyCoCwvfIia9yLArO48q2rld85LFohnLc1SEU3ix19aYMCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:09:46Z:b1929b73655e1cdd9ffc4e1fc0f0076a0cb6b19c588425fe7458a65bfa1d6fcc:8Doa/Xhbax5tzx1vfWi9ATHWmFbLaRM424KGbHFVs/D9MY5zOf8MZgA6H15Y8ZqFCC1oHCxmfa+o1TTlkNjXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -1432,7 +1432,7 @@ publication, or remote authority.
 
 ### Sign project items without exchanging the checkout
 
-Use `scripts/dev/sign-dev.sh <changed-file> ...` for this repository's public
+Use `.ai/tools/ryeos/development/maintainer/lib/sign-dev.sh <changed-file> ...` for this repository's public
 development publisher. Validate the selected items through normal resolution
 and admission; source-wide `bundle-verify` is read-only. Item signatures and
 the existing project snapshot commit the selected generation. Signing alone

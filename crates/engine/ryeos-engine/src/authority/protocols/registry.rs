@@ -363,12 +363,12 @@ fn validate_protocol_descriptor(
 
     // 8. callback channel ↔ callback-source injection symmetry
     match desc.callback_channel {
-        CallbackChannel::Http => {
+        CallbackChannel::RuntimeSocket => {
             if !has_callback_socket_injection || !has_callback_token_injection {
                 return Err(ProtocolError::Vocabulary {
                     name: desc.name.clone(),
                     source:
-                        crate::protocol_vocabulary::VocabularyError::HttpIncompleteCallbackTransport,
+                        crate::protocol_vocabulary::VocabularyError::RuntimeSocketIncompleteCallbackTransport,
                 });
             }
         }
@@ -410,7 +410,7 @@ fn validate_protocol_descriptor(
     // dispatcher classifies as a pushed head. That capability is open only on the condition that the launched
     // item declares the pinned-snapshot project source; remote and detached dispatch stay closed.
     if desc.qualification_callback.is_some()
-        && (desc.callback_channel != CallbackChannel::Http
+        && (desc.callback_channel != CallbackChannel::RuntimeSocket
             || desc.execution_evidence.is_none()
             || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
             || desc.capabilities.allows_target_site
@@ -430,7 +430,7 @@ fn validate_protocol_descriptor(
         });
         if desc.qualification_callback
             != Some(crate::protocols::QualificationCallbackAuthority::RemoteConsumer)
-            || desc.callback_channel != CallbackChannel::Http
+            || desc.callback_channel != CallbackChannel::RuntimeSocket
             || desc.lifecycle.mode != crate::protocol_vocabulary::LifecycleMode::Managed
             || desc.capabilities.allows_target_site
             || desc.capabilities.allows_detached
@@ -499,17 +499,17 @@ mod tests {
     }
 
     #[test]
-    fn http_requires_socket_and_token_sources() {
+    fn runtime_socket_requires_socket_and_token_sources() {
         for env_injections in [
             "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n",
             "  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
         ] {
-            let desc = descriptor("http", env_injections);
+            let desc = descriptor("runtime_socket", env_injections);
             assert!(matches!(
                 validate_protocol_descriptor(Path::new("/tmp/test.yaml"), &desc),
                 Err(ProtocolError::Vocabulary {
                     source:
-                        crate::protocol_vocabulary::VocabularyError::HttpIncompleteCallbackTransport,
+                        crate::protocol_vocabulary::VocabularyError::RuntimeSocketIncompleteCallbackTransport,
                     ..
                 })
             ));
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn qualification_only_protocol_requires_closed_managed_callback_contract() {
         let mut desc = descriptor(
-            "http",
+            "runtime_socket",
             "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
         );
         desc.qualification_callback =
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn captured_compatible_callback_requires_closed_bounded_qualification_contract() {
         let mut desc = descriptor(
-            "http",
+            "runtime_socket",
             "  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }\n  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }\n",
         );
         desc.lifecycle.mode = crate::protocol_vocabulary::LifecycleMode::Managed;

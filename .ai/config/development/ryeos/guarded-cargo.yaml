@@ -1,0 +1,46 @@
+# ryeos:signed:2026-11-12T23:59:42Z:0b1a91f2384c379c12f44b7e43d376d3aa4f9cb09179e9a43342be220235c048:OMo4Ta5w2OAWX53TMaUM2YqbX8Wyq2sb3YzfuRbazGjG3QDIauU3IqiZZS6HrR4DiSf27SwXlH5zgNnIYuzxBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+{
+  "category": "development/ryeos",
+  "name": "guarded-cargo",
+  "version": "1.0.0",
+  "schema": "ryeos.development.guarded-cargo.v1",
+  "description": "Portable defaults for the guarded-cargo host tool. A site copy passed with --config-file names its own shared target dir, lock, live-step process patterns and disk floors. Values expand ${NAME} and ${NAME:-default} from WORKTREE, TARGET_DIR and the environment.",
+  "lock_path": "${XDG_RUNTIME_DIR:-/tmp}/ryeos-guarded-cargo.lock",
+  "target_dir": "${CARGO_TARGET_DIR:-${WORKTREE}/target}",
+  "tmpdir": null,
+  "cargo": "cargo",
+  "env": {
+    "CARGO_INCREMENTAL": "0"
+  },
+  "live_step_patterns": [],
+  "wait_for_unguarded_cargo": true,
+  "poll_seconds": {
+    "live_step": 20,
+    "unguarded_cargo": 10,
+    "watchdog": 5
+  },
+  "disk": {
+    "paths": ["${TARGET_DIR}", "/"],
+    "refuse_below_mib": 2500,
+    "kill_below_mib": 1500
+  },
+  "priority": {
+    "nice": 19,
+    "ionice_idle": true,
+    "new_session": true
+  },
+  "shared_target": {
+    "touch_sources_on_worktree_change": true,
+    "source_paths": ["crates", "tests/e2e/external-execution/support"],
+    "marker": ".last-source-tree"
+  },
+  "prune": {
+    "remove_dirs": ["debug/incremental", "debug/examples"],
+    "test_executables": "all",
+    "deps_dirs": ["debug/deps"],
+    "stale_artifacts": {
+      "max_age_minutes": 120,
+      "name_globs": ["libryeos*", "ryeos*", "liblillux*", "lillux*", "*codex*", "*render_sandbox*", "*external*"]
+    }
+  }
+}

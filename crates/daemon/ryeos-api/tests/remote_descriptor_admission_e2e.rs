@@ -107,6 +107,7 @@ async fn remote_configure_descriptor_match_writes_config() {
             remote: None,
             url: None,
             descriptor: Some(descriptor_path),
+            expect_fingerprint: None,
         },
         Arc::new(local_state),
     )
@@ -133,6 +134,7 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
             remote: None,
             url: None,
             descriptor: Some(descriptor_path),
+            expect_fingerprint: None,
         },
         Arc::new(local_state),
     )
@@ -153,6 +155,7 @@ async fn remote_configure_rejects_credential_url_before_contact_or_persistence()
             remote: Some("unsafe".to_owned()),
             url: Some("https://user:do-not-retain@example.invalid".to_owned()),
             descriptor: None,
+            expect_fingerprint: None,
         },
         Arc::new(local_state),
     )
@@ -169,6 +172,8 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
+    // A direct URL needs an out-of-band key pin (no trust on first use).
+    let fingerprint = public_key["fingerprint"].as_str().unwrap().to_owned();
     let (url, _contacts) = start_mock_remote(public_key).await.unwrap();
     let app_root = local_state.config.app_root.clone();
 
@@ -177,6 +182,7 @@ async fn remote_configure_normalizes_direct_url_before_persistence() {
             remote: Some("normalized".to_owned()),
             url: Some(format!("{url}/")),
             descriptor: None,
+            expect_fingerprint: Some(fingerprint),
         },
         Arc::new(local_state),
     )
@@ -296,7 +302,7 @@ async fn remote_admit_ignores_project_shadow_before_releasing_token() {
 }
 
 #[tokio::test]
-async fn remote_bind_project_copies_project_only_remote_to_user_config() {
+async fn remote_bind_project_refuses_project_remote_trust_material() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let remote_state = remote_identity();
     let public_key = public_key_response(&remote_state);
@@ -310,7 +316,7 @@ async fn remote_bind_project_copies_project_only_remote_to_user_config() {
     );
     config::save_remotes(&project_root, &project_remotes).unwrap();
 
-    let result = remote_bind_project::handle(
+    let err = remote_bind_project::handle(
         remote_bind_project::Request {
             remote: "prod".to_string(),
             project: project_root.clone(),
@@ -320,26 +326,40 @@ async fn remote_bind_project_copies_project_only_remote_to_user_config() {
         Arc::new(local_state.clone()),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(result["scope"], "operator");
-    assert_eq!(result["remote_project_path"], "/srv/project");
-
+    match ryeos_app::handler_error::extract_handler_error(&err) {
+        Some(ryeos_app::handler_error::HandlerError::Structured { code, .. }) => {
+            assert_eq!(code, config::PROJECT_REMOTE_TRUST_MATERIAL)
+        }
+        other => panic!("expected project_remote_trust_material, got {other:?}: {err:#}"),
+    }
+    // The project's remote was not copied into node config.
     let operator_remotes = config::load_remotes(&local_state.config.app_root).unwrap();
-    let operator_remote = operator_remotes.get("prod").unwrap();
-    assert_eq!(operator_remote.url, "https://project.example.com");
-    let local_key = project_root.to_string_lossy().to_string();
-    assert_eq!(
-        operator_remote
-            .project_bindings
-            .get(&local_key)
-            .unwrap()
-            .remote_project_path,
-        "/srv/project"
-    );
+    assert!(!operator_remotes.contains_key("prod"));
+}
 
-    let project_remotes_after = config::load_remotes(&project_root).unwrap();
-    assert!(project_remotes_after["prod"].project_bindings.is_empty());
+#[tokio::test]
+async fn remote_bind_project_requires_a_node_remote() {
+    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
+    let project_root = tempfile::tempdir().unwrap();
+    let project_root = project_root.path().canonicalize().unwrap();
+
+    let err = remote_bind_project::handle(
+        remote_bind_project::Request {
+            remote: "prod".to_string(),
+            project: project_root,
+            remote_project: "/srv/project".to_string(),
+            sync_scope: ProjectSyncScope::FullProject,
+        },
+        Arc::new(local_state),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("ryeos remote configure prod --url <https-url>"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[tokio::test]

@@ -455,7 +455,7 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
         message: message.clone(),
         parent_hashes: parent_hashes.clone(),
         created_at: lillux::time::iso8601_now(),
-        source: "snapshot_create".to_string(),
+        source: ProjectSnapshot::SOURCE_SNAPSHOT_CREATE.to_string(),
     };
     let snapshot_hash = ctx.cas.store_object(&snapshot.to_value())?;
     let signer = NodeIdentitySigner::from_identity(&state.identity);

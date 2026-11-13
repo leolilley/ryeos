@@ -2319,7 +2319,8 @@ pub(crate) fn admit_captured_compatible_callback(
         crate::callback_token::CallbackRuntimeMethodSurface::for_qualification_authority(authority)
             .exact_surface_digest()?;
     if class.surface_digest != issued
-        || descriptor.callback_channel != ryeos_engine::protocol_vocabulary::CallbackChannel::Http
+        || descriptor.callback_channel
+            != ryeos_engine::protocol_vocabulary::CallbackChannel::RuntimeSocket
         || descriptor.capabilities.allows_target_site
         || descriptor.capabilities.allows_detached
         || descriptor.session.is_some()
@@ -4022,7 +4023,7 @@ mod tests {
             format!("qualification_callback: {qualification}\n")
         };
         serde_yaml::from_str(&format!(
-            "kind: protocol\nname: t\ncategory: ryeos/core\nabi_version: v1\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - {{ name: RYEOSD_SOCKET_PATH, source: callback_socket_path }}\n  - {{ name: RYEOSD_CALLBACK_TOKEN, source: callback_token }}\n  - {{ name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }}\ncapabilities:\n  allows_pushed_head: true\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: http\n{qualification_yaml}{class_yaml}"
+            "kind: protocol\nname: t\ncategory: ryeos/core\nabi_version: v1\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - {{ name: RYEOSD_SOCKET_PATH, source: callback_socket_path }}\n  - {{ name: RYEOSD_CALLBACK_TOKEN, source: callback_token }}\n  - {{ name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }}\ncapabilities:\n  allows_pushed_head: true\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: runtime_socket\n{qualification_yaml}{class_yaml}"
         ))
         .unwrap()
     }

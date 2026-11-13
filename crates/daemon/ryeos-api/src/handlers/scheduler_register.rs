@@ -11,13 +11,15 @@ use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
+use ryeos_engine::scheduled_fire_context::ScheduleFireLimits;
 use ryeos_executor::executor::ServiceAvailability;
 use ryeos_node_runtime::node_document;
 use ryeos_scheduler::projection;
 use ryeos_scheduler::types::{ScheduleManagedBy, ScheduleSourceRecord};
 use ryeos_scheduler_contract::{
-    ScheduleExecution, ScheduleExecutionAuthority, parse_misfire_policy, parse_overlap_policy,
-    validate_expression, validate_schedule_id, validate_timezone,
+    ScheduleAutoPauseReason, ScheduleExecution, ScheduleExecutionAuthority, parse_iso_ts,
+    parse_misfire_policy, parse_overlap_policy, validate_expression, validate_schedule_bounds,
+    validate_schedule_id, validate_timezone,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -38,6 +40,15 @@ pub struct Request {
     #[serde(default)]
     pub project_root: Option<String>,
     pub execution_policy: ryeos_engine::execution_contract::ExecutionPolicy,
+    /// Per-fire ceiling, clamped into each fire under the item and node caps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ScheduleFireLimits>,
+    /// Lifetime bound: at most this many boundaries from registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fires: Option<u32>,
+    /// Lifetime bound: no boundary at or after this RFC 3339 instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 pub async fn handle(
@@ -85,6 +96,19 @@ pub async fn handle(
         && ryeos_scheduler::crontab::is_at_past(&req.expression, lillux::time::timestamp_millis())
     {
         bail!("at schedule timestamp is in the past");
+    }
+    validate_schedule_bounds(
+        req.limits.as_ref(),
+        req.max_fires,
+        req.expires_at.as_deref(),
+    )?;
+    if req
+        .expires_at
+        .as_deref()
+        .and_then(parse_iso_ts)
+        .is_some_and(|expires_at| expires_at <= lillux::time::timestamp_millis())
+    {
+        bail!("expires_at is in the past");
     }
 
     // Check if schedule already exists (for preserving registered_at on update)
@@ -215,8 +239,12 @@ pub async fn handle(
             authority,
             capabilities,
             policy: req.execution_policy.clone(),
+            limits: req.limits.clone(),
+            max_fires: req.max_fires,
+            expires_at: req.expires_at.clone(),
         },
         managed_by: None,
+        paused_reason: None,
     };
     source_record.validate(Some(&req.schedule_id))?;
     let body = serde_json::to_value(&source_record)?;
@@ -242,6 +270,9 @@ pub async fn handle(
         "overlap_policy": req.overlap_policy,
         "lateness_grace_secs": req.lateness_grace_secs,
         "enabled": req.enabled,
+        "limits": req.limits,
+        "max_fires": req.max_fires,
+        "expires_at": req.expires_at,
         "spec_path": spec_path.display().to_string(),
         "created": !was_existing,
     }))
@@ -286,7 +317,11 @@ pub(super) fn load_existing_schedule_source(
                 .with_context(|| format!("inspect schedule source {}", source.display()));
         }
     }
-    let verified = projection::load_verified_schedule_source(&source, scheduler.trust_store())?;
+    let verified = projection::load_verified_schedule_source(
+        &source,
+        scheduler.trust_store(),
+        scheduler.identity().fingerprint(),
+    )?;
     if let Some(expected) = expected_spec_hash
         && verified.spec_hash != expected
     {
@@ -335,6 +370,7 @@ impl<'a> ScheduleSourceMutation<'a> {
                 &path,
                 &content,
                 scheduler.trust_store(),
+                scheduler.identity().fingerprint(),
             )?)
         } else {
             None
@@ -381,8 +417,12 @@ impl<'a> ScheduleSourceMutation<'a> {
             crate::API_TEMP_PURPOSE,
         )?;
         let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
-        let verified =
-            projection::verify_schedule_source_content(&self.path, &content, self.trust_store)?;
+        let verified = projection::verify_schedule_source_content(
+            &self.path,
+            &content,
+            self.trust_store,
+            identity.fingerprint(),
+        )?;
         Ok((self.path.clone(), verified))
     }
 }
@@ -416,10 +456,14 @@ pub(super) fn verify_schedule_enabled(
     Ok(())
 }
 
+/// The one signed pause/resume write. `paused_reason` names why the scheduler
+/// paused the schedule by itself; an operator pause passes `None`, and enabling
+/// always clears it.
 pub(super) fn rewrite_schedule_enabled(
     scheduler: &ryeos_scheduler_service::SchedulerService,
     current: &ryeos_scheduler::types::ScheduleSpecRecord,
     enabled: bool,
+    paused_reason: Option<ScheduleAutoPauseReason>,
 ) -> Result<ryeos_scheduler::types::ScheduleSpecRecord> {
     let mutation =
         ScheduleSourceMutation::acquire(scheduler, &current.schedule_id, Some(&current.spec_hash))?;
@@ -431,6 +475,7 @@ pub(super) fn rewrite_schedule_enabled(
     })?;
     let mut record = source.record.clone();
     record.enabled = enabled;
+    record.paused_reason = if enabled { None } else { paused_reason };
     record.validate(Some(&current.schedule_id))?;
 
     let body = serde_json::to_value(&record)?;
@@ -442,6 +487,80 @@ pub(super) fn rewrite_schedule_enabled(
         );
     }
     verified.to_spec_record()
+}
+
+/// Re-pin a schedule's signed source to `authority`, keeping every other
+/// field, including `registered_at`, the enabled state and any
+/// `paused_reason`. The caller has proven `authority` is the owner's current
+/// grant and still covers the schedule; this write only seals it.
+pub(super) fn rewrite_schedule_authority(
+    scheduler: &ryeos_scheduler_service::SchedulerService,
+    current: &ryeos_scheduler::types::ScheduleSpecRecord,
+    authority: ScheduleExecutionAuthority,
+) -> Result<ryeos_scheduler::types::ScheduleSpecRecord> {
+    let mutation =
+        ScheduleSourceMutation::acquire(scheduler, &current.schedule_id, Some(&current.spec_hash))?;
+    let source = mutation.verified.as_ref().with_context(|| {
+        format!(
+            "schedule projection {} has no trusted source",
+            current.schedule_id
+        )
+    })?;
+    let mut record = source.record.clone();
+    if record.execution.principal_id() != authority.principal_id() {
+        bail!(
+            "schedule {} authority cannot change principal on reauthorization",
+            current.schedule_id
+        );
+    }
+    record.execution.authority = authority;
+    record.validate(Some(&current.schedule_id))?;
+
+    let body = serde_json::to_value(&record)?;
+    let (_path, verified) = mutation.publish(&body, scheduler.identity())?;
+    verified.to_spec_record()
+}
+
+/// Pause a schedule on the scheduler's own judgement, through the same
+/// signed write `scheduler.pause` uses, under the scheduler mutation gate.
+///
+/// Returns `false` without writing when the schedule is gone, already paused,
+/// or no longer the exact generation `expected_spec_hash` names.
+pub async fn auto_pause_schedule(
+    scheduler: &ryeos_scheduler_service::SchedulerService,
+    schedule_id: &str,
+    expected_spec_hash: &str,
+    reason: ScheduleAutoPauseReason,
+) -> Result<bool> {
+    let _mutation_guard = scheduler.acquire_mutation().await?;
+    let scheduler_db = scheduler.scheduler_db();
+    let Some(spec) = scheduler_db.get_spec(schedule_id)? else {
+        return Ok(false);
+    };
+    if spec.spec_hash != expected_spec_hash || !spec.enabled {
+        return Ok(false);
+    }
+    let rec = rewrite_schedule_enabled(scheduler, &spec, false, Some(reason))?;
+    scheduler_db.upsert_spec(&rec)?;
+    scheduler.notify_reload(Some(schedule_id.to_owned()));
+    Ok(true)
+}
+
+/// The signed reason the scheduler recorded when it paused this schedule by
+/// itself, read from the trusted source of the exact projected generation.
+pub(super) fn schedule_paused_reason(
+    scheduler: &ryeos_scheduler_service::SchedulerService,
+    current: &ryeos_scheduler::types::ScheduleSpecRecord,
+) -> Result<Option<ScheduleAutoPauseReason>> {
+    let source =
+        load_existing_schedule_source(scheduler, &current.schedule_id, Some(&current.spec_hash))?
+            .with_context(|| {
+            format!(
+                "schedule projection {} has no trusted source",
+                current.schedule_id
+            )
+        })?;
+    Ok(source.record.paused_reason)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

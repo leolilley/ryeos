@@ -1,7 +1,9 @@
 # GNU CUDA graph-free compatibility product — unsigned source
 
 Its descriptors live under `authoring/drafts/` (outside the signed `.ai/` tree, see
-`authoring/drafts/README.md`).
+`authoring/drafts/README.md`). So does the unqualified Modal user-driver chain
+(the driver products recipe, driver qualification policy, production graph,
+normalizer and closure verifier tools).
 
 The distinct `qwen3-0.6b-gnu-cuda-graph-free-2048-draft` worker runs the
 existing persistent-session/Qwen implementation under selected GNU Python.

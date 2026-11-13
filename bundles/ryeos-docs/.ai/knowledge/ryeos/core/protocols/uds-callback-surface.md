@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-04T09:32:59Z:f0a84ce252fbd9b2ba7b98b87fbcf54f9c5e60b9cfb355fe57fa58c1cba235c0:3TAA9nDKhKxdPmrbHzAv2f2XBVUVQGCj5sViSELa5eX1KHAJi3Uox8HlL+A81ZvR/w4B6fyZG5//S1HgPLL5Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:46:00Z:b65fb40f166769173764d081d6b77ca393e1a6c2c12e96e6fc7368eee5d41470:IGct0MGEHV2qDcJvOX76O8Mn+fOAkUd8GF+Hh2+wQPPHW4MU7va/SnG2woSzBUsfZTXeH49s0Ei0yfyQe8eQDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
@@ -15,7 +15,9 @@ description: >
 The daemon's Unix-domain-socket RPC dispatcher gates every `runtime.*`
 method at the transport boundary — before the handler runs — in
 `crates/bin/daemon/src/uds/server.rs::dispatch_runtime_method`. This document
-records which tier gates each route. It is the route-level companion to
+records which tier gates each route. A protocol opts a subprocess into this
+surface with `callback_channel: runtime_socket`; `callback_channel: none`
+exposes no socket. It is the route-level companion to
 [callback-auth.md](callback-auth.md), which documents the token types,
 TTLs, env injection, and revocation.
 
@@ -50,7 +52,7 @@ requests already past token validation still meet the locked lifecycle check.
 | `runtime.get_thread` | chain-read | Rehydrate a predecessor within the same chain. Returns the slim thread + result shape; artifacts and facets are not embedded. |
 | `runtime.replay_events` | chain-read | Accepts `thread_id` or `chain_root_id`; both resolve to a chain root. |
 | `runtime.get_thread_events` | chain-read | Alias of the replay handler. |
-| `runtime.append_event` | exact-thread write | |
+| `runtime.append_event` | exact-thread write | The event is `{event_type, payload}`; the daemon stores it under the node's signed `event_storage` policy, and an event that sends `storage_class` is refused. |
 | `runtime.append_events` | exact-thread write | Atomic ordered batch append. The directive runtime uses this for hash-bound multipart `cognition_in` stimuli that exceed one event's payload ceiling. |
 | `runtime.bundle_events_append` | exact-thread write | Handler receives the capability and enforces the bundle scope. |
 | `runtime.bundle_events_read_chain` | exact-thread | A *read* by name, but gated to the exact executing thread — not a chain-wide token — and bundle-scoped in the service. |

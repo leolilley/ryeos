@@ -4642,8 +4642,9 @@ pub async fn admit_launch_contract(
 /// callers. This compiles symbolic secret requirements but deliberately does
 /// not open any credential source. [`admit_launch_contract`] performs the
 /// authority-bound availability check for real admission; static validation
-/// must remain credential-read-free. Callers must not persist or serialize
-/// the opaque prepared runtime payload itself.
+/// asks the vault for per-name presence only, so no secret value leaves the
+/// vault helper. Callers must not persist or serialize the opaque prepared
+/// runtime payload itself.
 pub async fn prepare_admitted_launch_contract(
     applicability: &LaunchContractApplicability,
     root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
@@ -5031,6 +5032,10 @@ pub struct RootDispatchPreflight {
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
     pub root_dispatch_evidence: RootDispatchEvidence,
     pub effect_class_ceiling: Option<ryeos_effect_contract::EffectClass>,
+    /// The kind's `unproven_max`, present only when `effect_class_ceiling`
+    /// exceeds it: the subject's ceiling is authored testimony the kind does
+    /// not admit above this class without qualification evidence.
+    pub effect_class_unproven_cap: Option<ryeos_effect_contract::EffectClass>,
     /// Kind-owned signed shared-workspace relationship. `None` is deny-all for
     /// workload-delegated workspace access; ordinary dispatch does not infer a
     /// relationship from this field.
@@ -5071,47 +5076,95 @@ pub fn enforce_preflight_effect_class(
             binding: None,
         });
     }
+    if let Some(cap) = preflight.effect_class_unproven_cap
+        && !cap.permits(requested)
+    {
+        let subject = &preflight.requested_subject.resolved.canonical_ref;
+        return Err(DispatchError::LaunchPolicyForbidden {
+            code: "durable_effect_sealed_unqualified".to_string(),
+            message: format!(
+                "`{subject}` declares {}, but kind `{}` admits at most {} without \
+                 qualification evidence",
+                ceiling.as_str(),
+                subject.kind,
+                cap.as_str(),
+            ),
+            binding: None,
+        });
+    }
     Ok(())
+}
+
+/// A subject's projected durable-effect ceiling and, when that ceiling
+/// exceeds what its kind admits on authored testimony alone, the kind's cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct EffectClassCeilingAdmission {
+    ceiling: Option<ryeos_effect_contract::EffectClass>,
+    unproven_cap: Option<ryeos_effect_contract::EffectClass>,
 }
 
 fn effect_class_ceiling_for_admission(
     engine: &ryeos_engine::engine::Engine,
     admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
-) -> Result<Option<ryeos_effect_contract::EffectClass>, DispatchError> {
+) -> Result<EffectClassCeilingAdmission, DispatchError> {
     let kind = &admission.verified_subject().resolved.canonical_ref.kind;
     let declaration = engine
         .kinds
         .get(kind)
         .and_then(|schema| schema.execution.as_ref())
         .and_then(|execution| execution.effect_class_ceiling.as_ref());
+    project_effect_class_ceiling(
+        kind,
+        declaration,
+        &admission.resolution_output().composed.composed,
+    )
+}
+
+/// Project the kind-declared path of a composed value into a ceiling. Generic
+/// dispatch reads only the declaration, never the kind's name or field.
+fn project_effect_class_ceiling(
+    kind: &str,
+    declaration: Option<&ryeos_engine::kind_registry::EffectClassCeilingDecl>,
+    composed: &serde_json::Value,
+) -> Result<EffectClassCeilingAdmission, DispatchError> {
     let Some(declaration) = declaration else {
-        return Ok(None);
+        return Ok(EffectClassCeilingAdmission::default());
     };
-    let mut value = &admission.resolution_output().composed.composed;
+    let mut value = composed;
     for segment in &declaration.path {
         let Some(next) = value.get(segment) else {
-            return Ok(None);
+            return Ok(EffectClassCeilingAdmission::default());
         };
         value = next;
     }
     let class = value
         .as_str()
         .ok_or_else(|| DispatchError::SchemaMisconfigured {
-            kind: kind.clone(),
+            kind: kind.to_owned(),
             detail: format!(
                 "signed effect-class projection `{}` resolved to a non-string value",
                 declaration.path.join(".")
             ),
         })?;
-    match class {
-        "live" => Ok(None),
-        "recorded" => Ok(Some(ryeos_effect_contract::EffectClass::Recorded)),
-        "sealed" => Ok(Some(ryeos_effect_contract::EffectClass::Sealed)),
-        other => Err(DispatchError::SchemaMisconfigured {
-            kind: kind.clone(),
-            detail: format!("signed effect-class projection contains unknown class `{other}`"),
-        }),
-    }
+    let ceiling = match class {
+        "live" => None,
+        "recorded" => Some(ryeos_effect_contract::EffectClass::Recorded),
+        "sealed" => Some(ryeos_effect_contract::EffectClass::Sealed),
+        other => {
+            return Err(DispatchError::SchemaMisconfigured {
+                kind: kind.to_owned(),
+                detail: format!("signed effect-class projection contains unknown class `{other}`"),
+            });
+        }
+    };
+    let unproven_cap = match (ceiling, declaration.unproven_max) {
+        (Some(ceiling), Some(cap)) if !cap.permits(ceiling) => Some(cap),
+        _ => None,
+    };
+    Ok(EffectClassCeilingAdmission {
+        ceiling,
+        unproven_cap,
+    })
 }
 
 fn workspace_access_for_admission(
@@ -5292,7 +5345,10 @@ fn finish_root_dispatch_preflight(
             )?;
         }
     }
-    let effect_class_ceiling = effect_class_ceiling_for_admission(&ctx.engine, &root_admission)?;
+    let EffectClassCeilingAdmission {
+        ceiling: effect_class_ceiling,
+        unproven_cap: effect_class_unproven_cap,
+    } = effect_class_ceiling_for_admission(&ctx.engine, &root_admission)?;
     let workspace_access = workspace_access_for_admission(&ctx.engine, &root_admission)?;
     Ok(RootDispatchPreflight {
         class,
@@ -5300,6 +5356,7 @@ fn finish_root_dispatch_preflight(
         root_admission: Some(root_admission),
         root_dispatch_evidence,
         effect_class_ceiling,
+        effect_class_unproven_cap,
         workspace_access,
     })
 }
@@ -5409,6 +5466,32 @@ struct ValidatedDispatchRoot {
         Option<std::sync::Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
 }
 
+/// The typed refusal for a project file inside a bundle-owned namespace, when
+/// `error` is (or wraps) that engine refusal. Executor-chain hops resolve
+/// through the same engine check, so launch paths use this to keep the
+/// refusal typed instead of folding it into a generic chain failure.
+pub(crate) fn reserved_namespace_shadow_error(
+    error: &ryeos_engine::error::EngineError,
+) -> Option<DispatchError> {
+    use ryeos_engine::error::EngineError;
+
+    match error {
+        EngineError::Shared(inner) => reserved_namespace_shadow_error(inner),
+        EngineError::ReservedNamespaceShadow {
+            canonical_ref,
+            namespace,
+            bundle,
+            project_path,
+        } => Some(DispatchError::ReservedNamespaceShadow {
+            item_ref: canonical_ref.clone(),
+            namespace: namespace.clone(),
+            bundle: bundle.clone(),
+            project_path: project_path.display().to_string(),
+        }),
+        _ => None,
+    }
+}
+
 fn map_engine_root_resolution_error(
     error: &ryeos_engine::error::EngineError,
     requested_root: &str,
@@ -5434,9 +5517,21 @@ fn map_engine_root_resolution_error(
             kind: kind.clone(),
             detail: error.to_string(),
         }),
+        EngineError::AmbiguousResolution {
+            canonical_ref,
+            space,
+            candidates,
+        } => Some(DispatchError::AmbiguousItemFormats {
+            item_ref: canonical_ref.clone(),
+            space: space.clone(),
+            candidates: candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        }),
+        EngineError::ReservedNamespaceShadow { .. } => reserved_namespace_shadow_error(error),
         EngineError::ItemNotFound { .. }
         | EngineError::ItemResolutionUnavailable { .. }
-        | EngineError::AmbiguousResolution { .. }
         | EngineError::PinnedVersionNotFound { .. }
         | EngineError::NoExtensionsForKind { .. }
         | EngineError::SchemaLoaderError { .. }
@@ -5444,6 +5539,7 @@ fn map_engine_root_resolution_error(
         | EngineError::SignatureMissing { .. }
         | EngineError::SignatureVerificationFailed { .. }
         | EngineError::UntrustedSigner { .. }
+        | EngineError::ProjectTrustDocumentRefused { .. }
         | EngineError::ContentHashMismatch { .. }
         | EngineError::InvalidMetadata { .. }
         | EngineError::EffectiveItemNotFound { .. }
@@ -5463,6 +5559,11 @@ fn map_root_resolution_validation_error(
     error: anyhow::Error,
     requested_root: &str,
 ) -> DispatchError {
+    // Root resolution builds the admission itself, so a handler that could
+    // not be created here refused the request before anything ran.
+    if let Some(busy) = crate::dispatch_error::process_creation_busy_from_chain(&error) {
+        return busy;
+    }
     for cause in error.chain() {
         if let Some(engine_error) = cause.downcast_ref::<ryeos_engine::error::EngineError>()
             && let Some(mapped) = map_engine_root_resolution_error(engine_error, requested_root)
@@ -6081,12 +6182,16 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                                         project_binding.execution_workspace(),
                                         admitted_request_snapshot.as_deref(),
                                     )
-                                    .map_err(|e| DispatchError::SchemaMisconfigured {
-                                        kind: v.resolved.kind.clone(),
-                                        detail: format!(
-                                            "failed to resolve executor-chain terminal for \
-                                             '{hop_ref}': {e}"
-                                        ),
+                                    .map_err(|e| {
+                                        reserved_namespace_shadow_error(&e).unwrap_or_else(|| {
+                                            DispatchError::SchemaMisconfigured {
+                                                kind: v.resolved.kind.clone(),
+                                                detail: format!(
+                                                    "failed to resolve executor-chain terminal for \
+                                                     '{hop_ref}': {e}"
+                                                ),
+                                            }
+                                        })
                                     })?;
                                     if terminal.kind
                                         == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch
@@ -6767,6 +6872,69 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_formats_map_to_typed_conflict() {
+        let error = anyhow::Error::new(ryeos_engine::error::EngineError::AmbiguousResolution {
+            canonical_ref: "tool:demo/x".to_string(),
+            space: "project (project)".to_string(),
+            candidates: vec![
+                std::path::PathBuf::from(".ai/tools/demo/x.py"),
+                std::path::PathBuf::from(".ai/tools/demo/x.yaml"),
+            ],
+        })
+        .context("admitted root resolution failed");
+
+        match map_root_resolution_validation_error(error, "tool:demo/x") {
+            DispatchError::AmbiguousItemFormats {
+                item_ref,
+                space,
+                candidates,
+            } => {
+                assert_eq!(item_ref, "tool:demo/x");
+                assert_eq!(space, "project (project)");
+                assert_eq!(
+                    candidates,
+                    vec![".ai/tools/demo/x.py", ".ai/tools/demo/x.yaml"]
+                );
+            }
+            other => panic!("expected ambiguous_item_formats, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reserved_namespace_shadow_maps_to_typed_conflict() {
+        let error = ryeos_engine::error::EngineError::ReservedNamespaceShadow {
+            canonical_ref: "tool:ryeos/core/runtimes/python/function".to_string(),
+            namespace: "ryeos/core".to_string(),
+            bundle: "core".to_string(),
+            project_path: std::path::PathBuf::from(
+                ".ai/tools/ryeos/core/runtimes/python/function.yaml",
+            ),
+        };
+        let direct = reserved_namespace_shadow_error(&error).expect("typed refusal");
+        assert_eq!(direct.code(), "reserved_namespace_shadow");
+        assert_eq!(direct.http_status(), axum::http::StatusCode::CONFLICT);
+
+        let wrapped = anyhow::Error::new(error).context("admitted root resolution failed");
+        match map_root_resolution_validation_error(wrapped, "tool:demo/x") {
+            DispatchError::ReservedNamespaceShadow {
+                item_ref,
+                namespace,
+                bundle,
+                project_path,
+            } => {
+                assert_eq!(item_ref, "tool:ryeos/core/runtimes/python/function");
+                assert_eq!(namespace, "ryeos/core");
+                assert_eq!(bundle, "core");
+                assert_eq!(
+                    project_path,
+                    ".ai/tools/ryeos/core/runtimes/python/function.yaml"
+                );
+            }
+            other => panic!("expected reserved_namespace_shadow, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn root_resolution_preserves_caller_and_configuration_error_classes() {
         let missing = anyhow::Error::new(ryeos_engine::error::EngineError::ItemNotFound {
             canonical_ref: "work:example/root".to_string(),
@@ -6802,6 +6970,41 @@ mod tests {
         assert!(matches!(
             map_root_resolution_validation_error(invariant, "work:example/root"),
             DispatchError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn root_resolution_busy_handler_is_typed_process_creation_busy() {
+        // A busy fork window behind a composed resolution failure and behind
+        // a shared engine failure both surface as the typed 503.
+        let composed = anyhow::Error::new(ryeos_engine::error::EngineError::Shared(
+            std::sync::Arc::new(ryeos_engine::error::EngineError::ProcessCreationBusy {
+                subject: "work:example/root".to_string(),
+                detail: "retained scopes: ThreadId(3): src/x.rs:1:1 (1 scope)".to_string(),
+            }),
+        ))
+        .context("admitted root resolution failed");
+        let mapped = map_root_resolution_validation_error(composed, "work:example/root");
+        assert!(
+            matches!(&mapped, DispatchError::ProcessCreationBusy { detail } if detail.contains("retained scopes")),
+            "{mapped:?}"
+        );
+        assert_eq!(
+            mapped.http_status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(mapped.code(), "process_creation_busy");
+        assert!(mapped.retryable());
+        assert!(!mapped.to_string().contains("retained scopes"));
+
+        let step = anyhow::Error::new(ryeos_engine::resolution::ResolutionError::StepFailed {
+            step: ryeos_engine::resolution::ResolutionStepName::PipelineInit,
+            class: ryeos_engine::resolution::ResolutionFailureClass::ProcessCreationBusy,
+            reason: "composer handler subprocess failed: busy".to_string(),
+        });
+        assert!(matches!(
+            map_root_resolution_validation_error(step, "work:example/root"),
+            DispatchError::ProcessCreationBusy { .. }
         ));
     }
 
@@ -6968,6 +7171,7 @@ metadata:
         let registered_bundle_roots = bundle_roots
             .iter()
             .map(|root| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "example-bundle".to_owned(),
                 canonical_root: std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()),
             })
@@ -7104,6 +7308,145 @@ metadata:
         }
     }
 
+    fn effect_preflight(
+        ceiling: Option<ryeos_effect_contract::EffectClass>,
+        unproven_cap: Option<ryeos_effect_contract::EffectClass>,
+    ) -> RootDispatchPreflight {
+        let root = tempdir();
+        let authority = ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        let mut admitted = admitted_service_fixture(&root, authority, b"name: effectful\n");
+        admitted.resolved.canonical_ref = CanonicalRef::parse("tool:example/effectful").unwrap();
+        admitted.resolved.kind = "tool".to_string();
+        RootDispatchPreflight {
+            class: RootDispatchClass::MethodDispatch,
+            requested_subject: admitted.clone(),
+            root_admission: None,
+            root_dispatch_evidence: RootDispatchEvidence {
+                applicability: LaunchContractApplicability::NonEnvelope {
+                    class: RootDispatchClass::MethodDispatch,
+                },
+                requested_subject: admitted.clone(),
+                admitted_subject_ref: admitted.resolved.canonical_ref.clone(),
+                admitted_subject_digest: admitted.resolved.raw_content_digest.clone(),
+            },
+            effect_class_ceiling: ceiling,
+            effect_class_unproven_cap: unproven_cap,
+            workspace_access: None,
+        }
+    }
+
+    fn refusal_code(result: Result<(), DispatchError>) -> (String, String) {
+        match result {
+            Err(DispatchError::LaunchPolicyForbidden { code, message, .. }) => (code, message),
+            other => panic!("expected a launch-policy refusal, got {other:?}"),
+        }
+    }
+
+    fn effects_decl(
+        unproven_max: Option<ryeos_effect_contract::EffectClass>,
+    ) -> ryeos_engine::kind_registry::EffectClassCeilingDecl {
+        ryeos_engine::kind_registry::EffectClassCeilingDecl {
+            path: vec!["effects".to_owned()],
+            unproven_max,
+        }
+    }
+
+    #[test]
+    fn effect_ceiling_projects_sealed_but_marks_it_unproven_under_kind_cap() {
+        use ryeos_effect_contract::EffectClass;
+        let decl = effects_decl(Some(EffectClass::Recorded));
+        let sealed = project_effect_class_ceiling(
+            "tool",
+            Some(&decl),
+            &serde_json::json!({"effects": "sealed"}),
+        )
+        .unwrap();
+        assert_eq!(sealed.ceiling, Some(EffectClass::Sealed));
+        assert_eq!(sealed.unproven_cap, Some(EffectClass::Recorded));
+        let recorded = project_effect_class_ceiling(
+            "tool",
+            Some(&decl),
+            &serde_json::json!({"effects": "recorded"}),
+        )
+        .unwrap();
+        assert_eq!(recorded.ceiling, Some(EffectClass::Recorded));
+        assert_eq!(recorded.unproven_cap, None, "recorded is within the cap");
+        let live = project_effect_class_ceiling(
+            "tool",
+            Some(&decl),
+            &serde_json::json!({"effects": "live"}),
+        )
+        .unwrap();
+        assert_eq!(live, EffectClassCeilingAdmission::default());
+    }
+
+    #[test]
+    fn kind_without_unproven_max_keeps_current_behaviour() {
+        use ryeos_effect_contract::EffectClass;
+        let decl = effects_decl(None);
+        let sealed = project_effect_class_ceiling(
+            "tool",
+            Some(&decl),
+            &serde_json::json!({"effects": "sealed"}),
+        )
+        .unwrap();
+        assert_eq!(sealed.ceiling, Some(EffectClass::Sealed));
+        assert_eq!(sealed.unproven_cap, None);
+        enforce_preflight_effect_class(
+            &effect_preflight(sealed.ceiling, sealed.unproven_cap),
+            Some(EffectClass::Sealed),
+        )
+        .unwrap();
+        assert_eq!(
+            project_effect_class_ceiling("tool", None, &serde_json::json!({"effects": "sealed"}))
+                .unwrap(),
+            EffectClassCeilingAdmission::default()
+        );
+    }
+
+    #[test]
+    fn sealed_request_against_unproven_sealed_ceiling_refuses_with_sealed_unqualified() {
+        use ryeos_effect_contract::EffectClass;
+        let (code, message) = refusal_code(enforce_preflight_effect_class(
+            &effect_preflight(Some(EffectClass::Sealed), Some(EffectClass::Recorded)),
+            Some(EffectClass::Sealed),
+        ));
+        assert_eq!(code, "durable_effect_sealed_unqualified");
+        assert!(message.contains("tool:example/effectful"), "{message}");
+        assert!(message.contains("kind `tool`"), "{message}");
+        assert!(message.contains("at most recorded"), "{message}");
+    }
+
+    #[test]
+    fn recorded_request_against_unproven_sealed_ceiling_is_admitted() {
+        use ryeos_effect_contract::EffectClass;
+        let preflight = effect_preflight(Some(EffectClass::Sealed), Some(EffectClass::Recorded));
+        enforce_preflight_effect_class(&preflight, Some(EffectClass::Recorded)).unwrap();
+        enforce_preflight_effect_class(&preflight, None).unwrap();
+    }
+
+    #[test]
+    fn missing_ceiling_refuses_subject_ineligible() {
+        use ryeos_effect_contract::EffectClass;
+        let (code, _) = refusal_code(enforce_preflight_effect_class(
+            &effect_preflight(None, None),
+            Some(EffectClass::Recorded),
+        ));
+        assert_eq!(code, "durable_effect_subject_ineligible");
+    }
+
+    #[test]
+    fn recorded_ceiling_refuses_sealed_request() {
+        use ryeos_effect_contract::EffectClass;
+        let (code, _) = refusal_code(enforce_preflight_effect_class(
+            &effect_preflight(Some(EffectClass::Recorded), None),
+            Some(EffectClass::Sealed),
+        ));
+        assert_eq!(code, "durable_effect_ceiling_exceeded");
+    }
+
     #[test]
     fn method_wrapper_rebinds_route_evidence_to_outer_requested_subject() {
         let root = tempdir();
@@ -7129,6 +7472,7 @@ metadata:
                 admitted_subject_digest: admitted.resolved.raw_content_digest.clone(),
             },
             effect_class_ceiling: None,
+            effect_class_unproven_cap: None,
             workspace_access: None,
         };
 

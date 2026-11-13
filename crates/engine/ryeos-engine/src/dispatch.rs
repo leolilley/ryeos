@@ -1983,6 +1983,7 @@ mod tests {
                 output_limit_exceeded: None,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                process_creation_busy: None,
             });
             let expected =
                 interpret_terminal_output_with_success(success, exit_code, stdout, "diagnostic");
@@ -2018,6 +2019,7 @@ mod tests {
             output_limit_exceeded: None,
             stdout_truncated: false,
             stderr_truncated: false,
+            process_creation_busy: None,
         });
 
         let retained = completion.error.unwrap()["stderr"]
@@ -2044,6 +2046,7 @@ mod tests {
                 output_limit_exceeded: None,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                process_creation_busy: None,
             });
             let text = error.to_string();
             match refusal {
@@ -2072,6 +2075,7 @@ mod tests {
                 output_limit_exceeded: None,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                process_creation_busy: None,
             });
             let EngineError::SubprocessSpawnFailed {
                 aborted_before_attachment,
@@ -2099,6 +2103,7 @@ mod tests {
             output_limit_exceeded: Some(lillux::OutputLimitExceeded::Stdout),
             stdout_truncated: true,
             stderr_truncated: false,
+            process_creation_busy: None,
         });
 
         assert_eq!(completion.status, ThreadTerminalStatus::Failed);

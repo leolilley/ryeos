@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-18T22:04:50Z:90c203c7f402ceaedc06d07721a36b0ed45216cc4f062d362e7f2e5a9da2e9fa:gUIyJwCPzOYe4DuN5j/ALbCrgsWi4C+9uVXlJ2rxAQ8xdaHI9U/hOwGYhrqd0b1tLAh5PSpB5mSDRWoSEKT9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:15:23Z:4d33333de333c38aa5d30ef60c392b4cd680c61f342441641deca54a09fbd91b:qL4MwAsFkZHWKMuN4qXHNarkXRSDdjEHWcI7dzTsy8V2lwtIv2HMxxxtYQW9BVxPT1HQlF6XKyzOd7ma4ApRAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities]
@@ -48,6 +48,11 @@ composition as typed protocol bindings. `runtime`, `method_runtime`, and
 - `RYEOSD_PROJECT_STATE_SCOPE` — opaque logical-project namespace identity;
   stable across pinned COW successors and not itself an authority
 - `RYEOSD_THREAD_AUTH_TOKEN`
+- `RYEOSD_ACTING_PRINCIPAL` — the principal the daemon authorized for this
+  launch (`fp:<64 hex>`, `session:<id>` for session-local UI dispatch, or the
+  schedule's principal). `tool_callback` and `tool_streaming` declare it. It
+  tells a tool who called it; it is information, not proof. To record who did
+  something, read the `attribution.actor` the daemon stamps on a bundle event.
 
 The callback token and thread identity bind the durable project/state
 authority server-side. A subprocess does not receive or submit the canonical

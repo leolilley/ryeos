@@ -23,6 +23,11 @@ use super::planning;
 use super::projection;
 use super::types::{self, FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 use crate::SchedulerContext;
+use ryeos_scheduler_contract::{ScheduleAutoPauseReason, ScheduledAuthorityRefusal};
+
+/// A schedule observed with no boundary left under its lifetime bounds: its
+/// id, the exact generation observed, and the bound that ended it.
+type ExhaustedSchedule = (String, String, ScheduleAutoPauseReason);
 
 /// Start the timer loop. Call after listeners are bound.
 pub async fn run<Ctx, Shutdown>(
@@ -41,7 +46,7 @@ where
     tracing::info!(count = specs.len(), "scheduler: timer loop started");
 
     loop {
-        let sleep_duration = {
+        let (sleep_duration, exhausted) = {
             let runtime_gate = ctx.scheduler_runtime_gate();
             let Ok(_runtime_guard) = runtime_gate.try_read_owned() else {
                 tracing::debug!("scheduler: runtime mutation in progress; timer cycle paused");
@@ -90,12 +95,20 @@ where
 
             let now = lillux::time::timestamp_millis();
             let next_fire = compute_soonest_fire(&specs, &ctx, now)?;
+            let exhausted = lifetime_exhausted_specs(&specs, ctx.as_ref(), now)?;
 
-            match next_fire {
+            let sleep_duration = match next_fire {
                 Some(at) if at > now => std::time::Duration::from_millis((at - now) as u64),
                 _ => std::time::Duration::from_secs(1),
-            }
+            };
+            (sleep_duration, exhausted)
         };
+
+        // The pause write takes the scheduler mutation gate, so it runs only
+        // after this cycle's read guard is released.
+        if pause_lifetime_exhausted(ctx.as_ref(), &exhausted).await {
+            continue;
+        }
 
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
@@ -209,6 +222,67 @@ fn load_specs<Ctx: SchedulerContext>(ctx: &Arc<Ctx>) -> anyhow::Result<Vec<Sched
         })?;
     }
     Ok(specs)
+}
+
+/// Schedules whose signed lifetime bounds admit no further boundary.
+fn lifetime_exhausted_specs<Ctx: SchedulerContext>(
+    specs: &[ScheduleSpecRecord],
+    ctx: &Ctx,
+    now: i64,
+) -> anyhow::Result<Vec<ExhaustedSchedule>> {
+    let db = ctx.scheduler_db();
+    let mut exhausted = Vec::new();
+    for spec in specs {
+        if spec.execution.max_fires.is_none() && spec.execution.expires_at.is_none() {
+            continue;
+        }
+        let last_fire = db
+            .get_last_fire(&spec.schedule_id)
+            .with_context(|| format!("query lifetime boundary for {}", spec.schedule_id))?;
+        if let Some(fire) = &last_fire {
+            fire.validate()
+                .with_context(|| format!("invalid last fire for schedule {}", spec.schedule_id))?;
+        }
+        if let Some(reason) =
+            planning::plan_schedule(spec, last_fire.as_ref(), now).lifetime_exhausted
+        {
+            exhausted.push((spec.schedule_id.clone(), spec.spec_hash.clone(), reason));
+        }
+    }
+    Ok(exhausted)
+}
+
+/// Pause every schedule whose lifetime is exhausted. A refused or failed
+/// pause is logged and judged again on the next pass; it never stops the
+/// timer. Returns whether any schedule was paused.
+async fn pause_lifetime_exhausted<Ctx: SchedulerContext>(
+    ctx: &Ctx,
+    exhausted: &[ExhaustedSchedule],
+) -> bool {
+    let mut paused_any = false;
+    for (schedule_id, spec_hash, reason) in exhausted {
+        match ctx
+            .auto_pause_schedule(schedule_id, spec_hash, *reason)
+            .await
+        {
+            Ok(true) => {
+                paused_any = true;
+                tracing::info!(
+                    schedule_id = %schedule_id,
+                    reason = %reason,
+                    "scheduler: schedule lifetime reached; schedule paused"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => tracing::error!(
+                schedule_id = %schedule_id,
+                reason = %reason,
+                error = %format!("{error:#}"),
+                "scheduler: schedule lifetime reached but the pause write failed"
+            ),
+        }
+    }
+    paused_any
 }
 
 /// Check if a spec is due using the shared planner.
@@ -407,7 +481,8 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
         reserved.reserved_at,
         reserved.trigger_reason.clone(),
         reserved.schedule_spec_hash.clone(),
-    )?;
+    )?
+    .with_limits(spec.execution.limits.clone())?;
 
     let ctx = Arc::clone(ctx);
     let spec = spec.clone();
@@ -523,6 +598,13 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
                 );
             }
             Err(err) => {
+                // A refusal of the schedule's retained authority is typed: the
+                // fire records it as its own outcome, and the schedule pauses.
+                let refusal = ScheduledAuthorityRefusal::find(&err).cloned();
+                let failure_outcome = refusal
+                    .as_ref()
+                    .map_or("dispatch_failed", |refusal| refusal.kind.fire_outcome())
+                    .to_string();
                 {
                     let _runtime_guard = ctx.scheduler_runtime_gate().read_owned().await;
                     let db = ctx.scheduler_db();
@@ -551,7 +633,7 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
                         let fail_rec = FireRecord {
                             status: "failed".to_string(),
                             completed_at: Some(completed_at.max(settlement_anchor)),
-                            outcome: Some("dispatch_failed".to_string()),
+                            outcome: Some(failure_outcome),
                             ..latest
                         };
                         if let Err(error) =
@@ -571,6 +653,35 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
                     error = %err,
                     "schedule dispatch failed"
                 );
+
+                // The first refusal pauses the schedule, through the same
+                // signed write an operator pause uses, so later boundaries
+                // stop failing one by one. The fire record and
+                // `scheduler.explain` carry why. The runtime gate is released
+                // above; the pause takes the mutation gate itself.
+                if let Some(refusal) = refusal {
+                    let reason = refusal.kind.pause_reason();
+                    match ctx
+                        .auto_pause_schedule(&spec.schedule_id, &spec.spec_hash, reason)
+                        .await
+                    {
+                        Ok(paused) => tracing::warn!(
+                            fire_id = %fire_id,
+                            schedule_id = %spec.schedule_id,
+                            refusal = %refusal.kind,
+                            detail = %refusal.detail,
+                            paused,
+                            "scheduler: schedule authority refused; schedule paused"
+                        ),
+                        Err(error) => tracing::error!(
+                            fire_id = %fire_id,
+                            schedule_id = %spec.schedule_id,
+                            refusal = %refusal.kind,
+                            error = %format!("{error:#}"),
+                            "scheduler: schedule authority refused but the pause write failed"
+                        ),
+                    }
+                }
             }
         }
     });
@@ -722,6 +833,9 @@ mod tests {
         hang_dispatch: std::sync::atomic::AtomicBool,
         dispatch_started: Arc<tokio::sync::Notify>,
         dispatch_release: Arc<tokio::sync::Notify>,
+        auto_pauses: Mutex<Vec<ExhaustedSchedule>>,
+        /// When set, project binding refuses as revalidation would.
+        refuse_authority: Mutex<Option<ryeos_scheduler_contract::ScheduledAuthorityRefusalKind>>,
     }
 
     impl MockContext {
@@ -742,6 +856,8 @@ mod tests {
                 hang_dispatch: std::sync::atomic::AtomicBool::new(false),
                 dispatch_started: Arc::new(tokio::sync::Notify::new()),
                 dispatch_release: Arc::new(tokio::sync::Notify::new()),
+                auto_pauses: Mutex::new(Vec::new()),
+                refuse_authority: Mutex::new(None),
             }
         }
     }
@@ -761,6 +877,10 @@ mod tests {
 
         fn schedule_trust_store(&self) -> &TrustStore {
             &self.trust
+        }
+
+        fn schedule_signer_fingerprint(&self) -> &str {
+            ""
         }
 
         fn get_thread_status(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
@@ -784,6 +904,14 @@ mod tests {
             _fire: &ryeos_engine::scheduled_fire_context::ScheduledFireContext,
             _thread_id: &str,
         ) -> anyhow::Result<crate::ScheduledProjectBinding> {
+            let refusal = *self.refuse_authority.lock().unwrap();
+            if let Some(kind) = refusal {
+                return Err(anyhow::Error::new(ScheduledAuthorityRefusal::new(
+                    kind,
+                    "the pinned grant is gone",
+                ))
+                .context("revalidate scheduled delegation"));
+            }
             let selected = self.selected_binding.lock().unwrap().take();
             if let Some(binding) = selected {
                 self.binding_selected.notify_one();
@@ -813,6 +941,28 @@ mod tests {
                 admitted_capsule_hash: "44".repeat(32),
             })
         }
+
+        async fn auto_pause_schedule(
+            &self,
+            schedule_id: &str,
+            expected_spec_hash: &str,
+            reason: ScheduleAutoPauseReason,
+        ) -> anyhow::Result<bool> {
+            let Some(mut spec) = self.db.get_spec(schedule_id)? else {
+                return Ok(false);
+            };
+            if spec.spec_hash != expected_spec_hash || !spec.enabled {
+                return Ok(false);
+            }
+            self.auto_pauses.lock().unwrap().push((
+                schedule_id.to_owned(),
+                expected_spec_hash.to_owned(),
+                reason,
+            ));
+            spec.enabled = false;
+            self.db.upsert_spec(&spec)?;
+            Ok(true)
+        }
     }
 
     /// Wait until every detached fire task has finished and dropped its
@@ -839,6 +989,9 @@ mod tests {
             policy: ryeos_engine::execution_contract::ExecutionPolicy::projectless(
                 ryeos_engine::execution_contract::ExecutionResponse::Accepted,
             ),
+            limits: None,
+            max_fires: None,
+            expires_at: None,
         }
     }
 
@@ -981,6 +1134,139 @@ mod tests {
             .unwrap();
         assert!(active.object_hashes.is_empty());
         finish_detached_work(&ctx).await;
+    }
+
+    #[tokio::test]
+    async fn lifetime_exhausted_schedule_is_auto_paused() {
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
+        let now = lillux::time::timestamp_millis();
+        let mut spec = make_spec("bounded", "skip");
+        spec.schedule_type = "interval".to_owned();
+        spec.expression = "60".to_owned();
+        spec.registered_at = now - 200_000;
+        spec.execution.max_fires = Some(1);
+        ctx.db.upsert_spec(&spec).unwrap();
+
+        // Before the single admitted boundary is recorded, nothing is exhausted.
+        assert!(
+            lifetime_exhausted_specs(std::slice::from_ref(&spec), ctx.as_ref(), now)
+                .unwrap()
+                .is_empty()
+        );
+
+        let only_boundary = spec.registered_at + 60_000;
+        ctx.db
+            .upsert_fire(&FireRecord {
+                fire_id: types::fire_id(&spec.schedule_id, only_boundary),
+                schedule_id: spec.schedule_id.clone(),
+                scheduled_at: only_boundary,
+                reserved_at: only_boundary,
+                dispatched_at: None,
+                completed_at: Some(only_boundary),
+                thread_id: None,
+                status: "skipped".to_owned(),
+                trigger_reason: "overlap_policy_skip".to_owned(),
+                outcome: Some("overlap_policy_skip".to_owned()),
+                signer_fingerprint: spec.signer_fingerprint.clone(),
+                schedule_spec_hash: spec.spec_hash.clone(),
+                project_authority: None,
+                admitted_capsule_hash: None,
+            })
+            .unwrap();
+
+        let exhausted =
+            lifetime_exhausted_specs(std::slice::from_ref(&spec), ctx.as_ref(), now).unwrap();
+        assert_eq!(
+            exhausted,
+            vec![(
+                spec.schedule_id.clone(),
+                spec.spec_hash.clone(),
+                ScheduleAutoPauseReason::MaxFiresReached
+            )]
+        );
+        assert!(pause_lifetime_exhausted(ctx.as_ref(), &exhausted).await);
+        assert_eq!(*ctx.auto_pauses.lock().unwrap(), exhausted);
+        assert!(!ctx.db.get_spec(&spec.schedule_id).unwrap().unwrap().enabled);
+        // A second pass sees nothing left to pause.
+        assert!(!pause_lifetime_exhausted(ctx.as_ref(), &exhausted).await);
+    }
+
+    #[tokio::test]
+    async fn authority_refusal_records_typed_outcome_and_pauses_schedule() {
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
+        *ctx.refuse_authority.lock().unwrap() =
+            Some(ryeos_scheduler_contract::ScheduledAuthorityRefusalKind::GrantRevoked);
+        let spec = make_spec("revoked-owner", "skip");
+        ctx.db.upsert_spec(&spec).unwrap();
+        let fire_id = types::fire_id(&spec.schedule_id, 1000);
+
+        dispatch_fire(&ctx, &fire_id, &spec, 1000, "normal", false)
+            .await
+            .unwrap();
+        finish_detached_work(&ctx).await;
+
+        let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire recorded");
+        assert_eq!(fire.status, "failed");
+        assert_eq!(fire.outcome.as_deref(), Some("authority_revoked"));
+        assert_eq!(
+            *ctx.auto_pauses.lock().unwrap(),
+            vec![(
+                spec.schedule_id.clone(),
+                spec.spec_hash.clone(),
+                ScheduleAutoPauseReason::AuthorityRevoked
+            )]
+        );
+        assert!(!ctx.db.get_spec(&spec.schedule_id).unwrap().unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn untyped_dispatch_failure_stays_dispatch_failed_and_does_not_pause() {
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
+        let mut spec = make_spec("pinned-without-roots", "skip");
+        spec.project_root = Some("/project".to_owned());
+        spec.execution.policy.project =
+            ryeos_engine::execution_contract::ProjectExecutionPolicy::Pinned {
+                source: ryeos_engine::execution_contract::PinnedSource::CurrentHead,
+                realization: ryeos_engine::execution_contract::PinnedRealization::ReadOnly,
+                child_policy: ryeos_engine::execution_contract::ChildProjectPolicy::Inherit,
+            };
+        // The mock binds a pinned authority with no staged publication,
+        // which the timer refuses: an ordinary, untyped failure.
+        *ctx.selected_binding.lock().unwrap() = Some(crate::ScheduledProjectBinding {
+            authority: ryeos_state::objects::ExecutionProjectAuthority::pinned(
+                "project:test".to_owned(),
+                Some(std::path::PathBuf::from("/project")),
+                "55".repeat(32),
+                ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
+            pending_publication: None,
+        });
+        ctx.db.upsert_spec(&spec).unwrap();
+        let fire_id = types::fire_id(&spec.schedule_id, 1000);
+
+        dispatch_fire(&ctx, &fire_id, &spec, 1000, "normal", false)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ctx.binding_selected.notified(),
+        )
+        .await
+        .expect("binding reached");
+        ctx.binding_release.notify_one();
+        finish_detached_work(&ctx).await;
+
+        let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire recorded");
+        assert_eq!(fire.status, "failed");
+        assert_eq!(fire.outcome.as_deref(), Some("dispatch_failed"));
+        assert!(ctx.auto_pauses.lock().unwrap().is_empty());
+        assert!(ctx.db.get_spec(&spec.schedule_id).unwrap().unwrap().enabled);
     }
 
     #[tokio::test]

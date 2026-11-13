@@ -96,6 +96,12 @@ pub struct ExecuteRequest {
     /// diagnostics block.
     #[serde(default)]
     pub state_root: Option<String>,
+    /// Ask this node to sign the successful response envelope for this exact
+    /// signed request and executed item ref
+    /// (`crate::remote::result_attestation`). A forwarding node sets it
+    /// and refuses an unsigned result.
+    #[serde(default)]
+    pub attest_result: bool,
 }
 
 impl ExecuteRequest {
@@ -547,6 +553,11 @@ pub fn resolve_execution_contract(
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<ResolvedExecutionContract> {
     policy.validate()?;
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        state.authorizer.as_ref(),
+        caller_scopes,
+        &policy.environment,
+    )?;
     if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
         let required_capability = access.required_capability();
         ryeos_app::execution_policy::authorize_live_project_access(
@@ -849,6 +860,14 @@ pub fn preauthorize_execution_policy(
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<()> {
     policy.validate()?;
+    // An environment that reads the operator's vault is operator authority,
+    // not a consequence of holding execute rights on the item. Refuse it here,
+    // before any capture, launch reservation, or secret read.
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        state.authorizer.as_ref(),
+        caller_scopes,
+        &policy.environment,
+    )?;
     if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
         let required_capability = access.required_capability();
         ryeos_app::execution_policy::authorize_live_project_access(
@@ -887,6 +906,24 @@ pub fn preauthorize_execution_policy(
             })?;
     }
     Ok(())
+}
+
+/// The typed 403 for an operator-vault preauthorization refusal, naming the
+/// missing capability. Any other refusal returns `None` and keeps the
+/// caller's existing route error shape.
+pub(crate) fn operator_vault_route_error(error: &anyhow::Error) -> Option<RouteDispatchError> {
+    use ryeos_app::execution_policy::OperatorVaultCapabilityRequired;
+    let refusal = error.downcast_ref::<OperatorVaultCapabilityRequired>()?;
+    Some(RouteDispatchError::Structured {
+        code: OperatorVaultCapabilityRequired::CODE.to_owned(),
+        status: StatusCode::FORBIDDEN.as_u16(),
+        body: json!({
+            "error": refusal.to_string(),
+            "error_code": OperatorVaultCapabilityRequired::CODE,
+            "required_capability": refusal.required_capability(),
+        }),
+        thread_id: None,
+    })
 }
 
 // ── Mode ──────────────────────────────────────────────────────────────────
@@ -990,6 +1027,26 @@ impl CompiledResponseMode for CompiledExecuteMode {
     ) -> Result<axum::response::Response, RouteDispatchError> {
         let request: ExecuteRequest = ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+        // A forwarding node asks for a result signed for this exact request.
+        // The request was verified by the `ryeos_signed` invoker; recompute
+        // its digest from the same bytes.
+        let attestation_binding = if request.attest_result {
+            let request_digest = crate::auth::signed_request_digest(
+                &ctx.state.identity.principal_id(),
+                ctx.request_parts.method.as_str(),
+                &ctx.request_parts.uri,
+                &ctx.request_parts.headers,
+                &ctx.body_raw,
+            )
+            .ok_or_else(|| {
+                RouteDispatchError::BadRequest(
+                    "attest_result requires a ryeos_signed request".to_string(),
+                )
+            })?;
+            Some((request_digest, request.item_ref.clone()))
+        } else {
+            None
+        };
         // This assertion belongs to the authenticated wire ingress. Nested
         // admission consumes verified handler authority, not a second proof.
         ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
@@ -1000,7 +1057,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
         // HTTP only owns ingress/response adaptation, never a second admission.
         let accepted = ctx.request_parts.uri.path() == "/execute/launch";
-        let outcome = admit_execution_with_publication(
+        let identity = ctx.state.identity.clone();
+        let mut outcome = admit_execution_with_publication(
             request,
             ctx.principal.handler_context(),
             ctx.state,
@@ -1009,6 +1067,19 @@ impl CompiledResponseMode for CompiledExecuteMode {
             ctx.publication,
         )
         .await?;
+        if let Some((request_digest, item_ref)) = attestation_binding
+            && outcome.status.is_success()
+        {
+            crate::remote::result_attestation::attest(
+                &mut outcome.body,
+                &identity,
+                &request_digest,
+                &item_ref,
+            )
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!("sign remote execute result: {error}"))
+            })?;
+        }
         Ok((outcome.status, axum::Json(outcome.body)).into_response())
     }
 }
@@ -1254,7 +1325,8 @@ async fn admit_execution_with_publication(
     if let Err(error) =
         preauthorize_execution_policy(&request.execution_policy, &caller_scopes, &state)
     {
-        return Err(RouteDispatchError::BadRequest(error.to_string()));
+        return Err(operator_vault_route_error(&error)
+            .unwrap_or_else(|| RouteDispatchError::BadRequest(error.to_string())));
     }
 
     // This authenticated read-side control returns before project realization,
@@ -1899,7 +1971,24 @@ async fn admit_execution_with_publication(
                 project_for_layering,
             )
             .map(|report| report.remotes)
-            .map_err(|e| RouteDispatchError::Internal(format!("load remotes: {e:#}")))?,
+            .map_err(|e| {
+                match crate::remote::config::typed_load_error_or(e, |e| {
+                    crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                }) {
+                    crate::handler_error::HandlerError::Structured { code, status, body } => {
+                        RouteDispatchError::Structured {
+                            code,
+                            status,
+                            body,
+                            thread_id: None,
+                        }
+                    }
+                    crate::handler_error::HandlerError::Internal(message) => {
+                        RouteDispatchError::Internal(message)
+                    }
+                    other => RouteDispatchError::Internal(other.to_string()),
+                }
+            })?,
         )
     } else {
         None
@@ -2396,6 +2485,13 @@ fn map_forward_error_to_dispatch(
                 detail: detail.clone(),
             }
         }
+        RemoteForwardError::ResultUnsigned
+        | RemoteForwardError::ResultAttestationInvalid { .. } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: format!("[{}] {e}", e.code()),
+            }
+        }
         RemoteForwardError::MissingSnapshotHash => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
                 target_site_id: target_site_id.to_string(),
@@ -2442,6 +2538,107 @@ mod tests {
 
     static NO_PROVIDER_ENVIRONMENT: ryeos_app::vault::ProviderEnvironment =
         ryeos_app::vault::ProviderEnvironment::none();
+
+    fn scopes(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn operator_vault_namespace_policy() -> ExecutionPolicy {
+        ExecutionPolicy {
+            environment: ExecutionEnvironmentPolicy::Vault {
+                namespace: ryeos_app::execution_policy::OPERATOR_VAULT_NAMESPACE.to_owned(),
+                name_policy:
+                    ryeos_app::execution_policy::ExecutionEnvironmentNamePolicy::DeclaredRequired,
+            },
+            ..ExecutionPolicy::projectless(ExecutionResponse::Wait)
+        }
+    }
+
+    #[test]
+    fn preauthorization_refuses_operator_vault_exposure_without_the_fixed_capability() {
+        use ryeos_app::execution_policy::{
+            LIVE_PROJECT_WRITE_CAPABILITY, OPERATOR_VAULT_CAPABILITY,
+            OperatorVaultCapabilityRequired,
+        };
+        let (_state_root, _store_owner, state) = crate::test_support::build_test_state();
+        let live = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        let pinned = ExecutionPolicy::local_pinned_capture(ExecutionResponse::Wait);
+        let vault = operator_vault_namespace_policy();
+        for (policy, narrow) in [
+            // Live write authority, and execute rights on the item, are not
+            // operator-vault authority.
+            (
+                &live,
+                scopes(&[LIVE_PROJECT_WRITE_CAPABILITY, "ryeos.execute.*"]),
+            ),
+            (&pinned, scopes(&["ryeos.execute.directive.*"])),
+            (&vault, scopes(&["ryeos.get.vault.*"])),
+            (&vault, Vec::new()),
+        ] {
+            let error = preauthorize_execution_policy(policy, &narrow, &state).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<OperatorVaultCapabilityRequired>(),
+                Some(&OperatorVaultCapabilityRequired),
+                "{policy:?} under {narrow:?}: {error:#}"
+            );
+            assert!(error.to_string().contains(OPERATOR_VAULT_CAPABILITY));
+            let Some(RouteDispatchError::Structured {
+                code, status, body, ..
+            }) = operator_vault_route_error(&error)
+            else {
+                panic!("operator-vault refusal must map to a typed route error");
+            };
+            assert_eq!(code, OperatorVaultCapabilityRequired::CODE);
+            assert_eq!(status, StatusCode::FORBIDDEN.as_u16());
+            assert_eq!(body["error_code"], OperatorVaultCapabilityRequired::CODE);
+            assert_eq!(body["required_capability"], OPERATOR_VAULT_CAPABILITY);
+        }
+    }
+
+    #[test]
+    fn preauthorization_admits_operator_vault_exposure_with_the_capability_or_operator_wildcard() {
+        use ryeos_app::execution_policy::{
+            LIVE_PROJECT_WRITE_CAPABILITY, OPERATOR_VAULT_CAPABILITY,
+        };
+        let (_state_root, _store_owner, state) = crate::test_support::build_test_state();
+        let live = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        let pinned = ExecutionPolicy::local_pinned_capture(ExecutionResponse::Wait);
+        let vault = operator_vault_namespace_policy();
+        // The configured operator's bootstrap grant.
+        for policy in [&live, &pinned, &vault] {
+            preauthorize_execution_policy(policy, &scopes(&["*"]), &state).unwrap();
+        }
+        preauthorize_execution_policy(
+            &live,
+            &scopes(&[LIVE_PROJECT_WRITE_CAPABILITY, OPERATOR_VAULT_CAPABILITY]),
+            &state,
+        )
+        .unwrap();
+        preauthorize_execution_policy(&pinned, &scopes(&[OPERATOR_VAULT_CAPABILITY]), &state)
+            .unwrap();
+        preauthorize_execution_policy(&vault, &scopes(&[OPERATOR_VAULT_CAPABILITY]), &state)
+            .unwrap();
+
+        // Without operator-vault exposure the capability is not required.
+        preauthorize_execution_policy(
+            &live.clone().exclude_operator_vault(),
+            &scopes(&[LIVE_PROJECT_WRITE_CAPABILITY]),
+            &state,
+        )
+        .unwrap();
+        preauthorize_execution_policy(
+            &ExecutionPolicy::projectless(ExecutionResponse::Wait),
+            &[],
+            &state,
+        )
+        .unwrap();
+
+        // Any other refusal keeps its own route error shape.
+        let live_refusal =
+            preauthorize_execution_policy(&live, &scopes(&[OPERATOR_VAULT_CAPABILITY]), &state)
+                .unwrap_err();
+        assert!(operator_vault_route_error(&live_refusal).is_none());
+    }
 
     fn no_provider_environment() -> ProviderEnvironmentRecipient<'static> {
         ProviderEnvironmentRecipient {
@@ -3413,6 +3610,7 @@ mod tests {
             usage_subject: None,
             debug_raw: false,
             state_root: None,
+            attest_result: false,
         }
     }
 

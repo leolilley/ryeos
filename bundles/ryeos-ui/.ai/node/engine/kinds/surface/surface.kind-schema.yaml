@@ -1,8 +1,19 @@
-# ryeos:signed:2026-11-08T06:40:44Z:879cccf224487f975f9d78cf5d368676d3567f8b311da42e71fc92e5269038e4:zFjOx9xZ7kK5D59POWlj7LlrS6Aw4ltnm9Ax6d7BHSTyb5LT/4VsuJfTNTnk46yvt60Mk/SqIZH+DjvcKjXrCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T10:40:20Z:df4703a5e2b30630121e7b11bcef1ebcd113631a92030bf483ada4998372f233:FGojhGNOzTX50Pgf8w+gG+JmpvJa0bhIJZVrc2DXfoeVX/5OYst56C/T/9fHdoFpnqIy6wlz5SmuWVdWqx2lCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
-version: "2.0.0"
+version: "2.2.0"
 location:
   directory: surfaces
+
+# A surface is never executed. Its seat (the operator presentation opened on
+# it) is a daemon-owned thread of this profile; terminal seat chains retire
+# through a retirement fence so their retained evidence outlives the chain.
+thread_profile:
+  name: seat_session
+  root_executable: false
+  supports_interrupt: false
+  supports_continuation: false
+  supports_operator_followup: false
+  retirement_fence: true
 
 formats:
   - extensions: [".yaml", ".yml"]
@@ -59,10 +70,6 @@ composer_config:
     # so the keyed merge would silently drop them.
     - name: library
       strategy: replace_root_last
-      expect_value_type: sequence
-    - name: navigation
-      strategy: keyed_seq_merge_root_last
-      key: id
       expect_value_type: sequence
     - name: launch_entry
       strategy: replace_root_last
@@ -230,19 +237,6 @@ composed_value_contract:
           required:
             group: { type: single, prim: string }
             views: { type: single, prim: sequence, elements: { type: single, prim: string } }
-          optional: {}
-    navigation:
-      type: single
-      prim: sequence
-      elements:
-        type: single
-        prim: mapping
-        contract:
-          root_type: mapping
-          required:
-            id: { type: single, prim: string }
-            label: { type: single, prim: string }
-            view: { type: single, prim: string }
           optional: {}
 
 metadata:

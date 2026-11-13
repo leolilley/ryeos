@@ -307,6 +307,7 @@ fn preflight_verify_bundle_in_context_inner(
             None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
         }
         .context("preflight: bundle manifest verification")?;
+        refuse_overlapping_owned_namespaces(source_path, dependency_bundle_roots, &trust_store)?;
         validate_manifest_only_control_tree(&ai_dir)?;
         return Ok(PreflightReport::default());
     }
@@ -544,6 +545,7 @@ fn preflight_verify_bundle_in_context_inner(
         None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
     }
     .context("preflight: bundle manifest verification")?;
+    refuse_overlapping_owned_namespaces(source_path, dependency_bundle_roots, &trust_store)?;
 
     if !warnings.is_empty() {
         tracing::info!(
@@ -563,6 +565,40 @@ fn preflight_verify_bundle_in_context_inner(
 /// Refuse an item namespace when no kind schema is in the exact dependency
 /// closure. Manifest-only bundles may contain only their signed manifest and
 /// content-addressed executable payload machinery.
+/// Refuse a candidate bundle whose signed manifest claims a namespace that an
+/// installed bundle (one of `dependency_bundle_roots`) already owns, or sits
+/// inside. A dependency root without a manifest is not an installed bundle
+/// and claims nothing.
+fn refuse_overlapping_owned_namespaces(
+    candidate_root: &Path,
+    dependency_bundle_roots: &[PathBuf],
+    trust_store: &TrustStore,
+) -> Result<()> {
+    let (candidate, candidate_claims) =
+        crate::manifest::verified_owned_namespaces(candidate_root, trust_store)
+            .context("preflight: read candidate owned namespaces")?;
+    if candidate_claims.is_empty() {
+        return Ok(());
+    }
+    let mut claims = vec![(candidate, candidate_claims)];
+    for root in dependency_bundle_roots {
+        let manifest = root.join(ryeos_engine::AI_DIR).join("manifest.yaml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let installed = crate::manifest::verified_owned_namespaces(root, trust_store)
+            .with_context(|| {
+                format!(
+                    "preflight: read owned namespaces of installed bundle at {}",
+                    root.display()
+                )
+            })?;
+        claims.push(installed);
+    }
+    ryeos_engine::item_resolution::check_owned_namespace_claims(&claims)
+        .map_err(|error| anyhow::anyhow!("preflight: {error}"))
+}
+
 fn validate_manifest_only_control_tree(ai_dir: &Path) -> Result<()> {
     const ALLOWED: &[&str] = &[
         "bin",
@@ -2463,6 +2499,7 @@ strict_fields: warn
             },
             content: None,
             execution: None,
+            thread_profile: None,
             composed_value_contract: shape_from_yaml(contract_yaml),
             composer: IDENTITY_COMPOSER.to_string(),
             composer_config: serde_json::Value::Null,
