@@ -269,6 +269,17 @@ impl TrustStore {
     ///
     /// The fingerprint is the SHA-256 hex digest of the raw public key bytes.
     pub fn load_from_dir(keys_dir: &Path) -> Result<Self, EngineError> {
+        match Self::read_trust_dir_files(keys_dir)? {
+            Some(files) => Self::load_from_files(files),
+            None => Ok(Self::empty()),
+        }
+    }
+
+    /// Read the trust documents of one directory under the shared bounds,
+    /// without parsing them. `None` when the directory is absent.
+    pub fn read_trust_dir_files(
+        keys_dir: &Path,
+    ) -> Result<Option<Vec<(PathBuf, Vec<u8>)>>, EngineError> {
         let mut file_count = 0_usize;
         let mut total_bytes = 0_u64;
         let mut files = Vec::new();
@@ -307,10 +318,7 @@ impl TrustStore {
                 keys_dir.display()
             ))
         })?;
-        if !present {
-            return Ok(Self::empty());
-        }
-        Self::load_from_files(files)
+        Ok(present.then_some(files))
     }
 
     /// Load one deterministic set of trusted-key documents from already
@@ -434,6 +442,11 @@ impl TrustStore {
         self.signers.get(fingerprint)
     }
 
+    /// Every trusted signer, in no particular order.
+    pub fn signers(&self) -> impl Iterator<Item = &TrustedSigner> {
+        self.signers.values()
+    }
+
     /// Number of trusted signers.
     pub fn len(&self) -> usize {
         self.signers.len()
@@ -486,15 +499,30 @@ impl TrustStore {
         if !trust_dir.is_dir() {
             return Ok(std::borrow::Cow::Borrowed(self));
         }
-        let project_keys = Self::load_from_dir(&trust_dir)?;
-        if project_keys.is_empty() {
+        let files = Self::read_trust_dir_files(&trust_dir)?.unwrap_or_default();
+        if files.is_empty() {
             return Ok(std::borrow::Cow::Borrowed(self));
         }
+        Ok(std::borrow::Cow::Owned(self.with_project_key_files(files)?))
+    }
+
+    /// Overlay project trust documents, given as already admitted bytes, on
+    /// this node store. This is the one place project trust documents are
+    /// parsed and verified: the daemon's engine and the runtime-side loader
+    /// (`ryeos-runtime` `verified_loader`) both call it, so they cannot
+    /// disagree about which project keys count. Paths are diagnostic only.
+    pub fn with_project_key_files(
+        &self,
+        files: impl IntoIterator<Item = (PathBuf, Vec<u8>)>,
+    ) -> Result<Self, EngineError> {
+        let project_keys = Self::load_from_files(files)?;
         let mut merged = project_keys.signers;
-        for (fp, signer) in &self.signers {
-            merged.entry(fp.clone()).or_insert_with(|| signer.clone());
+        for (fingerprint, signer) in &self.signers {
+            merged
+                .entry(fingerprint.clone())
+                .or_insert_with(|| signer.clone());
         }
-        Ok(std::borrow::Cow::Owned(Self { signers: merged }))
+        Ok(Self { signers: merged })
     }
 
     /// Overlay project-local keys from one admitted project-content
@@ -529,16 +557,9 @@ impl TrustStore {
                         project_relative.display()
                     ))
                 })?;
-            files.push((entry.relative_path, bytes));
+            files.push((project_relative, bytes));
         }
-        let project_keys = Self::load_from_files(files)?;
-        let mut merged = project_keys.signers;
-        for (fingerprint, signer) in &self.signers {
-            merged
-                .entry(fingerprint.clone())
-                .or_insert_with(|| signer.clone());
-        }
-        Ok(Self { signers: merged })
+        self.with_project_key_files(files)
     }
 }
 

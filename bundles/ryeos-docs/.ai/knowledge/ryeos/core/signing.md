@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-11-12T10:13:58Z:97d123b07e0d0e24c3d1c8b03dfc940e815b0161f43ebb0115199e1c25b4741f:yVkd5MpzqC5q578ajqmau7PPIhvvDJ8uNcrI/rnQF5IuzLXyopQZfSvdEP9S3a4s2YmeXbKIqkeH/FIXU8F8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:38:57Z:60b7b0750ec82e074e4c92e0000e7b93a18dca2eb5703eadf81dc3eb94ff5683:hle1QKMbs1gLk1caIZ/xzghDIWf67QoXBWI+tyoXi2taImUpiiE7uwnHXLLuZ28eccTVLzLPF6vXzcEJM/HfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [fundamentals, signing, trust, integrity, compilation]
-version: "3.1.0"
+version: "3.1.1"
 description: >
   How signing and trust work in Rye OS — Ed25519 signatures,
   content hashing, path anchoring, the trust store, the signed
@@ -189,6 +189,12 @@ Each trust doc is self-signed (signed by the key it declares). During
 3. **Publisher trust** — the hardcoded official publisher key (or dev key)
 
 Additional publisher keys can be pinned with `ryeos trust pin`.
+
+Runtimes read trust documents with the daemon's own parser and checks
+(`ryeos_engine::trust`): a signed document whose content was changed, or
+whose signature line names a key the store does not hold, is refused in a
+runtime exactly as it is in the daemon. A runtime has no trust reader of
+its own.
 
 **Bundles do NOT ship trust docs.** The operator must pin publisher
 keys explicitly via `ryeos init` (official) or `ryeos trust pin`

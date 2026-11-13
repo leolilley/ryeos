@@ -3,11 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use ryeos_engine::trust::{
     MAX_TRUST_DIRECTORY_BYTES, MAX_TRUST_DOCUMENT_BYTES, MAX_TRUST_DOCUMENTS,
-    MAX_TRUST_TRAVERSAL_DEPTH, MAX_TRUST_TRAVERSAL_ENTRIES,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
@@ -103,98 +101,50 @@ impl TrustStore {
         project_root: Option<&Path>,
         node_trusted_keys_dir: &Path,
     ) -> Result<Self> {
-        let mut keys = HashMap::new();
-
-        let project_trusted_dir = project_root.map(|root| root.join(".ai/config/keys/trusted"));
-        let mut project_sources = Vec::new();
-        for (dir, is_project) in project_trusted_dir
-            .as_deref()
-            .map(|dir| (dir, true))
-            .into_iter()
-            .chain(std::iter::once((node_trusted_keys_dir, false)))
-        {
-            let mut file_count = 0_usize;
-            let mut total_bytes = 0_u64;
-            lillux::visit_regular_files_no_follow_bounded(
-                dir,
-                lillux::DirectoryTraversalBudget::new(
-                    MAX_TRUST_TRAVERSAL_ENTRIES,
-                    MAX_TRUST_TRAVERSAL_DEPTH,
-                ),
-                |_relative, is_directory| Ok(is_directory),
-                |relative, file| {
-                    file_count = file_count.saturating_add(1);
-                    if file_count > MAX_TRUST_DOCUMENTS {
-                        bail!(
-                            "trust directory {} exceeds {MAX_TRUST_DOCUMENTS} regular files",
-                            dir.display()
-                        );
-                    }
-                    if relative.extension().and_then(|extension| extension.to_str()) != Some("toml")
-                    {
-                        return Ok(());
-                    }
-                    let bytes =
-                        lillux::read_open_regular_file_bounded(file, MAX_TRUST_DOCUMENT_BYTES)?;
-                    total_bytes = total_bytes
-                        .checked_add(bytes.len() as u64)
-                        .ok_or_else(|| anyhow::anyhow!("trust directory byte count overflow"))?;
-                    if total_bytes > MAX_TRUST_DIRECTORY_BYTES {
-                        bail!(
-                            "trust directory {} exceeds {MAX_TRUST_DIRECTORY_BYTES} aggregate bytes",
-                            dir.display()
-                        );
-                    }
-                    let path = dir.join(relative);
-                    let content = std::str::from_utf8(&bytes).with_context(|| {
-                        format!("trusted key document is not UTF-8: {}", path.display())
-                    })?;
-                    let key = Self::parse_trusted_key_toml_content(&path, content)?;
-                    if is_project {
-                        project_sources.push(TrustSourceDependency {
-                            logical_path: relative.to_path_buf(),
-                            source_hash: lillux::sha256_hex(&bytes),
-                        });
-                    }
-                    tracing::info!(
-                        fingerprint = %key.fingerprint,
-                        owner = %key.owner,
-                        "loaded trusted key"
-                    );
-                    keys.entry(key.fingerprint.clone()).or_insert(key);
-                    Ok(())
-                },
-            )
-            .with_context(|| format!("load trusted keys from {}", dir.display()))?;
-        }
-
-        if !keys.is_empty() {
-            tracing::info!(count = keys.len(), "trust store loaded");
-        }
-
-        project_sources.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        Ok(Self {
-            keys,
-            project_sources,
-        })
+        let node = ryeos_engine::trust::TrustStore::load_from_dir(node_trusted_keys_dir)
+            .with_context(|| {
+                format!("load trusted keys from {}", node_trusted_keys_dir.display())
+            })?;
+        let Some(project_root) = project_root else {
+            return Ok(Self::from_engine(&node, Vec::new()));
+        };
+        let project_trusted_dir = project_root.join(".ai/config/keys/trusted");
+        let files = ryeos_engine::trust::TrustStore::read_trust_dir_files(&project_trusted_dir)
+            .with_context(|| format!("load trusted keys from {}", project_trusted_dir.display()))?
+            .unwrap_or_default();
+        let project_sources = files
+            .iter()
+            .map(|(path, bytes)| TrustSourceDependency {
+                logical_path: path
+                    .strip_prefix(&project_trusted_dir)
+                    .unwrap_or(path)
+                    .to_path_buf(),
+                source_hash: lillux::sha256_hex(bytes),
+            })
+            .collect();
+        let effective = node
+            .with_project_key_files(files)
+            .with_context(|| format!("load trusted keys from {}", project_trusted_dir.display()))?;
+        Ok(Self::from_engine(&effective, project_sources))
     }
 
     fn load_with_project_content(
         project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
         node_trusted_keys_dir: &Path,
     ) -> Result<Self> {
-        let mut node = Self::load_with_optional_project(None, node_trusted_keys_dir)?;
+        let node = ryeos_engine::trust::TrustStore::load_from_dir(node_trusted_keys_dir)
+            .with_context(|| {
+                format!("load trusted keys from {}", node_trusted_keys_dir.display())
+            })?;
         let prefix = Path::new(".ai/config/keys/trusted");
         let entries = project_content.list_files(prefix, false, MAX_TRUST_DOCUMENTS)?;
         let mut total_bytes = 0_u64;
         let mut project_sources = Vec::new();
-        for entry in entries.into_iter().filter(|entry| {
-            entry
-                .relative_path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                == Some("toml")
-        }) {
+        let mut files = Vec::new();
+        for entry in entries
+            .into_iter()
+            .filter(|entry| ryeos_engine::trust::is_project_trust_document(&entry.relative_path))
+        {
             if entry.size > MAX_TRUST_DOCUMENT_BYTES {
                 bail!(
                     "project trust document {} exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes",
@@ -218,124 +168,43 @@ impl TrustStore {
                         logical_path.display()
                     )
                 })?;
-            let content = std::str::from_utf8(&bytes).with_context(|| {
-                format!(
-                    "admitted project trust document is not UTF-8: {}",
-                    logical_path.display()
-                )
-            })?;
-            let source_hash = lillux::sha256_hex(&bytes);
-            let key = Self::parse_trusted_key_toml_content(&logical_path, content)?;
-            node.keys.insert(key.fingerprint.clone(), key);
             project_sources.push(TrustSourceDependency {
                 logical_path: entry.relative_path,
-                source_hash,
+                source_hash: lillux::sha256_hex(&bytes),
             });
+            files.push((logical_path, bytes));
         }
-        project_sources.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        node.project_sources = project_sources;
-        Ok(node)
+        let effective = node.with_project_key_files(files)?;
+        Ok(Self::from_engine(&effective, project_sources))
     }
 
-    fn parse_trusted_key_toml_content(path: &Path, content: &str) -> Result<TrustedKey> {
-        let mut fingerprint = None;
-        let mut owner = String::new();
-        let mut pem_lines: Vec<String> = Vec::new();
-        let mut in_pem = false;
-        // Single-line `pem = "ed25519:<b64>"` form, written by the
-        // daemon's self-trust bootstrap and surfaced via the `ryeos-cli`
-        // `identity-public-key` verb. The multi-line
-        // `-----BEGIN PUBLIC KEY-----` PEM form is also supported (see
-        // the daemon's trusted-signer fixture in
-        // `crates/bin/daemon/tests/fixtures/trusted_signers/`). Either form is
-        // accepted; if both appear the multi-line PEM wins (it is the
-        // strictly typed format).
-        let mut inline_key_b64: Option<String> = None;
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('#') {
-                continue;
-            }
-            if trimmed.starts_with("-----BEGIN PUBLIC KEY-----") {
-                in_pem = true;
-                continue;
-            }
-            if trimmed.starts_with("-----END PUBLIC KEY-----") {
-                in_pem = false;
-                continue;
-            }
-            if in_pem {
-                pem_lines.push(trimmed.to_string());
-                continue;
-            }
-            if let Some(val) = trimmed.strip_prefix("fingerprint") {
-                let val = val.trim_start_matches(['=', ' ']).trim().trim_matches('"');
-                fingerprint = Some(val.to_string());
-            }
-            if let Some(val) = trimmed.strip_prefix("owner") {
-                let val = val.trim_start_matches(['=', ' ']).trim().trim_matches('"');
-                owner = val.to_string();
-            }
-            // Accept both `pem` and `public_key` as field names for the
-            // inline ed25519 key.  `PUBLISHER_TRUST.toml` files use
-            // `public_key`; the daemon's self-trust bootstrap uses `pem`.
-            let maybe_key = trimmed
-                .strip_prefix("pem")
-                .or_else(|| trimmed.strip_prefix("public_key"));
-            if let Some(val) = maybe_key {
-                let val = val.trim_start_matches(['=', ' ']).trim().trim_matches('"');
-                if let Some(b64) = val.strip_prefix("ed25519:") {
-                    inline_key_b64 = Some(b64.to_string());
-                }
-            }
+    /// Adopt signers the engine's trust store already parsed and verified.
+    /// The runtime never parses trust documents itself.
+    fn from_engine(
+        store: &ryeos_engine::trust::TrustStore,
+        mut project_sources: Vec<TrustSourceDependency>,
+    ) -> Self {
+        let keys: HashMap<String, TrustedKey> = store
+            .signers()
+            .map(|signer| {
+                (
+                    signer.fingerprint.clone(),
+                    TrustedKey {
+                        fingerprint: signer.fingerprint.clone(),
+                        verifying_key: signer.verifying_key,
+                        owner: signer.label.clone().unwrap_or_default(),
+                    },
+                )
+            })
+            .collect();
+        if !keys.is_empty() {
+            tracing::info!(count = keys.len(), "trust store loaded");
         }
-
-        let fingerprint = fingerprint.ok_or_else(|| anyhow::anyhow!("missing fingerprint"))?;
-        let key_bytes: [u8; 32] = if !pem_lines.is_empty() {
-            let pem_b64: String = pem_lines.join("");
-            let pem_bytes = base64::engine::general_purpose::STANDARD
-                .decode(&pem_b64)
-                .context("invalid base64 in PEM")?;
-            if pem_bytes.len() < 44 {
-                bail!("PEM too short for Ed25519 public key");
-            }
-            pem_bytes[pem_bytes.len() - 32..]
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid key length"))?
-        } else if let Some(b64) = inline_key_b64 {
-            let raw = base64::engine::general_purpose::STANDARD
-                .decode(&b64)
-                .context("invalid base64 in inline ed25519 key")?;
-            if raw.len() != 32 {
-                bail!(
-                    "inline ed25519 key has wrong length: {} (expected 32 raw bytes)",
-                    raw.len()
-                );
-            }
-            raw.try_into()
-                .map_err(|_| anyhow::anyhow!("invalid inline ed25519 key length"))?
-        } else {
-            bail!(
-                "trust entry at {} has no public-key block: expected either a multi-line \
-                 `-----BEGIN PUBLIC KEY-----` PEM or a single-line `pem = \"ed25519:<base64>\"`",
-                path.display()
-            );
-        };
-        let verifying_key = VerifyingKey::from_bytes(&key_bytes)
-            .map_err(|_| anyhow::anyhow!("invalid Ed25519 public key"))?;
-        let observed_fingerprint = lillux::crypto::fingerprint(&verifying_key);
-        if fingerprint != observed_fingerprint {
-            bail!(
-                "declared fingerprint {fingerprint} does not match public key fingerprint {observed_fingerprint}"
-            );
+        project_sources.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        Self {
+            keys,
+            project_sources,
         }
-
-        Ok(TrustedKey {
-            fingerprint,
-            verifying_key,
-            owner,
-        })
     }
 
     pub fn get(&self, fingerprint: &str) -> Option<&TrustedKey> {
@@ -580,11 +449,7 @@ impl ConfigDependencyProof {
                     let mut observed = entries
                         .into_iter()
                         .filter(|entry| {
-                            entry
-                                .relative_path
-                                .extension()
-                                .and_then(|value| value.to_str())
-                                == Some("toml")
+                            ryeos_engine::trust::is_project_trust_document(&entry.relative_path)
                         })
                         .map(|entry| TrustSourceDependency {
                             logical_path: entry.relative_path,
@@ -1714,6 +1579,7 @@ fn deep_merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use lillux::crypto::SigningKey;
     use ryeos_engine::project_content::{AuthoritativeProjectContent, ProjectContentEntry};
     use std::collections::BTreeMap;
@@ -1825,7 +1691,6 @@ mod tests {
         );
         format!(
             r#"version = "1.0.0"
-category = "keys/trusted"
 fingerprint = "{fingerprint}"
 owner = "test"
 
@@ -2110,7 +1975,7 @@ pem = """
         fs::write(&entry, content.replace(&declared, &"f".repeat(64))).unwrap();
 
         let error = TrustStore::load(tmp.path(), &no_operator_trust()).unwrap_err();
-        assert!(format!("{error:#}").contains("declared fingerprint"));
+        assert!(format!("{error:#}").contains("fingerprint mismatch"));
     }
 
     #[test]
@@ -2215,6 +2080,57 @@ pem = """
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(verified.content.contains("# Test"));
+    }
+
+    /// The runtime used to skip every `#` line of a trust document, so a
+    /// tampered or forged signature line went unnoticed. It now verifies
+    /// documents through the engine's trust store, exactly as the daemon does.
+    #[test]
+    fn runtime_trust_refuses_tampered_signed_document() {
+        let signing_key = SigningKey::from_bytes(&[64u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let trust_dir = tmp.path().join("trusted");
+        fs::create_dir_all(&trust_dir).unwrap();
+        let signed =
+            lillux::signature::sign_content(&trust_document(&signing_key), &signing_key, "#", None);
+        let path = trust_dir.join("signer.toml");
+        fs::write(&path, &signed).unwrap();
+        assert_eq!(
+            TrustStore::load(Path::new("/missing-project"), &trust_dir)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        fs::write(
+            &path,
+            signed.replace("owner = \"test\"", "owner = \"forged\""),
+        )
+        .unwrap();
+        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("content tampered"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn runtime_trust_refuses_signature_by_unknown_key() {
+        let pinned = SigningKey::from_bytes(&[65u8; 32]);
+        let stranger = SigningKey::from_bytes(&[66u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let trust_dir = tmp.path().join("trusted");
+        fs::create_dir_all(&trust_dir).unwrap();
+        fs::write(
+            trust_dir.join("signer.toml"),
+            lillux::signature::sign_content(&trust_document(&pinned), &stranger, "#", None),
+        )
+        .unwrap();
+        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not found in trust store"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
@@ -2425,8 +2341,9 @@ pem = """
 
         std::fs::create_dir_all(trust_dir).unwrap();
         let vk_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-        let toml =
-            format!("fingerprint = \"{fp}\"\npem = \"ed25519:{vk_b64}\"\nowner = \"test\"\n");
+        let toml = format!(
+            "fingerprint = \"{fp}\"\nowner = \"test\"\n\n[public_key]\npem = \"ed25519:{vk_b64}\"\n"
+        );
         std::fs::write(trust_dir.join("test.toml"), toml).unwrap();
         signed
     }
