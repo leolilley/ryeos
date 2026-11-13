@@ -855,6 +855,111 @@ pub fn resolve_external_execution_artifacts(
     })
 }
 
+/// Hash-only inventory of the external execution artifacts the installed
+/// signed bundles declare for this host, for comparing binding pins with what
+/// is installed. Each bundle passes the same manifest and executor
+/// verification the daemon applies, but nothing is copied, sealed or
+/// executed, and no adapter is inspected: this grants no executable
+/// authority. Provider spec identities are the signed declarations' digests.
+pub fn installed_artifact_hashes(
+    bundle_roots: &[PathBuf],
+    node_trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<crate::node_config::coherence::InstalledArtifactHashes> {
+    use crate::node_config::coherence::{
+        InstalledArtifactHashes, InstalledLifecycleArtifactHashes, InstalledProviderArtifactHashes,
+    };
+
+    let target = lillux::platform::current_binary_target()?;
+    let mut installed = InstalledArtifactHashes::default();
+    for root in bundle_roots {
+        let name = root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("registered bundle root has no UTF-8 name")?;
+        let verified = ryeos_bundle::manifest::load_verified_manifest(
+            &root.join(ryeos_engine::AI_DIR),
+            name,
+            node_trust_store,
+        )
+        .with_context(|| format!("verify external execution bundle `{name}`"))?;
+        let payloads =
+            ryeos_engine::binary_resolver::verified_bundle_payload_hashes(root, node_trust_store)
+                .with_context(|| format!("verify executables of bundle `{name}`"))?;
+        let executable = |declared: &str, role: &str| -> Result<String> {
+            payloads
+                .get(&ryeos_engine::binary_resolver::host_executor_item_ref(declared))
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "signed {role} `{declared}` is not in bundle `{name}`'s executor manifest for this host"
+                    )
+                })
+        };
+
+        for declaration in &verified.manifest.external_providers {
+            declaration.validate()?;
+            if !declaration
+                .targets
+                .iter()
+                .any(|candidate| candidate == target)
+            {
+                continue;
+            }
+            let hashes = InstalledProviderArtifactHashes {
+                connector: executable(&declaration.connector, "external provider connector")?,
+                configuration_adapter: executable(
+                    &declaration.configuration_adapter,
+                    "external provider configuration adapter",
+                )?,
+            };
+            ensure!(
+                installed
+                    .providers
+                    .insert(declaration.id.clone(), hashes)
+                    .is_none(),
+                "external provider declaration `{}` has more than one signed bundle owner",
+                declaration.id
+            );
+        }
+
+        for declaration in &verified.manifest.external_lifecycle_adapters {
+            declaration.validate()?;
+            if !declaration
+                .targets
+                .iter()
+                .any(|candidate| candidate == target)
+            {
+                continue;
+            }
+            let hashes = InstalledLifecycleArtifactHashes {
+                adapter: executable(&declaration.adapter, "external lifecycle adapter")?,
+                supervisor: executable(&declaration.supervisor, "external candidate supervisor")?,
+                launcher: executable(&declaration.launcher, "external candidate launcher")?,
+                restoration_verifier: declaration
+                    .restoration_verifier
+                    .as_deref()
+                    .map(|verifier| executable(verifier, "external restoration verifier"))
+                    .transpose()?,
+                provider_spec: declaration.provider_spec.sha256.clone(),
+                snapshot_production_spec: declaration
+                    .snapshot_production_spec
+                    .as_ref()
+                    .map(|spec| spec.sha256.clone()),
+            };
+            ensure!(
+                installed
+                    .lifecycle_adapters
+                    .insert(declaration.id.clone(), hashes)
+                    .is_none(),
+                "external lifecycle adapter `{}` has more than one signed bundle owner",
+                declaration.id
+            );
+        }
+        installed.payloads.extend(payloads.into_values());
+    }
+    Ok(installed)
+}
+
 fn capture_declared_provider_spec(
     root: &std::path::Path,
     identity: &LifecycleProviderSpecIdentity,

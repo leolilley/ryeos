@@ -2616,6 +2616,14 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     OK,
                     serde_json::json!({ "bundles": roots.len() }),
                 ));
+                checks.push(external_bindings_check(
+                    &config.app_root,
+                    isolation
+                        .as_ref()
+                        .ok()
+                        .and_then(|runtime| runtime.registered_generation_node_trust()),
+                    &snapshot,
+                ));
                 if !args.no_bundles {
                     let operator_config_root =
                         ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
@@ -2649,14 +2657,20 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                 }
             }
             Err(e) => {
-                checks.push(check(
-                    "node_config",
-                    FAIL,
-                    serde_json::json!({
-                        "error": format!("{e:#}"),
-                        "note": "installed bundle registrations failed verification",
-                    }),
-                ));
+                let mut detail = serde_json::json!({
+                    "error": format!("{e:#}"),
+                    "note": "installed bundle registrations failed verification",
+                });
+                // A binding in a schema this node no longer admits is named
+                // with the step that clears it.
+                if let Some(refusal) = e.chain().find_map(|cause| {
+                    cause.downcast_ref::<ryeos_app::node_config::coherence::BindingSchemaUnsupported>()
+                }) {
+                    detail["code"] = serde_json::json!(refusal.code());
+                    detail["note"] = serde_json::json!(refusal.to_string());
+                    detail["fix"] = serde_json::json!(refusal.fix());
+                }
+                checks.push(check("node_config", FAIL, detail));
             }
         }
     } else {
@@ -2700,6 +2714,21 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         .with_tone(crate::tty::Tone::Secondary),
                 );
             }
+            if c.name == "external_bindings" {
+                for finding in c.detail["findings"].as_array().into_iter().flatten() {
+                    section.rows.push(
+                        crate::tty::Row::text(format!(
+                            "{} {}/{} {}: {}",
+                            finding["code"].as_str().unwrap_or_default(),
+                            finding["binding"]["section"].as_str().unwrap_or_default(),
+                            finding["binding"]["id"].as_str().unwrap_or_default(),
+                            finding["field"].as_str().unwrap_or_default(),
+                            finding["fix"].as_str().unwrap_or_default(),
+                        ))
+                        .with_tone(crate::tty::Tone::Secondary),
+                    );
+                }
+            }
         }
         let mut document =
             crate::tty::Document::titled(format!("NODE DOCTOR — {}", config.app_root.display()));
@@ -2728,6 +2757,68 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         Ok(())
     } else {
         Err(ReportedLocalFailure("node doctor found failing checks".to_string()).into())
+    }
+}
+
+/// Doctor row for pin coherence: every pin of every installed external
+/// execution and runtime snapshot binding compared with the installed signed
+/// bundles and the node vault, read only. FAIL names each pin the next fresh
+/// operation through that binding would refuse; WARN names pins it could not
+/// decide (an unreadable vault).
+fn external_bindings_check(
+    app_root: &std::path::Path,
+    trust: Option<&ryeos_engine::trust::TrustStore>,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA, OK, WARN};
+    if snapshot.external_execution.is_empty()
+        && snapshot.runtime_snapshot_production.is_empty()
+        && snapshot.runtime_snapshot_qualification.is_empty()
+    {
+        return check(
+            "external_bindings",
+            NA,
+            serde_json::json!({
+                "note": "no external execution or runtime snapshot binding is installed",
+            }),
+        );
+    }
+    let Some(trust) = trust else {
+        return check(
+            "external_bindings",
+            FAIL,
+            serde_json::json!({ "error": "the locked isolation runtime retains no node trust" }),
+        );
+    };
+    match ryeos_app::node_config::coherence::inspect_installed_binding_coherence(
+        app_root, trust, snapshot,
+    ) {
+        Ok(report) => {
+            let status = if report.has_failures() {
+                FAIL
+            } else if report.has_warnings() {
+                WARN
+            } else {
+                OK
+            };
+            check(
+                "external_bindings",
+                status,
+                serde_json::json!({
+                    "bindings": report.bindings,
+                    "findings": report.findings,
+                    "not_checked": report.not_checked,
+                }),
+            )
+        }
+        Err(error) => check(
+            "external_bindings",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "note": "the installed bundles' artifacts could not be inventoried",
+            }),
+        ),
     }
 }
 

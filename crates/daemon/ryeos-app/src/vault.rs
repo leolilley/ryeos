@@ -1383,6 +1383,73 @@ impl NodeVault for SealedEnvelopeVault {
     }
 }
 
+/// Read-only view of the node's sealed store, for diagnostics such as
+/// `ryeos node doctor`. Opening it never runs rewrap recovery, and no method
+/// writes the store, its keys or a rewrap file: a pending rewrap is reported,
+/// not completed.
+#[derive(Debug, Clone)]
+pub struct ReadOnlySealedVault {
+    store_path: PathBuf,
+    secret_path: PathBuf,
+    rewrap_pending: bool,
+}
+
+impl SealedEnvelopeVault {
+    /// Open the vault of `app_root` for reading only. See
+    /// [`ReadOnlySealedVault`].
+    pub fn open_read_only(app_root: &Path) -> ReadOnlySealedVault {
+        let store_path = default_sealed_store_path(app_root);
+        ReadOnlySealedVault {
+            rewrap_pending: ryeos_vault::sealed::rewrap_pending(&store_path),
+            secret_path: ryeos_vault::paths::default_vault_secret_key_path(app_root),
+            store_path,
+        }
+    }
+}
+
+impl ReadOnlySealedVault {
+    /// Whether an interrupted rewrap waits for the next vault open to
+    /// recover it. While it does, the store is not read.
+    pub fn rewrap_pending(&self) -> bool {
+        self.rewrap_pending
+    }
+
+    /// Whether the store holds this exact placement credential generation.
+    /// The decrypted map, the matched value included, is zeroized before
+    /// this returns; only presence leaves.
+    pub fn placement_credential_present(&self, access: &PlacementCredentialAccess) -> Result<bool> {
+        if self.rewrap_pending {
+            bail!("vault rewrap is pending; the next daemon start or vault operation recovers it");
+        }
+        if !self.store_path.exists() {
+            return Ok(false);
+        }
+        with_store_lock(&self.store_path, || {
+            let secret_key = lillux::vault::read_secret_key(&self.secret_path).map_err(|e| {
+                anyhow!(
+                    "vault: load secret key {}: {e:#}",
+                    self.secret_path.display()
+                )
+            })?;
+            let mut entries =
+                ryeos_vault::sealed::read_sealed_secrets(&self.store_path, &secret_key).map_err(
+                    |error| {
+                        anyhow!(
+                            "vault: read sealed store {}: {error:#}",
+                            self.store_path.display()
+                        )
+                    },
+                )?;
+            let present = entries.contains_key(access.physical_key());
+            use zeroize::Zeroize as _;
+            for value in entries.values_mut() {
+                value.zeroize();
+            }
+            Ok(present)
+        })
+    }
+}
+
 /// Read a single named secret from the vault. Returns `Ok(Some(value))`
 /// when present and `Ok(None)` when absent. Generic launch preparation uses
 /// this only after validating a symbolic requirement against the signed
@@ -2378,5 +2445,110 @@ mod tests {
         // Simulate vault_set with blocked name (handler returns 400)
         let err = vault.set_secret("caller", "PATH", "/evil").unwrap_err();
         assert!(format!("{err:#}").contains("blocked"));
+    }
+
+    // ── read-only open ──
+
+    fn placement_vault_fixture(state: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let key_path = ryeos_vault::paths::default_vault_secret_key_path(state);
+        let public_path = ryeos_vault::paths::default_vault_public_key_path(state);
+        let store_path = default_sealed_store_path(state);
+        std::fs::create_dir_all(store_path.parent().unwrap().parent().unwrap()).unwrap();
+        let key = lillux::vault::VaultSecretKey::generate();
+        lillux::vault::write_secret_key(&key_path, &key).unwrap();
+        lillux::vault::write_public_key(&public_path, &key.public_key()).unwrap();
+        let mut initial = HashMap::new();
+        initial.insert("TOKEN".to_string(), "value".to_string());
+        write_sealed_secrets(&store_path, &key.public_key(), &initial).unwrap();
+        (key_path, public_path, store_path)
+    }
+
+    fn placement_access(generation: char) -> PlacementCredentialAccess {
+        PlacementCredentialAccess::new(
+            &"1".repeat(64),
+            &generation.to_string().repeat(64),
+            "test-backend",
+            "test-account",
+        )
+        .unwrap()
+    }
+
+    fn file_facts(path: &Path) -> (Vec<u8>, std::time::SystemTime) {
+        (
+            std::fs::read(path).unwrap(),
+            std::fs::metadata(path).unwrap().modified().unwrap(),
+        )
+    }
+
+    #[test]
+    fn credential_presence_matches_provision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        placement_vault_fixture(state);
+        let provisioned = placement_access('a');
+        let vault = SealedEnvelopeVault::load(state).unwrap();
+        vault
+            .provision_placement_credential(&provisioned, &provisioned.test_value("secret"))
+            .unwrap();
+
+        let read_only = SealedEnvelopeVault::open_read_only(state);
+        assert!(!read_only.rewrap_pending());
+        assert!(
+            read_only
+                .placement_credential_present(&provisioned)
+                .unwrap()
+        );
+        assert!(
+            !read_only
+                .placement_credential_present(&placement_access('b'))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn read_only_open_never_writes_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        let (key_path, public_path, store_path) = placement_vault_fixture(state);
+        let before = [
+            file_facts(&key_path),
+            file_facts(&public_path),
+            file_facts(&store_path),
+        ];
+
+        let read_only = SealedEnvelopeVault::open_read_only(state);
+        assert!(
+            !read_only
+                .placement_credential_present(&placement_access('a'))
+                .unwrap()
+        );
+        let after = [
+            file_facts(&key_path),
+            file_facts(&public_path),
+            file_facts(&store_path),
+        ];
+        assert_eq!(before, after);
+
+        // An interrupted rewrap stays exactly as it was: the read-only open
+        // reports it and neither recovers it nor reads the store.
+        let journal = store_path.with_extension("rewrap-journal.toml");
+        std::fs::write(&journal, "version = 1\nstore_present = true\n").unwrap();
+        let journal_before = file_facts(&journal);
+        let read_only = SealedEnvelopeVault::open_read_only(state);
+        assert!(read_only.rewrap_pending());
+        let error = read_only
+            .placement_credential_present(&placement_access('a'))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("rewrap is pending"),
+            "{error:#}"
+        );
+        assert_eq!(file_facts(&journal), journal_before);
+        let after = [
+            file_facts(&key_path),
+            file_facts(&public_path),
+            file_facts(&store_path),
+        ];
+        assert_eq!(before, after);
     }
 }
