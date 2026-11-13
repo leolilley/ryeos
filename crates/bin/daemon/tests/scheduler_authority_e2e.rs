@@ -147,10 +147,12 @@ async fn max_fires_pauses_the_schedule_with_a_typed_reason() {
 /// resume and reauthorize its schedule, and the Core doctor capabilities the
 /// schedule fires with.
 const OWNER_SCOPES: &[&str] = &[
+    "ryeos.execute.service.scheduler/explain",
     "ryeos.execute.service.scheduler/pause",
     "ryeos.execute.service.scheduler/reauthorize",
     "ryeos.execute.service.scheduler/register",
     "ryeos.execute.service.scheduler/resume",
+    "ryeos.execute.service.scheduler/show_fires",
     "ryeos.execute.tool.ryeos/core/node/doctor",
     "ryeos.read.project.live",
 ];
