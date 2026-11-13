@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Check canonical gate scope using a fake Cargo; never build or sign bundles."""
+"""Check canonical gate scope using a fake Cargo; never build or sign bundles.
+
+gate.sh runs from a shadow root: its own script and the helpers it sources are
+the real ones, but the custody token scan and the Core reporter unit tests it
+runs before Cargo are stubbed. Both are checked elsewhere in CI (the scan in its
+own step, the reporter tests in every real gate run), and the scan reads the
+whole tree, which alone outlasted this test's per-invocation timeout. What this
+test checks is only the Cargo argument selection.
+"""
 import json
 import os
 from pathlib import Path
@@ -10,10 +18,28 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def shadow_gate(shadow):
+    """Lay out the real gate.sh and its sourced helpers under `shadow`, with
+    the pre-Cargo checks it runs replaced by no-ops. Returns the gate path."""
+    scripts = shadow / "scripts"
+    (scripts / "ci").mkdir(parents=True)
+    (scripts / "gate.sh").symlink_to(ROOT / "scripts/gate.sh")
+    for helper in ("lib", "pkg"):
+        (scripts / helper).symlink_to(ROOT / "scripts" / helper)
+    custody = scripts / "ci/check-custody-tokens.sh"
+    custody.write_text("#!/bin/sh\nexit 0\n")
+    custody.chmod(0o700)
+    reporter = shadow / "bundles/core/tests/reporter/test_reporter.py"
+    reporter.parent.mkdir(parents=True)
+    reporter.write_text("")
+    return scripts / "gate.sh"
+
+
 class GatePackageSelection(unittest.TestCase):
     def invoke(self, *args):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            gate = shadow_gate(root / "repo")
             log = root / "argv.json"
             cargo = root / "cargo"
             cargo.write_text(
@@ -26,7 +52,7 @@ class GatePackageSelection(unittest.TestCase):
             environment = dict(os.environ, CARGO=str(cargo), GATE_ARGV_LOG=str(log),
                                GATE_BUILD_JOBS="1", GATE_TEST_THREADS="1")
             result = subprocess.run(
-                ["bash", str(ROOT / "scripts/gate.sh"), *args],
+                ["bash", str(gate), *args],
                 env=environment, capture_output=True, text=True, timeout=10,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
