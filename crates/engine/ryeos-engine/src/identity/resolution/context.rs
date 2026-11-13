@@ -734,6 +734,7 @@ pub(crate) fn field_as_list(
 fn parser_failure_class(error: &EngineError) -> ResolutionFailureClass {
     match error {
         EngineError::Shared(error) => parser_failure_class(error),
+        EngineError::ProcessCreationBusy { .. } => ResolutionFailureClass::ProcessCreationBusy,
         EngineError::ParserFailed {
             kind: ParseErrKind::Syntax | ParseErrKind::Schema,
             ..
@@ -781,6 +782,18 @@ mod parser_failure_class_tests {
         assert_eq!(
             parser_failure_class(&error),
             ResolutionFailureClass::InvalidDefinition
+        );
+    }
+
+    #[test]
+    fn busy_parser_spawn_is_process_creation_busy() {
+        let error = EngineError::Shared(Arc::new(EngineError::ProcessCreationBusy {
+            subject: "parser:test/example".to_string(),
+            detail: "timed out after 5000 ms".to_string(),
+        }));
+        assert_eq!(
+            parser_failure_class(&error),
+            ResolutionFailureClass::ProcessCreationBusy
         );
     }
 }

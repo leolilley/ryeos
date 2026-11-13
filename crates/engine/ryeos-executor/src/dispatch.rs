@@ -5463,6 +5463,11 @@ fn map_root_resolution_validation_error(
     error: anyhow::Error,
     requested_root: &str,
 ) -> DispatchError {
+    // Root resolution builds the admission itself, so a handler that could
+    // not be created here refused the request before anything ran.
+    if let Some(busy) = crate::dispatch_error::process_creation_busy_from_chain(&error) {
+        return busy;
+    }
     for cause in error.chain() {
         if let Some(engine_error) = cause.downcast_ref::<ryeos_engine::error::EngineError>()
             && let Some(mapped) = map_engine_root_resolution_error(engine_error, requested_root)
@@ -6802,6 +6807,41 @@ mod tests {
         assert!(matches!(
             map_root_resolution_validation_error(invariant, "work:example/root"),
             DispatchError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn root_resolution_busy_handler_is_typed_process_creation_busy() {
+        // A busy fork window behind a composed resolution failure and behind
+        // a shared engine failure both surface as the typed 503.
+        let composed = anyhow::Error::new(ryeos_engine::error::EngineError::Shared(
+            std::sync::Arc::new(ryeos_engine::error::EngineError::ProcessCreationBusy {
+                subject: "work:example/root".to_string(),
+                detail: "retained scopes: ThreadId(3): src/x.rs:1:1 (1 scope)".to_string(),
+            }),
+        ))
+        .context("admitted root resolution failed");
+        let mapped = map_root_resolution_validation_error(composed, "work:example/root");
+        assert!(
+            matches!(&mapped, DispatchError::ProcessCreationBusy { detail } if detail.contains("retained scopes")),
+            "{mapped:?}"
+        );
+        assert_eq!(
+            mapped.http_status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(mapped.code(), "process_creation_busy");
+        assert!(mapped.retryable());
+        assert!(!mapped.to_string().contains("retained scopes"));
+
+        let step = anyhow::Error::new(ryeos_engine::resolution::ResolutionError::StepFailed {
+            step: ryeos_engine::resolution::ResolutionStepName::PipelineInit,
+            class: ryeos_engine::resolution::ResolutionFailureClass::ProcessCreationBusy,
+            reason: "composer handler subprocess failed: busy".to_string(),
+        });
+        assert!(matches!(
+            map_root_resolution_validation_error(step, "work:example/root"),
+            DispatchError::ProcessCreationBusy { .. }
         ));
     }
 

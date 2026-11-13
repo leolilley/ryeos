@@ -326,9 +326,17 @@ fn resolution_error_to_engine(
     error: crate::resolution::ResolutionError,
     requested_root: &CanonicalRef,
 ) -> EngineError {
-    use crate::resolution::ResolutionError;
+    use crate::resolution::{ResolutionError, ResolutionFailureClass};
 
     match error {
+        ResolutionError::StepFailed {
+            class: ResolutionFailureClass::ProcessCreationBusy,
+            reason,
+            ..
+        } => EngineError::ProcessCreationBusy {
+            subject: requested_root.to_string(),
+            detail: reason,
+        },
         ResolutionError::IntegrityFailure { item_ref, reason } => {
             EngineError::EffectiveItemUntrusted {
                 canonical_ref: item_ref,
@@ -4650,6 +4658,35 @@ mod tests {
     struct CountingGenerationLifeline {
         begins: AtomicUsize,
         checks: AtomicUsize,
+    }
+
+    #[test]
+    fn busy_resolution_step_is_typed_process_creation_busy() {
+        let root = CanonicalRef::parse("tool:hello").unwrap();
+        let error = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::ProcessCreationBusy,
+                reason: "composer handler subprocess failed: busy".to_string(),
+            },
+            &root,
+        );
+        assert!(error.is_process_creation_busy(), "{error}");
+        let expected_subject = root.to_string();
+        assert!(
+            matches!(&error, EngineError::ProcessCreationBusy { subject, .. } if *subject == expected_subject),
+            "{error}"
+        );
+        // Every other step failure keeps its composition-failure shape.
+        let other = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::DependencyUnavailable,
+                reason: "handler binary missing".to_string(),
+            },
+            &root,
+        );
+        assert!(!other.is_process_creation_busy(), "{other}");
     }
 
     #[test]

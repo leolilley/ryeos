@@ -3990,7 +3990,11 @@ fn map_binding_resolution_error(
 
             let classification = match class {
                 ResolutionFailureClass::InvalidDefinition => LaunchPrepareErrorClass::Configuration,
-                ResolutionFailureClass::DependencyUnavailable => {
+                // Binding resolution may follow admission, so a busy fork
+                // window stays the generic unavailable refusal here and is
+                // never offered for automatic retry.
+                ResolutionFailureClass::DependencyUnavailable
+                | ResolutionFailureClass::ProcessCreationBusy => {
                     return host_preparation_error_with_binding(
                         "ref_binding_resolution_failed",
                         format!(
