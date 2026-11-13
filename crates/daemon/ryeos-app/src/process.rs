@@ -12,13 +12,23 @@ use crate::env_contract::BASE_ALLOWLIST_NAMES;
 /// Poll interval (ms) when waiting for a process group to exit after SIGTERM.
 const KILL_POLL_INTERVAL_MS: u64 = 100;
 
-/// Wait time (ms) after SIGKILL before checking if the process group is dead.
-const POST_SIGKILL_WAIT_MS: u64 = 200;
-
 /// Workload-authored cancellation policy cannot control daemon availability.
 /// Grace remains cooperative, but the node owns this hard upper bound before
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
+
+/// Bound on proving the pinned group empty after SIGKILL. The proof polls every
+/// [`KILL_POLL_INTERVAL_MS`], so a group that dies quickly returns quickly;
+/// the bound only lets slow kernel teardown (large unmaps, exit through
+/// uninterruptible I/O) finish before the stop is reported unsettled.
+pub const POST_SIGKILL_SETTLE_BOUND: Duration =
+    Duration::from_secs(MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
+
+/// [`KillResult::method`] when SIGKILL reached the exact pinned group but the
+/// group was still present at [`POST_SIGKILL_SETTLE_BOUND`]. The kill was
+/// delivered; only its settlement is not yet observed. Distinct from
+/// `sigkill_failed`, where no signal was delivered.
+pub const SIGKILL_DELIVERED_UNSETTLED: &str = "sigkill_delivered_unsettled";
 
 /// Grace for stopping a launch whose metadata records no stop policy. Every
 /// managed subprocess launch records one, resolved from the signed execution
@@ -1667,9 +1677,22 @@ fn graceful_kill(
 
 #[cfg(target_os = "linux")]
 fn hard_kill_pinned_group(
+    identity: &ExecutionProcessIdentity,
+    group: &PinnedProcess,
+    method: &'static str,
+) -> KillResult {
+    hard_kill_pinned_group_within(identity, group, method, POST_SIGKILL_SETTLE_BOUND)
+}
+
+/// SIGKILL the pinned group and prove it empty within `settle`. `method`
+/// names a proved kill; a delivered kill whose group is still present at the
+/// bound reports [`SIGKILL_DELIVERED_UNSETTLED`].
+#[cfg(target_os = "linux")]
+fn hard_kill_pinned_group_within(
     _identity: &ExecutionProcessIdentity,
     group: &PinnedProcess,
     method: &'static str,
+    settle: Duration,
 ) -> KillResult {
     match signal_pinned_group(group, lillux::signal::SIGKILL) {
         SignalResult::AlreadyDead => {
@@ -1687,10 +1710,17 @@ fn hard_kill_pinned_group(
         }
     }
     let deadline = std::time::Instant::now()
-        .checked_add(Duration::from_millis(POST_SIGKILL_WAIT_MS))
+        .checked_add(settle)
         .unwrap_or_else(std::time::Instant::now);
     match wait_for_group_exit(group, deadline) {
-        Ok(success) => KillResult { success, method },
+        Ok(true) => KillResult {
+            success: true,
+            method,
+        },
+        Ok(false) => KillResult {
+            success: false,
+            method: SIGKILL_DELIVERED_UNSETTLED,
+        },
         Err(()) => KillResult {
             success: false,
             method: "group_wait_failed",
@@ -2607,6 +2637,42 @@ mod tests {
                 Some(state) => panic!("descendant survived the group SIGKILL in state {state}"),
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hard_kill_reports_unsettled_group_distinctly() {
+        let mut leader = unsafe {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn group leader")
+        };
+        let pgid = i64::from(leader.id());
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+        let group = pin_group_leader(&identity).expect("pin group leader");
+
+        // The test has not reaped the killed leader, so its zombie keeps the
+        // group present: SIGKILL was delivered, settlement is unobserved.
+        let unsettled = hard_kill_pinned_group_within(&identity, &group, "killed", Duration::ZERO);
+        assert!(!unsettled.success);
+        assert_eq!(unsettled.method, SIGKILL_DELIVERED_UNSETTLED);
+
+        leader.wait().expect("reap group leader");
+        let settled = hard_kill_pinned_group_within(&identity, &group, "killed", Duration::ZERO);
+        assert!(settled.success);
+        assert_eq!(settled.method, "already_dead");
     }
 
     #[test]

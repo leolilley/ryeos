@@ -6374,6 +6374,9 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
             _ = tick.tick() => {}
+            // A stop left for recovery to settle wakes the pass at once
+            // instead of waiting out the period.
+            _ = ryeos_app::recovery_nudge::nudged() => {}
         }
 
         let pass_result = run_periodic_recovery_pass(&state).await;

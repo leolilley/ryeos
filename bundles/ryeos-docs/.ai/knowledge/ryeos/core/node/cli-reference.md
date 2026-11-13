@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:23ae2ff7abf536732dc45037e52da88ec623890675eba42845994a722fc20cd6:7r8vN1BaY89pnootpyEeqgRZjg2nnMUnhIWLcYU+4RqkxJfH9sJtMAyEe/k+0FUrCac+qnvZjsR5pVbooShdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:45:28Z:2857d38f041353a391e9d31dc25f86e1d04e4e7abf8c234cf775d9b3347ad145:vQq8hMY2HZsKoXu/FFNahxbj3mpxhRx9SH5Pq3XjDOUwe7EQROEkUg74ZZsO+bSyXjZdnCrZ208hoKu5L1FJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -170,7 +170,9 @@ Runs the offline node checklist. Its isolation row uses the production strict
 loader: disabled is a healthy inactive opt-out, while enforced mode resolves
 and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
-[Execution Isolation](execution-isolation.md).
+[Execution Isolation](execution-isolation.md). Its `process_quarantine` row
+warns about threads whose attached process group recovery cannot prove gone,
+from the report the daemon writes after each recovery pass.
 
 ### `ryeos node reset execution-history`
 

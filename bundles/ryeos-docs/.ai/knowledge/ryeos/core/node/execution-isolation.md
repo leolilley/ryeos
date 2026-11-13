@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:32:51Z:bf2cff905c4590985559c0738e9057a884836d47f4afc590f9b845b9cd328d7d:BhHyKu6wIPprWujOFNAjgvcCsy0dNbf8UdSFSLLAMpA3KN5EY//arzZcgvtme3Se510IaiP45awgzx6nqOtPBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:45:28Z:38294faaa4e928dacc10cb232dceed30cc6575546cfe20fa1be94a27f55f3656:Eb9murcA45gHmtDuTznoeXcmWVZ6cEfdZVGxwP322dZoX2HbSOvgCVxGdCUTI8LrPcvkZkH/k5Sr7JnSr78xCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -720,7 +720,12 @@ daemon exit, the exclusive state lock proves that any still-live, exactly
 matched attachment belongs to the previous daemon; startup kills that group
 before recovery launches a replacement. A same-boot attachment whose leader
 birth identity can no longer be proven is quarantined rather than cleared or
-signalled.
+signalled. The quarantine is recorded on the thread's runtime row
+(`process_quarantine`: reason `same_boot_group_present` or
+`boot_comparison_unavailable`, first seen, last checked). `thread get` shows it
+under `runtime`, `ryeos node doctor` lists it as a `process_quarantine`
+finding, and it clears with the identity once a later recovery pass proves the
+group gone.
 
 A graceful stop sends SIGTERM to the exact target only, never to its process
 group or scope. The retained launcher stays alive to publish the real exit, and

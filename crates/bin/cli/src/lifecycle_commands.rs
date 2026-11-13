@@ -2487,6 +2487,19 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Process quarantine: recovery holds an attached identity it cannot prove
+    // gone. The daemon mirrors its runtime rows into a report after each
+    // recovery pass; the rows stay the authority.
+    if initialized {
+        checks.push(process_quarantine_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "process_quarantine",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
     //    daemon (metadata present, not responding) may be hung-but-alive and
@@ -2840,6 +2853,38 @@ fn wall_clock_check(
 /// Doctor row for the native-capacity account: healthy with its summary,
 /// a warning with the cure when the allowance is spent and the signed policy
 /// lets the operator re-issue, a failure when it does not.
+fn process_quarantine_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+    match ryeos_app::process_quarantine_report::read_report(&state_dir) {
+        Ok(None) => check("process_quarantine", OK, serde_json::json!({})),
+        Ok(Some(report)) => check(
+            "process_quarantine",
+            WARN,
+            serde_json::json!({
+                "message": format!(
+                    "{} thread(s) quarantined: process group unproved",
+                    report.threads.len()
+                ),
+                "written_at": report.written_at,
+                "threads": report.threads,
+                "note": "recovery cannot prove these same-boot process groups gone, so it neither clears nor signals them; each recovery pass rechecks and the record clears once the group is gone",
+                "fix": "inspect the group (`ps -o pid,stat,cmd -g <pgid>`); a member stuck in uninterruptible I/O clears when that I/O completes",
+            }),
+        ),
+        Err(error) => check(
+            "process_quarantine",
+            WARN,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "path": ryeos_app::process_quarantine_report::report_path(&state_dir),
+            }),
+        ),
+    }
+}
+
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {

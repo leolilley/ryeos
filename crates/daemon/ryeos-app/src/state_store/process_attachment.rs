@@ -491,6 +491,29 @@ impl StateStore {
         Ok(cleared)
     }
 
+    /// Record that recovery holds this exact attached identity in
+    /// quarantine. False when the row no longer carries the identity.
+    pub fn record_process_quarantine(
+        &self,
+        thread_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        reason: runtime_db::ProcessQuarantineReason,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.record_process_quarantine(
+            thread_id,
+            process_identity,
+            reason,
+            lillux::time::timestamp_millis(),
+        )
+    }
+
+    /// Every thread whose attached identity recovery holds in quarantine.
+    pub fn list_process_quarantines(&self) -> Result<Vec<runtime_db::QuarantinedProcess>> {
+        let g = self.lock()?;
+        g.runtime_db.list_process_quarantines()
+    }
+
     /// Read the exact operational settlement retained after compare-clear.
     /// Product qualification must also bind it to a signed terminal event and
     /// independently recheck Lillux scope emptiness before using it.

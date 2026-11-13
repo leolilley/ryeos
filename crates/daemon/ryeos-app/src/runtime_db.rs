@@ -150,6 +150,49 @@ pub struct RuntimeInfo {
     #[serde(skip_serializing)]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
     pub recovery_wait: Option<RecoveryWaitDisposition>,
+    /// Recovery could not prove the attached process group gone, so it keeps
+    /// the identity and neither clears nor signals it. Shown in thread status
+    /// and by `node doctor`; cleared with the identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_quarantine: Option<ProcessQuarantine>,
+}
+
+/// Why recovery retains an attached identity it cannot clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessQuarantineReason {
+    /// The same-boot group leader is gone but its process group is still
+    /// present or cannot be proved absent.
+    SameBootGroupPresent,
+    /// The identity's boot could not be compared with the current boot.
+    BootComparisonUnavailable,
+}
+
+impl ProcessQuarantineReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SameBootGroupPresent => "same_boot_group_present",
+            Self::BootComparisonUnavailable => "boot_comparison_unavailable",
+        }
+    }
+}
+
+/// Durable record that recovery holds an attached identity in quarantine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessQuarantine {
+    pub reason: ProcessQuarantineReason,
+    pub first_seen_at_ms: i64,
+    pub last_checked_at_ms: i64,
+}
+
+/// One thread whose attached identity recovery holds in quarantine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantinedProcess {
+    pub thread_id: String,
+    pub pgid: Option<i64>,
+    pub quarantine: ProcessQuarantine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2025,6 +2068,7 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     process_dead_observed_at_ms INTEGER,
     stop_requested_at_ms INTEGER,
     stop_intent TEXT,
+    process_quarantine TEXT,
     workspace_id TEXT,
     workspace_view_identity TEXT,
     workspace_borrower_launch_owner TEXT,
@@ -2033,7 +2077,10 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
             AND workspace_borrower_launch_owner IS NULL)
         OR (workspace_id IS NOT NULL AND workspace_view_identity IS NOT NULL
             AND workspace_borrower_launch_owner IS NOT NULL)
-    )
+    ),
+    -- A quarantine describes the attached identity recovery cannot prove
+    -- gone; it is cleared in the same statement that clears the identity.
+    CHECK (process_quarantine IS NULL OR process_identity IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
@@ -2601,7 +2648,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // rows written by the field-order encoder of epoch 131 do not re-verify.
 // Epoch 133: a content-addressed direct command closure carries its required,
 // nullable `host_origin`; epoch-132 capsules lack it and refuse.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 133;
+// Epoch 134: `thread_runtime.process_quarantine` records the attached identity
+// recovery cannot prove gone; an epoch-133 store lacks the column and refuses.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 134;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -4686,6 +4735,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "stop_intent",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_quarantine",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
@@ -17546,7 +17601,7 @@ impl RuntimeDb {
             let changed = tx.execute(
                 "UPDATE thread_runtime
                 SET pid=NULL, pgid=NULL, process_identity=NULL, process_release_fence=NULL,
-                    process_dead_observed_at_ms=NULL,
+                    process_dead_observed_at_ms=NULL, process_quarantine=NULL,
                     workspace_id=NULL, workspace_view_identity=NULL, workspace_borrower_launch_owner=NULL,
                     latest_process_settlement=?6
               WHERE thread_id=?1 AND workspace_id=?2 AND workspace_view_identity=?3
@@ -19815,6 +19870,89 @@ impl RuntimeDb {
         })
     }
 
+    /// Record that recovery holds the exact attached identity in quarantine.
+    /// Idempotent per identity: a repeat keeps `first_seen_at_ms` and moves
+    /// `last_checked_at_ms`. Returns false (and writes nothing) when the row
+    /// no longer carries this identity, so a later attach is never marked.
+    pub fn record_process_quarantine(
+        &self,
+        thread_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+        reason: ProcessQuarantineReason,
+        now_ms: i64,
+    ) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let identity_json = serde_json::to_string(process_identity)
+                .context("failed to encode process_identity for quarantine")?;
+            let tx = conn.unchecked_transaction()?;
+            let existing = tx
+                .query_row(
+                    "SELECT process_quarantine FROM thread_runtime
+                      WHERE thread_id = ?1 AND process_identity = ?2",
+                    params![thread_id, identity_json],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            let Some(existing) = existing else {
+                tx.commit()?;
+                return Ok(false);
+            };
+            let first_seen_at_ms = existing
+                .as_deref()
+                .map(serde_json::from_str::<ProcessQuarantine>)
+                .transpose()
+                .with_context(|| {
+                    format!("failed to decode process_quarantine for thread {thread_id}")
+                })?
+                .map_or(now_ms, |previous| previous.first_seen_at_ms);
+            let record = ProcessQuarantine {
+                reason,
+                first_seen_at_ms,
+                last_checked_at_ms: now_ms,
+            };
+            tx.execute(
+                "UPDATE thread_runtime SET process_quarantine = ?3
+                  WHERE thread_id = ?1 AND process_identity = ?2",
+                params![thread_id, identity_json, serde_json::to_string(&record)?],
+            )?;
+            tx.commit().context("commit process quarantine record")?;
+            Ok(true)
+        })
+    }
+
+    /// Every thread whose attached identity recovery holds in quarantine,
+    /// ordered by thread id.
+    pub fn list_process_quarantines(&self) -> Result<Vec<QuarantinedProcess>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT thread_id, pgid, process_quarantine FROM thread_runtime
+                  WHERE process_quarantine IS NOT NULL ORDER BY thread_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .map(|(thread_id, pgid, raw)| {
+                    let quarantine =
+                        serde_json::from_str::<ProcessQuarantine>(&raw).with_context(|| {
+                            format!("failed to decode process_quarantine for thread {thread_id}")
+                        })?;
+                    Ok(QuarantinedProcess {
+                        thread_id,
+                        pgid,
+                        quarantine,
+                    })
+                })
+                .collect()
+        })
+    }
+
     /// Clear live process ownership only if it is still the exact incarnation
     /// the caller finished waiting/reaping. This cannot erase a later attach.
     /// Workspace borrowers must use atomic workspace/process settlement instead:
@@ -19861,7 +19999,7 @@ impl RuntimeDb {
                 "UPDATE thread_runtime
                 SET pid = NULL, pgid = NULL, process_identity = NULL,
                     process_release_fence = NULL, process_dead_observed_at_ms = NULL,
-                    latest_process_settlement = ?3
+                    process_quarantine = NULL, latest_process_settlement = ?3
               WHERE thread_id = ?1 AND process_identity = ?2
                 AND workspace_id IS NULL AND workspace_view_identity IS NULL
                 AND workspace_borrower_launch_owner IS NULL
@@ -19968,7 +20106,7 @@ impl RuntimeDb {
                 .query_row(
                     "SELECT pid, pgid, launch_metadata, process_identity,
                         process_release_fence, process_dead_observed_at_ms,
-                        stop_requested_at_ms, stop_intent
+                        stop_requested_at_ms, stop_intent, process_quarantine
                    FROM thread_runtime WHERE thread_id = ?1",
                     params![thread_id],
                     |row| {
@@ -19980,6 +20118,7 @@ impl RuntimeDb {
                         let process_dead_observed_at_ms: Option<i64> = row.get(5)?;
                         let stop_requested_at_ms: Option<i64> = row.get(6)?;
                         let stop_intent: Option<String> = row.get(7)?;
+                        let process_quarantine: Option<String> = row.get(8)?;
                         Ok((
                             pid,
                             pgid,
@@ -19989,6 +20128,7 @@ impl RuntimeDb {
                             process_dead_observed_at_ms,
                             stop_requested_at_ms,
                             stop_intent,
+                            process_quarantine,
                         ))
                     },
                 )
@@ -20002,10 +20142,18 @@ impl RuntimeDb {
                 process_dead_observed_at_ms,
                 stop_requested_at_ms,
                 stop_intent,
+                process_quarantine,
             )) = raw
             else {
                 return Ok(None);
             };
+            let process_quarantine = process_quarantine
+                .as_deref()
+                .map(serde_json::from_str::<ProcessQuarantine>)
+                .transpose()
+                .with_context(|| {
+                    format!("failed to decode process_quarantine for thread {thread_id}")
+                })?;
             let launch_metadata = lm_text
                 .as_deref()
                 .map(decode_current_launch_metadata)
@@ -20067,6 +20215,9 @@ impl RuntimeDb {
                     "incomplete durable stop tombstone for thread {thread_id}: timestamp and intent must be present together"
                 );
             }
+            if process_quarantine.is_some() && process_identity.is_none() {
+                bail!("thread {thread_id} has a process quarantine without an attached identity");
+            }
             let recovery_wait = self.recovery_wait(thread_id)?;
             Ok(Some(RuntimeInfo {
                 pid,
@@ -20078,6 +20229,7 @@ impl RuntimeDb {
                 stop_intent,
                 launch_metadata,
                 recovery_wait,
+                process_quarantine,
             }))
         })
     }
@@ -29823,6 +29975,70 @@ mod tests {
             db.process_resource_owners().unwrap()[0].runtime_custody,
             reserved.runtime_custody
         );
+    }
+
+    #[test]
+    fn process_quarantine_is_recorded_once_per_identity_and_cleared_with_it() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let identity = fake_process_identity(1234, 5678);
+        let reason = ProcessQuarantineReason::SameBootGroupPresent;
+        assert!(
+            !db.record_process_quarantine("t1", &identity, reason, 10)
+                .unwrap(),
+            "an unattached row has no identity to quarantine"
+        );
+        db.attach_process(
+            "t1",
+            1234,
+            5678,
+            &identity,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+        assert!(
+            db.record_process_quarantine("t1", &identity, reason, 10)
+                .unwrap()
+        );
+        assert!(
+            db.record_process_quarantine("t1", &identity, reason, 20)
+                .unwrap()
+        );
+        let expected = ProcessQuarantine {
+            reason,
+            first_seen_at_ms: 10,
+            last_checked_at_ms: 20,
+        };
+        assert_eq!(
+            db.get_runtime_info("t1")
+                .unwrap()
+                .unwrap()
+                .process_quarantine,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            db.list_process_quarantines().unwrap(),
+            vec![QuarantinedProcess {
+                thread_id: "t1".to_string(),
+                pgid: Some(5678),
+                quarantine: expected,
+            }]
+        );
+        assert!(
+            !db.record_process_quarantine("t1", &fake_process_identity(1, 1), reason, 30)
+                .unwrap(),
+            "a different identity is never marked"
+        );
+
+        assert!(db.clear_process_if_matches("t1", &identity).unwrap());
+        assert!(
+            db.get_runtime_info("t1")
+                .unwrap()
+                .unwrap()
+                .process_quarantine
+                .is_none()
+        );
+        assert!(db.list_process_quarantines().unwrap().is_empty());
     }
 
     #[test]
