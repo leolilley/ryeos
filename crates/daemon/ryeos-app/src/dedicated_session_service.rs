@@ -540,6 +540,14 @@ fn append_authoritative_observation_batch(
         worker_boot_epoch,
         result,
     )?);
+    observation_events.extend(approval_expiry_fact_events(
+        session,
+        worker_boot_epoch,
+        batch_digest,
+        first_sequence,
+        through_sequence,
+        result,
+    )?);
     crate::authoritative_root_fact::append_once_with_followups(
         state,
         &session.placement_thread_id,
@@ -2449,6 +2457,193 @@ fn approval_request_authority(
     })
 }
 
+/// The approval identity a worker's `approval.expired` observation projects
+/// to: one exact worker incarnation, upstream request id and request digest.
+fn observed_expiry_approval_id(
+    worker_boot_epoch: u64,
+    upstream_request_id: &Value,
+    request_digest: &str,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "worker_boot_epoch":worker_boot_epoch,
+        "upstream_request_id":upstream_request_id,
+        "request_digest":request_digest,
+    }))
+}
+
+const APPROVAL_EXPIRY_FACT: &str = "hosted_session.approval_expired";
+
+fn approval_expiry_fact_operation_id(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    approval_id: &str,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_approval_expiry_observation.v1",
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "worker_boot_epoch":worker_boot_epoch,
+        "approval_id":approval_id,
+    }))
+}
+
+/// Root testimony for each `approval.expired` event a pushed batch carries,
+/// naming the exact observation sequence of the event. A later owner decision
+/// that the worker answers as absent cites this fact as its explanation.
+fn approval_expiry_fact_events(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    batch_digest: &str,
+    first_sequence: u64,
+    through_sequence: u64,
+    result: &Value,
+) -> Result<Vec<NewEventRecord>> {
+    let mut facts = Vec::new();
+    let events = result
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("worker events are not a bounded array"))?;
+    for (index, event) in events.iter().enumerate() {
+        let event: WorkerEvent = serde_json::from_value(event.clone())?;
+        if event.event_type != "approval.expired" {
+            continue;
+        }
+        let upstream_request_id = event
+            .payload
+            .get("request_id")
+            .ok_or_else(|| anyhow!("expired approval event has no request id"))?;
+        let request_digest = event
+            .payload
+            .get("request_digest")
+            .and_then(Value::as_str)
+            .filter(|digest| lillux::valid_hash(digest))
+            .ok_or_else(|| anyhow!("expired approval event has no canonical request digest"))?;
+        let event_sequence = first_sequence
+            .checked_add(u64::try_from(index)?)
+            .filter(|sequence| *sequence <= through_sequence)
+            .ok_or_else(|| anyhow!("expired approval event lies outside its batch sequence"))?;
+        let approval_id =
+            observed_expiry_approval_id(worker_boot_epoch, upstream_request_id, request_digest)?;
+        facts.push(NewEventRecord {
+            event_type: APPROVAL_EXPIRY_FACT.to_owned(),
+            storage_class: "indexed".to_owned(),
+            payload: json!({
+                "schema":1,
+                "operation_id":approval_expiry_fact_operation_id(
+                    session,
+                    worker_boot_epoch,
+                    &approval_id,
+                )?,
+                "origin":"daemon_accepted_worker_observation",
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":session.placement_thread_id,
+                "worker_boot_epoch":worker_boot_epoch,
+                "approval_id":approval_id,
+                "upstream_request_id":upstream_request_id,
+                "request_digest":request_digest,
+                "batch_digest":batch_digest,
+                "first_sequence":first_sequence,
+                "through_sequence":through_sequence,
+                "event_sequence":event_sequence,
+            }),
+        });
+    }
+    Ok(facts)
+}
+
+/// The acknowledged worker observation that recorded one approval's expiry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedApprovalExpiry {
+    pub batch_digest: String,
+    pub first_sequence: u64,
+    pub through_sequence: u64,
+    pub event_sequence: u64,
+}
+
+/// Explain a worker's typed `absent` answer to a reserved owner decision.
+///
+/// The bridge forgets an expired approval once RyeOS acknowledges the batch
+/// carrying its expiry, so a decision reserved before that expiry was
+/// projected can reach the worker after it is forgotten. That answer is
+/// explained only by this exact worker incarnation's own acknowledged
+/// `approval.expired` observation for this exact upstream request: the same
+/// placement, worker boot epoch, request id and request digest, with this
+/// reservation's row already projected `expired`. Anything else returns
+/// `None`, and the caller keeps treating the delivery as unknown.
+#[allow(clippy::too_many_arguments)]
+pub fn observed_expiry_explaining_absent_delivery(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    approval_id: &str,
+    worker_boot_epoch: u64,
+    request_digest: &str,
+    reservation_token: &str,
+    decision_digest: &str,
+    upstream_request_id: &Value,
+) -> Result<Option<ObservedApprovalExpiry>> {
+    if observed_expiry_approval_id(worker_boot_epoch, upstream_request_id, request_digest)?
+        != approval_id
+    {
+        return Ok(None);
+    }
+    if !state.state_store.dedicated_approval_has_exact_state(
+        &session.placement_thread_id,
+        approval_id,
+        worker_boot_epoch,
+        request_digest,
+        reservation_token,
+        decision_digest,
+        "expired",
+    )? {
+        return Ok(None);
+    }
+    let operation_id = approval_expiry_fact_operation_id(session, worker_boot_epoch, approval_id)?;
+    let fact = crate::authoritative_root_fact::lookup(
+        state,
+        &session.placement_thread_id,
+        APPROVAL_EXPIRY_FACT,
+        &operation_id,
+    )?;
+    if fact.count != 1 {
+        return Ok(None);
+    }
+    let Some(payload) = fact.payload else {
+        return Ok(None);
+    };
+    let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+        && payload.get("origin").and_then(Value::as_str)
+            == Some("daemon_accepted_worker_observation")
+        && payload.get("chain_root_id").and_then(Value::as_str)
+            == Some(session.chain_root_id.as_str())
+        && payload.get("placement_thread_id").and_then(Value::as_str)
+            == Some(session.placement_thread_id.as_str())
+        && payload.get("worker_boot_epoch").and_then(Value::as_u64) == Some(worker_boot_epoch)
+        && payload.get("approval_id").and_then(Value::as_str) == Some(approval_id)
+        && payload.get("upstream_request_id") == Some(upstream_request_id)
+        && payload.get("request_digest").and_then(Value::as_str) == Some(request_digest);
+    if !exact {
+        return Ok(None);
+    }
+    let sequence = |key: &str| payload.get(key).and_then(Value::as_u64);
+    let (Some(batch_digest), Some(first_sequence), Some(through_sequence), Some(event_sequence)) = (
+        payload.get("batch_digest").and_then(Value::as_str),
+        sequence("first_sequence"),
+        sequence("through_sequence"),
+        sequence("event_sequence"),
+    ) else {
+        return Ok(None);
+    };
+    if !(first_sequence..=through_sequence).contains(&event_sequence) {
+        return Ok(None);
+    }
+    Ok(Some(ObservedApprovalExpiry {
+        batch_digest: batch_digest.to_owned(),
+        first_sequence,
+        through_sequence,
+        event_sequence,
+    }))
+}
+
 fn approval_request_fact_events(
     session: &DedicatedSessionRecord,
     worker_boot_epoch: u64,
@@ -2795,11 +2990,11 @@ fn project_worker_events(
             {
                 bail!("expired approval event does not correlate to the retained thread and turn");
             }
-            let approval_id = ryeos_state::objects::canonical_value_digest(&json!({
-                "worker_boot_epoch":worker_boot_epoch,
-                "upstream_request_id":upstream_request_id,
-                "request_digest":request_digest,
-            }))?;
+            let approval_id = observed_expiry_approval_id(
+                worker_boot_epoch,
+                upstream_request_id,
+                request_digest,
+            )?;
             state
                 .state_store
                 .observe_dedicated_session_approval_expiry(

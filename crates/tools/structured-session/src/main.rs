@@ -18,6 +18,11 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_APP_SERVER_LINE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENTS: usize = 4_096;
 const MAX_PENDING_SERVER_REQUESTS: usize = 128;
+/// Expired approvals whose expiry RyeOS has not yet acknowledged are never
+/// forgotten. Each one has an unacknowledged expiry event, so they are bounded
+/// by the event queue plus one in-flight observation batch of at most 128
+/// events. Exceeding this is a broken invariant and fails the session.
+const MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS: usize = MAX_EVENTS + 128;
 /// HTTP routes and server-request replies share this finite executor.  A
 /// provider cannot turn a backlog of long requests into unbounded bridge
 /// threads, while several workers preserve full-duplex event handling.
@@ -166,6 +171,12 @@ struct EventQueue {
     events: VecDeque<Value>,
     bytes: usize,
     command_progress: Option<CommandProgressBarrier>,
+    /// Observation sequence of the last pushed event. Observation sequences
+    /// start at 1 and `take_batch` drains the queue in order with contiguous
+    /// sequences, so the n-th pushed event is carried at sequence n.
+    pushed_through: u64,
+    /// Highest observation sequence RyeOS has durably acknowledged.
+    acknowledged_through: u64,
 }
 
 struct CommandProgressBarrier {
@@ -243,6 +254,8 @@ struct HttpRequest {
 struct ExpiredServerRequest {
     id: String,
     request_digest: String,
+    /// Observation sequence of this request's `approval.expired` event.
+    event_sequence: u64,
 }
 
 struct PendingObservationBatch {
@@ -550,7 +563,6 @@ struct ServerRequestCorrelation {
 #[serde(deny_unknown_fields)]
 struct ApprovalResponses {
     accept: ValueTemplate,
-    cancel: ValueTemplate,
     decline: ValueTemplate,
     expire: ValueTemplate,
 }
@@ -957,14 +969,15 @@ fn reject_nonlocal_schema_refs(value: &Value, depth: usize) -> Result<()> {
     Ok(())
 }
 
-/// Why the bridge refused a workload message. It rides on the error as a
-/// context so the refusal can be reported by class without reading any
-/// message content.
+/// Why the bridge refused a workload message or a RyeOS control. It rides on
+/// the error as a context so the refusal can be reported by class without
+/// reading any message content.
 #[derive(Debug, Clone, Copy)]
 enum RefusalClass {
     UnknownNotification,
     UnknownServerRequest,
     SchemaViolation,
+    UnrecordedApprovalDecision,
 }
 
 impl RefusalClass {
@@ -973,6 +986,7 @@ impl RefusalClass {
             Self::UnknownNotification => "unknown_notification",
             Self::UnknownServerRequest => "unknown_server_request",
             Self::SchemaViolation => "schema_violation",
+            Self::UnrecordedApprovalDecision => "unrecorded_approval_decision",
         }
     }
 }
@@ -986,6 +1000,21 @@ impl std::fmt::Display for RefusalClass {
 impl std::error::Error for RefusalClass {}
 
 const MAX_REFUSED_METHOD_BYTES: usize = 128;
+
+/// The refused approval decision, only when it is a short plain identifier,
+/// so a refusal never echoes arbitrary control content.
+fn refused_decision_label(decision: &str) -> &str {
+    if !decision.is_empty()
+        && decision.len() <= 32
+        && decision
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        decision
+    } else {
+        "<non-identifier>"
+    }
+}
 
 /// The refused message's method name, only when it is a plain protocol
 /// identifier. Anything else is not reported, so a refusal event can never
@@ -1135,8 +1164,13 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         .map(std::path::PathBuf::from)
         .ok_or_else(|| anyhow!("structured-session bridge requires an admitted profile"))?;
     let profile_bytes = read_admitted_profile_bytes(&profile_path)?;
-    let profile: StructuredSessionProfile =
+    let profile_value: Value =
         serde_json::from_slice(&profile_bytes).context("decode structured-session profile")?;
+    // The version is checked before the typed decode, so an older profile is
+    // refused by its schema rather than by a field the current one dropped.
+    require_current_profile_schema(&profile_value)?;
+    let profile: StructuredSessionProfile =
+        serde_json::from_value(profile_value).context("decode structured-session profile")?;
     if profile.schema_version
         != ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
     {
@@ -1680,11 +1714,28 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                     .through_sequence
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("observation sequence overflow"))?;
+                events
+                    .lock()
+                    .map_err(|_| anyhow!("event queue is poisoned"))?
+                    .acknowledge_observations(pending.through_sequence)?;
                 previous_observation_digest = Some(pending.digest);
             }
             _ => bail!("daemon sent a non-request frame"),
         }
     }
+}
+
+fn require_current_profile_schema(profile: &Value) -> Result<()> {
+    use ryeos_engine::structured_session_profile::{
+        STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, StructuredSessionProfileSchemaRefusal,
+    };
+    let found = profile.get("schema_version").and_then(Value::as_u64);
+    if found != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION)) {
+        return Err(anyhow::Error::new(StructuredSessionProfileSchemaRefusal {
+            found,
+        }));
+    }
+    Ok(())
 }
 
 fn read_admitted_profile_bytes(path: &std::path::Path) -> Result<Vec<u8>> {
@@ -2843,6 +2894,27 @@ impl StructuredWorkload {
             .get("requestId")
             .ok_or_else(|| anyhow!("approval has no requestId"))?;
         let key = canonical_id(request_id)?;
+        // The vocabulary is RyeOS's recorded decisions, not the upstream
+        // protocol's. It is checked before the pending request is looked up,
+        // so a refused decision never consumes the request.
+        let decision = request
+            .get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("approval decision must be a string"))?;
+        if !matches!(decision, "accept" | "decline") {
+            return Err(
+                anyhow::Error::new(RefusalClass::UnrecordedApprovalDecision).context(format!(
+                    "approval decision `{}` is not a RyeOS-recorded decision",
+                    refused_decision_label(decision)
+                )),
+            );
+        }
+        let acknowledged_through = self
+            .events
+            .lock()
+            .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+            .acknowledged_through;
+        prune_expired_server_requests(&mut self.expired_server_requests, acknowledged_through)?;
         let pending = match self.server_requests.get(&key) {
             Some(pending) if pending.request_digest == expected_request_digest => {
                 self.server_requests
@@ -2862,19 +2934,22 @@ impl StructuredWorkload {
                     "request_digest":expected_request_digest,
                 }));
             }
-            None => bail!("approval is absent, stale, or already resolved"),
+            // Typed so RyeOS can tell this from a delivery failure: nothing
+            // was delivered. It explains the absence only from its own
+            // acknowledged expiry of this exact request.
+            None => {
+                return Ok(json!({
+                    "resolved":false,
+                    "outcome":"absent",
+                    "request_id":request_id,
+                    "request_digest":expected_request_digest,
+                }));
+            }
         };
         let method = pending
             .get("method")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("pending server request has no method"))?;
-        let decision = request
-            .get("decision")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("approval decision must be a string"))?;
-        if !matches!(decision, "accept" | "decline" | "cancel") {
-            bail!("approval decision is outside the baseline vocabulary");
-        }
         let rule = self
             .profile
             .server_requests
@@ -2889,7 +2964,6 @@ impl StructuredWorkload {
         let response_template = match decision {
             "accept" => &rule.responses.accept,
             "decline" => &rule.responses.decline,
-            "cancel" => &rule.responses.cancel,
             _ => unreachable!("decision vocabulary checked above"),
         };
         let response = evaluate_template(response_template, &context)?;
@@ -2929,15 +3003,19 @@ impl StructuredWorkload {
             let expiry_event = approval_expired_event(&rule, &context)?;
             let response = evaluate_template(&rule.responses.expire, &context)?;
             self.deliver_server_request_response(&request_id, &rule, &response)?;
-            self.push_event(expiry_event)?;
+            let event_sequence = self.push_sequenced_event(expiry_event)?;
             self.expired_server_requests
                 .push_back(ExpiredServerRequest {
                     id,
                     request_digest: ryeos_state::objects::canonical_value_digest(&pending)?,
+                    event_sequence,
                 });
-            while self.expired_server_requests.len() > MAX_PENDING_SERVER_REQUESTS {
-                self.expired_server_requests.pop_front();
-            }
+            let acknowledged_through = self
+                .events
+                .lock()
+                .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+                .acknowledged_through;
+            prune_expired_server_requests(&mut self.expired_server_requests, acknowledged_through)?;
         }
         Ok(())
     }
@@ -3597,6 +3675,11 @@ impl StructuredWorkload {
     }
 
     fn push_event(&mut self, event: Value) -> Result<()> {
+        self.push_sequenced_event(event).map(drop)
+    }
+
+    /// Queues one event and returns the observation sequence it will carry.
+    fn push_sequenced_event(&mut self, event: Value) -> Result<u64> {
         self.events
             .lock()
             .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
@@ -3641,6 +3724,28 @@ fn invocation_identity_matches(required: &BTreeMap<String, Value>, context: &Val
     required
         .iter()
         .all(|(pointer, expected)| context.pointer(pointer).unwrap_or(&Value::Null) == expected)
+}
+
+/// Forget an expired approval as soon as RyeOS has acknowledged the
+/// observation batch carrying its expiry event, and never before. Until then
+/// the daemon may still hold the approval as pending and deliver a late
+/// decision, which gets the typed `expired` outcome. After it, RyeOS has
+/// recorded the expiry: a decision it reserved earlier that arrives now gets
+/// the typed `absent` outcome, which RyeOS explains from that recorded expiry.
+fn prune_expired_server_requests(
+    expired: &mut VecDeque<ExpiredServerRequest>,
+    acknowledged_through: u64,
+) -> Result<()> {
+    while expired
+        .front()
+        .is_some_and(|entry| entry.event_sequence <= acknowledged_through)
+    {
+        expired.pop_front();
+    }
+    if expired.len() > MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS {
+        bail!("unacknowledged approval expiries exceed the observation backlog bound");
+    }
+    Ok(())
 }
 
 fn approval_expired_event(rule: &ServerRequestRule, context: &Value) -> Result<Value> {
@@ -3704,7 +3809,15 @@ impl EventQueue {
         pending.acknowledged = true;
         Ok(())
     }
-    fn push(&mut self, event: Value) -> Result<()> {
+    fn acknowledge_observations(&mut self, through_sequence: u64) -> Result<()> {
+        if through_sequence < self.acknowledged_through || through_sequence > self.pushed_through {
+            bail!("observation acknowledgement is outside the pushed event sequence");
+        }
+        self.acknowledged_through = through_sequence;
+        Ok(())
+    }
+
+    fn push(&mut self, event: Value) -> Result<u64> {
         if self.events.len() >= MAX_EVENTS {
             bail!("structured workload event backlog is exhausted");
         }
@@ -3716,8 +3829,13 @@ impl EventQueue {
         if self.bytes > 8 * 1024 * 1024 {
             bail!("structured-session event backlog byte ceiling is exhausted");
         }
+        let sequence = self
+            .pushed_through
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("observation sequence overflow"))?;
         self.events.push_back(event);
-        Ok(())
+        self.pushed_through = sequence;
+        Ok(sequence)
     }
 
     fn take_batch(
@@ -5164,6 +5282,75 @@ mod tests {
         }
     }
 
+    fn expired_requests(
+        sequences: std::ops::RangeInclusive<u64>,
+    ) -> VecDeque<ExpiredServerRequest> {
+        sequences
+            .map(|event_sequence| ExpiredServerRequest {
+                id: format!("approval-{event_sequence}"),
+                request_digest: "a".repeat(64),
+                event_sequence,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expired_approval_remembered_until_acknowledged() {
+        let mut expired = expired_requests(1..=200);
+        prune_expired_server_requests(&mut expired, 0).unwrap();
+        assert_eq!(expired.len(), 200);
+        assert_eq!(expired.front().unwrap().event_sequence, 1);
+
+        // Only acknowledged entries are dropped: with expiries through 100
+        // acknowledged, the unacknowledged 101..=200 all stay.
+        prune_expired_server_requests(&mut expired, 100).unwrap();
+        assert_eq!(expired.len(), 100);
+        assert_eq!(expired.front().unwrap().event_sequence, 101);
+    }
+
+    #[test]
+    fn expired_approval_pruned_after_ack() {
+        // No retention cushion: every acknowledged expiry is dropped at once.
+        let mut expired = expired_requests(1..=200);
+        prune_expired_server_requests(&mut expired, 199).unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired.front().unwrap().id, "approval-200");
+        prune_expired_server_requests(&mut expired, 200).unwrap();
+        assert!(expired.is_empty());
+    }
+
+    #[test]
+    fn unacknowledged_expired_approvals_beyond_the_backlog_bound_fail_closed() {
+        let bound = u64::try_from(MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS).unwrap();
+        let mut expired = expired_requests(1..=bound);
+        prune_expired_server_requests(&mut expired, 0).unwrap();
+        expired.push_back(ExpiredServerRequest {
+            id: "approval-overflow".to_owned(),
+            request_digest: "a".repeat(64),
+            event_sequence: bound + 1,
+        });
+        assert!(prune_expired_server_requests(&mut expired, 0).is_err());
+    }
+
+    #[test]
+    fn observation_acknowledgement_tracks_pushed_sequences() {
+        let mut queue = EventQueue::default();
+        for expected in 1..=3 {
+            assert_eq!(
+                queue
+                    .push(json!({"event_type":"delta","payload":{},"session_observations":[]}))
+                    .unwrap(),
+                expected
+            );
+        }
+        let (_, through, _) = queue.take_batch(128, 1, None).unwrap().unwrap();
+        assert_eq!(through, 3);
+        assert!(queue.acknowledge_observations(4).is_err());
+        queue.acknowledge_observations(through).unwrap();
+        assert_eq!(queue.acknowledged_through, 3);
+        assert!(queue.acknowledge_observations(2).is_err());
+    }
+
     #[test]
     fn observation_batches_respect_the_exact_serialized_byte_ceiling() {
         let mut queue = EventQueue::default();
@@ -5275,7 +5462,6 @@ mod tests {
                 },
                 "responses":{
                     "accept":{"op":"literal","value":{"decision":"accept"}},
-                    "cancel":{"op":"literal","value":{"decision":"cancel"}},
                     "decline":{"op":"literal","value":{"decision":"decline"}},
                     "expire":{"op":"literal","value":{"decision":"decline"}}
                 },
@@ -5478,6 +5664,195 @@ mod tests {
         assert!(child.wait().unwrap().success());
     }
 
+    fn gating_approval_schemas() -> HashMap<String, Value> {
+        HashMap::from([
+            (
+                "request.json".to_owned(),
+                json!({"type":"object","additionalProperties":false}),
+            ),
+            (
+                "response.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["ok"],
+                    "properties":{"ok":{"const":true}},
+                    "additionalProperties":false
+                }),
+            ),
+            (
+                "approval.json".to_owned(),
+                json!({
+                    "type":"object",
+                    "required":["session","operation","command"],
+                    "properties":{
+                        "session":{"type":"string"},
+                        "operation":{"type":"string"},
+                        "command":{"type":"string"}
+                    },
+                    "additionalProperties":false
+                }),
+            ),
+        ])
+    }
+
+    /// Runs the gating-approval fixture and, once its approval is surfaced,
+    /// sends one approval control per decision in order. Returns the route
+    /// result, each control's outcome in order, and the workload.
+    fn run_gating_approval_decisions(
+        root: &tempfile::TempDir,
+        decisions: &[&str],
+    ) -> (Value, Vec<WorkloadCommandResult>, StructuredWorkload) {
+        let workload_home = root.path().join("home");
+        std::fs::create_dir(&workload_home).unwrap();
+        let request_digest = ryeos_state::objects::canonical_value_digest(&json!({
+            "id":"approval-one",
+            "method":"approval/request",
+            "params":{"session":"session-one","operation":"operation-one","command":"true"}
+        }))
+        .unwrap();
+        let events = Arc::new(Mutex::new(EventQueue::default()));
+        let (control_sender, controls) = sync_channel(1);
+        let (result_sender, results) = sync_channel(decisions.len());
+        let observed_events = Arc::clone(&events);
+        let decisions = decisions
+            .iter()
+            .map(|decision| (*decision).to_owned())
+            .collect::<Vec<_>>();
+        let control_count = decisions.len();
+        let controller = std::thread::spawn(move || {
+            let deadline = MonotonicDeadline::after(Duration::from_secs(2));
+            while !observed_events
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event["event_type"] == "approval.requested")
+            {
+                assert!(!deadline.has_elapsed(), "approval event was not surfaced");
+                lillux::time::sleep(Duration::from_millis(1));
+            }
+            for (index, decision) in decisions.into_iter().enumerate() {
+                control_sender
+                    .send(PendingControl {
+                        request_id: format!("control-{index}"),
+                        body: json!({
+                            "kind":"approval_decision",
+                            "request_id":"approval-one",
+                            "request_digest":request_digest,
+                            "decision":decision,
+                            "reservation_token":format!("reservation-{index}")
+                        }),
+                    })
+                    .unwrap();
+            }
+        });
+        let mut lifecycle = BridgeLifecycle::default();
+        let mut workload = StructuredWorkload::start(
+            &mut lifecycle,
+            "/bin/sh",
+            root.path().to_str().unwrap(),
+            workload_home.to_str().unwrap(),
+            gating_approval_profile(),
+            "session".to_owned(),
+            HashSet::from([RouteEffectClass::SessionMutation]),
+            gating_approval_schemas(),
+            events,
+            controls,
+            result_sender,
+            "/bin/sh",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        workload.bound_session_id = Some("session-one".to_owned());
+        let result = workload
+            .handle(
+                json!({"route_id":"operation.run","payload":{}}),
+                root.path().to_str().unwrap(),
+            )
+            .unwrap();
+        controller.join().unwrap();
+        let outcomes = (0..control_count)
+            .map(|_| results.recv_timeout(Duration::from_secs(1)).unwrap())
+            .collect();
+        (result, outcomes, workload)
+    }
+
+    #[test]
+    fn approval_cancel_decision_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let (result, outcomes, mut workload) =
+            run_gating_approval_decisions(&root, &["cancel", "accept"]);
+        assert_eq!(result["response"]["result"], json!({"ok":true}));
+        let [(cancel_id, cancel), (accept_id, accept)] = <[_; 2]>::try_from(outcomes).unwrap();
+        assert_eq!(cancel_id, "control-0");
+        assert_eq!(
+            cancel.unwrap_err(),
+            "approval decision `cancel` is not a RyeOS-recorded decision"
+        );
+        // The refused decision left the request pending: the later accept
+        // still found and resolved it.
+        assert_eq!(accept_id, "control-1");
+        let WorkloadCommandOutput::Final(accepted) = accept.unwrap() else {
+            panic!("expected final control result")
+        };
+        assert_eq!(accepted, json!({"resolved":true}));
+
+        // The vocabulary is checked before the pending lookup and the refusal
+        // is typed.
+        let refused = workload
+            .handle_approval(
+                json!({"operation":"approval","requestId":"approval-absent","decision":"cancel"})
+                    .as_object()
+                    .unwrap(),
+                &"d".repeat(64),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refused.downcast_ref::<RefusalClass>(),
+            Some(RefusalClass::UnrecordedApprovalDecision)
+        ));
+        assert!(
+            refused
+                .to_string()
+                .contains("approval decision `cancel` is not a RyeOS-recorded decision")
+        );
+    }
+
+    #[test]
+    fn retired_profile_schema_is_refused_before_decode() {
+        use ryeos_engine::structured_session_profile::StructuredSessionProfileSchemaRefusal;
+        let mut profile = json!({"schema_version":11,"server_requests":[{
+            "responses":{"cancel":{"op":"literal","value":null}}
+        }]});
+        let refusal = require_current_profile_schema(&profile).unwrap_err();
+        assert_eq!(
+            refusal.downcast_ref::<StructuredSessionProfileSchemaRefusal>(),
+            Some(&StructuredSessionProfileSchemaRefusal { found: Some(11) })
+        );
+        assert!(refusal.to_string().contains("Cure: migrate the profile"));
+        profile["schema_version"] = json!(
+            ryeos_engine::structured_session_profile::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION
+        );
+        require_current_profile_schema(&profile).unwrap();
+    }
+
+    #[test]
+    fn approval_accept_and_decline_still_deliver() {
+        for decision in ["accept", "decline"] {
+            let root = tempfile::tempdir().unwrap();
+            let (result, outcomes, _workload) = run_gating_approval_decisions(&root, &[decision]);
+            assert_eq!(result["response"]["result"], json!({"ok":true}));
+            let [(control_id, outcome)] = <[_; 1]>::try_from(outcomes).unwrap();
+            assert_eq!(control_id, "control-0");
+            let WorkloadCommandOutput::Final(resolved) = outcome.unwrap() else {
+                panic!("expected final control result")
+            };
+            assert_eq!(resolved, json!({"resolved":true}), "decision {decision}");
+        }
+    }
+
     #[test]
     fn in_flight_upstream_call_services_a_gating_approval() {
         let root = tempfile::tempdir().unwrap();
@@ -5593,30 +5968,90 @@ mod tests {
         assert!(!schema_error.contains(sentinel));
         assert!(schema_error.contains("instance digest"));
 
+        // More expiries than the old 128-entry ring, none of them acknowledged
+        // yet: the first is still remembered as expired.
         let expired_digest = "a".repeat(64);
-        workload
-            .expired_server_requests
-            .push_back(ExpiredServerRequest {
-                id: canonical_id(&json!("approval-expired")).unwrap(),
-                request_digest: expired_digest.clone(),
-            });
-        let expired_request = json!({
-            "operation":"approval",
-            "requestId":"approval-expired",
-            "decision":"decline",
-        });
+        let mut expiry_sequences = Vec::new();
+        for index in 0..200 {
+            let event_sequence = workload
+                .push_sequenced_event(json!({"event_type":"approval.expired","payload":{}}))
+                .unwrap();
+            expiry_sequences.push(event_sequence);
+            workload
+                .expired_server_requests
+                .push_back(ExpiredServerRequest {
+                    id: canonical_id(&json!(format!("approval-expired-{index}"))).unwrap(),
+                    request_digest: expired_digest.clone(),
+                    event_sequence,
+                });
+            let acknowledged_through = workload.events.lock().unwrap().acknowledged_through;
+            prune_expired_server_requests(
+                &mut workload.expired_server_requests,
+                acknowledged_through,
+            )
+            .unwrap();
+        }
+        assert_eq!(workload.expired_server_requests.len(), 200);
+        let late_decision = |index: usize| {
+            json!({
+                "operation":"approval",
+                "requestId":format!("approval-expired-{index}"),
+                "decision":"decline",
+            })
+        };
         let expired = workload
-            .handle_approval(expired_request.as_object().unwrap(), &expired_digest)
+            .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
             .unwrap();
         assert_eq!(
             expired,
             json!({
                 "resolved":false,
                 "outcome":"expired",
-                "request_id":"approval-expired",
+                "request_id":"approval-expired-0",
                 "request_digest":expired_digest,
             })
         );
+        // As soon as RyeOS acknowledges an expiry event, that entry is
+        // forgotten: a late decision for it gets the typed `absent` answer,
+        // while expiries not yet acknowledged still answer `expired`.
+        workload
+            .events
+            .lock()
+            .unwrap()
+            .acknowledge_observations(expiry_sequences[99])
+            .unwrap();
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
+                .unwrap(),
+            json!({
+                "resolved":false,
+                "outcome":"absent",
+                "request_id":"approval-expired-0",
+                "request_digest":expired_digest,
+            })
+        );
+        assert_eq!(workload.expired_server_requests.len(), 100);
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(100).as_object().unwrap(), &expired_digest)
+                .unwrap()["outcome"],
+            "expired"
+        );
+        let pushed_through = workload.events.lock().unwrap().pushed_through;
+        workload
+            .events
+            .lock()
+            .unwrap()
+            .acknowledge_observations(pushed_through)
+            .unwrap();
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(199).as_object().unwrap(), &expired_digest)
+                .unwrap()["outcome"],
+            "absent"
+        );
+        assert!(workload.expired_server_requests.is_empty());
 
         let reused_key = canonical_id(&json!("approval-reused")).unwrap();
         let old_digest = "b".repeat(64);
@@ -6118,7 +6553,6 @@ server.serve_forever()
             },
             responses: ApprovalResponses {
                 accept: ValueTemplate::Literal { value: Value::Null },
-                cancel: ValueTemplate::Literal { value: Value::Null },
                 decline: ValueTemplate::Literal { value: Value::Null },
                 expire: ValueTemplate::Literal { value: Value::Null },
             },
@@ -6153,7 +6587,6 @@ server.serve_forever()
             },
             responses: ApprovalResponses {
                 accept: ValueTemplate::Literal { value: Value::Null },
-                cancel: ValueTemplate::Literal { value: Value::Null },
                 decline: ValueTemplate::Literal { value: Value::Null },
                 expire: ValueTemplate::Literal { value: Value::Null },
             },

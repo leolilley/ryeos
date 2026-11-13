@@ -60,7 +60,7 @@ def source_digest() -> str:
 class OpenCodeContractTests(unittest.TestCase):
     def test_profile_uses_the_closed_http_projection_contract(self) -> None:
         profile = json.loads(PROFILE.read_text())
-        self.assertEqual(profile["schema_version"], 11)
+        self.assertEqual(profile["schema_version"], 12)
         self.assertIsNone(profile["external_candidate"])
         self.assertEqual(profile["auxiliary_configs"], [])
         self.assertEqual(profile["runtime_configs"], [])
