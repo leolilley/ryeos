@@ -210,11 +210,11 @@ impl<'a> SignerContext<'a> {
     }
 }
 
-/// Scope of the implicit node root: node state and runtime-authored project
-/// items.
+/// Scope of the implicit node root: node state only. The node key never
+/// signs project items; runtime-authored ones carry the authoring key.
 fn node_root_scope() -> SignerScope {
     SignerScope {
-        spaces: vec![SignerSpace::Project, SignerSpace::Node],
+        spaces: vec![SignerSpace::Node],
         kinds: vec![ALL_KINDS.to_string()],
         projects: Vec::new(),
     }
@@ -1339,6 +1339,69 @@ mod tests {
         let bad = SignerContext::project("tool", None);
         let (class, _) = verify_item_signature(&content, &header, &envelope, &store, &bad).unwrap();
         assert_eq!(class, TrustClass::Untrusted);
+    }
+
+    #[test]
+    fn authoring_signer_with_empty_scope_is_untrusted() {
+        let (sk, vk, fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let record = SignerRecord::new(
+            &vk,
+            "authoring",
+            SignerRole::Authoring,
+            SignerScope::authoring_default(),
+            SignerStatus::Active,
+        );
+        assert!(record.scope.kinds.is_empty());
+        record.scope.validate().unwrap();
+        let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
+        let (content, envelope, header) = signed_with_header(&sk, &fp);
+        for kind in ["knowledge", "directive", "tool"] {
+            let ctx = SignerContext::project(kind, Some(Path::new("/work/p")));
+            let (class, _) =
+                verify_item_signature(&content, &header, &envelope, &store, &ctx).unwrap();
+            assert_eq!(class, TrustClass::Untrusted, "{kind}");
+        }
+    }
+
+    #[test]
+    fn authoring_signer_admitted_for_knowledge_is_trusted_for_knowledge_only() {
+        let (sk, vk, fp) = gen_key();
+        let (_, node_vk, _) = gen_key2();
+        let record = record_for(
+            &vk,
+            SignerRole::Authoring,
+            vec![SignerSpace::Project],
+            &["knowledge"],
+            &[],
+            SignerStatus::Active,
+        );
+        let store = TrustStore::from_registry(node_vk, vec![record]).unwrap();
+        let (content, envelope, header) = signed_with_header(&sk, &fp);
+        let knowledge = SignerContext::project("knowledge", None);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &knowledge).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
+        let graph = SignerContext::project("graph", None);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &graph).unwrap();
+        assert_eq!(class, TrustClass::Untrusted);
+    }
+
+    #[test]
+    fn node_key_signed_project_item_is_out_of_scope() {
+        // The signing key is the registry's node root.
+        let (sk, vk, fp) = gen_key();
+        let store = TrustStore::from_registry(vk, Vec::new()).unwrap();
+        let (content, envelope, header) = signed_with_header(&sk, &fp);
+        let project = SignerContext::project("knowledge", Some(Path::new("/work/p")));
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &project).unwrap();
+        assert_eq!(class, TrustClass::Untrusted);
+        let node = SignerContext::new(SignerSpace::Node, "node", None);
+        let (class, _) =
+            verify_item_signature(&content, &header, &envelope, &store, &node).unwrap();
+        assert_eq!(class, TrustClass::Trusted);
     }
 
     #[test]

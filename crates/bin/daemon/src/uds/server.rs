@@ -1822,8 +1822,9 @@ fn handle_runtime_author_item(
     let thread_auth = thread_auth.ok_or_else(|| anyhow::anyhow!("missing thread auth state"))?;
     let params: RuntimeAuthorItemParams =
         serde_json::from_value(params.clone()).context("invalid runtime.author_item params")?;
+    let authoring = RuntimeItemAuthorService::load_authoring_identity(&state.config.app_root)?;
     serde_json::to_value(RuntimeItemAuthorService::author(
-        &state.identity,
+        &authoring,
         &state.authorizer,
         cap,
         thread_auth,

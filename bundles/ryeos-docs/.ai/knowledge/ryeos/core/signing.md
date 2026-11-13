@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:49:28Z:440d77866cc7e45919a4fbb1254d60cacb244755e70ffe0cbd866608ce624874:gT+09vtmphCk56Vusi6CYawRZjIdLo/43OHU3ye+ZfsxetaqI4SpNxQzL6Jnie86zOcl6eFHswphXUUq66cNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:02:48Z:4bc3d2e5b2682863d2fed4c05a1c2446b8e05f671b01f13f7becb68bc646c221:Qm0zITcKjF/uhHwsEmZ5gyqmzSGQ3ICqGxjdj+Ce+p6hFNIfUpjhJ2YgBY0B+AnUOzZ6FVz7MxQYNkpoxovQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -15,15 +15,18 @@ description: >
 Rye OS uses Ed25519 cryptographic signatures to ensure item integrity.
 Every executable item must be signed before the daemon will run it.
 
-## Three Keys, Three Roles
+## Four Keys, Four Roles
 
 | Key | Purpose | Location |
 |-----|---------|----------|
 | **Operator key** | Operator identity — CLI auth, signing project items | `<system>/.ai/node/operator/signing/private_key.pem` |
 | **Node key** | Daemon identity — bundle registrations, node config | `<system>/.ai/node/identity/private_key.pem` |
+| **Authoring key** | Items the runtime authors; machine drafts, no kind admitted until the operator widens its scope | `<system>/.ai/node/authoring/signing/private_key.pem` |
 | **Publisher key** | Bundle author identity — signs items in published bundles | Signer record in `<system>/.ai/node/trust/signers/` |
 
-The operator key and node key are generated at `ryeos init` time. The
+The operator, authoring and node keys are generated at `ryeos init` time.
+Operator and authoring keys rotate with `ryeos node operator rotate` and
+`ryeos node authoring rotate`; the node key does not rotate. The
 publisher key is **hardcoded in the binary** and pinned during init
 without trusting any on-disk file. For development, `--trust-file`
 pins a dev publisher key instead.
@@ -183,19 +186,22 @@ files; the cure is to keep exactly one of them.
 Trust lives only on the node, as a registry of signer records in
 `<system>/.ai/node/trust/signers/<fp>.yaml`. Each record is signed by the
 node key; nothing writes trust by hand. The node key itself is the
-implicit root: it is trusted for the node and project spaces and needs no
-record.
+implicit root: it is trusted for the node space only and needs no
+record. It does not sign project items.
 
 A record carries the signer's fingerprint and public key, a label, and:
 
 | Field | Values |
 |---|---|
-| `role` | `publisher`, `operator`, `project_author` |
+| `role` | `publisher`, `operator`, `project_author`, `authoring` |
 | `scope` | `spaces` (bundle, project, node), `kinds` (item kinds, or all), `projects` (project roots, for `project_author`) |
 | `status` | `active`, `retired`, `revoked` |
 
 Defaults: a publisher is scoped to the bundle space for every kind; the
-operator key is scoped to the project and node spaces for every kind.
+operator key is scoped to the project and node spaces for every kind; the
+authoring key is scoped to the project space with **no kinds** (`kinds: []`
+admits nothing), so items it signs are untrusted until the operator widens the
+scope with `ryeos trust scope <fp> --kind <kind>`.
 
 `scope.projects` names projects by their logical project path: the absolute
 project path as the node knows it. A run against a live project matches by that

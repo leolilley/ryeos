@@ -85,6 +85,11 @@ pub fn user_signing_key() -> SigningKey {
     SigningKey::from_bytes(&[44u8; 32])
 }
 
+/// Deterministic authoring signing key. Bytes pattern: `[46; 32]`.
+pub fn authoring_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[46u8; 32])
+}
+
 /// Deterministic X25519 vault secret. Distinct from the Ed25519 keys
 /// above so node-key rotation doesn't brick the vault. Bytes
 /// pattern: `[45; 32]`.
@@ -99,6 +104,9 @@ pub struct FastFixture {
     pub publisher: SigningKey,
     pub node: SigningKey,
     pub user: SigningKey,
+    /// The key the daemon signs runtime-authored items with. Pinned with the
+    /// authoring role and the default scope, which admits no kind.
+    pub authoring: SigningKey,
     pub vault: lillux::vault::VaultSecretKey,
 }
 
@@ -262,6 +270,9 @@ impl FastFixture {
     }
     pub fn user_fp(&self) -> String {
         lillux::signature::compute_fingerprint(&self.user.verifying_key())
+    }
+    pub fn authoring_fp(&self) -> String {
+        lillux::signature::compute_fingerprint(&self.authoring.verifying_key())
     }
     pub fn site_id(&self) -> String {
         format!("site:{}", self.node_fp())
@@ -434,6 +445,7 @@ pub fn populate_initialized_state_with_profile_and_identities(
     profile: FastFixtureProfile,
 ) -> Result<FastFixture> {
     let publisher = publisher_signing_key();
+    let authoring = authoring_signing_key();
     let vault = vault_secret_key();
 
     // ── Layout dirs (mirrors bootstrap::create_directory_layout) ──
@@ -511,6 +523,16 @@ pub fn populate_initialized_state_with_profile_and_identities(
     )
     .with_context(|| format!("write operator signing key under {}", state_path.display()))?;
 
+    // ── Authoring Ed25519 identity ──
+    let authoring_key_path = ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf())
+        .authoring_signing_key_path();
+    if let Some(parent) = authoring_key_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create authoring key home {}", parent.display()))?;
+    }
+    write_pem_signing_key(&authoring_key_path, &authoring)
+        .with_context(|| format!("write authoring signing key under {}", state_path.display()))?;
+
     // ── Vault X25519 keypair ──
     let vault_dir = state_path.join(AI_DIR).join("node").join("vault");
     lillux::vault::write_secret_key(&vault_dir.join("private_key.pem"), &vault)
@@ -533,6 +555,12 @@ pub fn populate_initialized_state_with_profile_and_identities(
         ryeos_engine::trust::SignerRole::Operator,
         ryeos_engine::trust::SignerScope::operator_default(),
     );
+    super::pin_signer(
+        state_path,
+        &authoring.verifying_key(),
+        ryeos_engine::trust::SignerRole::Authoring,
+        ryeos_engine::trust::SignerScope::authoring_default(),
+    );
 
     // ── Trust the system-bundle signer (signs `bundles/core` items) ──
     //
@@ -546,6 +574,7 @@ pub fn populate_initialized_state_with_profile_and_identities(
         publisher,
         node,
         user,
+        authoring,
         vault,
     })
 }

@@ -432,12 +432,7 @@ pub(crate) fn prepare_initial_capacity_binding(
         .open_pinned_regular(OsStr::new("native-capacity-issuance.json"), false)?
         .is_some()
     {
-        let binding = load_existing_capacity_binding(
-            app_root,
-            &operator_fingerprint,
-            node_fingerprint,
-            policy,
-        )?;
+        let binding = load_existing_capacity_binding(app_root, node_fingerprint, policy)?;
         return Ok(PreparedCapacityIssuance {
             binding,
             owner: None,
@@ -630,11 +625,62 @@ fn initialize_control_file(
     )
 }
 
+/// The operator that signed the capacity issuance, resolved in the node
+/// registry. The issuance and every document chained to it are signed by this
+/// one key, which a later operator rotation retires but never changes.
+pub(crate) fn issuing_operator(
+    app_root: &Path,
+    trust: &TrustStore,
+) -> Result<(String, VerifyingKey)> {
+    let parent = PinnedDirectory::open(&app_root.join(".ai/config/onboarding"))?
+        .context("capacity issuance directory absent")?;
+    let input = super::RetainedInput::capture(
+        parent,
+        OsStr::new("native-capacity-issuance.json"),
+        16 * 1024,
+    )?;
+    let document: IssuanceDocument = serde_json::from_slice(&input.bytes)?;
+    let fingerprint = document.body.operator_fingerprint;
+    let pinned_operator = trust
+        .signer(&fingerprint)
+        .is_some_and(|record| record.role == ryeos_engine::trust::SignerRole::Operator);
+    ensure!(
+        pinned_operator,
+        "capacity issuance names operator {fingerprint}, which is not a pinned operator of this node"
+    );
+    let key = trust
+        .get(&fingerprint)
+        .with_context(|| format!("capacity issuing operator {fingerprint} is revoked"))?
+        .verifying_key;
+    Ok((fingerprint, key))
+}
+
+/// Refuse a capacity operation signed by an operator other than the one that
+/// issued the account. Capacity documents chain to the issuing operator; an
+/// operator rotation retires that key, and no successor chain exists yet.
+pub(crate) fn require_issuing_operator_current(
+    app_root: &Path,
+    current_operator_fingerprint: &str,
+) -> Result<()> {
+    let trust = TrustStore::load_node_registry(app_root)?;
+    let (issuing, _) = issuing_operator(app_root, &trust)?;
+    ensure!(
+        issuing == current_operator_fingerprint,
+        "capacity_operator_rotated: this node's capacity account was issued by operator \
+         {issuing}, but the operator is now {current_operator_fingerprint}. Capacity \
+         re-anchors, re-issuances and policy amendments are signed by the issuing operator \
+         and no successor chain exists, so they cannot run after an operator rotation. \
+         Run them before rotating the operator, or initialize a fresh app root"
+    );
+    Ok(())
+}
+
 /// Resealing preserves an already operator-signed issuance. It never adopts
 /// unsigned records, creates missing stores, or derives a grant from a ceiling.
+/// The issuance is verified under the operator that signed it, which a later
+/// rotation may have retired.
 pub(crate) fn load_existing_capacity_binding(
     app_root: &Path,
-    operator_fingerprint: &str,
     node_fingerprint: &str,
     policy: &NodeNativeCapacityPolicy,
 ) -> Result<NativeCapacityAccountBinding> {
@@ -650,15 +696,12 @@ pub(crate) fn load_existing_capacity_binding(
         document.body.schema == "ryeos/native-capacity-issuance/v3",
         "foreign capacity issuance schema"
     );
+    let trust = TrustStore::load_node_registry(app_root)?;
+    let (operator_fingerprint, operator) = issuing_operator(app_root, &trust)?;
     ensure!(
         document.body.operator_fingerprint == operator_fingerprint,
-        "capacity issuance operator differs from initialization"
+        "capacity issuance operator changed while it was read"
     );
-    let trust = TrustStore::load_node_registry(app_root)?;
-    let operator = &trust
-        .get(operator_fingerprint)
-        .context("capacity operator is not pinned")?
-        .verifying_key;
     let encoded = document
         .signature
         .strip_prefix("ed25519:")
@@ -675,7 +718,7 @@ pub(crate) fn load_existing_capacity_binding(
         document
             .body
             .binding
-            .with_current_reanchor(app_root, operator, operator_fingerprint)?;
+            .with_current_reanchor(app_root, &operator, &operator_fingerprint)?;
     binding.require_installed(app_root, node_fingerprint, policy)?;
     input.require_original()?;
     Ok(binding)

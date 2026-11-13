@@ -128,6 +128,18 @@ impl RuntimeRoot {
         self.operator_dir().join("signing").join("private_key.pem")
     }
 
+    /// Node-volume home of the authoring key (`.ai/node/authoring`): the key
+    /// the daemon signs runtime-authored items with. It is not the operator
+    /// key and not the node key.
+    pub fn authoring_dir(&self) -> PathBuf {
+        self.node().join("authoring")
+    }
+
+    /// The authoring key. This is the only owner of the path.
+    pub fn authoring_signing_key_path(&self) -> PathBuf {
+        self.authoring_dir().join("signing").join("private_key.pem")
+    }
+
     /// The operator-signed genesis record created by `ryeos init`.
     pub fn operator_genesis_path(&self) -> PathBuf {
         self.operator_dir().join("genesis.json")

@@ -552,6 +552,7 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
         operator_fingerprint == report.operator_fingerprint,
         "operator key differs from the one that initialized this node"
     );
+    super::require_issuing_operator_current(app_root, &operator_fingerprint)?;
     let prior = report.capacity_account;
     let measured = prior.measured_at(app_root)?;
     let onboarding = onboarding(app_root)?;
@@ -866,6 +867,7 @@ struct AmendmentInputs {
 fn amendment_inputs(app_root: &Path, operator_key: &SigningKey) -> Result<AmendmentInputs> {
     let operator = operator_key.verifying_key();
     let operator_fingerprint = ryeos_engine::trust::compute_fingerprint(&operator);
+    super::require_issuing_operator_current(app_root, &operator_fingerprint)?;
     let node_identity_path = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node/identity/public-identity.json");

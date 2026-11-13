@@ -34,7 +34,6 @@ mod reservation;
 pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
-pub(crate) use account::load_existing_capacity_binding;
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use account::reanchor::{
     CapacityPolicyAmendmentCheck, CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport,
@@ -47,6 +46,7 @@ pub use account::reissue::{
     reissue_capacity,
 };
 pub use account::{CapacityAccountSummary, inspect_capacity_account};
+pub(crate) use account::{issuing_operator, load_existing_capacity_binding};
 pub use factory::{
     LiveNativeFactory, LiveNativeFactoryFailure, LiveNativeProducerPreparationFailure,
     LiveNativeProducerPublicationFailure, LiveProducerControlCensus, PlannedMarginWake,
@@ -580,7 +580,7 @@ impl LiveNativeCapacityInputs {
             policy,
             snapshot,
             node_fingerprint: report.node_fingerprint,
-            operator_fingerprint: report.operator_fingerprint,
+            operator_fingerprint: issuing_operator(app_root, &trust)?.0,
             capacity_account: report.capacity_account,
             clock,
             occupancy,

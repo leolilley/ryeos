@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T11:09:13Z:77e788b82d785217fdb43aecc3f6c622ffda1ed15871cf023faf81511a9e0c33:kT5vzkgodc/IRRn9knQtTfhw43hEeygncve9JylWFQ1bULK5cN3WdZe4vu7hGqvg3jMcdanqhpBEACQg2F5EBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:02:48Z:dce345b6413a3e96e868195b5590f68d27f29067174f1c3c85160b5891cdc067:l0YHhkSrRfcurZ0PhRAQbB6MCFq8fb2wsIQQAeNl/48JcWSXIY859j2DwctWdVW5G8nZ0x1SrMKBKYhqQYP5Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -22,6 +22,8 @@ Operator artifacts owned by `ryeos init`:
 - `<system>/.ai/node/trust/signers/<fp>.yaml` — node-signed signer
   records (publisher, operator, project author).
 - `<system>/.ai/node/trust/events/` — node-signed hash-chained key events.
+- `<system>/.ai/node/authoring/signing/private_key.pem` — authoring key, the
+  key `runtime.author_item` signs with. Under the live-execution floor.
 - `<system>/.ai/node/operator/genesis.json` — operator-signed genesis record.
 
 Operator artifacts owned by `ryeos remote configure`:

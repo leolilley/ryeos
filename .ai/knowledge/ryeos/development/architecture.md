@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T11:09:13Z:81b1c49d781b0feb97e170fa154aea51afe0a3f7bb6dcdf233c051ba52b893e2:c18gK2CsDympvfXLrDCdTHbdX6oaUw55ZS+33RzLtY49BYZgbyozqt33IW0OBxLKHeezjE3agwKE5h4DQvmuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:05:03Z:83b5c37cbe30b0cffe6eb4f0a842733a82b3c52ca4082182933644c8fe0998cd:z1egbFIa5XYbN8g3WTLXG+DVTTYTJEDO6nEGxl10NAFsOuZHIYGko16xf/JBq2uOMbFwzq5T5RLO4IgsyugNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -125,7 +125,7 @@ enforced as a **scope-independent structural floor** — they apply to
   `.ai/node/vault`.
 - Live-execution-only denials (a run may not read or write them, but the
   snapshot floor does not list them): `.ai/node/trust`,
-  `.ai/node/operator`, `.ai/node/remotes`.
+  `.ai/node/operator`, `.ai/node/authoring`, `.ai/node/remotes`.
 - `NODE_OWNED` — node runtime state and transaction anchors: `.ai/state`,
   `.ai/cache`, `.ai/.bundles.lock`, `.ai/node/schedules`, `.ai/node/routes`,
   `.ai/node/bundles`.

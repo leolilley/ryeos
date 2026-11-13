@@ -94,6 +94,7 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
         operator_fingerprint == report.operator_fingerprint,
         "operator key differs from the one that initialized this node"
     );
+    super::require_issuing_operator_current(app_root, &operator_fingerprint)?;
     let binding: NativeCapacityAccountBinding = report.capacity_account;
     let policy = binding.policy.clone();
     ensure!(
