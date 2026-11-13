@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:36:23Z:0d6af20b3b270fc74a2e138262389d783c020f801a566989ecf3f648ce8fab1e:aN1PeLx/s2vfqE6zKKnxcyYpc+SHlrmCpXKIyu8V3oimzdxu8anBVOY58/NncxCqJFS4qV+/CcPXWAvVH7BlBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:17:38Z:0133c20a26a4760ae4b3a0bf110e8b7441ec162dffd9923820526b1e9251290a:hg0Zmm6/r/ejlfDP0rTZ97gxE/+aH2DXOWEyibAuCR0M+u2lg7oCSLdnPr1IrdRyoRYr8nHbGW7D1iMuBXJMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -112,6 +112,8 @@ per item (defaults, then exact item overrides, then direct
 metadata; `thread cancel`, daemon drain and recovery stop the process under
 that recorded policy. A `native_async` declaration supplies its own policy
 instead. The node caps the grace at 5 seconds whatever the config says.
+The policy is node-local: a same-node continuation keeps the recorded policy,
+while a cross-node worker handoff re-resolves it from the target node's config.
 
 Both configs coexist — one for LLM API calls, one for subprocess
 management.

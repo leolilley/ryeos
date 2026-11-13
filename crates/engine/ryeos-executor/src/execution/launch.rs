@@ -3177,6 +3177,18 @@ async fn load_execution_control_snapshot_cached(
     }
 }
 
+/// The stop policy a managed launch records at attachment. A policy already
+/// on the row is kept: a same-node continuation seeds its source's policy and
+/// a same-thread relaunch keeps its own. A row without one (a fresh launch,
+/// or a remote handoff successor, whose seed carries no node-local policy)
+/// records what this node's signed execution config resolves.
+fn attach_stop_policy(
+    recorded: Option<ryeos_engine::contracts::CancellationMode>,
+    resolved: &ryeos_engine::execution_policy::ResolvedExecutionPolicy,
+) -> ryeos_engine::contracts::CancellationMode {
+    recorded.unwrap_or_else(|| resolved.stop_policy())
+}
+
 pub struct NativeLaunchResult {
     pub thread: Value,
     pub result: Value,
@@ -7216,14 +7228,13 @@ async fn run_claimed_thread_row_inner(
     // A stop policy already recorded on the row (a continuation seed or a
     // same-thread relaunch) is authoritative; otherwise this launch records
     // the policy its signed execution config resolves.
-    let stop_policy = match state
-        .state_store
-        .get_launch_metadata(&thread_id)?
-        .and_then(|metadata| metadata.cancellation_mode)
-    {
-        Some(recorded) => recorded,
-        None => execution_policy.stop_policy(),
-    };
+    let stop_policy = attach_stop_policy(
+        state
+            .state_store
+            .get_launch_metadata(&thread_id)?
+            .and_then(|metadata| metadata.cancellation_mode),
+        execution_policy,
+    );
     let descriptor_clone = verified_protocol.descriptor.clone();
     let runtime_item_ref = selected_runtime.canonical_ref.clone();
     let observation_declarations = selected_runtime.yaml.observability.child_records.clone();
@@ -13617,6 +13628,33 @@ mod tests {
                 expected_substr,
             );
         }
+    }
+
+    #[test]
+    fn a_handoff_successor_records_the_target_policy_and_a_continuation_keeps_its_own() {
+        use ryeos_engine::contracts::CancellationMode;
+        // The target node's own signed execution config.
+        let target_policy =
+            ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &serde_json::json!({
+                    "defaults": { "cancellation_mode": "graceful", "cancellation_grace_secs": 2 }
+                }),
+                &ryeos_engine::canonical_ref::CanonicalRef::parse("directive:x").unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        // A remote handoff successor's seed carries no node-local policy, so
+        // it records the target's, never the source's.
+        assert_eq!(
+            attach_stop_policy(None, &target_policy),
+            CancellationMode::Graceful { grace_secs: 2 }
+        );
+        // A same-node continuation seeds its source's policy, which is kept.
+        assert_eq!(
+            attach_stop_policy(Some(CancellationMode::Hard), &target_policy),
+            CancellationMode::Hard
+        );
     }
 
     #[test]

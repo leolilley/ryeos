@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:50:40Z:b603233976f91478df01a9a66a8198c0151826c9be0965ec5fa57bf37660e421:PMikv6h7yz92Oo+P5it6wiVST6kbOvSQawvGfJqBhDFycW3LNrVTRDlPj1wDq9/CwPv2DG40Ru2uqYH+8SvjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:17:38Z:6416ccbf68a18aa4a4c4e5117120b6a1ce8419a66862afa969f0d2a65607fb2c:3x3kOZGAP4otuEw9eZOZIzhTLTRc/jyd5diayGBGRlyQuZfS6NCueDAiNWJ8gm79qFz8uD3uvU65KKzfEH6vDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -548,9 +548,12 @@ parent-delegation ceiling, and applies only the attested project, site, and
 credential-profile rebind before minting a new target capsule. Source
 `RuntimeLaunchMetadata`, source checkpoint directories, source isolation
 attempts, handler authentication, cancellation policy, and other node-local
-runtime fields never cross the site boundary. The stop policy is node-local:
-the target resolves its own from its signed execution config and records it
-when the successor attaches, so the source's recorded policy is not carried.
+runtime fields never cross the site boundary. The stop policy is node-local.
+A cross-node handoff re-resolves it: the target records the policy its own
+signed execution config grants when the successor attaches, and the source's
+`thread_continued` edge records the source's policy as `source_stop_policy`,
+so a change across the site boundary stays visible. A same-node continuation
+instead keeps its source's recorded policy.
 
 Every closure fetch and staged handoff payload is bounded by the consuming
 node's mandatory `object_closure` policy. The serving node independently
