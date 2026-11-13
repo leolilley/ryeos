@@ -17,6 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use anyhow::{Context, Result, anyhow, bail};
 use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
 use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::identity::authored_provenance::PROVENANCE_MARKER;
 use ryeos_engine::kind_registry::validate_metadata_anchoring;
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use serde::{Deserialize, Serialize};
@@ -25,8 +26,6 @@ use serde_json::json;
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
 use crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY;
 use ryeos_node_runtime::identity::NodeIdentity;
-
-const PROVENANCE_MARKER: &str = "ryeos:authored:";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

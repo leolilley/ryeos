@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:aef684b68c611e82fb47d0f0d344bddfbc5e1eb1cfc363dcd7ce1594bf9a41be:tGGhFMqX86c6ncTk8geX+211xpPX1Mb4uG9pB29nazVyaILaFIp9LGpd/QjFgcS8xiH20/NCLRWB/cKti1OmDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:02:02Z:8e1e5f2018263687ae8b494e0f0604c36e2bd18aec64f82ffbafd107b68b2233:GTFmG0h06qtbRkPCyubLP+5O3BE9PntGEQ3hv7HUocVDm6DNLTSnXrKm+qRMJnKjRXmf2t4Z0zDWNYN/GNFeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -138,6 +138,18 @@ Response: `{ item_ref, path, mode, signer_fingerprint, content_digest,
 required_capability }`.
 
 v1 supports live-filesystem project provenance only.
+
+### How authored items resolve and show up
+
+An authored item is signed by the **node** key, which the node trusts, so it
+resolves as `trusted_project` and launches wherever `trusted_project` is
+admitted, exactly like an operator-signed item. Launch trust does not tell them
+apart. Inspection does: `items.effective` returns an `authorship` row for the
+root, each extends ancestor and each referenced item, with
+`signer_fingerprint`, `signer_role` (`node` for this node's key, `other` for
+any other key, `none` when unsigned) and `runtime_authored`, which is true only
+when the node key signed the item and its signed bytes carry the
+`ryeos:authored:` provenance line.
 
 ## Invoking it: the `author-item` tool
 
