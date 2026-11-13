@@ -480,6 +480,38 @@ pub(super) fn rewrite_schedule_enabled(
     verified.to_spec_record()
 }
 
+/// Re-pin a schedule's signed source to `authority`, keeping every other
+/// field, including `registered_at`, the enabled state and any
+/// `paused_reason`. The caller has proven `authority` is the owner's current
+/// grant and still covers the schedule; this write only seals it.
+pub(super) fn rewrite_schedule_authority(
+    scheduler: &ryeos_scheduler_service::SchedulerService,
+    current: &ryeos_scheduler::types::ScheduleSpecRecord,
+    authority: ScheduleExecutionAuthority,
+) -> Result<ryeos_scheduler::types::ScheduleSpecRecord> {
+    let mutation =
+        ScheduleSourceMutation::acquire(scheduler, &current.schedule_id, Some(&current.spec_hash))?;
+    let source = mutation.verified.as_ref().with_context(|| {
+        format!(
+            "schedule projection {} has no trusted source",
+            current.schedule_id
+        )
+    })?;
+    let mut record = source.record.clone();
+    if record.execution.principal_id() != authority.principal_id() {
+        bail!(
+            "schedule {} authority cannot change principal on reauthorization",
+            current.schedule_id
+        );
+    }
+    record.execution.authority = authority;
+    record.validate(Some(&current.schedule_id))?;
+
+    let body = serde_json::to_value(&record)?;
+    let (_path, verified) = mutation.publish(&body, scheduler.identity())?;
+    verified.to_spec_record()
+}
+
 /// Pause a schedule on the scheduler's own judgement, through the same
 /// signed write `scheduler.pause` uses, under the scheduler mutation gate.
 ///

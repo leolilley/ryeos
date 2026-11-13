@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:16:30Z:df0a60f8c3c0a2be5f697752aca72e5628638b892d2d505abaf30d0737318099:k52Nji/0sreuwKRqYxnsJuG5p6VjoFh9Gmx/ynbs3pE+LAP0AvSgrgylHd807h4K2XbRODPJXXwuLk0nTlfKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:22:04Z:f098c4c02b8b82b5bb1fbf7ee81324c3980a31cfbdd07fd947352dea54cf42af:jL9QjaUo+4xj8YoUlgHVznfVCgiePpqOczJ98XIxzPzGloOnzbaoFCvo/gOoKE6CXQz4mvRE4M4YVv+u0uCiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, scheduler, scheduling]
@@ -10,7 +10,7 @@ description: Scheduler service reference.
 
 Invariant: scheduler services manage one-shot and recurring capsule-producing subprocess Tool specs and fire history in daemon state.
 
-Services: `scheduler/register`, `scheduler/list`, `scheduler/deregister`, `scheduler/pause`, `scheduler/resume`, `scheduler/explain`, and `scheduler/show_fires`.
+Services: `scheduler/register`, `scheduler/list`, `scheduler/deregister`, `scheduler/pause`, `scheduler/resume`, `scheduler/reauthorize`, `scheduler/explain`, and `scheduler/show_fires`.
 
 `scheduler/register` requires an explicit complete schedule contract:
 `schedule_id`, `item_ref`, `schedule_type`, `expression`, object `params`,
@@ -41,7 +41,14 @@ first such refusal pauses the schedule through the ordinary signed pause write
 and records the same code as `paused_reason`. `scheduler/explain` reports an
 `authority` block (`valid`, `refusal`, `outcome`, `detail`) computed by the
 same revalidation, and `scheduler/resume` refuses with
-`schedule_authority_invalid` while the authority does not hold. A `live_direct` fire intentionally
+`schedule_authority_invalid` while the authority does not hold.
+`scheduler/reauthorize {schedule_id}`, called by the schedule's owner, seals
+the owner's current grant generation into the existing signed schedule when
+its class, origin and scopes still cover the schedule, and otherwise refuses
+with `schedule_reauthorize_not_covered`,
+`schedule_reauthorize_class_or_origin_changed` or `schedule_not_grant_bound`.
+`ryeos node doctor` reports schedules whose pinned generation no longer
+matches under `schedule_authority`. A `live_direct` fire intentionally
 resolves the live project again at each fire and recovery and is never
 implicitly snapshotted. A `pinned` fire binds one durable
 `current_head` or explicit `snapshot` authority and retains it through recovery;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:16:30Z:9e5e2b60a635475624c0343d7815de21402b8d6959a0da0c905974f2c4df174f:B71FUZJNJsMmKUNDPOn2tAf0iNILb8CLVIMXI0VMqoHmKYQJAV8vusUtR7qdgaJJQOIPIMg400c4pv4o1Rb5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:22:04Z:e58b05f93ad1d1fa025d0678a01b9197f5fb82f827724bceddb7f482c0bd8d4d:qZyFp3iVCriit4mVZ73wqf88Izx6pHOm38n3dRFc9t3Pj+ff6riYTxg004/R3CI59y7KDCXDYar8JMEfaNB3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, scheduler, cron, scheduling]
 version: "1.0.0"
@@ -24,6 +24,7 @@ their exact capability grants.
 | `scheduler/deregister` | `scheduler.deregister`| Remove a schedule              |
 | `scheduler/pause`      | `scheduler.pause`     | Pause a schedule               |
 | `scheduler/resume`     | `scheduler.resume`    | Resume a paused schedule       |
+| `scheduler/reauthorize` | `scheduler.reauthorize` | Re-pin a schedule to the owner's current grant generation |
 | `scheduler/explain`     | `scheduler.explain`   | Explain schedule timing and policy |
 | `scheduler/show_fires` | `scheduler.show_fires`| Show fire history for a schedule |
 
@@ -42,6 +43,7 @@ ryeos scheduler list                # List all schedules
 ryeos scheduler deregister <id>     # Remove a schedule
 ryeos scheduler pause <id>          # Pause execution
 ryeos scheduler resume <id>         # Resume after pause
+ryeos scheduler reauthorize <id>    # Re-pin to the current grant generation
 ryeos scheduler explain <id>        # Inspect timing and policy
 ryeos scheduler show-fires <id>     # View fire history
 ```
@@ -194,6 +196,29 @@ block computed by the same revalidation: `valid`, the typed `refusal`
 `forwarding_grant_changed`, `forwarding_attestation_not_covered` or
 `node_authority_changed`), its `outcome`, and a `detail`. `scheduler.resume`
 refuses with `schedule_authority_invalid` until the authority holds again.
+
+### Reauthorize
+
+The generation pin is exact: re-issuing a grant, even with identical scopes,
+is a new generation, and the schedule's fires are refused until its owner
+re-pins it. `ryeos scheduler reauthorize <id>` (`scheduler.reauthorize`) does
+that without resubmitting the spec. Signed by the owner, it seals the grant
+generation that authenticated the request into the existing signed source;
+every other field, `registered_at` and the registration request digest are
+kept, and the enabled state is unchanged, so a paused schedule is then resumed
+with `scheduler.resume`. It is refused, and nothing is written, with:
+
+- `schedule_reauthorize_not_covered` when the current grant no longer covers
+  every capability the schedule declares (register it again with a narrower
+  capability set);
+- `schedule_reauthorize_class_or_origin_changed` when the current grant's
+  principal class or origin site differs from the pinned one;
+- `schedule_not_grant_bound` for a node-owned schedule, which pins no grant.
+
+A caller that does not own the schedule gets not-found, as for the other
+owner verbs. `ryeos node doctor` reports, under `schedule_authority`, every
+schedule whose pinned generation is missing or superseded, before its next
+fire refuses.
 
 ## Pause and Resume
 

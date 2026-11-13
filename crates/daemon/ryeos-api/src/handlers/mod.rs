@@ -117,6 +117,8 @@ pub mod scheduler_list;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_pause;
 #[cfg(feature = "scheduling")]
+pub mod scheduler_reauthorize;
+#[cfg(feature = "scheduling")]
 pub mod scheduler_register;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_resume;
@@ -325,6 +327,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     scheduler_pause::DESCRIPTOR,
     #[cfg(feature = "scheduling")]
     scheduler_resume::DESCRIPTOR,
+    #[cfg(feature = "scheduling")]
+    scheduler_reauthorize::DESCRIPTOR,
     sync_jobs_list::DESCRIPTOR,
     sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,

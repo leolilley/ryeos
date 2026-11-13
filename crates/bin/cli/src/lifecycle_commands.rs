@@ -2487,6 +2487,11 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Schedules pinned to a grant generation that no longer holds refuse
+    // their next fire and pause; report them before that happens.
+    #[cfg(feature = "scheduling")]
+    checks.push(schedule_authority_check(&config.app_root, initialized));
+
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
     //    daemon (metadata present, not responding) may be hung-but-alive and
@@ -2840,6 +2845,59 @@ fn wall_clock_check(
 /// Doctor row for the native-capacity account: healthy with its summary,
 /// a warning with the cure when the allowance is spent and the signed policy
 /// lets the operator re-issue, a failure when it does not.
+/// Schedules whose pinned authorized-key grant generation is missing or
+/// superseded. Each refuses its next fire and pauses itself; the owner
+/// re-pins it with `ryeos scheduler reauthorize <id>`.
+#[cfg(feature = "scheduling")]
+fn schedule_authority_check(
+    app_root: &std::path::Path,
+    initialized: bool,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+    if !initialized {
+        return check(
+            "schedule_authority",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        );
+    }
+    match inspect_schedule_grant_generations(app_root) {
+        Ok(superseded) if superseded.is_empty() => {
+            check("schedule_authority", OK, serde_json::json!({}))
+        }
+        Ok(superseded) => check(
+            "schedule_authority",
+            WARN,
+            serde_json::json!({
+                "superseded": superseded,
+                "note": "these schedules pin a grant generation that no longer holds; each refuses its next fire and pauses itself",
+                "fix": "as each schedule's owner: ryeos scheduler reauthorize <schedule_id>, then ryeos scheduler resume <schedule_id> if it was paused",
+            }),
+        ),
+        Err(error) => check(
+            "schedule_authority",
+            WARN,
+            serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
+#[cfg(feature = "scheduling")]
+fn inspect_schedule_grant_generations(
+    app_root: &std::path::Path,
+) -> anyhow::Result<Vec<ryeos_scheduler_service::SupersededScheduleGrant>> {
+    let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
+    let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
+    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+        .map_err(|error| anyhow::anyhow!("load trust store: {error}"))?;
+    ryeos_scheduler_service::superseded_schedule_grants(
+        app_root,
+        &root.authorized_keys_dir(),
+        &identity,
+        &trust_store,
+    )
+}
+
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {

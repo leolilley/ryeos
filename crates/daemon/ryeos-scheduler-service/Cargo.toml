@@ -29,6 +29,7 @@ tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-scheduler = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }

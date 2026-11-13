@@ -377,6 +377,127 @@ async fn revoked_grant_pauses_schedule_with_typed_outcome() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn rewritten_grant_then_reauthorize_restores_fires() {
+    let (h, _fixture) = DaemonHarness::start_fast_core_scheduling()
+        .await
+        .expect("start Core+Scheduling daemon");
+    let owner = SecondPrincipal::new();
+    owner.grant(&h, OWNER_SCOPES).await;
+    let project = doctor_project(&h);
+    let (status, body) = owner
+        .exec(
+            &h,
+            "service:scheduler/register",
+            doctor_registration(&h, "reauthorized-owner", &project),
+        )
+        .await;
+    result(status, &body, "owner registers the schedule");
+
+    // Re-issue the grant with the same scopes before the first boundary: a
+    // new generation, so the fire is refused as changed and the schedule
+    // pauses.
+    owner.revoke(&h);
+    // A grant records its creation to the second; identical scopes in the
+    // same second would be byte-identical, the same generation.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    owner.grant(&h, OWNER_SCOPES).await;
+    journal_records(&h, "reauthorized-owner", "authority_changed").await;
+    let explained = explain_as(&h, &owner, "reauthorized-owner", |e| e["enabled"] == false).await;
+    assert_eq!(
+        explained["paused_reason"], "authority_changed",
+        "{explained:#}"
+    );
+
+    // Only the owner may re-pin; anyone else is told nothing exists.
+    let (status, body) = exec(
+        &h,
+        "service:scheduler/reauthorize",
+        json!({"schedule_id": "reauthorized-owner"}),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{body:#}");
+
+    // A grant that no longer covers the schedule's capabilities cannot re-pin it.
+    owner.revoke(&h);
+    let narrowed: Vec<&str> = OWNER_SCOPES
+        .iter()
+        .copied()
+        .filter(|scope| *scope != "ryeos.read.project.live")
+        .collect();
+    owner.grant(&h, &narrowed).await;
+    let (status, body) = owner
+        .exec(
+            &h,
+            "service:scheduler/reauthorize",
+            json!({"schedule_id": "reauthorized-owner"}),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body:#}");
+    assert!(
+        body.to_string()
+            .contains("schedule_reauthorize_not_covered"),
+        "{body:#}"
+    );
+    assert!(
+        body.to_string().contains("ryeos.read.project.live"),
+        "{body:#}"
+    );
+
+    // A covering grant re-pins it; resume then fires again.
+    owner.revoke(&h);
+    owner.grant(&h, OWNER_SCOPES).await;
+    let (status, body) = owner
+        .exec(
+            &h,
+            "service:scheduler/reauthorize",
+            json!({"schedule_id": "reauthorized-owner"}),
+        )
+        .await;
+    let reauthorized = result(status, &body, "owner reauthorizes the schedule");
+    assert_eq!(reauthorized["reauthorized"], true, "{reauthorized:#}");
+    assert_eq!(reauthorized["enabled"], false, "{reauthorized:#}");
+    assert_ne!(
+        reauthorized["principal_grant_hash"], reauthorized["previous_principal_grant_hash"],
+        "{reauthorized:#}"
+    );
+    let explained = explain_as(&h, &owner, "reauthorized-owner", |_| true).await;
+    assert_eq!(explained["authority"]["valid"], true, "{explained:#}");
+
+    let (status, body) = owner
+        .exec(
+            &h,
+            "service:scheduler/resume",
+            json!({"schedule_id": "reauthorized-owner"}),
+        )
+        .await;
+    result(status, &body, "owner resumes the reauthorized schedule");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    loop {
+        let (status, body) = owner
+            .exec(
+                &h,
+                "service:scheduler/show_fires",
+                json!({"schedule_id": "reauthorized-owner"}),
+            )
+            .await;
+        let fires = result(status, &body, "owner reads fire history");
+        let fires = fires["fires"].as_array().expect("fire list");
+        if fires
+            .iter()
+            .any(|fire| matches!(fire["status"].as_str(), Some("dispatched" | "completed")))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the reauthorized schedule did not dispatch a fire: {fires:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// Poll `scheduler.explain` as `owner` until `done` accepts it.
 async fn explain_as(
     h: &DaemonHarness,
