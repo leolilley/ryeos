@@ -467,8 +467,8 @@ fn long_lists_build_only_the_rows_in_view_and_the_feed_opens_at_its_end() {
 }
 
 /// RyeOS fills the bottom-left corner and opens the launcher; the open
-/// Surfaces run along the top from the left, the current one filled; the two
-/// bars are the same height.
+/// Surfaces run along the top from the left, the current one filled, with
+/// the node's status at the right; the two bars are the same height.
 #[test]
 fn ryeos_holds_the_bottom_left_corner_and_the_bars_match() {
     let (width, height) = (1280.0, 800.0);
@@ -492,5 +492,15 @@ fn ryeos_holds_the_bottom_left_corner_and_the_bars_match() {
     assert!(
         (tall - bottom).abs() <= 1.0,
         "top {tall} and bottom {bottom} bars match"
+    );
+    let status = rt
+        .elements()
+        .into_iter()
+        .find(|element| element.role == "status")
+        .expect("the node's status is in the top bar");
+    assert!(
+        status.rect[0] > width / 2.0,
+        "the node's status sits at the right, not at {}",
+        status.rect[0]
     );
 }

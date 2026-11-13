@@ -132,8 +132,8 @@ pub fn shell(
     page
 }
 
-/// The top bar: the node's status, then the open Surfaces as a list that
-/// grows to the right, the current one filled orange to the bar's edges.
+/// The top bar: the open Surfaces as a list from the left, the current one
+/// filled orange to the bar's edges, and the node's status at the right.
 fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
     let p = Palette::get();
     let session = &vm.session;
@@ -198,9 +198,9 @@ fn system_bar(vm: &RyeOsViewModel, local: &Local) -> El {
         .center_y()
         .fill(p.bg)
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
-        .child(status)
-        .child(el().w(1.0).h(12.0).fill(p.line))
         .child(surfaces)
+        .child(el().w(1.0).h(12.0).fill(p.line))
+        .child(status)
 }
 
 /// One open Surface in the top bar. The current one is filled orange and
