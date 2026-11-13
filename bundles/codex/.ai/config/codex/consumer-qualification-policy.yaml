@@ -71,7 +71,7 @@ product_qualification_policy:
     worker_ref: worker:codex/external-hosted-authoring
     product_declaration_id: guest-runtime
     environment_ref: config:codex/environments/external-authoring
-    worker_execution_ref: worker_execution:codex/bounded-turn
+    worker_execution_ref: worker_execution:codex/external-bounded-turn
     environment_binding: environment
   producer_scenarios:
     remote_codex:

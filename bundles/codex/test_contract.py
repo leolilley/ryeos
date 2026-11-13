@@ -43,7 +43,12 @@ WORKER_EXECUTION_PATHS = (
     BUNDLE / ".ai/worker-executions/codex/session.yaml",
     BUNDLE / ".ai/worker-executions/codex/bounded-turn.yaml",
     BUNDLE / ".ai/worker-executions/codex/bounded-turn-recovery.yaml",
+    BUNDLE / ".ai/worker-executions/codex/external-bounded-turn.yaml",
 )
+# A remote lease admits a session only when its deadline plus the node's turn-end margin ends before the
+# lease; an external binding's lease is at most 3600 s and the margin is 600 s.
+EXTERNAL_LEASE_MAX_SECONDS = 3600
+TURN_END_MARGIN_SECONDS = 600
 
 
 def source_manifest_digest() -> str:
@@ -871,7 +876,7 @@ class CodexContractTests(unittest.TestCase):
             with self.subTest(profile=path.stem):
                 execution = yaml.safe_load(path.read_text(encoding="utf-8"))
                 config = execution["config"]
-                bounded = path.stem.startswith("bounded-turn")
+                bounded = "bounded-turn" in path.stem
                 self.assertEqual(
                     config["mode"]["kind"], "bounded_turn" if bounded else "session"
                 )
@@ -894,6 +899,21 @@ class CodexContractTests(unittest.TestCase):
                         ),
                         path.stem == "bounded-turn-recovery",
                     )
+
+    def test_external_authoring_turn_fits_a_remote_lease(self) -> None:
+        execution = yaml.safe_load(
+            (BUNDLE / ".ai/worker-executions/codex/external-bounded-turn.yaml").read_text(encoding="utf-8")
+        )
+        self.assertLessEqual(
+            execution["config"]["max_lifetime_seconds"] + TURN_END_MARGIN_SECONDS,
+            EXTERNAL_LEASE_MAX_SECONDS,
+        )
+        for policy in ("consumer-qualification-policy.yaml", "consumer-qualification-policy-trusted-lane.yaml"):
+            with self.subTest(policy=policy):
+                self.assertIn(
+                    "worker_execution_ref: worker_execution:codex/external-bounded-turn",
+                    (BUNDLE / ".ai/config/codex" / policy).read_text(encoding="utf-8"),
+                )
 
     def test_every_mapped_codex_file_reconstructs_its_worker_manifest_pin(self) -> None:
         activations = [
