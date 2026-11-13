@@ -263,7 +263,7 @@ fn launch_origin(
         .map(|declaration| declaration.graph_parent_profiles.as_slice())
         .unwrap_or(&[]);
     // A thread record's kind is its kind schema's thread profile name.
-    if !graph_profiles.iter().any(|name| *name == record.kind) {
+    if !graph_profiles.contains(&record.kind) {
         return Err(delegation(format!(
             "its parent is a `{}` thread running `{}`, which is delegation, not an operator graph",
             record.kind, record.item_ref

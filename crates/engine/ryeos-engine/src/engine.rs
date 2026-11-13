@@ -3835,6 +3835,20 @@ impl Engine {
         self.checked_bundle_generation(|| self.effective_item_current(request))
     }
 
+    /// Resolve once and return the effective item together with the verified
+    /// resolution it was projected from. See
+    /// [`CheckedEngineGeneration::effective_item_with_resolution`].
+    pub fn effective_item_with_resolution(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<(EffectiveItem, crate::resolution::ResolutionOutput), EngineError> {
+        self.checked_bundle_generation(|| {
+            let output = self.effective_resolution_output_current(&request)?;
+            let item = self.effective_item_from_output(request, output.clone())?;
+            Ok((item, output))
+        })
+    }
+
     /// Resolve and compose an exact item closure for a downstream admission
     /// boundary. Unlike [`EffectiveItem`], this retains the complete verified
     /// root/ancestor/reference bytes and provenance required to seal and later

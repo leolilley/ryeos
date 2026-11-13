@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T06:07:09Z:50e0bfb94ffea2bec671e47eb8dba053e52e74bac8fd55cc2c72e947bf4a770d:ZyIt/ppkWT7qVIWqCFQ/SJXP1YdLZkpYdPlf8WLlJTIlJOiUQ6MZbF5OH8pe1VAT5/dnSfsGB0NwtPtu5w0xAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:17:17Z:a748ae0b6aee5903af35aab453626284f604356da986786318b9cc7b98acd11d:nomO+HiFFRU/pBBcgrLO0TWXaN+aLiRXIa4cP9Ns1B91yKKZ9hCK3ywwy3PciUZR7wox3zyJN5mpNUaOBROwAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -313,7 +313,7 @@ policies:
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
   # Operator grants of host-direct execution, per exact item. Empty by
-  # default: nothing runs on the host. Changed only by the operator-signed
+  # default, so nothing runs on the host. Changed only by the operator-signed
   # `node.policy-apply` (`ryeos node host-access grant|revoke`).
   host_access:
     schema: 1

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T06:07:09Z:834a60d4a17edc47edb81a9145226180e1b13986f400f571007cbb9d2bd1c424:55aNkShrAMQ5YrZ7Q1LoB2EDDp4ublB/a24z9L5XFORtG+84LFCUr7CBbnXBqepSYWhYiToI6ZtCadyJVbEMAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:17:17Z:1977e27e0a1ace17c1604a01bb7790f50618025eecc33a9549ce84184b0d0623:QkZgbTxqIapj/T4CClbrWHodX1ctkAVeYVWO9rmNQKSRPtihQQVHC3u/W0eQAOnHmlcnMmnqWiC5k9moviQPBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -340,7 +340,7 @@ policies:
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
   # Operator grants of host-direct execution, per exact item. Empty by
-  # default: nothing runs on the host. Changed only by the operator-signed
+  # default, so nothing runs on the host. Changed only by the operator-signed
   # `node.policy-apply` (`ryeos node host-access grant|revoke`).
   host_access:
     schema: 1

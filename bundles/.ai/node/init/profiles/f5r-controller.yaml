@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T06:07:09Z:288a285b8dc95e1a8c2bf2528685f8ad18243ac3443b8c2d763c1c20f4b6e1d8:I+yQpGWwshZcwzUk5vcVzVB2f4CGKdf94puLj2XjIG6Z9HS5by2150FB5rHc0PvD8G6b97S1DJuFcFZiRZu+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:17:17Z:eca41611e869c754bb0767952700770398b33a61c83266a38ae0671a778454e5:nLlP1CZyCN8SSQTU4XvkUKAUb17vK5t7p1KP1TMLHqKFg0UIfc2ORduo/duApqUENYfWFRMzvVnsQiZJvoWYBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -362,7 +362,7 @@ policies:
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
   # Operator grants of host-direct execution, per exact item. Empty by
-  # default: nothing runs on the host. Changed only by the operator-signed
+  # default, so nothing runs on the host. Changed only by the operator-signed
   # `node.policy-apply` (`ryeos node host-access grant|revoke`).
   host_access:
     schema: 1
