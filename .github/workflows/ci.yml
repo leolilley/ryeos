@@ -115,6 +115,9 @@ jobs:
           python3 tests/development/oci_hook_contract.py
           python3 tests/development/contained_workflow_products.py
 
+      - name: Check development host tools
+        run: python3 tests/development/dev_host_tools.py
+
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
 
