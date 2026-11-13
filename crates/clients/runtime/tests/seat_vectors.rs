@@ -79,6 +79,7 @@ fn touch_word(outcome: TouchOutcome) -> &'static str {
         TouchOutcome::Renewed => "renewed",
         TouchOutcome::Retry => "retry",
         TouchOutcome::Refused => "refused",
+        TouchOutcome::SessionEnded => "session_ended",
     }
 }
 

@@ -679,9 +679,9 @@ fn divider(
     let drag_commit = commit.clone();
     let drag_key = key.to_owned();
     let line = if horizontal {
-        el().w(1.0).h_full().fill(p.line)
+        el().w(1.0).h_full()
     } else {
-        el().w_full().h(1.0).fill(p.line)
+        el().w_full().h(1.0)
     };
     let handle = if horizontal {
         col().w(DIVIDER).h_full().items_center()

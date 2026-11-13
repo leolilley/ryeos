@@ -179,6 +179,9 @@ pub enum TouchOutcome {
     Retry,
     /// The daemon refused the writer.
     Refused,
+    /// The browser session itself is no longer accepted: the request was
+    /// refused as unauthenticated and re-reading the session was too.
+    SessionEnded,
 }
 
 /// Classify a touch response body (already decoded): only an object of

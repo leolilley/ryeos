@@ -419,6 +419,42 @@ mod seat_delivery {
         assert_eq!(platform.transport.calls_to(SEAT_TOUCH_PATH).len(), 2);
     }
 
+    /// A 401 on a touch looks at the session once. If the session is refused
+    /// too, the seat stops as ended; if it still reads, presence retries.
+    #[test]
+    fn a_refused_credential_ends_the_seat_only_when_the_session_is_refused_too() {
+        for (session_reply, ends) in [(Reply::Status(401), true), (Reply::Network, false)] {
+            let platform = FakePlatform::new();
+            platform
+                .transport
+                .script(SEAT_TOUCH_PATH, vec![Reply::Status(401)]);
+            platform
+                .transport
+                .script(crate::api::SESSION_CURRENT_PATH, vec![session_reply]);
+            platform.clock.set_now(TOUCH_INTERVAL_MS + 1);
+            let who = producer('a');
+            let mut runtime = ready(&platform, &who);
+            runtime.maybe_touch();
+            platform.sim().run_for(10);
+
+            let mut core = core();
+            let drained = runtime.drain(&mut core);
+            assert_eq!(drained.stop.is_some(), ends, "{:?}", drained.stop);
+            assert_eq!(
+                platform
+                    .transport
+                    .calls_to(crate::api::SESSION_CURRENT_PATH)
+                    .len(),
+                1
+            );
+            if ends {
+                assert!(runtime.shared.current_producer().is_none());
+            } else {
+                assert_eq!(runtime.shared.current_producer(), Some(who));
+            }
+        }
+    }
+
     /// A definite refusal of presence fences the producer that was refused
     /// and reports `writer_refused` once. A late refusal that belongs to a
     /// predecessor neither reports nor fences its successor.

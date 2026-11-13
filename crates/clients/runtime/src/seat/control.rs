@@ -18,6 +18,7 @@ use crate::api::{SEAT_CLOSE_PATH, SEAT_OPEN_PATH, SEAT_TOUCH_PATH};
 use crate::codec::{decode_strict, encode_exact};
 use crate::error::RuntimeError;
 use crate::history::SeatCoordinate;
+use crate::api::SESSION_CURRENT_PATH;
 use crate::platform::{Clock, Platform, Transport};
 
 use super::ack::unwrap_result;
@@ -142,6 +143,14 @@ pub async fn touch_seat<P: Platform>(
             }
             Err(_) => TouchOutcome::Retry,
         },
+        // A refused credential gets one look at the session: when that is
+        // refused too the session is over, otherwise the next interval retries.
+        Err(error) if error.status() == Some(401) => {
+            match shared.platform.transport().get(SESSION_CURRENT_PATH).await {
+                Err(again) if again.status() == Some(401) => TouchOutcome::SessionEnded,
+                _ => TouchOutcome::Retry,
+            }
+        }
         Err(error) => classify_touch_error(&error),
     }
 }

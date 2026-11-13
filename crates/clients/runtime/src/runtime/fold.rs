@@ -264,6 +264,12 @@ impl<P: Platform + 'static> ClientRuntime<P> {
                             "seat presence was refused".to_owned(),
                         )));
                     }
+                    TouchOutcome::SessionEnded => {
+                        self.shared.fence(&producer);
+                        out.stop_with(StopReason::Unavailable(Unavailable::WriterRefused(
+                            "The browser session ended.".to_owned(),
+                        )));
+                    }
                 }
             }
             SeatTask::LiveEnded { producer, event } => {
