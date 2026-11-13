@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T13:05:06Z:2ecdaddb6baab8a298e14d5ca73fef59643ff8cbe46a91d1454efbabc0bf2227:d8p5UiRxFGhfu3AZB2vNkdp8IHUTqoIzb8sCwvIfqhwNm9p0tIeHWGjlGfYySU1mYwlheSAdDbgE9sAwhzOgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T13:05:39Z:c3e4be7267e2cd38283abbdadb1249063ad41375502802f2636130e4f50d2da1:vZpSd6462/SMbjzbhyamyBCHiyStea68UtM6xttMGFBF9agwIZHsZaoY+SbaC/Ezw/0CtlR2mkGDAEJNYCr7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -476,7 +476,7 @@ The browser is a renderer, not a second application model:
 - `crates/clients/rune/` (`ryeos-client-rune`) is the renderer: it projects the
   view model to Rune elements and turns presses and keys back into core events.
 - `crates/clients/rune/pkg/` is generated, reviewed installed output. Never edit
-  it directly; `scripts/build-rune-web.sh` writes it.
+  it directly; `build-rune-web.sh` in the browser-assets-production tool's `lib/` writes it.
 - `crates/daemon/ryeos-ui/web-assets.json` is the closed asset manifest.
 - `crates/daemon/ryeos-ui/src/assets.rs` serves only that registered closure.
 
@@ -492,7 +492,7 @@ compiled in; `ryeos-cjk.ttf` (common Chinese and Japanese, kana) and
 `ryeos-emoji.ttf` (monochrome Noto Emoji) cover content in other scripts. The
 boot module fetches them beside the renderer and hands them over (`add_font`)
 before `start`; one that fails to load leaves its characters undrawn and the
-client still starts. `scripts/build-rune-fonts.py` produces them from pinned
+client still starts. `browser-assets-production/lib/build-rune-fonts.py` produces them from pinned
 upstream Noto sources.
 `crates/clients/web/` is only the `web` launcher binary: it mints a launch URL
 and opens the browser.
@@ -538,7 +538,7 @@ Keep the installed node running and iterate against it without rebuilding the
 daemon:
 
 ```bash
-scripts/build-rune-web.sh            # WASM_BINDGEN must be the CLI the lock names
+.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh  # WASM_BINDGEN must be the CLI the lock names
 .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh --background --port 7411 \
   --upstream http://127.0.0.1:PORT --asset-dir crates/clients/rune/pkg
 ```

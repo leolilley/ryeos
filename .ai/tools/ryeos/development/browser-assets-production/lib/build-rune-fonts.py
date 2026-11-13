@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# ryeos:signed:2026-11-13T13:05:39Z:712ca9ceed5f065f943fd3543ec025e912244ada9a782d0a50f1194d9a8ad55d:qzKnt4/eegUFBOmbPYUUdUbSpv8SNyvZACFewq5YdDcBccS1acqX/Mz1sn9NAexPfFrcuyTdVniwPGSnqzHUDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
 """Produce the browser client's coverage fonts from pinned upstream Noto sources.
 
 On the web Rune draws only the faces it is given: Inter and IBM Plex Mono cover
@@ -9,7 +13,7 @@ the interface, and these two cover content in other scripts.
                    level 1), kana, CJK punctuation and fullwidth forms.
   ryeos-emoji.ttf  Noto Emoji (monochrome outlines) at regular weight, whole.
 
-    scripts/build-rune-fonts.py --sources DIR
+    build-rune-fonts.py --sources DIR
 
 DIR holds the upstream files under the names below (fetch them from the URLs);
 each is checked against its pinned digest. Output goes to
@@ -24,7 +28,7 @@ import hashlib
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[6]
 OUT = ROOT / "crates/clients/rune/web/fonts"
 
 SOURCES = {

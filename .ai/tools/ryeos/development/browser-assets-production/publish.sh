@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-12T23:22:23Z:7efd2970bc5fe267d64f3f0e1998fc05f77bdac0470e607d6eb65eb0f2c19cb5:zlWNpgAMQ5C1Qxm0NOcFKEo+2PTv4ToQ5Eq8F+sqXa8BRN2duOCvMq4ZwDCQLx39UUqxBuU7v6SS2F5sqqa5AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T13:05:39Z:113253a54af6c287f7c9057712e5d7ae1a8d4d6d5de95f0f145cbb71efb477cc:Evg5obicviSIPYvdHcuKcblw2uh5NrnSTj59yD7IMFnCCY1NsngWFM8n6zG5aSTesdZ8BniaG5cm1PKbelS7Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -17,7 +17,7 @@ trap 'rm -rf -- "$stage"' EXIT
 
 # The Rune renderer's closed set: built with remapped paths and the exact
 # wasm-bindgen CLI the lock names (the build refuses any other version).
-"$root/scripts/build-rune-web.sh" --out "$stage/final"
+"$root/.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh" --out "$stage/final"
 
 expected=(
   index.html

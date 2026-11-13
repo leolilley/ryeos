@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
+# ryeos:signed:2026-11-13T13:05:39Z:f99365a4d2a881f2042e831067d50af8efb097d1b60dc3ba96c9df60bb57c7b5:ZPAdWfKW/Dma5jQPAWDp31A0o99RUSlnrDlT4oSiXZBzz/UAGQy983Gy1CGIx1I4u96mUmhTWoB2kCkQ/WjvDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
 # Build the Rune browser renderer into the daemon's closed asset set:
 #   crates/clients/rune/pkg/{index.html, ryeos_boot.js, ryeos_rune.js, rune_bridge.js,
 #                             rune_platform.js, ryeos_rune_bg.wasm.gz, ryeos-cjk.ttf.gz,
 #                             ryeos-emoji.ttf.gz}
 # then refresh the registry digests. The renderer builds in the size-first `web` profile; it
-# and the coverage fonts (crates/clients/rune/web/fonts, from build-rune-fonts.py) are stored
+# and the coverage fonts (crates/clients/rune/web/fonts, from browser-assets-production/lib/build-rune-fonts.py) are stored
 # gzip-encoded, which the daemon serves as is. Output is byte-identical across checkouts:
 # paths are remapped, no wasm-opt runs, gzip carries no name or time, and wasm-bindgen's
 # hashed snippet folders are flattened to fixed names so the registry never sees a rotating
@@ -17,7 +21,7 @@
 # WASM_BINDGEN (default wasm-bindgen; must match the locked wasm-bindgen crate).
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/../../../../../.." && pwd)
 cargo=${CARGO:-cargo}
 target_dir=${CARGO_TARGET_DIR:-$root/target}
 bindgen=${WASM_BINDGEN:-wasm-bindgen}

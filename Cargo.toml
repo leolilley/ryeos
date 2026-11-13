@@ -111,7 +111,7 @@ lto = "thin"
 # process can be stack-dumped with named frames; costs a few MB per binary.
 strip = "debuginfo"
 
-# The browser renderer (scripts/build-rune-web.sh): a page downloads it, so
+# The browser renderer (.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh): a page downloads it, so
 # size wins. Whole-program LTO, one codegen unit, and no symbol names, which
 # the page has no use for and which cost megabytes.
 [profile.web]
