@@ -329,6 +329,10 @@ fn build_top_level_help(
             "Provision one administrator-owned local hosted-worker service",
         ),
         crate::tty::Row::key_value(
+            "node host retire",
+            "Retire a stopped node's host service, or every orphaned one",
+        ),
+        crate::tty::Row::key_value(
             "node doctor",
             "Offline checklist answering \"why won't it start\"",
         ),
@@ -932,6 +936,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Provision one administrator-owned local hosted-worker service",
             "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
         ),
+        "node host retire" => (
+            "ryeos node host retire",
+            "Retire a stopped node's host service, or every orphaned one",
+            "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
+        ),
         "node doctor" => (
             "ryeos node doctor",
             "Diagnose the local node environment",
@@ -962,6 +971,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire predecessor external-content bindings",
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--json] [--app-root <DIR>]",
         ),
+        "node large-objects purge-quarantine" => (
+            "ryeos node large-objects purge-quarantine",
+            "Discard the damaged large objects scrub quarantined",
+            "ryeos node large-objects purge-quarantine [--dry-run | --confirm] [--json] [--app-root <DIR>]",
+        ),
         "node reset policy-generation" => (
             "ryeos node reset policy-generation",
             "Replace an obsolete node-policy generation",
@@ -986,6 +1000,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "ryeos sign",
             "Sign RyeOS items by canonical ref, glob, or .ai path",
             "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
+        ),
+        "codex login device" => (
+            "ryeos codex login device",
+            "Log a Codex credential profile in with a device code: open the login session, show the code, wait for the account, end the session, and confirm",
+            "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
         ),
         "identity" => (
             "ryeos identity",
@@ -1036,12 +1055,41 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         ],
         #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "codex login device" => &[
+            (
+                "--create",
+                "Create the profile first; an existing owned profile is kept",
+            ),
+            (
+                "--trusted",
+                "Open the login on an explicitly trusted process-group node",
+            ),
+            (
+                "--yes",
+                "Confirm the observed account without asking (needed without a terminal)",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
         "node host setup" => &[
             (
                 "--confirm",
                 "Confirm provisioning the administrator-owned host association",
             ),
             ("--app-root <DIR>", "Existing initialized application root"),
+        ],
+        "node host retire" => &[
+            (
+                "--confirm",
+                "Confirm removing the administrator-owned host association",
+            ),
+            (
+                "--app-root <DIR>",
+                "Application root whose stopped node's service to retire",
+            ),
+            (
+                "--orphaned",
+                "Retire every node service whose app root no longer exists",
+            ),
         ],
         "execute" => &[
             (

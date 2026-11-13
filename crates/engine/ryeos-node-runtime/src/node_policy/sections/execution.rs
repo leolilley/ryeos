@@ -799,7 +799,7 @@ mod tests {
                 | "local-inference"
                 | "hosted-node"
                 | "hosted-workflow"
-                | "f5r-controller"
+                | "hosted-controller"
                 | "bundle-source"
                 | "core"
                 | "core-knowledge"
@@ -813,7 +813,7 @@ mod tests {
             // qualification ceiling: two concurrent leases of at most four
             // hours, about eight lease-hours a day, and ten minutes of each
             // lease kept free after a turn's deadline.
-            if profile == "f5r-controller" {
+            if profile == "hosted-controller" {
                 assert_eq!(
                     policy.external_lease_budget,
                     Some(controller_lease_budget()),

@@ -126,7 +126,7 @@ mod tests {
         }
         assert_eq!(delegating.len(), 1, "{delegating:?}");
         assert!(
-            delegating[0].0.ends_with("f5r-controller.yaml"),
+            delegating[0].0.ends_with("hosted-controller.yaml"),
             "{delegating:?}"
         );
         assert_eq!(

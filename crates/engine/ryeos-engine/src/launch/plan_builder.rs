@@ -75,6 +75,9 @@ struct RuntimeSourceAuthorityDecls {
     item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
     #[serde(default, rename = "project_snapshots")]
     _project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
+    /// Handler-route operator-vault bound; judged by route dispatch, not here.
+    #[serde(default, rename = "operator_vault")]
+    _operator_vault: bool,
 }
 
 #[derive(serde::Deserialize)]

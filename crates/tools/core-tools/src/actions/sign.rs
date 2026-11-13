@@ -1500,7 +1500,19 @@ mod tests {
             .join(ryeos_engine::AI_DIR)
             .join(ryeos_engine::TRUST_KEYS_DIR);
         std::fs::create_dir_all(&trust_dir).unwrap();
-        std::fs::write(trust_dir.join("operator.toml"), doc.to_toml()).unwrap();
+        // A project trust document counts only when a node-trusted key signed
+        // it; the live node trust store holds the dev publisher.
+        use lillux::crypto::DecodePrivateKey as _;
+        let dev_pem = std::fs::read_to_string(
+            ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
+        )
+        .unwrap();
+        let dev_key = SigningKey::from_pkcs8_pem(&dev_pem).unwrap();
+        std::fs::write(
+            trust_dir.join("operator.toml"),
+            lillux::signature::sign_content(&doc.to_toml(), &dev_key, "#", None),
+        )
+        .unwrap();
     }
 
     #[test]

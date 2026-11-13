@@ -107,6 +107,20 @@ pub enum DaemonCommand {
         #[arg(long)]
         node_resources_json: String,
     },
+    /// Root-only retirement of native host services. With `--app-root`, the
+    /// service of that node, which must be stopped; with `--orphaned`, every
+    /// RyeOS node service whose recorded app root no longer exists.
+    #[command(hide = true)]
+    HostRetire {
+        #[arg(
+            long,
+            required_unless_present = "orphaned",
+            conflicts_with = "orphaned"
+        )]
+        app_root: Option<PathBuf>,
+        #[arg(long)]
+        orphaned: bool,
+    },
     /// Root-only installer transaction bridge. It owns the shared package
     /// namespace lock; it is neither node configuration nor worker authority.
     #[command(hide = true)]

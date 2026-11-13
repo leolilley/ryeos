@@ -857,6 +857,18 @@ pub(super) fn reset_external_content_bindings(ctx: &HandlerContext<'_>) -> Resul
     }))
 }
 
+pub(super) fn purge_quarantined_large_objects(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let _: EmptyArguments = ctx.arguments()?;
+    let config = config(ctx)?;
+    let purged = ryeos_app::operator_external_content::purge_quarantined_large_objects(
+        &config,
+        ctx.state_lock,
+        false,
+    )
+    .context("purge the large-object quarantine")?;
+    Ok(serde_json::to_value(purged)?)
+}
+
 // ── Authorization reset ──────────────────────────────────────────────────
 
 /// Grants a receipt can list; a node with more refuses the reset rather than

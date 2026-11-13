@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-11T02:56:41Z:25e2881909700c79fb283718863bfe81d65fbdfb7ce9b9fe6625b7ce6f4975dd:t5/gMcTNJyYWCD8H8pFyg9OLNdVhDjSv8wIE0a77R/dpc3ccRJkQioOItyzn1Lgptf5f2aFgM+T9OXXIFYzlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:51:31Z:cadfe6d7e3029be87f9b13ef71998f33cefdd82849a344eb400c8dda83a043ac:f3gzjEhAFP2PPGJd4ibCpSNSsC+WQOkNqeHpSlrm+qHG+G3+PUj/XYv0YcZOZca4hRGibeUHxhPL9ongV6dgBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the OpenCode provider data."""
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def source_digest() -> str:
 class OpenCodeContractTests(unittest.TestCase):
     def test_profile_uses_the_closed_http_projection_contract(self) -> None:
         profile = json.loads(PROFILE.read_text())
-        self.assertEqual(profile["schema_version"], 11)
+        self.assertEqual(profile["schema_version"], 12)
         self.assertIsNone(profile["external_candidate"])
         self.assertEqual(profile["auxiliary_configs"], [])
         self.assertEqual(profile["runtime_configs"], [])

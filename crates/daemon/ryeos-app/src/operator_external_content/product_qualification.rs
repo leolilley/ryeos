@@ -4887,7 +4887,17 @@ fn resolve_current_bundle_verifier_identity_in_generation(
                 binding_subject_authority,
             )?;
             if !preview.validation.ready_for_admission {
-                bail!("selected qualification verifier has no current exact content binding");
+                let consumer = crate::external_content_admission::consumer_authority(
+                    &resolution,
+                    binding_subject_authority,
+                )?;
+                return Err(
+                    crate::external_content_admission::ContentBindingMissing::from_preview(
+                        &consumer,
+                        &preview.validation,
+                    )
+                    .into(),
+                );
             }
             let realized = preview
                 .realizations

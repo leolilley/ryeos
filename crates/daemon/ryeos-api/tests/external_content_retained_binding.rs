@@ -27,7 +27,27 @@ fn fixture(
     String,
     String,
 ) {
-    let (tmp, store_owner, mut state) = test_state::build_test_state();
+    fixture_on(large_tier, test_state::build_test_state())
+}
+
+/// The same fixture over a caller-built state, for tests that resolve real
+/// kind contracts (the live-bundle engine).
+fn fixture_on(
+    large_tier: bool,
+    built: (
+        tempfile::TempDir,
+        ryeos_app::test_support::TestStateStore,
+        AppState,
+    ),
+) -> (
+    tempfile::TempDir,
+    ryeos_app::test_support::TestStateStore,
+    Arc<AppState>,
+    HandlerContext,
+    String,
+    String,
+) {
+    let (tmp, store_owner, mut state) = built;
     let closure = state
         .node_policy
         .require::<ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy>()
@@ -1139,4 +1159,237 @@ async fn release_refuses_a_binding_namespace_at_another_epoch() {
     overwrite(&epoch_file, &current);
     let released = release().await.unwrap();
     assert!(!released.idempotent);
+}
+
+/// A project-rooted consumer declaring one retained manifest, as the
+/// pinned-project materializer would resolve it.
+fn project_consumer(manifest_hash: &str) -> ryeos_engine::resolution::ResolutionOutput {
+    use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
+    use ryeos_engine::resolution::{
+        KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+    };
+    ResolutionOutput {
+        root: ResolvedAncestor {
+            requested_id: "test/environment".into(),
+            resolved_ref: "config:test/environment".into(),
+            source_path: "/fixture/.ai/config/test/environment.yaml".into(),
+            source_space: ItemSpace::Project,
+            source_root: ItemSourceRoot::Project,
+            trust_class: TrustClass::TrustedProject,
+            signer_fingerprint: Some("a".repeat(64)),
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            source_content_digest: "b".repeat(64),
+            raw_content_digest: "c".repeat(64),
+        },
+        ancestors: Vec::new(),
+        references_edges: Vec::new(),
+        referenced_items: Vec::new(),
+        step_outputs: Default::default(),
+        effective_trust_class: TrustClass::TrustedProject,
+        composed: KindComposedView::identity(json!({
+            "external_content": [{
+                "id":"content", "kind":"tree", "mode":"pinned",
+                "digest":manifest_hash, "mount_root":"project", "mount":"content"
+            }]
+        })),
+    }
+}
+
+fn pinned_binding_at(
+    state: &Arc<AppState>,
+    source_binding_hash: &str,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    snapshot_hash: &str,
+) -> String {
+    let consumer = ExternalContentConsumerAuthority::pinned_project(
+        resolution.root.resolved_ref.clone(),
+        "a".repeat(64),
+        snapshot_hash.to_owned(),
+        ryeos_engine::external_content::pre_external_realization_consumer_digest(resolution)
+            .unwrap(),
+        None,
+    )
+    .unwrap();
+    publish_binding_for_consumer(state, source_binding_hash, consumer)
+}
+
+fn bindings_request(
+    snapshot_hash: &str,
+) -> ryeos_app::operator_external_content::rebind::BindingsRequest {
+    serde_json::from_value(json!({
+        "consumer_ref": "config:test/environment",
+        "consumer_kind": "pinned_project",
+        "project_snapshot_hash": snapshot_hash,
+        "project_path": "/fixture",
+    }))
+    .unwrap()
+}
+
+fn rebind_request(
+    prior_binding_hash: &str,
+    snapshot_hash: &str,
+) -> ryeos_app::operator_external_content::rebind::RebindRequest {
+    serde_json::from_value(json!({
+        "prior_binding_hash": prior_binding_hash,
+        "project_snapshot_hash": snapshot_hash,
+        "project_path": "/fixture",
+    }))
+    .unwrap()
+}
+
+#[test]
+fn bindings_lists_the_earlier_snapshot_binding_as_stale_and_names_it() {
+    use ryeos_app::operator_external_content::rebind::inventory;
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, manifest_hash) =
+        fixture_on(false, test_state::build_test_state_with_bundles());
+    let resolution = project_consumer(&manifest_hash);
+    let (first, second) = ("d".repeat(64), "f".repeat(64));
+    let prior = pinned_binding_at(&state, &source_binding_hash, &resolution, &first);
+
+    let at_first = inventory(&state, &context, &bindings_request(&first), &resolution).unwrap();
+    assert!(at_first.ready_for_admission);
+    assert_eq!(at_first.declarations[0].status, "ready");
+    assert_eq!(
+        at_first.declarations[0].binding_hash.as_deref(),
+        Some(prior.as_str())
+    );
+    let entry = at_first
+        .bindings
+        .iter()
+        .find(|entry| entry.binding_hash == prior)
+        .unwrap();
+    assert_eq!(entry.status, "current");
+
+    // A new snapshot is a new consumer authority: the binding is listed as
+    // stale, naming why, and offered as the prior binding to renew.
+    let at_second = inventory(&state, &context, &bindings_request(&second), &resolution).unwrap();
+    assert!(!at_second.ready_for_admission);
+    assert_eq!(at_second.declarations[0].status, "missing_binding");
+    assert_eq!(
+        at_second.declarations[0].prior_binding_hash.as_deref(),
+        Some(prior.as_str())
+    );
+    let entry = at_second
+        .bindings
+        .iter()
+        .find(|entry| entry.binding_hash == prior)
+        .unwrap();
+    assert_eq!(entry.status, "stale");
+    assert_eq!(entry.stale_reasons, vec!["project_snapshot_changed"]);
+    // Another consumer's binding of the same bytes is not this consumer's.
+    assert!(
+        at_second
+            .bindings
+            .iter()
+            .all(|entry| entry.binding_hash != source_binding_hash)
+    );
+}
+
+#[tokio::test]
+async fn rebind_renews_the_binding_for_a_new_snapshot_once() {
+    use ryeos_app::operator_external_content::rebind::{inventory, prior_binding, rebind};
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, manifest_hash) =
+        fixture_on(false, test_state::build_test_state_with_bundles());
+    let resolution = project_consumer(&manifest_hash);
+    let (first, second) = ("d".repeat(64), "f".repeat(64));
+    let prior = pinned_binding_at(&state, &source_binding_hash, &resolution, &first);
+
+    let request = rebind_request(&prior, &second);
+    let checked = prior_binding(&state, &context, &request).unwrap();
+    let renewed = rebind(
+        Arc::clone(&state),
+        context.clone(),
+        request.clone(),
+        checked,
+        &resolution,
+    )
+    .await
+    .unwrap();
+    assert!(!renewed.idempotent);
+    assert_eq!(renewed.prior_binding_hash, prior);
+    assert_eq!(renewed.manifest_hash, manifest_hash);
+    assert_ne!(renewed.binding_hash, prior);
+
+    let at_second = inventory(&state, &context, &bindings_request(&second), &resolution).unwrap();
+    assert!(at_second.ready_for_admission);
+    assert_eq!(
+        at_second.declarations[0].binding_hash.as_deref(),
+        Some(renewed.binding_hash.as_str())
+    );
+    // The earlier generation's binding is left exactly as it was.
+    let earlier = at_second
+        .bindings
+        .iter()
+        .find(|entry| entry.binding_hash == prior)
+        .unwrap();
+    assert_eq!(earlier.status, "stale");
+
+    // Repeating the renewal stages and writes nothing.
+    let checked = prior_binding(&state, &context, &request).unwrap();
+    let again = rebind(
+        Arc::clone(&state),
+        context.clone(),
+        request,
+        checked,
+        &resolution,
+    )
+    .await
+    .unwrap();
+    assert!(again.idempotent);
+    assert_eq!(again.binding_hash, renewed.binding_hash);
+}
+
+#[tokio::test]
+async fn rebind_refuses_a_consumer_that_no_longer_declares_the_manifest() {
+    use ryeos_app::operator_external_content::rebind::{
+        RebindRefused, inventory, prior_binding, rebind,
+    };
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, manifest_hash) =
+        fixture_on(false, test_state::build_test_state_with_bundles());
+    let resolution = project_consumer(&manifest_hash);
+    let (first, second) = ("d".repeat(64), "f".repeat(64));
+    let prior = pinned_binding_at(&state, &source_binding_hash, &resolution, &first);
+    let changed = project_consumer(&"9".repeat(64));
+
+    let request = rebind_request(&prior, &second);
+    let checked = prior_binding(&state, &context, &request).unwrap();
+    let error = rebind(
+        Arc::clone(&state),
+        context.clone(),
+        request,
+        checked,
+        &changed,
+    )
+    .await
+    .expect_err("a consumer that dropped the manifest is not the same consumer");
+    assert_eq!(
+        error.downcast_ref::<RebindRefused>().unwrap().code,
+        RebindRefused::CONSUMER_CHANGED
+    );
+    // Refused before staging or binding: the original consumer still has no
+    // binding at the new snapshot.
+    let at_second = inventory(&state, &context, &bindings_request(&second), &resolution).unwrap();
+    assert!(!at_second.ready_for_admission);
+}
+
+#[test]
+fn rebind_refuses_an_installed_bundle_binding_as_not_generation_scoped() {
+    use ryeos_app::operator_external_content::rebind::{RebindRefused, prior_binding};
+
+    let (_tmp, _store_owner, state, context, source_binding_hash, _manifest_hash) = fixture(false);
+    let error = prior_binding(
+        &state,
+        &context,
+        &rebind_request(&source_binding_hash, &"f".repeat(64)),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<RebindRefused>().unwrap().code,
+        RebindRefused::NOT_GENERATION_SCOPED
+    );
 }

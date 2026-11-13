@@ -35,7 +35,8 @@ pub use execution_target::{
     MAX_EXECUTION_RESOURCE_FACTS, MAX_EXECUTION_TARGET_REQUIREMENTS,
 };
 pub use runtime_decorations::{
-    CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,
+    CancellationMode, DEFAULT_CANCELLATION_GRACE_SECS, ExecutionDecorations, NativeAsyncSpec,
+    NativeResumeSpec, RuntimeEnvSource,
 };
 pub use secret_env::DeliveredSecretEnv;
 pub use subprocess_limits::ExecutionSubprocessLimits;

@@ -78,6 +78,7 @@ pub mod prepared_evidence_attachment;
 pub mod principal;
 pub mod private_artifact_home;
 pub mod process;
+pub mod process_quarantine_report;
 pub mod projection_health;
 pub mod projection_repair;
 pub mod prospective_admission;
@@ -86,6 +87,7 @@ pub mod qualification_consumer_input;
 mod qualification_consumer_observation;
 pub mod qualification_workspace_custody;
 pub mod recovery_execution_gate;
+pub mod recovery_nudge;
 pub mod remote_consumer_launch;
 pub mod resolution_cache;
 mod retained_bundle_evidence;
@@ -106,6 +108,7 @@ pub mod scoped_producer_process;
 pub mod scoped_producer_start;
 pub mod scoped_producer_stop;
 mod selected_invocation_bookkeeping;
+pub mod stale_publication_report;
 pub use selected_invocation_bookkeeping::{
     SelectedBorrowReturn, SelectedBorrowTicket, SelectedGeneration, SelectedTicket,
 };

@@ -81,6 +81,7 @@ pub async fn handle(
             &yaml_path,
             &content,
             scheduler.trust_store(),
+            scheduler.identity().fingerprint(),
         )
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
         if verified.spec_hash != spec.spec_hash {

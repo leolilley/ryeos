@@ -44,8 +44,8 @@ mod terminal;
 
 use runtime_request::{SpawnRuntimeParams, spawn_runtime};
 use terminal::{
-    fallback_finalization, is_thread_terminal_status, reconcile_terminal_finalization,
-    runtime_terminal_status,
+    fallback_finalization, head_advance_not_applied_finalization, is_thread_terminal_status,
+    reconcile_terminal_finalization, runtime_terminal_status,
 };
 
 const MAX_SIGNED_EXECUTOR_MANIFEST_REF_BYTES: u64 = 256 * 1024;
@@ -3176,6 +3176,18 @@ async fn load_execution_control_snapshot_cached(
             anyhow::bail!("execution control authority changed repeatedly while loading");
         }
     }
+}
+
+/// The stop policy a managed launch records at attachment. A policy already
+/// on the row is kept: a same-node continuation seeds its source's policy and
+/// a same-thread relaunch keeps its own. A row without one (a fresh launch,
+/// or a remote handoff successor, whose seed carries no node-local policy)
+/// records what this node's signed execution config resolves.
+fn attach_stop_policy(
+    recorded: Option<ryeos_engine::contracts::CancellationMode>,
+    resolved: &ryeos_engine::execution_policy::ResolvedExecutionPolicy,
+) -> ryeos_engine::contracts::CancellationMode {
+    recorded.unwrap_or_else(|| resolved.stop_policy())
 }
 
 pub struct NativeLaunchResult {
@@ -7367,6 +7379,16 @@ async fn run_claimed_thread_row_inner(
     let callback_owned = envelope.callback.clone();
     let thread_id_owned = thread_id.to_string();
     let duration = hard_limits.duration_seconds;
+    // A stop policy already recorded on the row (a continuation seed or a
+    // same-thread relaunch) is authoritative; otherwise this launch records
+    // the policy its signed execution config resolves.
+    let stop_policy = attach_stop_policy(
+        state
+            .state_store
+            .get_launch_metadata(&thread_id)?
+            .and_then(|metadata| metadata.cancellation_mode),
+        execution_policy,
+    );
     let descriptor_clone = verified_protocol.descriptor.clone();
     let runtime_item_ref = selected_runtime.canonical_ref.clone();
     let observation_declarations = selected_runtime.yaml.observability.child_records.clone();
@@ -7532,6 +7554,7 @@ async fn run_claimed_thread_row_inner(
             is_resume,
             rearm_native_resume_budget_after_attach,
             selected_resources,
+            stop_policy,
         });
         drop(spawn_work_timer);
         drop(spawn_worker_total_timer);
@@ -7875,25 +7898,43 @@ async fn run_claimed_thread_row_inner(
         // Preserve the runtime's failure testimony and destroy the controller
         // workspace after terminalization; only a completed authenticated
         // import may enter the ordinary retained-generation freeze owner.
+        // A HEAD advance refused before any write is a terminal fact: the
+        // thread fails `head_advance_not_applied` below, with the retained
+        // generation joining that failed terminal.
+        let mut head_advance_not_applied = None;
         let result_generation = if owns_workspace && !external_candidate_without_completion {
-            super::prepare_stopped_managed_runtime_terminal_project_result(
+            match super::prepare_stopped_managed_runtime_terminal_project_result(
                 state,
                 provenance,
                 &thread_id,
                 launch_owner,
-            )
-            .map_err(|error| {
-                tracing::error!(
-                    thread_id = %thread_id,
-                    launch_owner,
-                    item_ref = %resolved.item_ref,
-                    error = %format!("{error:#}"),
-                    "failed to prepare stopped managed runtime terminal project result"
-                );
-                BuildAndLaunchError::Internal(
-                    error.context("prepare stopped managed runtime terminal project result"),
-                )
-            })?
+            ) {
+                Ok(generation) => generation,
+                Err(error) => match super::HeadAdvanceNotApplied::find(&error) {
+                    Some(not_applied) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            launch_owner,
+                            error = %not_applied,
+                            "stopped managed runtime HEAD advance was not applied; failing with the retained generation"
+                        );
+                        head_advance_not_applied = Some(not_applied.clone());
+                        Some(not_applied.retained.clone())
+                    }
+                    None => {
+                        tracing::error!(
+                            thread_id = %thread_id,
+                            launch_owner,
+                            item_ref = %resolved.item_ref,
+                            error = %format!("{error:#}"),
+                            "failed to prepare stopped managed runtime terminal project result"
+                        );
+                        return Err(BuildAndLaunchError::Internal(error.context(
+                            "prepare stopped managed runtime terminal project result",
+                        )));
+                    }
+                },
+            }
         } else {
             None
         };
@@ -8037,7 +8078,19 @@ async fn run_claimed_thread_row_inner(
             );
         }
         let observed_runtime_status = runtime_result.status;
-        let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
+        let fallback = match head_advance_not_applied.as_ref() {
+            // An operator stop still settles as that stop.
+            Some(not_applied)
+                if !matches!(
+                    terminal_status,
+                    ryeos_state::objects::ThreadStatus::Killed
+                        | ryeos_state::objects::ThreadStatus::Cancelled
+                ) =>
+            {
+                head_advance_not_applied_finalization(&thread_id, &runtime_result, not_applied)
+            }
+            _ => fallback_finalization(&thread_id, &runtime_result, terminal_status),
+        };
         runtime_result = fallback.runtime_result;
         let mut hosted_root_terminalization =
             if state.state_store.dedicated_session(&thread_id)?.is_some() {
@@ -13934,6 +13987,33 @@ mod tests {
                 expected_substr,
             );
         }
+    }
+
+    #[test]
+    fn a_handoff_successor_records_the_target_policy_and_a_continuation_keeps_its_own() {
+        use ryeos_engine::contracts::CancellationMode;
+        // The target node's own signed execution config.
+        let target_policy =
+            ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &serde_json::json!({
+                    "defaults": { "cancellation_mode": "graceful", "cancellation_grace_secs": 2 }
+                }),
+                &ryeos_engine::canonical_ref::CanonicalRef::parse("directive:x").unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
+        // A remote handoff successor's seed carries no node-local policy, so
+        // it records the target's, never the source's.
+        assert_eq!(
+            attach_stop_policy(None, &target_policy),
+            CancellationMode::Graceful { grace_secs: 2 }
+        );
+        // A same-node continuation seeds its source's policy, which is kept.
+        assert_eq!(
+            attach_stop_policy(Some(CancellationMode::Hard), &target_policy),
+            CancellationMode::Hard
+        );
     }
 
     #[test]

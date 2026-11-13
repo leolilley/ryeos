@@ -885,6 +885,69 @@ pub struct SubprocessResult {
     pub stdout_truncated: bool,
     /// Whether bytes beyond the retained stderr prefix were drained/discarded.
     pub stderr_truncated: bool,
+    /// Set only when process creation was refused because fork-sensitive
+    /// descriptor authority stayed retained past the setup deadline. No
+    /// process was created, so the same request may succeed once the holders
+    /// release. A stranded window or a caller-held lease never sets it.
+    pub process_creation_busy: Option<ProcessCreationBusy>,
+}
+
+/// Transient refusal of process creation: the fork window did not quiesce
+/// before the setup deadline. Carries what was seen for the daemon log; the
+/// public surface reports only that process creation is busy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessCreationBusy {
+    /// How long the creator waited for the fork window.
+    pub waited_ms: u64,
+    /// Retained descriptor scopes (holder sites), quiesce state and pending
+    /// closers observed when the wait ended.
+    pub diagnostic: String,
+}
+
+impl std::fmt::Display for ProcessCreationBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "timed out after {} ms waiting for fork-sensitive descriptor authority to quiesce; {}",
+            self.waited_ms, self.diagnostic
+        )
+    }
+}
+
+impl std::error::Error for ProcessCreationBusy {}
+
+/// Why a process creator could not take the fork window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ForkCustodyRefusal {
+    /// The window stayed closed past the deadline. Transient.
+    TimedOut(ProcessCreationBusy),
+    /// A failed or abandoned creation stranded the window with a fact.
+    Stranded(String),
+    /// The calling thread itself retains fork-sensitive descriptor authority.
+    CallerHoldsLease(String),
+    /// The window was taken but the child close set could not be prepared.
+    ChildCloseSet(String),
+}
+
+impl ForkCustodyRefusal {
+    /// The transient refusal, when this is one.
+    pub(crate) fn process_creation_busy(&self) -> Option<&ProcessCreationBusy> {
+        match self {
+            Self::TimedOut(busy) => Some(busy),
+            Self::Stranded(_) | Self::CallerHoldsLease(_) | Self::ChildCloseSet(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ForkCustodyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut(busy) => busy.fmt(f),
+            Self::Stranded(fact) | Self::CallerHoldsLease(fact) | Self::ChildCloseSet(fact) => {
+                f.write_str(fact)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -6185,6 +6248,15 @@ pub(crate) fn reap_fork_holder_until(
 pub(crate) fn quiesce_fork_sensitive_descriptors(
     deadline: Instant,
 ) -> Result<QuiescedForkSensitiveDescriptors, String> {
+    quiesce_fork_sensitive_descriptors_typed(deadline).map_err(|refusal| refusal.to_string())
+}
+
+/// [`quiesce_fork_sensitive_descriptors`] with the refusal kept typed, so a
+/// creator can tell a transient busy window from a stranded one.
+pub(crate) fn quiesce_fork_sensitive_descriptors_typed(
+    deadline: Instant,
+) -> Result<QuiescedForkSensitiveDescriptors, ForkCustodyRefusal> {
+    let waiting_since = Instant::now();
     let barrier = direct_attachment_fork_barrier();
     let owner = thread::current().id();
     let mut state = barrier
@@ -6192,10 +6264,10 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.retained_scope_owners.contains_key(&owner) {
-        return Err(format!(
+        return Err(ForkCustodyRefusal::CallerHoldsLease(format!(
             "process-control fork requested while the calling thread retains fork-sensitive descriptor authority ({})",
             retained_descriptor_scope_diagnostic(&state)
-        ));
+        )));
     }
     state.waiting_forks = state
         .waiting_forks
@@ -6209,7 +6281,7 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
                     .checked_sub(1)
                     .expect("fork-sensitive descriptor waiter count underflow");
                 barrier.changed.notify_all();
-                return Err(fact);
+                return Err(ForkCustodyRefusal::Stranded(fact));
             }
             barrier.changed.notify_all();
         }
@@ -6226,12 +6298,15 @@ pub(crate) fn quiesce_fork_sensitive_descriptors(
                 .checked_sub(1)
                 .expect("fork-sensitive descriptor waiter count underflow");
             barrier.changed.notify_all();
-            return Err(format!(
-                "timed out waiting for fork-sensitive descriptor authority to quiesce; retained scopes: {}; fork already quiesced: {}; pending fork-control closers: {}",
-                retained_descriptor_scope_diagnostic(&state),
-                state.fork_quiesced,
-                barrier.waiting_descriptor_closers.load(Ordering::SeqCst)
-            ));
+            return Err(ForkCustodyRefusal::TimedOut(ProcessCreationBusy {
+                waited_ms: u64::try_from(waiting_since.elapsed().as_millis()).unwrap_or(u64::MAX),
+                diagnostic: format!(
+                    "retained scopes: {}; fork already quiesced: {}; pending fork-control closers: {}",
+                    retained_descriptor_scope_diagnostic(&state),
+                    state.fork_quiesced,
+                    barrier.waiting_descriptor_closers.load(Ordering::SeqCst)
+                ),
+            }));
         }
         let (next, _) = barrier
             .changed
@@ -6259,9 +6334,22 @@ pub(crate) fn prepare_command_fork_custody(
     preserved: &BTreeSet<i32>,
     deadline: Instant,
 ) -> Result<QuiescedForkSensitiveDescriptors, String> {
+    prepare_command_fork_custody_typed(command, preserved, deadline)
+        .map_err(|refusal| refusal.to_string())
+}
+
+/// [`prepare_command_fork_custody`] with the refusal kept typed.
+#[cfg(unix)]
+pub(crate) fn prepare_command_fork_custody_typed(
+    command: &mut process::Command,
+    preserved: &BTreeSet<i32>,
+    deadline: Instant,
+) -> Result<QuiescedForkSensitiveDescriptors, ForkCustodyRefusal> {
     use std::os::unix::process::CommandExt as _;
-    let guard = quiesce_fork_sensitive_descriptors(deadline)?;
-    let close_fds = guard.fork_child_close_fds(preserved)?;
+    let guard = quiesce_fork_sensitive_descriptors_typed(deadline)?;
+    let close_fds = guard
+        .fork_child_close_fds(preserved)
+        .map_err(ForkCustodyRefusal::ChildCloseSet)?;
     unsafe {
         command.pre_exec(move || {
             for fd in &close_fds {
@@ -8261,6 +8349,7 @@ impl RunningProcess {
                 output_limit_exceeded: output_limit_exceeded(&out, &err),
                 stdout_truncated: out.truncated,
                 stderr_truncated: err.truncated,
+                process_creation_busy: None,
             };
         }
         let timeout = request_timeout_duration(self.timeout);
@@ -8404,6 +8493,7 @@ impl RunningProcess {
             output_limit_exceeded: None,
             stdout_truncated: false,
             stderr_truncated: false,
+            process_creation_busy: None,
         }
     }
 
@@ -8429,6 +8519,7 @@ impl RunningProcess {
             output_limit_exceeded: output_limit_exceeded(&out, &err),
             stdout_truncated: out.truncated,
             stderr_truncated: err.truncated,
+            process_creation_busy: None,
         }
     }
 
@@ -8641,6 +8732,7 @@ impl RunningProcess {
             output_limit_exceeded: output_limit_exceeded(&out, &err),
             stdout_truncated: out.truncated,
             stderr_truncated: err.truncated,
+            process_creation_busy: None,
         }
     }
 
@@ -8669,6 +8761,7 @@ impl RunningProcess {
             output_limit_exceeded: Some(exceeded),
             stdout_truncated: out.truncated,
             stderr_truncated: err.truncated,
+            process_creation_busy: None,
         }
     }
 
@@ -9747,14 +9840,20 @@ fn lib_spawn_with_stdio(
                 );
             }
             Some(
-                prepare_command_fork_custody(&mut command, &preserved, deadline).map_err(
-                    |error| {
-                        let mut failure = spawn_failure(start, format!("fork custody: {error}"));
+                prepare_command_fork_custody_typed(&mut command, &preserved, deadline).map_err(
+                    |refusal| {
+                        let mut failure = spawn_failure(start, format!("fork custody: {refusal}"));
                         // An expired caller deadline is the settled cause even
                         // when the barrier reported a different fact; that fact
                         // stays in the failure text.
                         failure.timed_out =
                             absolute_deadline.is_some_and(|original| original.has_elapsed());
+                        // Only a window that stayed closed past the setup
+                        // deadline is transient. No process was created.
+                        if !failure.timed_out {
+                            failure.process_creation_busy =
+                                refusal.process_creation_busy().cloned();
+                        }
                         failure
                     },
                 )?,
@@ -12322,6 +12421,18 @@ pub(crate) mod fork_creation_custody_tests {
                 Err(error) => error,
             };
         assert!(refused.contains("fork custody stranded"), "{refused}");
+        // A stranded window is a hard failure, never a transient busy one.
+        let refused =
+            match quiesce_fork_sensitive_descriptors_typed(Instant::now() + Duration::from_secs(5))
+            {
+                Ok(_) => panic!("fork window reopened while a pre-exec child holds the table"),
+                Err(refusal) => refusal,
+            };
+        assert!(
+            matches!(&refused, ForkCustodyRefusal::Stranded(fact) if fact.contains("fork custody stranded")),
+            "{refused}"
+        );
+        assert!(refused.process_creation_busy().is_none(), "{refused}");
 
         // Let the child exec; exec closes its witness copy.
         release_writer.write_all(&[1]).unwrap();
@@ -12562,6 +12673,63 @@ mod absolute_spawn_deadline_tests {
             inherited_fd_mappings: Vec::new(),
             supervised_status: None,
         }
+    }
+
+    /// Hold a fork-sensitive lease on another thread until released.
+    fn hold_lease_elsewhere() -> (std::sync::mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = thread::spawn(move || {
+            let lease = try_retain_fork_sensitive_descriptors().unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            drop(lease);
+        });
+        held_rx.recv().unwrap();
+        (release_tx, holder)
+    }
+
+    #[test]
+    fn quiesce_timeout_is_typed_busy() {
+        let (release, holder) = hold_lease_elsewhere();
+        let refused = match quiesce_fork_sensitive_descriptors_typed(
+            Instant::now() + Duration::from_millis(50),
+        ) {
+            Ok(_) => panic!("fork window quiesced while another thread held a lease"),
+            Err(refusal) => refusal,
+        };
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let busy = refused
+            .process_creation_busy()
+            .expect("a lease held past the deadline is a transient busy refusal");
+        assert!(busy.waited_ms >= 45, "{busy}");
+        // The holder's site is named for the daemon log.
+        assert!(busy.diagnostic.contains(file!()), "{busy}");
+        assert!(refused.to_string().contains("timed out after"), "{refused}");
+    }
+
+    #[test]
+    fn busy_spawn_failure_carries_typed_busy_without_a_process() {
+        let (release, holder) = hold_lease_elsewhere();
+        // No caller deadline: only the bounded setup window expires.
+        let mut busy_request = request("exit 0");
+        busy_request.timeout = 0.2;
+        let result = lib_run(busy_request);
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(!result.success);
+        assert!(!result.timed_out);
+        assert_eq!(result.pid, 0);
+        assert!(
+            result.stderr.starts_with("fork custody: "),
+            "{}",
+            result.stderr
+        );
+        let busy = result
+            .process_creation_busy
+            .expect("a held window past setup is typed busy");
+        assert!(busy.waited_ms > 0, "{busy}");
     }
 
     #[test]
@@ -12951,6 +13119,7 @@ pub(crate) fn spawn_failure(start: Instant, reason: impl Into<String>) -> Subpro
         output_limit_exceeded: None,
         stdout_truncated: false,
         stderr_truncated: false,
+        process_creation_busy: None,
     }
 }
 
@@ -12968,6 +13137,7 @@ fn spawn_failure_with_launcher_refusal(start: Instant, diagnostic: String) -> Su
         output_limit_exceeded: None,
         stdout_truncated: false,
         stderr_truncated: false,
+        process_creation_busy: None,
     }
 }
 

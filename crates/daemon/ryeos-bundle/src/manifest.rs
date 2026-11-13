@@ -77,6 +77,12 @@ pub struct RuntimeAuthorityDecls {
     pub item_authoring: Vec<ItemAuthorDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub project_snapshots: Vec<ProjectSnapshotOperation>,
+    /// Upper bound for this bundle's handler routes: a route may run its
+    /// fixed handler with the node operator's vault exposed only when its own
+    /// signed route declares `authority.operator_vault: true` **and** this
+    /// signed manifest allows it. Nothing is granted by this flag alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub operator_vault: bool,
 }
 
 /// One declared smoke execution: an item the bundle's author nominates as a
@@ -1764,7 +1770,7 @@ name: isolation
 version: "1.0"
 isolation_backends:
   - id: linux
-    protocol: ryeos.isolation-adapter/v14
+    protocol: ryeos.isolation-adapter/v15
     targets: [x86_64-unknown-linux-gnu]
     adapter: adapter
     artifacts: {}

@@ -70,7 +70,11 @@ pub async fn handle(
         .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error:#}")))?;
     let report =
         config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())
-            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+            .map_err(|e| {
+                config::typed_load_error_or(e, |e| {
+                    HandlerError::Internal(format!("load remotes: {e:#}"))
+                })
+            })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
     let binding = req
@@ -89,6 +93,15 @@ pub async fn handle(
             "remote run receives a destination-local policy; target must be `here`".to_string(),
         ));
     }
+    // The destination admits this request under the node or configured
+    // operator identity, not the local caller's. A caller may ask a remote to
+    // expose its operator vault only if it holds that authority itself.
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        state.authorizer.as_ref(),
+        &ctx.scopes,
+        &req.execution_policy.environment,
+    )
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let live_direct = matches!(
         &req.execution_policy.project,
         ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }

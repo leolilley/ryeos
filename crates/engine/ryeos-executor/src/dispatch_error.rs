@@ -404,8 +404,52 @@ pub enum DispatchError {
     /// classification to the leader's immutable result.
     #[error("{0}")]
     Shared(Arc<DispatchError>),
+    /// A handler process could not be created because fork-sensitive
+    /// descriptor authority stayed retained past the setup deadline. Raised
+    /// only before the request was admitted, so nothing ran and the same
+    /// request may be reissued after `PROCESS_CREATION_BUSY_RETRY_AFTER_MS`.
+    /// The public message is generic; `detail` (holder sites) is logged only.
+    #[error(
+        "process creation is busy; retry after {} ms",
+        PROCESS_CREATION_BUSY_RETRY_AFTER_MS
+    )]
+    ProcessCreationBusy { detail: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
+}
+
+/// The retry hint carried by a `process_creation_busy` refusal. Fork windows
+/// close for milliseconds; a held one strands or reopens within the five
+/// second setup deadline.
+pub const PROCESS_CREATION_BUSY_RETRY_AFTER_MS: u64 = 250;
+
+/// The public code of the transient process-creation refusal.
+pub const PROCESS_CREATION_BUSY_CODE: &str = "process_creation_busy";
+
+/// Map a pre-admission failure whose cause chain holds the transient
+/// process-creation refusal. Logs the holder detail, which never reaches the
+/// caller.
+pub fn process_creation_busy_from_chain(error: &anyhow::Error) -> Option<DispatchError> {
+    let busy = error.chain().find_map(|cause| {
+        if let Some(engine) = cause.downcast_ref::<ryeos_engine::error::EngineError>() {
+            return engine
+                .is_process_creation_busy()
+                .then(|| engine.to_string());
+        }
+        if let Some(ryeos_engine::resolution::ResolutionError::StepFailed {
+            class: ryeos_engine::resolution::ResolutionFailureClass::ProcessCreationBusy,
+            reason,
+            ..
+        }) = cause.downcast_ref::<ryeos_engine::resolution::ResolutionError>()
+        {
+            return Some(reason.clone());
+        }
+        cause
+            .downcast_ref::<lillux::ProcessCreationBusy>()
+            .map(ToString::to_string)
+    })?;
+    tracing::warn!(detail = %busy, "process creation busy; request refused before admission");
+    Some(DispatchError::ProcessCreationBusy { detail: busy })
 }
 
 /// Operator-actionable remediation for a missing required secret. The secret
@@ -534,6 +578,7 @@ impl DispatchError {
                 StatusCode::BAD_GATEWAY
             }
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
+            Self::ProcessCreationBusy { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::HookDispatchIntegrity { .. }
             | Self::RecordingIntegrity { .. }
             | Self::RuntimeActionOutcomeUnknown { .. }
@@ -614,6 +659,7 @@ impl DispatchError {
             Self::RecordingIntegrity { .. } => "recording_integrity",
             Self::RuntimeActionOutcomeUnknown { .. } => "runtime_action_outcome_unknown",
             Self::RuntimeActionResultUnavailable { .. } => "runtime_action_result_unavailable",
+            Self::ProcessCreationBusy { .. } => PROCESS_CREATION_BUSY_CODE,
             Self::Internal(_) => "internal",
             Self::Shared(_) | Self::PreBirthAdmissionRefused(_) => {
                 unreachable!("transparent error wrappers return before classification")
@@ -631,7 +677,7 @@ impl DispatchError {
             _ => {}
         }
         match self {
-            Self::ServiceUnavailable { .. } => true,
+            Self::ServiceUnavailable { .. } | Self::ProcessCreationBusy { .. } => true,
             Self::LaunchPreparationFailed { classification, .. } => classification == "unavailable",
             _ => false,
         }

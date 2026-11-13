@@ -330,9 +330,17 @@ fn resolution_error_to_engine(
     error: crate::resolution::ResolutionError,
     requested_root: &CanonicalRef,
 ) -> EngineError {
-    use crate::resolution::ResolutionError;
+    use crate::resolution::{ResolutionError, ResolutionFailureClass};
 
     match error {
+        ResolutionError::StepFailed {
+            class: ResolutionFailureClass::ProcessCreationBusy,
+            reason,
+            ..
+        } => EngineError::ProcessCreationBusy {
+            subject: requested_root.to_string(),
+            detail: reason,
+        },
         ResolutionError::IntegrityFailure { item_ref, reason } => {
             EngineError::EffectiveItemUntrusted {
                 canonical_ref: item_ref,
@@ -4694,6 +4702,35 @@ mod tests {
     }
 
     #[test]
+    fn busy_resolution_step_is_typed_process_creation_busy() {
+        let root = CanonicalRef::parse("tool:hello").unwrap();
+        let error = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::ProcessCreationBusy,
+                reason: "composer handler subprocess failed: busy".to_string(),
+            },
+            &root,
+        );
+        assert!(error.is_process_creation_busy(), "{error}");
+        let expected_subject = root.to_string();
+        assert!(
+            matches!(&error, EngineError::ProcessCreationBusy { subject, .. } if *subject == expected_subject),
+            "{error}"
+        );
+        // Every other step failure keeps its composition-failure shape.
+        let other = resolution_error_to_engine(
+            crate::resolution::ResolutionError::StepFailed {
+                step: crate::resolution::ResolutionStepName::PipelineInit,
+                class: crate::resolution::ResolutionFailureClass::DependencyUnavailable,
+                reason: "handler binary missing".to_string(),
+            },
+            &root,
+        );
+        assert!(!other.is_process_creation_busy(), "{other}");
+    }
+
+    #[test]
     fn effective_content_bounds_measure_exact_utf8_and_serialized_json() {
         let composed = serde_json::json!({ "text": "é\n" });
         let bytes = serde_json::to_vec(&composed).unwrap().len();
@@ -4746,6 +4783,20 @@ mod tests {
 
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    /// A project trust document for `key`, cross-signed by the test node key
+    /// (`test_signing_key`), as project trust documents must be.
+    fn node_vouched_project_trust_doc(key: &lillux::crypto::VerifyingKey) -> String {
+        let body = crate::trust::TrustedKeyDoc {
+            fingerprint: crate::trust::compute_fingerprint(key),
+            owner: "project".to_owned(),
+            version: "1.0.0".to_owned(),
+            attestation: None,
+            verifying_key: *key,
+        }
+        .to_toml();
+        lillux::signature::sign_content(&body, &test_signing_key(), "#", None)
     }
 
     fn test_trust_store() -> TrustStore {
@@ -6024,11 +6075,13 @@ formats:
         let signing_key = SigningKey::from_bytes(&[77u8; 32]);
         let verifying_key = signing_key.verifying_key();
         let fingerprint = crate::trust::compute_fingerprint(&verifying_key);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes());
-        let key_path = trusted_dir.join("project.pub");
-        fs::write(&key_path, encoded).unwrap();
+        let key_path = trusted_dir.join("project.toml");
+        fs::write(&key_path, node_vouched_project_trust_doc(&verifying_key)).unwrap();
 
-        let scoped = test_engine().for_project_root(&project_dir, None).unwrap();
+        let scoped = test_engine()
+            .with_node_trust_store(test_trust_store())
+            .for_project_root(&project_dir, None)
+            .unwrap();
         assert!(scoped.trust_store.is_trusted(&fingerprint));
         assert!(
             !scoped
@@ -6060,9 +6113,11 @@ formats:
         let project_fingerprint = crate::trust::compute_fingerprint(&project_verifying_key);
         let trusted_dir = project_root.join(AI_DIR).join(crate::TRUST_KEYS_DIR);
         fs::create_dir_all(&trusted_dir).unwrap();
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(project_verifying_key.as_bytes());
-        fs::write(trusted_dir.join("project.pub"), encoded).unwrap();
+        fs::write(
+            trusted_dir.join("project.toml"),
+            node_vouched_project_trust_doc(&project_verifying_key),
+        )
+        .unwrap();
 
         let source = "# ryeos-tool:\n#   note: project-only publisher\nprint('project trusted')\n";
         let signed_source =

@@ -173,6 +173,12 @@ pub(crate) fn run_handler_subprocess_bounded(
                 detail: format!("isolation adapter refused launch: {refusal}"),
             });
         }
+        if let Some(busy) = output.process_creation_busy {
+            return Err(EngineError::ProcessCreationBusy {
+                subject: canonical_ref.clone(),
+                detail: busy.to_string(),
+            });
+        }
         if output.timed_out {
             return Err(EngineError::HandlerSpawnFailed {
                 handler: canonical_ref.clone(),

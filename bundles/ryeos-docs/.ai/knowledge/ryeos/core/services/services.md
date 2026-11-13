@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T10:52:52Z:02aed3f35a0a572f318d3a8891bbc2d0f1965c8906e0c1fa17c8a772bfa22255:9Jez6tEny5MjeBIzBT+Dzn4uZxffl6GgmIZ4vdnE9OY3BEDQ4P2T+T2ZAo56lzNx2BOfGpq+KflFAgjjjnt3Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T12:07:15Z:3518e2e8a7af41db3670a1be7c48a5386c4ed24bb0fbb4bfcae9478a3be44d05:YGGk6cXnh40lZriCxd/CcgPzPQzMSO1oRgDkhMIC20lnaZl6bbelrxhKLwZOHbzEFZdJAGr9EPMWXwMvv15mDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -123,6 +123,12 @@ Vault services mutate or read the node vault. In v1, vault storage is a
 single node-level store protected by capabilities, not a per-principal
 namespace.
 
+Delivering vault secrets into an execution is separate from these services.
+An execution policy whose environment exposes the operator vault (a project
+overlay with `include_operator_vault: true`, or the `operator` vault
+namespace) requires the fixed capability `ryeos.use.vault.operator`; see
+[Secrets & credentials](../../standard/secrets.md#who-may-read-the-operator-vault).
+
 ## Remote Services
 
 Remote services are daemon-only local orchestrators. They may call
@@ -214,6 +220,7 @@ execution:
     effective_origin_site_id: site:<site-id>
   capabilities:
     - ryeos.execute.tool.ryeos-email/system/process_send_queue
+    - ryeos.use.vault.operator
   policy:
     schema_version: 2
     ownership: daemon_owned
@@ -233,6 +240,10 @@ execution:
         kind: inherit
 managed_by: null
 ```
+
+A schedule fires with exactly its declared `capabilities`. A policy that
+exposes the operator vault, as both examples here do, must list
+`ryeos.use.vault.operator`, or every fire is refused before launch.
 
 Project-managed declarations use the deploy/reconcile path rather than
 hand-editing node-owned schedule files. A declaration file lists desired
@@ -256,6 +267,7 @@ schedules:
     enabled: true
     capabilities:
       - ryeos.execute.tool.ryeos-email/system/process_send_queue
+      - ryeos.use.vault.operator
     execution_policy:
       schema_version: 2
       ownership: daemon_owned
@@ -382,7 +394,11 @@ Worker candidate disposition uses four such exact-coordinate services:
   namespace-bounded authoring wrapper in an isolated retained candidate CoW.
 - `service:worker-executions/publish` re-verifies the accepted evaluation and,
   for bounded candidates, the integration plus final re-evaluation before a
-  serialized project-HEAD compare-and-swap.
+  serialized project-HEAD compare-and-swap. A HEAD that moved off the admitted
+  base ends the session terminal `base_superseded` (typed 409
+  `base_superseded`); any other refusal before the HEAD write is the retryable
+  typed 409 `publication_not_applied`; only a failure at or after the write is
+  `publication_unknown`.
 
 These services do not replace `live_direct` execution or ordinary live-project
 authoring. They provide the separate immutable-generation lane required when a

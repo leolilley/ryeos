@@ -931,7 +931,6 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         thread_id: &str,
         event_type: &str,
         payload: Value,
-        storage_class: &str,
     ) -> Result<Value, CallbackError>;
 
     async fn append_events(

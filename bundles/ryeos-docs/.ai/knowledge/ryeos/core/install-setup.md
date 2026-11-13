@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-18T01:45:24Z:78cbcd1fdcc8ad76d38dfd80ae6f0cd62294324c76f6a8555d43c605875e2322:wcBf6Rz2iZdxA00WHrMQ/UTEZiO3+6J0bWcJiCv3FGDi8G1MhdDd1z0zGhgTsoWxQDrsEIuiu83Zeq6B6ERVDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:46:08Z:90a251eaa2426c26d2a0fc8b17707a77e874e23000cb584eb83feb8281e466bc:lGshc9dxMXvNfrs65ZIALsG4Vg+K3PpqxSdBgdeo1z+9c1A4M5YhMbQEJueMBTXgfdg/mdkPJtiOIzPR5fLJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -84,6 +84,30 @@ cargo build
 ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ryeos start
 ```
+
+### A development node beside a real install
+
+`scripts/pkg/install-local-direct.sh --prefix DIR` installs the packaged layout
+under a separate root-owned prefix instead of `/usr`: binaries in `DIR/bin`,
+bundle sources in `DIR/share/ryeos`. A prefix install must name its own node
+with `--app-root` and refuses the default node at `~/.local/share/ryeos`, so
+the real install and its node are never touched.
+
+```bash
+scripts/pkg/install-local-direct.sh --prefix /opt/ryeos-dev \
+  --app-root "$HOME/.local/share/ryeos-dev" --trust-source-publishers
+/opt/ryeos-dev/bin/ryeos node status --app-root "$HOME/.local/share/ryeos-dev"
+```
+
+- The prefix is off `PATH` by design. Call `DIR/bin/ryeos` by its absolute
+  path; `ryeos start` finds its `ryeosd` beside it. The installer does not move
+  `PATH` shadows or check `PATH` for a prefix install.
+- Every existing directory from `/` down to the prefix must be owned by root
+  and not writable by group or others. The installer creates `DIR` and
+  `DIR/share` as root when they are missing, and refuses otherwise.
+- `/usr/local` is refused because `/usr/local/bin` shadows `/usr/bin` on `PATH`.
+- Init uses `DIR/share/ryeos` as its `--source`. Installs into the same prefix
+  serialise on its package lock; different prefixes do not share a lock.
 
 ## Directory layout after init/start
 

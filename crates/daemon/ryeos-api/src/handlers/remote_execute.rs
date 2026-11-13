@@ -116,12 +116,20 @@ pub async fn handle(
     };
 
     let client = RemoteClient::from_named_remote(&state, &req.remote, abs_project_path.as_deref())
-        .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
+        .map_err(|e| {
+            config::typed_load_error_or(e, |e| {
+                HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote))
+            })
+        })?;
 
     // Load remote config for project binding and ignore rules.
     let report =
         config::load_remotes_layered_report(&state.config.app_root, abs_project_path.as_deref())
-            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+            .map_err(|e| {
+                config::typed_load_error_or(e, |e| {
+                    HandlerError::Internal(format!("load remotes: {e:#}"))
+                })
+            })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
 
@@ -186,6 +194,15 @@ pub async fn handle(
 
     // Delegate to the shared unary forward helper.
     let execution_policy = destination_execution_policy(&req.execution_policy)?;
+    // The destination admits this request under this node's identity, not the
+    // local caller's. A caller may ask a remote to expose its operator vault
+    // only if it holds that authority itself.
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        state.authorizer.as_ref(),
+        &ctx.scopes,
+        &execution_policy.environment,
+    )
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let forward_result = forward::execute_unary_forward(
         &state,
         &client,

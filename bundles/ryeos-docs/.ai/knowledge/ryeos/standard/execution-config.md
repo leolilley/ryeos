@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:c4de93521c3865d1063945f8b45c77b5032ab121b96e728d41cab2fd23ffaf39:zClD62luIho1McHy0RWPB7yUL9+JoMy+GbpJMTwG1ReMbZw594Ka3bZc2bjfAtwcwHKAjqKWvimgg9l5NYSEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:17:38Z:0133c20a26a4760ae4b3a0bf110e8b7441ec162dffd9923820526b1e9251290a:hg0Zmm6/r/ejlfDP0rTZ97gxE/+aH2DXOWEyibAuCR0M+u2lg7oCSLdnPr1IrdRyoRYr8nHbGW7D1iMuBXJMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -104,6 +104,16 @@ Separately, the core bundle's `config:execution/execution` controls
 | `max_concurrency`        | 10       |
 | `cancellation_mode`      | graceful |
 | `cancellation_grace_secs`| 5        |
+
+The two cancellation keys are the stop policy for every managed launch:
+directive and graph runtimes, tools, and workers. The engine resolves them
+per item (defaults, then exact item overrides, then direct
+`cancellation_*` params) and the daemon records the result in the launch's
+metadata; `thread cancel`, daemon drain and recovery stop the process under
+that recorded policy. A `native_async` declaration supplies its own policy
+instead. The node caps the grace at 5 seconds whatever the config says.
+The policy is node-local: a same-node continuation keeps the recorded policy,
+while a cross-node worker handoff re-resolves it from the target node's config.
 
 Both configs coexist — one for LLM API calls, one for subprocess
 management.

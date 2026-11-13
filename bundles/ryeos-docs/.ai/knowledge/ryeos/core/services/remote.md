@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T09:42:10Z:4536e076fdc17eda9afa246116b292a9a46b6e9da25372a922597b8eeeac3879:dLyvZtySoPx39wUSQZyYu/2hqlR4fVWGZi/QT+mhskvVWUhH4c69+rEE7mtgPsLb9gcKmr1e+4Us70A+FPk4Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:25:09Z:fa61d1d18d450e130e0c415a1f5a3bd9570a81c74997254f65db28f1422806c1:j7IbfzTAe60EZ4hEfwOFQOJVsVYEATaUY1nDSd75ckUoShorq5cdo9xVs4aDwarpKM4W7uy/V4wRb9xxy+VjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
-version: "1.1.1"
+version: "1.1.2"
 description: Remote service reference.
 ---
 
@@ -50,6 +50,13 @@ The authoritative matrix is in
 - `remote configure` stores remote identity, vault fingerprint, URL, and
   ingest-ignore config in the local system space under
   `.ai/config/remotes/remotes.yaml`.
+- Remote identity comes only from that node file. A project's
+  `.ai/config/remotes/remotes.yaml` cannot define or override a remote; one
+  that names `signing_key`, `principal_id`, `fingerprint`,
+  `vault_fingerprint` or `descriptor` refuses remote operations for that
+  project with `project_remote_trust_material` (409), naming
+  `ryeos remote configure <name> --url <https-url> --expect-fingerprint <fingerprint>`
+  as the cure.
 - `remote configure` requires a pin for the remote node key: a remote
   descriptor or an `expect_fingerprint` (64 lowercase hex). Without either it
   refuses with `remote_key_unpinned` and names the fingerprint seen; there is

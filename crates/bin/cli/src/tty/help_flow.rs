@@ -853,6 +853,14 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node host setup --confirm [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]",
             "--confirm         confirm administrator-owned host-service provisioning\n--app-root <DIR>  existing initialized application root\n--bind <ADDR>      replace the stopped node's persisted TCP endpoint\n--uds-path <PATH>  replace the stopped node's persisted lifecycle endpoint",
         ),
+        "node host retire" => (
+            "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
+            "--confirm         confirm removing the administrator-owned host association\n--app-root <DIR>  application root of the stopped node whose service to retire\n--orphaned        retire every node service whose app root no longer exists",
+        ),
+        "codex login device" => (
+            "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
+            "--create   create the profile first\n--trusted  open the login on an explicitly trusted process-group node\n--yes      confirm the observed account without asking\n--json     emit the final result as JSON",
+        ),
         "node doctor" => (
             "ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]",
             "--json            emit structured diagnostics\n--no-bundles      skip bundle diagnostics\n--app-root <DIR>  application root",
@@ -876,6 +884,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
         "node reset external-content-bindings" => (
             "ryeos node reset external-content-bindings [--dry-run | --confirm] [--app-root <DIR>]",
             "--dry-run         report without mutation\n--confirm         confirm binding retirement\n--app-root <DIR>  application root",
+        ),
+        "node large-objects purge-quarantine" => (
+            "ryeos node large-objects purge-quarantine [--dry-run | --confirm] [--app-root <DIR>]",
+            "--dry-run         report without mutation\n--confirm         confirm the quarantine is discarded\n--app-root <DIR>  application root",
         ),
         "node reset policy-generation" => (
             "ryeos node reset policy-generation --node-profile <NAME> --host-class <NAME> --confirm [--source <DIR>] [--trust-file <FILE>]... [--app-root <DIR>]",

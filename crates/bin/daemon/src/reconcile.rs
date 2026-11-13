@@ -432,6 +432,39 @@ fn finalize_dead(
         None,
         ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
     )?;
+    // A run interrupted after its fold-back froze and bound a generation,
+    // but before it advanced HEAD, is never published by recovery: it fails
+    // with the typed head-advance outcome, and the retained generation joins
+    // the failed terminal so it stays reachable after the workspace closes.
+    // If HEAD already names the generation, the advance applied before the
+    // interruption: the thread fails `head_advanced_before_interruption`,
+    // recording the publication although the run never confirmed completion.
+    if let Some((outcome_code, payload, generation)) = interrupted_head_advance(state, thread_id) {
+        let mut error = payload;
+        error["recovery"] = error_obj;
+        tracing::warn!(
+            thread_id,
+            outcome_code,
+            snapshot_hash = %generation.snapshot_hash,
+            "interrupted advance-head run settled from its recovered generation"
+        );
+        state.threads.finalize_thread_retaining_generation(
+            &ThreadFinalizeParams {
+                thread_id: thread_id.to_string(),
+                status: "failed".to_string(),
+                outcome_code: Some(outcome_code.to_string()),
+                result: None,
+                error: Some(error),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            },
+            &generation,
+        )?;
+        *reconciled += 1;
+        return Ok(());
+    }
     state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: "failed".to_string(),
@@ -445,6 +478,76 @@ fn finalize_dead(
     })?;
     *reconciled += 1;
     Ok(())
+}
+
+/// The outcome code, payload and retained generation of a dead thread whose
+/// admitted terminal publication advances HEAD and whose workspace froze and
+/// bound a result generation. `None` for every other thread, which keeps its
+/// ordinary recovery failure.
+fn interrupted_head_advance(
+    state: &AppState,
+    thread_id: &str,
+) -> Option<(
+    &'static str,
+    serde_json::Value,
+    ryeos_state::objects::WorkspaceGenerationPair,
+)> {
+    let thread = state.state_store.get_thread(thread_id).ok().flatten()?;
+    let resume = thread
+        .runtime
+        .launch_metadata
+        .as_ref()?
+        .resume_context
+        .as_ref()?;
+    let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
+        head_ref,
+        expected_hash,
+    } = resume.project_authority.terminal_publication()?
+    else {
+        return None;
+    };
+    let workspace = match state.state_store.execution_workspace_for_thread(thread_id) {
+        Ok(workspace) => workspace?,
+        Err(error) => {
+            tracing::warn!(thread_id, error = %format!("{error:#}"),
+                "cannot read the workspace of a dead advance-head thread; ordinary recovery failure");
+            return None;
+        }
+    };
+    let generation = ryeos_state::objects::WorkspaceGenerationPair {
+        snapshot_hash: workspace.frozen_snapshot_hash?,
+        output_capture_hash: workspace.frozen_output_capture_hash,
+    };
+    let observed = advance_head_ref_coordinates(head_ref).and_then(|(principal, project)| {
+        state
+            .state_store
+            .with_state_db(|db| db.read_project_head(principal, project))
+            .ok()
+            .flatten()
+    });
+    let (outcome_code, payload) = ryeos_executor::execution::interrupted_head_advance_outcome(
+        expected_hash,
+        observed.as_deref(),
+        &generation,
+    );
+    Some((outcome_code, payload, generation))
+}
+
+/// The principal and project of a canonical `projects/<principal>/<project>/head`.
+fn advance_head_ref_coordinates(head_ref: &str) -> Option<(&str, &str)> {
+    let mut components = head_ref.split('/');
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (Some("projects"), Some(principal), Some(project), Some("head"), None) => {
+            Some((principal, project))
+        }
+        _ => None,
+    }
 }
 
 fn has_in_process_handler_driver(thread: &ThreadDetail) -> bool {
@@ -1035,24 +1138,29 @@ fn finalize_recovered_stop(
     }
 }
 
+/// Whether a dead target's identity may be cleared. When it may not, the
+/// identity is quarantined: it is neither cleared nor signalled, and the
+/// decision is recorded on the thread's runtime row (when that row still
+/// carries this exact identity) so thread status and `node doctor` show it.
 fn dead_identity_safe_to_clear(
+    state: &AppState,
     identity: &ryeos_app::process::ExecutionProcessIdentity,
     thread_id: &str,
 ) -> bool {
-    match execution_identity_is_current_boot(identity) {
-        Ok(false) => true,
+    let reason = match execution_identity_is_current_boot(identity) {
+        Ok(false) => return true,
         Ok(true)
             if ryeos_app::process::process_group_presence(identity.pgid())
                 == IdentityLiveness::DeadOrStale =>
         {
-            true
+            return true;
         }
         Ok(true) => {
             tracing::warn!(
                 thread_id,
                 "dead same-boot group leader still has a present or unprovable process group; quarantining"
             );
-            false
+            ryeos_app::state_store::ProcessQuarantineReason::SameBootGroupPresent
         }
         Err(error) => {
             tracing::warn!(
@@ -1060,9 +1168,20 @@ fn dead_identity_safe_to_clear(
                 error = %format!("{error:#}"),
                 "cannot compare process-identity boot; quarantining"
             );
-            false
+            ryeos_app::state_store::ProcessQuarantineReason::BootComparisonUnavailable
         }
+    };
+    if let Err(error) = state
+        .state_store
+        .record_process_quarantine(thread_id, identity, reason)
+    {
+        tracing::warn!(
+            thread_id,
+            error = %format!("{error:#}"),
+            "failed to record process quarantine; the identity stays retained"
+        );
     }
+    false
 }
 
 /// Reconcile daemon state after restart.
@@ -1092,13 +1211,38 @@ pub async fn reconcile_active_threads_after_latched_stop(
     state: &AppState,
     latched: Option<&ryeos_node::lifecycle_marker::LatchedDrainFacts>,
 ) -> Result<ActiveThreadReconcileReport> {
-    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup, latched).await
+    let report = reconcile_active_threads_inner(state, ActiveReconcileMode::Startup, latched).await;
+    mirror_process_quarantine_report(state);
+    report
 }
 
 /// Mid-life counterpart used by the supervised periodic recovery task. It
 /// never clears claims or stops a verified live process owned by this daemon.
 pub async fn reconcile_live_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
-    reconcile_active_threads_inner(state, ActiveReconcileMode::Live, None).await
+    let report = reconcile_active_threads_inner(state, ActiveReconcileMode::Live, None).await;
+    mirror_process_quarantine_report(state);
+    report
+}
+
+/// Mirror the quarantined runtime rows into the report `ryeos node doctor`
+/// reads offline. Best effort: the rows stay the authority, and a failed
+/// mirror only leaves the doctor's view stale.
+fn mirror_process_quarantine_report(state: &AppState) {
+    let mirrored = state
+        .state_store
+        .list_process_quarantines()
+        .and_then(|threads| {
+            ryeos_app::process_quarantine_report::write_report(
+                &state.config.runtime_root().state(),
+                threads,
+            )
+        });
+    if let Err(error) = mirrored {
+        tracing::warn!(
+            error = %format!("{error:#}"),
+            "failed to mirror the process quarantine report for node doctor"
+        );
+    }
 }
 
 /// Retire every predecessor qualification child before root recovery can
@@ -1528,7 +1672,7 @@ async fn reconcile_active_threads_inner(
                         "durable stop process liveness is unavailable; failing closed"
                     );
                     continue;
-                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                } else if !dead_identity_safe_to_clear(state, identity, &thread.thread_id) {
                     continue;
                 }
                 let cleared = settle_reconciled_process(state, &thread.thread_id, identity);
@@ -1594,7 +1738,7 @@ async fn reconcile_active_threads_inner(
                         "terminal process liveness is unavailable; failing closed"
                     );
                     continue;
-                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                } else if !dead_identity_safe_to_clear(state, identity, &thread.thread_id) {
                     continue;
                 }
                 if !settle_reconciled_process(state, &thread.thread_id, identity)? {
@@ -1641,7 +1785,7 @@ async fn reconcile_active_threads_inner(
                 }
                 IdentityLiveness::DeadOrStale => {
                     if target_liveness != IdentityLiveness::DeadOrStale
-                        || !dead_identity_safe_to_clear(identity, &thread.thread_id)
+                        || !dead_identity_safe_to_clear(state, identity, &thread.thread_id)
                     {
                         continue;
                     }
@@ -3245,7 +3389,7 @@ fn reconcile_abandoned_workspace_members(state: &AppState) -> Result<()> {
                         IdentityLiveness::DeadOrStale => {}
                     }
                     if execution_liveness(&identity) != IdentityLiveness::DeadOrStale
-                        || !dead_identity_safe_to_clear(&identity, &member.thread_id)
+                        || !dead_identity_safe_to_clear(state, &identity, &member.thread_id)
                     {
                         continue;
                     }
@@ -3324,7 +3468,7 @@ fn assert_abandoned_workspace_contacts_settled(
             .get_thread(thread_id)?
             .and_then(|thread| thread.runtime.process_identity)
             && (execution_liveness(&identity) != IdentityLiveness::DeadOrStale
-                || !dead_identity_safe_to_clear(&identity, thread_id))
+                || !dead_identity_safe_to_clear(state, &identity, thread_id))
         {
             anyhow::bail!("workspace root process death is unproved");
         }
@@ -3336,6 +3480,7 @@ fn assert_abandoned_workspace_contacts_settled(
         let identity: ryeos_app::process::ExecutionProcessIdentity = serde_json::from_str(raw)?;
         if execution_liveness(&identity) != IdentityLiveness::DeadOrStale
             || !dead_identity_safe_to_clear(
+                state,
                 &identity,
                 workspace
                     .thread_id
@@ -4102,6 +4247,20 @@ fn converge_reserved_follow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advance_head_ref_coordinates_accept_only_the_canonical_project_head() {
+        let principal = "a".repeat(64);
+        let project = "b".repeat(64);
+        let head_ref = format!("projects/{principal}/{project}/head");
+        assert_eq!(
+            advance_head_ref_coordinates(&head_ref),
+            Some((principal.as_str(), project.as_str()))
+        );
+        assert!(advance_head_ref_coordinates("projects/a/b").is_none());
+        assert!(advance_head_ref_coordinates("projects/a/b/head/extra").is_none());
+        assert!(advance_head_ref_coordinates("chains/a/b/head").is_none());
+    }
     use ryeos_app::launch_metadata::ResumeContext;
     use ryeos_engine::contracts::{
         EffectivePrincipal, ExecutionHints, NativeResumeSpec, Principal, ProjectContext,
@@ -4408,6 +4567,7 @@ mod tests {
                 stop_intent: None,
                 launch_metadata: lm,
                 recovery_wait: None,
+                process_quarantine: None,
             },
         }
     }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:21Z:ff73d7cc7ff1a155650f1bf09ca733982a1d166becb8e7d15338752797c2c08c:zsFday2YflGm8ylqEcn57o2plHhvOpVBAyT1Qs0jvyZh4nwsLpBJsc+SPbKdYhROK55N97sWtiHwXS8mixWdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:48:58Z:089e2de9ae6f21b2845e0e946a56800cd67f3396c56017e057ff3c821d3a350f:4DB3PbV7uVIULh7xiv0CNpTLj0eVffrq3aPKU5NN9aaI/2i/Bo4oHVBKqc/OwqmhcQmcaSstKn+WWC1r7Ci9BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -514,7 +514,13 @@ node-signed `remote_operator` grant for the owner and immutable origin site.
 That authority binds the principal class, owner principal, configured origin,
 grant digest, and sorted canonical scopes. It must cover both the target
 capsule's retained effective capabilities and its required-nullable parent
-delegation ceiling. The target seals it into the target launch capsule and
+delegation ceiling. When the retained project environment exposes the
+operator vault (`include_operator_vault: true`, which the target rebind keeps),
+the target then delivers from its own vault, so this grant must also hold
+`ryeos.use.vault.operator`; otherwise the handoff is refused with
+`operator_vault_capability_required`. A remote-hosted worker workflow sends its
+target launch with the same exposure, so the target's grant for the forwarded
+operator needs the capability there too. The target seals it into the target launch capsule and
 placement evidence, then revalidates the identical current grant during
 preflight replay, preparation, immediately before placement publication, and
 again before private-state installation or runnable recovery. Revocation or
@@ -548,8 +554,12 @@ parent-delegation ceiling, and applies only the attested project, site, and
 credential-profile rebind before minting a new target capsule. Source
 `RuntimeLaunchMetadata`, source checkpoint directories, source isolation
 attempts, handler authentication, cancellation policy, and other node-local
-runtime fields never cross the site boundary. Handoff v1 refuses a source with
-a non-null cancellation policy because no portable contract roots it.
+runtime fields never cross the site boundary. The stop policy is node-local.
+A cross-node handoff re-resolves it: the target records the policy its own
+signed execution config grants when the successor attaches, and the source's
+`thread_continued` edge records the source's policy as `source_stop_policy`,
+so a change across the site boundary stays visible. A same-node continuation
+instead keeps its source's recorded policy.
 
 Every closure fetch and staged handoff payload is bounded by the consuming
 node's mandatory `object_closure` policy. The serving node independently
@@ -999,7 +1009,20 @@ terminal result before settling the controller projection: `HEAD == base`
 proves no publication and is the only retryable state; `HEAD == candidate`
 proves success. A missing or different HEAD is
 irreducibly ambiguous, receives authoritative `publication_unknown` testimony,
-and terminalizes without retry. Root
+and terminalizes without retry.
+
+A live publish classifies its own HEAD contact. A refusal raised before any
+HEAD write is never unknown. If the HEAD has moved off the admitted base (seen
+before the CAS, or the CAS's own typed conflict), the base is superseded for
+good: the root records `hosted_candidate.publication_superseded` with the
+observed HEAD, the session settles terminal `base_superseded:<candidate>`, the
+candidate stays retained as evidence, and the typed `base_superseded` refusal
+names the expected and observed HEAD and the next steps (inspect the
+candidate, start a new session from the current HEAD). Any other pre-write
+refusal (a handoff fence, an untrusted signer, an invalid or unreadable ref)
+records `publication_not_applied`, returns the session to `publish_ready` and
+answers with the typed, retryable `publication_not_applied`. Only a failure at
+or after the write is `publication_unknown`. Root
 terminalization waits while
 publication may have contacted HEAD. A process-local root-operation lease
 fences every hosted root-chain mutation; terminalization closes admission and

@@ -6744,7 +6744,7 @@ pub fn prepare_external_qualification_start_for_invocation<'a>(
     }))?;
     // Authenticate and admit headroom before the contact clock starts: the provider's
     // contact window (at most 60 s) must not be spent on this node's own admission work,
-    // which a loaded host can stretch past the window (attempt 77, 2026-11-11).
+    // which a loaded host can stretch past the window.
     let admission = {
         let authority = state.state_store.pinned_state_authority()?;
         let guard = authority.acquire_shared_guard()?;

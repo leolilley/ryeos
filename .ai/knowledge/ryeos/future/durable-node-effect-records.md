@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-12T07:28:15Z:f3e973ba9511f9239678afedcea11b2781ac70885ef20817d92cff471fede804:VMJWhMqYg9NFcILOCrcushTo2pUCbZ5Y4yPshSsRBFN3NBMOkjgi2j8J2yeJ/tzWaMfm3427Vk8MxFoqx01GBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:40:35Z:881f590cba049a424868eff38e8d28eb881ec362c96c96b510f1e4db08cbce1e:xvtuaCRwWcCpRZmQX03DKLbnZ72414GfXPS7l5jsd7NqteXE2NnDU5Ssv9o44zKotp1YIsqvXPxbqNl74exOCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [future, determinism, replay, cache, evidence, graph]
 version: "0.1.1"
@@ -47,6 +47,13 @@ redefined as **record replay** under the effect-class contract:
   *different run*, never a replay;
 - `live` actions never replay across runs (in-run reuse keeps today's
   session-replay semantics unchanged).
+
+Until a subject earns `sealed` with qualification evidence, an authored
+`effects: sealed` on a tool or graph is testimony only. Their kind schemas
+declare `effect_class_ceiling.unproven_max: recorded`: the subject keeps its
+authored ceiling, a `recorded` request is admitted, and a `sealed` request is
+refused with `durable_effect_sealed_unqualified`. That cap is where
+divergence proofs or qualification records plug in when they exist.
 
 Durability is opt-in per node, authored and signed:
 

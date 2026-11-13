@@ -7,6 +7,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod credential_ceremony;
+pub use credential_ceremony::CredentialCeremonyRefusal;
 pub mod external_execution;
 mod inspection_cleanup;
 pub use inspection_cleanup::MAX_INSPECTION_COPY_GROUP_PHYSICAL_REGISTRATIONS;
@@ -164,6 +166,49 @@ pub struct RuntimeInfo {
     #[serde(skip_serializing)]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
     pub recovery_wait: Option<RecoveryWaitDisposition>,
+    /// Recovery could not prove the attached process group gone, so it keeps
+    /// the identity and neither clears nor signals it. Shown in thread status
+    /// and by `node doctor`; cleared with the identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_quarantine: Option<ProcessQuarantine>,
+}
+
+/// Why recovery retains an attached identity it cannot clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessQuarantineReason {
+    /// The same-boot group leader is gone but its process group is still
+    /// present or cannot be proved absent.
+    SameBootGroupPresent,
+    /// The identity's boot could not be compared with the current boot.
+    BootComparisonUnavailable,
+}
+
+impl ProcessQuarantineReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SameBootGroupPresent => "same_boot_group_present",
+            Self::BootComparisonUnavailable => "boot_comparison_unavailable",
+        }
+    }
+}
+
+/// Durable record that recovery holds an attached identity in quarantine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessQuarantine {
+    pub reason: ProcessQuarantineReason,
+    pub first_seen_at_ms: i64,
+    pub last_checked_at_ms: i64,
+}
+
+/// One thread whose attached identity recovery holds in quarantine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantinedProcess {
+    pub thread_id: String,
+    pub pgid: Option<i64>,
+    pub quarantine: ProcessQuarantine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2039,6 +2084,7 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     process_dead_observed_at_ms INTEGER,
     stop_requested_at_ms INTEGER,
     stop_intent TEXT,
+    process_quarantine TEXT,
     workspace_id TEXT,
     workspace_view_identity TEXT,
     workspace_borrower_launch_owner TEXT,
@@ -2047,7 +2093,10 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
             AND workspace_borrower_launch_owner IS NULL)
         OR (workspace_id IS NOT NULL AND workspace_view_identity IS NOT NULL
             AND workspace_borrower_launch_owner IS NOT NULL)
-    )
+    ),
+    -- A quarantine describes the attached identity recovery cannot prove
+    -- gone; it is cleared in the same statement that clears the identity.
+    CHECK (process_quarantine IS NULL OR process_identity IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
@@ -2615,7 +2664,9 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // rows written by the field-order encoder of epoch 131 do not re-verify.
 // Epoch 133: a content-addressed direct command closure carries its required,
 // nullable `host_origin`; epoch-132 capsules lack it and refuse.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 133;
+// Epoch 134: `thread_runtime.process_quarantine` records the attached identity
+// recovery cannot prove gone; an epoch-133 store lacks the column and refuses.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 134;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -4700,6 +4751,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "stop_intent",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_quarantine",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
@@ -7757,6 +7814,14 @@ pub struct CredentialProfileRecord {
 }
 
 pub const CREDENTIAL_PROFILE_LIST_MAX_LIMIT: usize = 200;
+
+/// The ceremony columns a refusal reports.
+struct CredentialCeremonyRow {
+    state: String,
+    login_epoch: u64,
+    login_expires_at_ms: Option<i64>,
+    lock_owner: Option<String>,
+}
 
 /// Discovery metadata only. Private homes, account documents, login ceremonies,
 /// and exact session/lease coordinates belong to the selected-profile surface.
@@ -10854,15 +10919,19 @@ impl RuntimeDb {
                 bail!("credential enrollment expiry must be in the future");
             }
             let tx = conn.unchecked_transaction()?;
-            let epoch: i64 = tx
+            let epoch: Option<i64> = tx
                 .query_row(
                     "SELECT login_epoch FROM credential_profile
               WHERE profile_id=?1 AND lock_owner=?2 AND state='unauthenticated'",
                     params![profile_id, lock_owner],
                     |row| row.get(0),
                 )
-                .optional()?
-                .ok_or_else(|| anyhow!("credential profile cannot begin enrollment"))?;
+                .optional()?;
+            let Some(epoch) = epoch else {
+                return Err(Self::begin_enrollment_refusal(
+                    &tx, profile_id, lock_owner, now,
+                ));
+            };
             let next = epoch
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("credential login epoch overflow"))?;
@@ -10994,7 +11063,7 @@ impl RuntimeDb {
             }
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
-            let account_json: String = tx
+            let account_json: Option<String> = tx
                 .query_row(
                     "SELECT sanitized_account_json FROM credential_profile
                   WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
@@ -11008,8 +11077,16 @@ impl RuntimeDb {
                     ],
                     |row| row.get(0),
                 )
-                .optional()?
-                .ok_or_else(|| anyhow!("credential confirmation ceremony is absent or expired"))?;
+                .optional()?;
+            let Some(account_json) = account_json else {
+                return Err(Self::confirm_enrollment_refusal(
+                    &tx,
+                    profile_id,
+                    owner_principal,
+                    login_epoch,
+                    now,
+                ));
+            };
             let account: serde_json::Value = serde_json::from_str(&account_json)?;
             if ryeos_state::objects::canonical_value_digest(&account)? != expected_account_digest {
                 bail!("credential confirmation account digest changed");
@@ -11039,6 +11116,208 @@ impl RuntimeDb {
             tx.commit()?;
             u64::try_from(generation).context("negative credential generation")
         })
+    }
+
+    /// Clear an enrollment nobody can finish. The operator names the login
+    /// epoch; the node moves the profile back to `unauthenticated` only when
+    /// that login is `enrolling` or `confirming`, its window has closed and no
+    /// worker holds the profile. Returns the new authority revision.
+    pub fn abandon_credential_enrollment(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+    ) -> Result<u64> {
+        self.conn.with_sql(|conn| {
+            let now = lillux::time::timestamp_millis() as i64;
+            let epoch =
+                i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
+                "UPDATE credential_profile SET state='unauthenticated', active_login_id=NULL,
+                    login_expires_at_ms=NULL, sanitized_account_json=NULL, updated_at_ms=?4,
+                    authority_revision=authority_revision+1
+              WHERE profile_id=?1 AND owner_principal=?2 AND login_epoch=?3
+                AND state IN ('enrolling','confirming') AND lock_owner IS NULL
+                AND (login_expires_at_ms IS NULL OR login_expires_at_ms<?4)",
+                params![profile_id, owner_principal, epoch, now],
+            )?;
+            if changed != 1 {
+                let row = Self::credential_ceremony_row(&tx, profile_id, owner_principal)?
+                    .ok_or_else(|| anyhow!("credential profile is absent or not owned"))?;
+                let reason = match row.state.as_str() {
+                    _ if row.login_epoch != login_epoch => format!(
+                        "name the current login epoch {}; the profile has moved on",
+                        row.login_epoch
+                    ),
+                    "enrolling" | "confirming" if row.lock_owner.is_some() => format!(
+                        "worker {} still holds the profile; end its login session first",
+                        row.lock_owner.as_deref().unwrap_or_default()
+                    ),
+                    "enrolling" | "confirming" => format!(
+                        "the login window is still open until {} ms; finish or cancel that login instead",
+                        row.login_expires_at_ms.unwrap_or_default()
+                    ),
+                    _ => "only an expired enrolling or confirming login can be abandoned".to_string(),
+                };
+                return Err(CredentialCeremonyRefusal::AbandonRefused {
+                    profile_id: profile_id.to_string(),
+                    state: row.state,
+                    current_login_epoch: row.login_epoch,
+                    requested_login_epoch: login_epoch,
+                    reason,
+                }
+                .into());
+            }
+            let revision: i64 = tx.query_row(
+                "SELECT authority_revision FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get(0),
+            )?;
+            tx.commit()?;
+            u64::try_from(revision).context("negative credential authority revision")
+        })
+    }
+
+    fn credential_ceremony_row(
+        conn: &Connection,
+        profile_id: &str,
+        owner_principal: &str,
+    ) -> Result<Option<CredentialCeremonyRow>> {
+        conn.query_row(
+            "SELECT state, login_epoch, login_expires_at_ms, lock_owner
+               FROM credential_profile WHERE profile_id=?1 AND owner_principal=?2",
+            params![profile_id, owner_principal],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(state, login_epoch, login_expires_at_ms, lock_owner)| {
+            Ok(CredentialCeremonyRow {
+                state,
+                login_epoch: u64::try_from(login_epoch)
+                    .context("negative credential login epoch")?,
+                login_expires_at_ms,
+                lock_owner,
+            })
+        })
+        .transpose()
+    }
+
+    fn begin_enrollment_refusal(
+        conn: &Connection,
+        profile_id: &str,
+        lock_owner: &str,
+        now: i64,
+    ) -> anyhow::Error {
+        let row = conn
+            .query_row(
+                "SELECT owner_principal FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(anyhow::Error::from)
+            .and_then(|owner| match owner {
+                Some(owner) => Self::credential_ceremony_row(conn, profile_id, &owner),
+                None => Ok(None),
+            });
+        let row = match row {
+            Ok(Some(row)) => row,
+            Ok(None) => return anyhow!("credential profile cannot begin enrollment: it is absent"),
+            Err(error) => return error.context("credential profile cannot begin enrollment"),
+        };
+        if row.lock_owner.as_deref() != Some(lock_owner) {
+            return anyhow!(
+                "credential profile cannot begin enrollment: the login worker does not hold it"
+            );
+        }
+        if !matches!(row.state.as_str(), "enrolling" | "confirming") {
+            return anyhow!(
+                "credential profile cannot begin enrollment from state {}",
+                row.state
+            );
+        }
+        match row.login_expires_at_ms {
+            Some(at) if at >= now => CredentialCeremonyRefusal::EnrollmentInProgress {
+                profile_id: profile_id.to_string(),
+                state: row.state,
+                login_epoch: row.login_epoch,
+                login_expires_at_ms: row.login_expires_at_ms,
+            }
+            .into(),
+            _ => CredentialCeremonyRefusal::EnrollmentAbandoned {
+                profile_id: profile_id.to_string(),
+                state: row.state,
+                login_epoch: row.login_epoch,
+            }
+            .into(),
+        }
+    }
+
+    fn confirm_enrollment_refusal(
+        conn: &Connection,
+        profile_id: &str,
+        owner_principal: &str,
+        login_epoch: u64,
+        now: i64,
+    ) -> anyhow::Error {
+        let row = match Self::credential_ceremony_row(conn, profile_id, owner_principal) {
+            Ok(Some(row)) => row,
+            Ok(None) => return anyhow!("credential profile is absent or not owned"),
+            Err(error) => {
+                return error.context("credential confirmation could not read its profile");
+            }
+        };
+        if row.state != "confirming" || row.login_epoch != login_epoch {
+            return CredentialCeremonyRefusal::ConfirmWrongState {
+                profile_id: profile_id.to_string(),
+                state: row.state,
+                current_login_epoch: row.login_epoch,
+                requested_login_epoch: login_epoch,
+            }
+            .into();
+        }
+        let window_open = matches!(row.login_expires_at_ms, Some(at) if at >= now);
+        if !window_open {
+            return CredentialCeremonyRefusal::ConfirmExpired {
+                profile_id: profile_id.to_string(),
+                login_epoch,
+                lock_owner: row.lock_owner,
+            }
+            .into();
+        }
+        match row.lock_owner {
+            Some(lock_owner) => {
+                let holding_chain_root_id = conn
+                    .query_row(
+                        "SELECT chain_root_id FROM dedicated_session
+                      WHERE credential_profile_id=?1 AND worker_instance_id=?2
+                      ORDER BY updated_at_ms DESC LIMIT 1",
+                        params![profile_id, lock_owner],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten();
+                CredentialCeremonyRefusal::ConfirmLockHeld {
+                    profile_id: profile_id.to_string(),
+                    login_epoch,
+                    lock_owner,
+                    holding_chain_root_id,
+                }
+                .into()
+            }
+            None => anyhow!(
+                "credential confirmation lost a concurrent ceremony change; read the profile again"
+            ),
+        }
     }
 
     pub fn cancel_credential_enrollment(
@@ -17562,7 +17841,7 @@ impl RuntimeDb {
             let changed = tx.execute(
                 "UPDATE thread_runtime
                 SET pid=NULL, pgid=NULL, process_identity=NULL, process_release_fence=NULL,
-                    process_dead_observed_at_ms=NULL,
+                    process_dead_observed_at_ms=NULL, process_quarantine=NULL,
                     workspace_id=NULL, workspace_view_identity=NULL, workspace_borrower_launch_owner=NULL,
                     latest_process_settlement=?6
               WHERE thread_id=?1 AND workspace_id=?2 AND workspace_view_identity=?3
@@ -19831,6 +20110,89 @@ impl RuntimeDb {
         })
     }
 
+    /// Record that recovery holds the exact attached identity in quarantine.
+    /// Idempotent per identity: a repeat keeps `first_seen_at_ms` and moves
+    /// `last_checked_at_ms`. Returns false (and writes nothing) when the row
+    /// no longer carries this identity, so a later attach is never marked.
+    pub fn record_process_quarantine(
+        &self,
+        thread_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+        reason: ProcessQuarantineReason,
+        now_ms: i64,
+    ) -> Result<bool> {
+        self.conn.with_sql(|conn| {
+            let identity_json = serde_json::to_string(process_identity)
+                .context("failed to encode process_identity for quarantine")?;
+            let tx = conn.unchecked_transaction()?;
+            let existing = tx
+                .query_row(
+                    "SELECT process_quarantine FROM thread_runtime
+                      WHERE thread_id = ?1 AND process_identity = ?2",
+                    params![thread_id, identity_json],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?;
+            let Some(existing) = existing else {
+                tx.commit()?;
+                return Ok(false);
+            };
+            let first_seen_at_ms = existing
+                .as_deref()
+                .map(serde_json::from_str::<ProcessQuarantine>)
+                .transpose()
+                .with_context(|| {
+                    format!("failed to decode process_quarantine for thread {thread_id}")
+                })?
+                .map_or(now_ms, |previous| previous.first_seen_at_ms);
+            let record = ProcessQuarantine {
+                reason,
+                first_seen_at_ms,
+                last_checked_at_ms: now_ms,
+            };
+            tx.execute(
+                "UPDATE thread_runtime SET process_quarantine = ?3
+                  WHERE thread_id = ?1 AND process_identity = ?2",
+                params![thread_id, identity_json, serde_json::to_string(&record)?],
+            )?;
+            tx.commit().context("commit process quarantine record")?;
+            Ok(true)
+        })
+    }
+
+    /// Every thread whose attached identity recovery holds in quarantine,
+    /// ordered by thread id.
+    pub fn list_process_quarantines(&self) -> Result<Vec<QuarantinedProcess>> {
+        self.conn.with_sql(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT thread_id, pgid, process_quarantine FROM thread_runtime
+                  WHERE process_quarantine IS NOT NULL ORDER BY thread_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter()
+                .map(|(thread_id, pgid, raw)| {
+                    let quarantine =
+                        serde_json::from_str::<ProcessQuarantine>(&raw).with_context(|| {
+                            format!("failed to decode process_quarantine for thread {thread_id}")
+                        })?;
+                    Ok(QuarantinedProcess {
+                        thread_id,
+                        pgid,
+                        quarantine,
+                    })
+                })
+                .collect()
+        })
+    }
+
     /// Clear live process ownership only if it is still the exact incarnation
     /// the caller finished waiting/reaping. This cannot erase a later attach.
     /// Workspace borrowers must use atomic workspace/process settlement instead:
@@ -19877,7 +20239,7 @@ impl RuntimeDb {
                 "UPDATE thread_runtime
                 SET pid = NULL, pgid = NULL, process_identity = NULL,
                     process_release_fence = NULL, process_dead_observed_at_ms = NULL,
-                    latest_process_settlement = ?3
+                    process_quarantine = NULL, latest_process_settlement = ?3
               WHERE thread_id = ?1 AND process_identity = ?2
                 AND workspace_id IS NULL AND workspace_view_identity IS NULL
                 AND workspace_borrower_launch_owner IS NULL
@@ -19984,7 +20346,7 @@ impl RuntimeDb {
                 .query_row(
                     "SELECT pid, pgid, launch_metadata, process_identity,
                         process_release_fence, process_dead_observed_at_ms,
-                        stop_requested_at_ms, stop_intent
+                        stop_requested_at_ms, stop_intent, process_quarantine
                    FROM thread_runtime WHERE thread_id = ?1",
                     params![thread_id],
                     |row| {
@@ -19996,6 +20358,7 @@ impl RuntimeDb {
                         let process_dead_observed_at_ms: Option<i64> = row.get(5)?;
                         let stop_requested_at_ms: Option<i64> = row.get(6)?;
                         let stop_intent: Option<String> = row.get(7)?;
+                        let process_quarantine: Option<String> = row.get(8)?;
                         Ok((
                             pid,
                             pgid,
@@ -20005,6 +20368,7 @@ impl RuntimeDb {
                             process_dead_observed_at_ms,
                             stop_requested_at_ms,
                             stop_intent,
+                            process_quarantine,
                         ))
                     },
                 )
@@ -20018,10 +20382,18 @@ impl RuntimeDb {
                 process_dead_observed_at_ms,
                 stop_requested_at_ms,
                 stop_intent,
+                process_quarantine,
             )) = raw
             else {
                 return Ok(None);
             };
+            let process_quarantine = process_quarantine
+                .as_deref()
+                .map(serde_json::from_str::<ProcessQuarantine>)
+                .transpose()
+                .with_context(|| {
+                    format!("failed to decode process_quarantine for thread {thread_id}")
+                })?;
             let launch_metadata = lm_text
                 .as_deref()
                 .map(decode_current_launch_metadata)
@@ -20083,6 +20455,9 @@ impl RuntimeDb {
                     "incomplete durable stop tombstone for thread {thread_id}: timestamp and intent must be present together"
                 );
             }
+            if process_quarantine.is_some() && process_identity.is_none() {
+                bail!("thread {thread_id} has a process quarantine without an attached identity");
+            }
             let recovery_wait = self.recovery_wait(thread_id)?;
             Ok(Some(RuntimeInfo {
                 pid,
@@ -20094,6 +20469,7 @@ impl RuntimeDb {
                 stop_intent,
                 launch_metadata,
                 recovery_wait,
+                process_quarantine,
             }))
         })
     }
@@ -29852,6 +30228,70 @@ mod tests {
     }
 
     #[test]
+    fn process_quarantine_is_recorded_once_per_identity_and_cleared_with_it() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let identity = fake_process_identity(1234, 5678);
+        let reason = ProcessQuarantineReason::SameBootGroupPresent;
+        assert!(
+            !db.record_process_quarantine("t1", &identity, reason, 10)
+                .unwrap(),
+            "an unattached row has no identity to quarantine"
+        );
+        db.attach_process(
+            "t1",
+            1234,
+            5678,
+            &identity,
+            &RuntimeLaunchMetadata::default(),
+        )
+        .unwrap();
+        assert!(
+            db.record_process_quarantine("t1", &identity, reason, 10)
+                .unwrap()
+        );
+        assert!(
+            db.record_process_quarantine("t1", &identity, reason, 20)
+                .unwrap()
+        );
+        let expected = ProcessQuarantine {
+            reason,
+            first_seen_at_ms: 10,
+            last_checked_at_ms: 20,
+        };
+        assert_eq!(
+            db.get_runtime_info("t1")
+                .unwrap()
+                .unwrap()
+                .process_quarantine,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            db.list_process_quarantines().unwrap(),
+            vec![QuarantinedProcess {
+                thread_id: "t1".to_string(),
+                pgid: Some(5678),
+                quarantine: expected,
+            }]
+        );
+        assert!(
+            !db.record_process_quarantine("t1", &fake_process_identity(1, 1), reason, 30)
+                .unwrap(),
+            "a different identity is never marked"
+        );
+
+        assert!(db.clear_process_if_matches("t1", &identity).unwrap());
+        assert!(
+            db.get_runtime_info("t1")
+                .unwrap()
+                .unwrap()
+                .process_quarantine
+                .is_none()
+        );
+        assert!(db.list_process_quarantines().unwrap().is_empty());
+    }
+
+    #[test]
     fn attach_and_read_launch_metadata_roundtrip() {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
@@ -33215,5 +33655,248 @@ mod tests {
             assert!(db.expired_seat_leases_slice(0, None, &max, limit).is_err());
             assert!(db.claimed_seat_leases_slice(None, &max, limit).is_err());
         }
+    }
+
+    fn ceremony_profile_in_confirming(
+        db: &RuntimeDb,
+        profile_id: &str,
+        lock_owner: &str,
+    ) -> (u64, String) {
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id,
+            owner_principal: "fp:operator",
+            home_id: "home-ceremony",
+        })
+        .unwrap();
+        db.acquire_credential_profile(profile_id, "fp:operator", lock_owner)
+            .unwrap();
+        let login_epoch = db
+            .begin_credential_enrollment(
+                profile_id,
+                lock_owner,
+                "login-ceremony",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap();
+        let account = serde_json::json!({"account_label": "fixture"});
+        let account_json = serde_json::to_string(&account).unwrap();
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE credential_profile SET state='confirming', sanitized_account_json=?2
+                      WHERE profile_id=?1",
+                    params![profile_id, account_json],
+                )?)
+            })
+            .unwrap();
+        (
+            login_epoch,
+            ryeos_state::objects::canonical_value_digest(&account).unwrap(),
+        )
+    }
+
+    fn expire_ceremony(db: &RuntimeDb, profile_id: &str) {
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE credential_profile SET login_expires_at_ms=1 WHERE profile_id=?1",
+                    [profile_id],
+                )?)
+            })
+            .unwrap();
+    }
+
+    fn ceremony_refusal(error: anyhow::Error) -> CredentialCeremonyRefusal {
+        error
+            .downcast_ref::<CredentialCeremonyRefusal>()
+            .cloned()
+            .unwrap_or_else(|| panic!("expected a typed ceremony refusal, got {error:#}"))
+    }
+
+    #[test]
+    fn confirm_refuses_with_lock_held_naming_owner() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, digest) = ceremony_profile_in_confirming(&db, "P-held", "login-owner");
+        let refusal = ceremony_refusal(
+            db.confirm_credential_enrollment("P-held", "fp:operator", epoch, &digest)
+                .unwrap_err(),
+        );
+        match &refusal {
+            CredentialCeremonyRefusal::ConfirmLockHeld {
+                lock_owner,
+                login_epoch,
+                ..
+            } => {
+                assert_eq!(lock_owner, "login-owner");
+                assert_eq!(*login_epoch, epoch);
+            }
+            other => panic!("expected lock-held refusal, got {other:?}"),
+        }
+        assert_eq!(refusal.code(), "credential_confirm_lock_held");
+        assert!(refusal.to_string().contains("worker session terminate"));
+
+        db.release_credential_profile("P-held", "login-owner")
+            .unwrap();
+        let generation = db
+            .confirm_credential_enrollment("P-held", "fp:operator", epoch, &digest)
+            .unwrap();
+        assert_eq!(generation, 2);
+        assert_eq!(
+            db.credential_profile("P-held").unwrap().unwrap().state,
+            "active"
+        );
+    }
+
+    #[test]
+    fn confirm_refuses_expired_naming_abandon() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, digest) = ceremony_profile_in_confirming(&db, "P-late", "login-owner");
+        db.release_credential_profile("P-late", "login-owner")
+            .unwrap();
+        expire_ceremony(&db, "P-late");
+        let refusal = ceremony_refusal(
+            db.confirm_credential_enrollment("P-late", "fp:operator", epoch, &digest)
+                .unwrap_err(),
+        );
+        assert_eq!(refusal.code(), "credential_confirm_expired");
+        assert!(
+            refusal
+                .to_string()
+                .contains(&format!("ryeos codex profile abandon-login P-late {epoch}"))
+        );
+
+        let wrong_epoch = ceremony_refusal(
+            db.confirm_credential_enrollment("P-late", "fp:operator", epoch + 1, &digest)
+                .unwrap_err(),
+        );
+        assert_eq!(wrong_epoch.code(), "credential_confirm_wrong_state");
+    }
+
+    #[test]
+    fn abandon_requires_expired_and_unlocked() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, _digest) = ceremony_profile_in_confirming(&db, "P-stuck", "login-owner");
+        let before = db.credential_profile("P-stuck").unwrap().unwrap();
+
+        let locked = ceremony_refusal(
+            db.abandon_credential_enrollment("P-stuck", "fp:operator", epoch)
+                .unwrap_err(),
+        );
+        assert_eq!(locked.code(), "credential_abandon_refused");
+        assert!(locked.to_string().contains("login-owner"));
+
+        db.release_credential_profile("P-stuck", "login-owner")
+            .unwrap();
+        let open = ceremony_refusal(
+            db.abandon_credential_enrollment("P-stuck", "fp:operator", epoch)
+                .unwrap_err(),
+        );
+        assert!(open.to_string().contains("still open"));
+
+        expire_ceremony(&db, "P-stuck");
+        let stale_epoch = ceremony_refusal(
+            db.abandon_credential_enrollment("P-stuck", "fp:operator", epoch + 1)
+                .unwrap_err(),
+        );
+        assert!(stale_epoch.to_string().contains("current login epoch"));
+        assert!(
+            db.abandon_credential_enrollment("P-stuck", "fp:other", epoch)
+                .is_err(),
+            "another principal cannot abandon the owner's login"
+        );
+
+        let revision = db
+            .abandon_credential_enrollment("P-stuck", "fp:operator", epoch)
+            .unwrap();
+        let after = db.credential_profile("P-stuck").unwrap().unwrap();
+        assert_eq!(after.state, "unauthenticated");
+        assert_eq!(after.authority_revision, revision);
+        assert!(revision > before.authority_revision);
+        assert_eq!(after.login_epoch, epoch);
+        assert_eq!(after.credential_generation, before.credential_generation);
+        assert!(after.active_login_id.is_none());
+        assert!(after.login_expires_at_ms.is_none());
+        assert!(after.sanitized_account.is_none());
+    }
+
+    #[test]
+    fn abandon_then_begin_succeeds() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, _digest) = ceremony_profile_in_confirming(&db, "P-again", "login-owner");
+        expire_ceremony(&db, "P-again");
+
+        let abandoned = ceremony_refusal(
+            db.begin_credential_enrollment(
+                "P-again",
+                "login-owner",
+                "login-two",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(abandoned.code(), "credential_enrollment_abandoned");
+
+        db.release_credential_profile("P-again", "login-owner")
+            .unwrap();
+        db.abandon_credential_enrollment("P-again", "fp:operator", epoch)
+            .unwrap();
+        db.acquire_credential_profile("P-again", "fp:operator", "login-owner-two")
+            .unwrap();
+        let next = db
+            .begin_credential_enrollment(
+                "P-again",
+                "login-owner-two",
+                "login-two",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap();
+        assert_eq!(next, epoch + 1);
+    }
+
+    #[test]
+    fn begin_refuses_an_open_login_as_in_progress() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, _digest) = ceremony_profile_in_confirming(&db, "P-busy", "login-owner");
+        let refusal = ceremony_refusal(
+            db.begin_credential_enrollment(
+                "P-busy",
+                "login-owner",
+                "login-two",
+                lillux::time::timestamp_millis() as i64 + 60_000,
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(
+            refusal,
+            CredentialCeremonyRefusal::EnrollmentInProgress {
+                profile_id: "P-busy".into(),
+                state: "confirming".into(),
+                login_epoch: epoch,
+                login_expires_at_ms: db
+                    .credential_profile("P-busy")
+                    .unwrap()
+                    .unwrap()
+                    .login_expires_at_ms,
+            }
+        );
+    }
+
+    #[test]
+    fn abandon_refuses_active_profile() {
+        let (_tmp, db) = fresh_db();
+        let (epoch, digest) = ceremony_profile_in_confirming(&db, "P-live", "login-owner");
+        db.release_credential_profile("P-live", "login-owner")
+            .unwrap();
+        db.confirm_credential_enrollment("P-live", "fp:operator", epoch, &digest)
+            .unwrap();
+        let refusal = ceremony_refusal(
+            db.abandon_credential_enrollment("P-live", "fp:operator", epoch)
+                .unwrap_err(),
+        );
+        assert_eq!(refusal.code(), "credential_abandon_refused");
+        assert_eq!(
+            db.credential_profile("P-live").unwrap().unwrap().state,
+            "active"
+        );
     }
 }
