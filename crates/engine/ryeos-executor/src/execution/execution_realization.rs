@@ -622,7 +622,7 @@ mod tests {
                 "requires_network":false, "custom":[]
             },
             "materialization_requirements":[],
-            "filesystem_authority_ceiling":"captured_execution",
+            "filesystem_authority_ceiling":"captured_execution", "execution_posture":"confined",
             "network_authority_ceiling":"isolated",
             "target_requirement":null,
             "endpoint_requirement": if external { serde_json::json!({

@@ -266,7 +266,7 @@ session:
         "plan_id":"factory-plan","root_executor_id":"native:factory","root_ref":"worker:test/factory","item_kind":"worker",
         "nodes":[{"node_type":"dispatch_subprocess","id":"spawn","spec":{"cmd":path,"verified_command":{"authority":"captured_content","code":{"source_path":path,"content_hash":executable_hash}},"args":[],"cwd":"/workspace","env":{},"stdin":null,"timeout_secs":30},"executor_chain":["worker:test/factory","native:factory"]}],
         "entrypoint":"spawn","capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
-        "materialization_requirements":[],"network_authority_ceiling":"isolated","filesystem_authority_ceiling":"captured_execution",
+        "materialization_requirements":[],"network_authority_ceiling":"isolated","filesystem_authority_ceiling":"captured_execution", "execution_posture":"confined",
         "target_requirement":target,"endpoint_requirement":{"kind":"local"},"external_endpoint_binding":null,
         "subprocess_limits":null, "resource_authority_ceiling":"node_policy","cache_key":"factory","executor_chain":["worker:test/factory","native:factory"],"executor_authorities":[],"runtime_identity":runtime
     })).unwrap();

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T04:16:48Z:81e0445a56a0721c589cd53bcf4b00782d3fae99fadca188293fdf5acd1e8172:GvfgLiobg75mAnKlNN2xJM+iJeZRHtJTjhFlm4Y60Rp2UCVc8XV1ajtTV/MAwPDKP2xplkc6x0rUjmuwqVWsBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:07:09Z:834a60d4a17edc47edb81a9145226180e1b13986f400f571007cbb9d2bd1c424:55aNkShrAMQ5YrZ7Q1LoB2EDDp4ublB/a24z9L5XFORtG+84LFCUr7CBbnXBqepSYWhYiToI6ZtCadyJVbEMAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -267,7 +267,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 10
+      version: 11
       # Host classes this profile supports. The deployment names one at
       # init (`ryeos init --host-class`), and the node runs under that
       # class's floor and isolation lane from then on. A class names the
@@ -293,6 +293,7 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace_nested
+          host_direct: unavailable
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -338,6 +339,12 @@ policies:
         verified_artifact_file_bytes: 268435456
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
+  # Operator grants of host-direct execution, per exact item. Empty by
+  # default: nothing runs on the host. Changed only by the operator-signed
+  # `node.policy-apply` (`ryeos node host-access grant|revoke`).
+  host_access:
+    schema: 1
+    grants: []
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:

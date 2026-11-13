@@ -185,7 +185,7 @@ fn retained_inputs_capsule(
         "entrypoint":"spawn", "capabilities":{"requires_model":false,
             "requires_subprocess":true,"requires_network":false,"custom":[]},
         "materialization_requirements":[], "network_authority_ceiling":"isolated",
-        "filesystem_authority_ceiling":"captured_execution",
+        "filesystem_authority_ceiling":"captured_execution", "execution_posture":"confined",
         "target_requirement":{"os":"linux","arch":std::env::consts::ARCH,"resources":[]},
         "endpoint_requirement":{"kind":"external","binding_id":"component-direct",
             "stdout_max_bytes":4096,"stderr_max_bytes":2048},

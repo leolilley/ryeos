@@ -4475,7 +4475,7 @@ mod tests {
             },
             "materialization_requirements": [],
             "network_authority_ceiling": "node_policy",
-            "filesystem_authority_ceiling": "node_policy",
+            "filesystem_authority_ceiling": "node_policy", "execution_posture":"confined",
             "target_requirement": null,
             "endpoint_requirement": {"kind": "local"},
             "external_endpoint_binding": null,

@@ -564,6 +564,35 @@ impl PlanNode {
     }
 }
 
+/// The one value an item authors to declare host authority.
+pub const HOST_AUTHORITY_REQUIRED: &str = "required";
+
+/// How a launch runs relative to the node's isolation lane.
+///
+/// `Confined` is every ordinary launch: the lane's isolation, enforced or not.
+/// `HostDirect` is a tool that declared `host_authority: required`; when the
+/// node lane offers it and the operator granted that exact item, it runs on
+/// the host, unconfined, as the daemon user, whatever the lane's mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPosture {
+    Confined,
+    HostDirect,
+}
+
+impl ExecutionPosture {
+    pub fn is_host_direct(self) -> bool {
+        self == Self::HostDirect
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Confined => "confined",
+            Self::HostDirect => "host_direct",
+        }
+    }
+}
+
 /// Normalized execution plan — the engine's output from `build_plan`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, try_from = "ExecutionPlanWire")]
@@ -583,6 +612,12 @@ pub struct ExecutionPlan {
     /// Signed filesystem projection, frozen alongside networking. This is
     /// required in serialized authority; predecessor plans are not reinterpreted.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// Signed execution posture projected from the root item's declared host
+    /// authority. Required in serialized authority; a predecessor plan is not
+    /// reinterpreted as confined. `host_direct` is a claim the launch admits
+    /// only under the node lane, the operator's exact grant and the configured
+    /// local operator.
+    pub execution_posture: ExecutionPosture,
     /// Signed process suitability/resource request. Required explicit null
     /// distinguishes a workload with no target requirement from a predecessor
     /// plan that predates the current execution contract.
@@ -646,6 +681,12 @@ struct ExecutionPlanWire {
     /// Signed filesystem projection, frozen alongside networking. This is
     /// required in serialized authority; predecessor plans are not reinterpreted.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// Signed execution posture projected from the root item's declared host
+    /// authority. Required in serialized authority; a predecessor plan is not
+    /// reinterpreted as confined. `host_direct` is a claim the launch admits
+    /// only under the node lane, the operator's exact grant and the configured
+    /// local operator.
+    pub execution_posture: ExecutionPosture,
     /// Signed process suitability/resource request. Required explicit null
     /// distinguishes a workload with no target requirement from a predecessor
     /// plan that predates the current execution contract.
@@ -710,6 +751,7 @@ impl TryFrom<ExecutionPlanWire> for ExecutionPlan {
             materialization_requirements: wire.materialization_requirements,
             network_authority_ceiling: wire.network_authority_ceiling,
             filesystem_authority_ceiling: wire.filesystem_authority_ceiling,
+            execution_posture: wire.execution_posture,
             target_requirement: wire.target_requirement,
             current_target_request: wire.current_target_request,
             endpoint_requirement: wire.endpoint_requirement,
@@ -964,7 +1006,7 @@ mod execution_project_file_tests {
             },"executor_chain":[]},{"node_type":"complete","id":"done"}],
             "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,
                 "requires_network":false,"custom":[]}, "materialization_requirements":[],
-            "network_authority_ceiling":"isolated", "filesystem_authority_ceiling":"captured_execution",
+            "network_authority_ceiling":"isolated", "filesystem_authority_ceiling":"captured_execution", "execution_posture":"confined",
             "target_requirement":null, "endpoint_requirement":{"kind":"external","binding_id":"test-binding",
                 "stdout_max_bytes":4096,"stderr_max_bytes":2048},
             "external_endpoint_binding":{"binding_id":"test-binding","binding_digest":"a".repeat(64)},
@@ -1003,7 +1045,7 @@ mod current_plan_data_controls {
         serde_json::json!({"plan_id":"data", "root_executor_id":"tool:test/runtime", "root_ref":"worker:test/root",
             "item_kind":"worker", "nodes":[], "entrypoint":"entry",
             "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
-            "materialization_requirements":[],"network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy",
+            "materialization_requirements":[],"network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy", "execution_posture":"confined",
             "target_requirement":{"os":"linux","arch":"x86_64"}, "endpoint_requirement":{"kind":"local"},
             "external_endpoint_binding":null,"resource_authority_ceiling":"node_policy","subprocess_limits":null,
             "cache_key":"data","executor_authorities":[]})

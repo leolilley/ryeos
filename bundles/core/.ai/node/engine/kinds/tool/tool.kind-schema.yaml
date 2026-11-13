@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T02:56:41Z:f486ba3af9b5236bc7eba80265ecb5dbf2e9a005c5ad9fa7926604ba905b2330:JhQAMc0VZ9GuJFK1LelrPrpn2un9GEYMSvjLmsGAtQjus1HVVi5N3S2EjojY8bCrPzctj3U6gVCO+ddYiQK9Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:07:09Z:f2a7be9466b69b6982b4f2112ce11be2a4eeb66dc4a015564f0f5fa37fbe6a2f:5to7Wd8NkfXxMLNSXBPhkKgC7BxliujTR0OQ7ujIFciUuU0Ij1HrHVdV9F11Py4ObY6bpoX9SdEYkMiXo9i4DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.3.0"
 location:
@@ -44,6 +44,34 @@ execution:
   filesystem_authority_ceiling:
     path: [filesystem_authority]
     default: node_policy
+  # Declared host authority. An item that authors `host_authority: required`
+  # asks to run on the host, unconfined, as the daemon user: authority equal
+  # to the operator's. Declaring it grants nothing. A launch runs on the host
+  # only when the node's isolation lane says `host_direct: operator_granted`,
+  # the operator granted that exact item (signer, source closure and runtime
+  # bytes) in the `host_access` node-policy section, and the caller is the
+  # configured local operator through an origin the grant names. The paths
+  # below are claims that cannot be true for such a process, so an item that
+  # combines them with host authority is refused; it runs live, with no
+  # callbacks.
+  host_authority:
+    path: [host_authority]
+    incompatible:
+      - [network_authority]
+      - [filesystem_authority]
+      - [workspace_access]
+      - [execution_endpoint]
+      - [supported_target]
+      - [resource_authority]
+      - [project_lane]
+      - [external_content]
+      - [external_product_slots]
+    admitted_effects: [live]
+    admitted_protocols: [protocol:ryeos/core/opaque]
+    # A host-authority item launched from inside another thread is a
+    # `graph_child` origin only when its parent runs this profile; any other
+    # parent (directive, worker, tool) is delegation and refused.
+    graph_parent_profiles: [graph_run]
   # Optional declaration that the tool runs against a pinned project snapshot
   # (a pushed-head project source). Protocols that gate that capability on a
   # declaration admit only tools that author `project_lane: pinned_snapshot`.
@@ -193,6 +221,10 @@ composed_value_contract:
     resource_authority:
       type: single
       prim: string
+    # Declared host authority (`required`); see execution.host_authority.
+    host_authority:
+      type: single
+      prim: string
 runtime:
   # Tool invocation selectors remain ordinary schema-validated input. The
   # shared runtime template may project one scalar `params` value into one
@@ -244,6 +276,8 @@ runtime:
     # a runtime-handler block.
     - network_authority
     - filesystem_authority
+    # Consumed by the kind-owned host-authority projection above.
+    - host_authority
     # Mechanically selected through execution.terminator.protocol above.
     - execution_protocol
     # Signed executor-chain policy for adjacent source admission. The daemon

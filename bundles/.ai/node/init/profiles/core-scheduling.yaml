@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T04:16:48Z:fdb6d33307433de359b0b90c4dff7eed815bedd10e865c23a58f92c0fca5cff6:+TcQ3FdLB0/JNbmt8mRxzHdVTwlfjJXa9CFoSN01QYniK0JbVTLl4zvOOmL17t47bK5qF6278XvlBmEokwvoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:07:09Z:333918e53b7541ef6cee28439d98f3525050971517719d243891fac14c8b738f:yL10h6lpOgXWXZRJAWPcFX8rrrv6jCFcbL/blo3Du0xin0NuSwGkypyE1G+q8B1NG86Xu+2BoOzF06mmAb04Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -220,7 +220,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 10
+      version: 11
       # Host classes this profile supports. The deployment names one at
       # init (`ryeos init --host-class`), and the node runs under that
       # class's floor and isolation lane from then on. A class names the
@@ -246,6 +246,7 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
+          host_direct: unavailable
         local:
           # A host whose supervisor delegates qualified per-job process scopes
           # (runit, or the OCI hook): jobs run sandboxed in their own scope.
@@ -265,6 +266,7 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace
+          host_direct: unavailable
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -310,6 +312,12 @@ policies:
         verified_artifact_file_bytes: 268435456
         verified_artifact_total_bytes: 1073741824
         verified_artifact_files: 4096
+  # Operator grants of host-direct execution, per exact item. Empty by
+  # default: nothing runs on the host. Changed only by the operator-signed
+  # `node.policy-apply` (`ryeos node host-access grant|revoke`).
+  host_access:
+    schema: 1
+    grants: []
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:

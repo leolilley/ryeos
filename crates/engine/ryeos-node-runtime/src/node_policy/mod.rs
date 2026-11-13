@@ -69,6 +69,7 @@ impl NodePolicyTable {
             Box::new(sections::command_registration::CommandRegistrationPolicySection),
             Box::new(sections::execution::NodeExecutionPolicySection),
             Box::new(sections::external_content::ExternalContentImportPolicySection),
+            Box::new(sections::host_access::NodeHostAccessPolicySection),
             Box::new(sections::hosted::HostedNodePolicySection),
             Box::new(sections::ingest_ignore::IngestIgnorePolicySection),
             Box::new(sections::isolation::IsolationPolicySection),

@@ -8712,6 +8712,7 @@ requires:
             network_authority_ceiling: None,
             pushed_head_declaration: None,
             filesystem_authority_ceiling: None,
+            host_authority: None,
             target: None,
             endpoint: None,
             resource_authority_ceiling: None,

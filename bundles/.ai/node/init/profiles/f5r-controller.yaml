@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T04:16:48Z:5d90ea86d0026cf0c3000da88b971555b5dfd5ac9a1c4b1d7ee3242c5fe1ab51:jl/aG5XIMtvrM4GwsfF24oeynnD3wAWW/yZyZbQqXxQo/3hDIs90ANySI2bmn29iWQ7ApVSZmQVcl53RNCaMDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:07:09Z:288a285b8dc95e1a8c2bf2528685f8ad18243ac3443b8c2d763c1c20f4b6e1d8:I+yQpGWwshZcwzUk5vcVzVB2f4CGKdf94puLj2XjIG6Z9HS5by2150FB5rHc0PvD8G6b97S1DJuFcFZiRZu+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -247,7 +247,7 @@ policies:
   isolation:
     schema: 1
     policy:
-      version: 10
+      version: 11
       # Host classes this profile supports. The deployment names one at
       # init (`ryeos init --host-class`), and the node runs under that
       # class's floor and isolation lane from then on. A class names the
@@ -277,6 +277,7 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
+          host_direct: unavailable
         local:
           # A host the operator runs the controller on directly.
           # Vault secrets, the node identity, the credential home and the
@@ -306,6 +307,7 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
+          host_direct: unavailable
         hosted_enforced:
           # The `hosted` floor on a provider container whose kernel allows
           # user, pid and mount namespaces: the enforced backend proves them
@@ -325,6 +327,7 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace
+          host_direct: unavailable
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves
@@ -358,6 +361,12 @@ policies:
         verified_artifact_file_bytes: 67108864
         verified_artifact_total_bytes: 268435456
         verified_artifact_files: 4096
+  # Operator grants of host-direct execution, per exact item. Empty by
+  # default: nothing runs on the host. Changed only by the operator-signed
+  # `node.policy-apply` (`ryeos node host-access grant|revoke`).
+  host_access:
+    schema: 1
+    grants: []
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
