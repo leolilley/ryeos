@@ -856,8 +856,7 @@ fn run_build(
                 .expect("could not determine XDG data directory")
         });
     let registry_roots = bundle_publish_dependency_roots(&source_path, registry_roots, &app_root)?;
-    let base_trust_store = ryeos_engine::trust::TrustStore::load_node_registry(&app_root)
-        .context("load trust store for registry roots")?;
+    let base_trust_store = registry_root_trust(&app_root)?;
     let owner = resolve_publish_owner(owner, &signing_key, &base_trust_store);
 
     let report = run_publish(&PublishOptions {
@@ -874,6 +873,23 @@ fn run_build(
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+/// Base trust for verifying a bundle's registry dependency roots.
+///
+/// Publishing and signing also run outside any node (a build host, CI): a root
+/// with no node public identity at all is not a node, so it contributes no
+/// signers and only the publishing key itself is trusted. A root that is a
+/// node must load its signer registry, and any failure there is an error.
+fn registry_root_trust(app_root: &Path) -> anyhow::Result<ryeos_engine::trust::TrustStore> {
+    let identity = ryeos_engine::trust::node_public_identity_path(app_root);
+    match std::fs::symlink_metadata(&identity) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(ryeos_engine::trust::TrustStore::empty())
+        }
+        _ => ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+            .context("load trust store for registry roots"),
+    }
 }
 
 fn run_manifest_sign(
@@ -1366,8 +1382,7 @@ fn run_bundle_sign(
         });
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
     let signing_key = load_operator_signing_key()?;
-    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(&app_root)
-        .context("load trust store for registry roots")?;
+    let trust_store = registry_root_trust(&app_root)?;
 
     let report = ryeos_core_tools::actions::sign_bundle::rebuild_and_sign_bundle_items_with_trust(
         &source_path,
