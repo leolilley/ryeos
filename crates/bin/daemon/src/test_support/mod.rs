@@ -1242,18 +1242,12 @@ impl DaemonHarness {
         // real project pass its absolute tempdir path instead.
         let project_path = (project_path != ".").then_some(project_path);
 
-        // The directive runtime's signed launch contract requires an explicit
-        // model identity. These fixtures keep model configuration on the
-        // directive itself, so the correct binding is the independently
-        // authorized directive ref repeated in the `model` slot.
-        let ref_bindings = if item_ref.starts_with("directive:") {
-            serde_json::json!({ "model": item_ref })
-        } else {
-            serde_json::json!({})
-        };
+        // These fixtures keep model configuration on the directive itself;
+        // the directive runtime defaults the `model` binding to the executed
+        // directive, so no binding is sent.
         let body = serde_json::json!({
             "item_ref": item_ref,
-            "ref_bindings": ref_bindings,
+            "ref_bindings": {},
             "project_path": project_path,
             "parameters": params,
             "execution_policy": if project_path.is_some() {

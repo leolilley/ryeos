@@ -629,6 +629,74 @@ async fn execute_launch_admits_directive_ref() {
     assert_completed(&thread, &thread_id);
 }
 
+/// A directive root with no `model` binding binds `model` to its own canonical
+/// ref through the directive runtime's signed `caller_or_primary_ref` source.
+/// Validation shows the defaulted binding; launch then completes without one.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_launch_directive_without_model_binding_models_itself() {
+    let mock = MockProvider::start(vec![MockResponse::Text("hello".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-execute-launch-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/launch", &fixture.publisher).expect("plant directive");
+
+    let (status, preview) = h
+        .post_json(
+            "/execute",
+            json!({
+                "item_ref": "directive:test/launch",
+                "ref_bindings": {},
+                "project_path": project.path().to_str().unwrap(),
+                "parameters": {},
+                "validate_only": true,
+                "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                ),
+            }),
+        )
+        .await
+        .expect("post validate-only directive without ref bindings");
+    assert_eq!(status, reqwest::StatusCode::OK, "preview={preview:#}");
+    assert_eq!(
+        preview.pointer("/runtime_preparation/binding_records/model/canonical_ref"),
+        Some(&json!("directive:test/launch")),
+        "an unbound directive must model itself; preview={preview:#}"
+    );
+
+    let (status, body) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "directive:test/launch",
+                "launch_id": TEST_LAUNCH_ID,
+                "ref_bindings": {},
+                "project_path": project.path().to_str().unwrap(),
+                "parameters": {},
+                "execution_policy": accepted_policy(true)
+            }),
+        )
+        .await
+        .expect("post /execute/launch directive without ref bindings");
+
+    let thread_id = unwrap_accepted(status, &body);
+    let thread = wait_for_terminal_thread(&h, &thread_id).await;
+    assert_completed(&thread, &thread_id);
+}
+
 /// Knowledge is method-dispatched. This proves the method-dispatch path
 /// honors the pre-minted thread id — the returned id is the id created, not a
 /// phantom.

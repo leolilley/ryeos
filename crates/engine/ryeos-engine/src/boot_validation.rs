@@ -610,6 +610,9 @@ fn launch_preparer_validation_request(
                         crate::runtime_registry::RefBindingSource::Caller => {
                             ryeos_handler_protocol::RefBindingSourceWire::Caller
                         }
+                        crate::runtime_registry::RefBindingSource::CallerOrPrimaryRef => {
+                            ryeos_handler_protocol::RefBindingSourceWire::CallerOrPrimaryRef
+                        }
                         crate::runtime_registry::RefBindingSource::PrimaryField { path } => {
                             ryeos_handler_protocol::RefBindingSourceWire::PrimaryField {
                                 path: path.clone(),

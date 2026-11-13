@@ -199,14 +199,9 @@ async fn post_execute_with_extras(
     extras: serde_json::Value,
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let project_path = (project_path != ".").then_some(project_path);
-    let ref_bindings = if item_ref.starts_with("directive:") {
-        serde_json::json!({ "model": item_ref })
-    } else {
-        serde_json::json!({})
-    };
     let mut body = serde_json::json!({
         "item_ref": item_ref,
-        "ref_bindings": ref_bindings,
+        "ref_bindings": {},
         "project_path": project_path,
         "parameters": parameters,
         "execution_policy": if project_path.is_some() {

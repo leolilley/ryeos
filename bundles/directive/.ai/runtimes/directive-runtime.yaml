@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-31T02:06:51Z:9dc1acf999f62cf9825da41d5dc95416dabd6548c3b4e9a54ccd3ad67f666b90:kWevfv1QKdj6G1gkT60gjKK3EB7dEXE3A0nAkACMUho5W2bWEKRU0GK9udYqSOZgnUrmGoOKgyeKoQVji8xmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:33:45Z:9155821001e62c0ba7684e2643083494eeba8478a73129b485150228cec727ea:/Fj7XnFl2EYRzpxD2DmcaIIOX+Av5/QSeY5MSll3wpXEKXvXCNR6ECoxHHTkQ3dVFNpiwpX8yRdY5JVBili/AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -20,8 +20,9 @@ launch_contract:
     model:
       required: true
       project_result_requirement: none
+      # An explicit caller binding wins; otherwise the directive models itself.
       source:
-        kind: caller
+        kind: caller_or_primary_ref
       allowed_kinds:
         - directive
       allowed_spaces:
