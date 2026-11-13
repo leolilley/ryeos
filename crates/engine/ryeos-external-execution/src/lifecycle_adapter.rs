@@ -48,6 +48,9 @@ pub enum LifecycleAdapterInvocation {
     ObserveSnapshotReadiness,
     QualifySnapshotCreate,
     QualifySnapshotVerify,
+    /// Read-only observation of a restored qualification occurrence before
+    /// its one verifier attempt is claimed.
+    QualifySnapshotObserve,
     QualifySnapshotTerminate,
     ObserveSnapshotTermination,
 }
@@ -89,6 +92,7 @@ impl LifecycleAdapterInvocation {
             Self::ObserveSnapshotReadiness => "observe-snapshot-readiness",
             Self::QualifySnapshotCreate => "qualify-snapshot-create",
             Self::QualifySnapshotVerify => "qualify-snapshot-verify",
+            Self::QualifySnapshotObserve => "qualify-snapshot-observe",
             Self::QualifySnapshotTerminate => "qualify-snapshot-terminate",
             Self::ObserveSnapshotTermination => "observe-snapshot-termination",
         }
@@ -101,6 +105,7 @@ impl LifecycleAdapterInvocation {
                 | Self::ProduceSnapshotUpload
                 | Self::ProduceSnapshotCreate
                 | Self::RelayFile
+                | Self::QualifySnapshotObserve
                 | Self::AdmitLease
                 | Self::AwaitLeaseReady
         )

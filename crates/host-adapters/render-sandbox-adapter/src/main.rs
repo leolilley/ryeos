@@ -434,6 +434,9 @@ fn run() -> Result<()> {
             snapshot_qualification::create_restored_sandbox(&adapter)
         }
         Some("qualify-snapshot-verify") => snapshot_qualification::run_restored_verifier(&adapter),
+        Some("qualify-snapshot-observe") => {
+            snapshot_qualification::observe_restored_sandbox(&adapter)
+        }
         Some("qualify-snapshot-terminate") => {
             snapshot_qualification::terminate_restored_sandbox(&adapter, true)
         }

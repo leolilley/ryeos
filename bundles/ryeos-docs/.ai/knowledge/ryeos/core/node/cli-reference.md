@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:13:17Z:6f0841c71113bcca00da685f8c30ee411244b16129e1680928d8253752f6162c:NyNZyVUXajmzc6bNHAoNleC3GKqZz6CEq7CdL2+BiOLKPto4w/yISxons1FtxFtdkD90ir/vCYdNGkSbOuZyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:14:30Z:614e78033d90a83a682a201d9314d56bce65c1fc0f2115ee928e19ceae9ce3c5:a74egAXH0+dGtkAEETrSAjvYsjy7+AEswXSarjMdK+FVlmAW+RWT/4fNapCsplsBu3ILp8aJKWLTlOM3B14sDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -495,6 +495,41 @@ supplies only the secret, from stdin or an inherited sealed memfd
 no-op and a different secret for an existing generation is refused; a new
 secret needs a newly composed binding. Reports never carry the secret or the
 physical vault key.
+
+### `ryeos external-content runtime-snapshot-run`
+
+```bash
+ryeos external-content runtime-snapshot-run '{"production_binding":"render-snapshot","qualification_binding":"render-snapshot-qualification","source":{"kind":"captured_product","witness_hash":"<witness>","witness_source":{"kind":"local_capture"}},"maximum_lifetime_seconds":600}'
+```
+
+Produces and qualifies one runtime snapshot on a running node through the
+node's own services, in order: `bootstrap-runtime-source` (the node creates the
+source sandbox, for a captured product or a bundle materialization),
+`observe-bootstrap-runtime-source` until it runs, `produce-runtime-snapshot`
+joined to that bootstrap operation, `observe-runtime-snapshot-readiness`,
+`terminate-bootstrap-runtime-source`, `create-runtime-snapshot-qualification`,
+`observe-runtime-snapshot-qualification` until the restored occurrence runs,
+`verify-runtime-snapshot-qualification`, and
+`terminate-runtime-snapshot-qualification` unless `keep_occurrence` is true
+(the report then gives the occurrence's deadline from the qualification
+binding's `maximum_lifetime_seconds` and the terminate verb).
+
+Before any provider contact it refuses if `ryeos node doctor`'s binding check
+fails either named binding. It keeps no state file: every step's operation id
+derives from its coordinates, so rerunning the same input reads the node's
+journals and continues. A step the node has not settled (an attempt pending,
+quarantined, late or rejected) stops the run with `stopped` naming the step,
+its phase and the read verb for its record; the run never repeats provider
+contact. The provider credential is only the production binding's, in the node
+vault.
+
+`verify-runtime-snapshot-qualification` observes the restored occurrence first
+and refuses with HTTP 409 `occurrence_not_running` (status `creating`,
+`terminated`, `absent`, ...) before claiming its one verifier attempt, so a
+verify against a sandbox the provider is still creating no longer spends it.
+`produce-runtime-snapshot` still accepts a captured product with an
+operator-named `source_occurrence_id` instead of a `bootstrap_operation_id`
+until the external snapshot driver is retired.
 
 ## Other local operator verbs
 

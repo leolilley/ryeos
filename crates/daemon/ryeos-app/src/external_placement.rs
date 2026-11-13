@@ -294,6 +294,18 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
         bail!("external placement backend cannot terminate a qualification occurrence")
     }
+    /// Read-only: observe the exact restored occurrence before its one
+    /// verifier attempt is claimed.
+    fn observe_snapshot_qualification_occurrence(
+        &self,
+        _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        _qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        _credential: &PlacementCredential,
+        _request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>>{
+        bail!("external placement backend cannot observe a qualification occurrence")
+    }
     fn seal_restoration_verifier_upload(
         &self,
         _producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
@@ -1525,6 +1537,27 @@ impl ExternalPlacementBackendRegistry {
             credential,
             request,
             first_contact,
+            deadline,
+        )
+    }
+
+    pub(crate) fn observe_snapshot_qualification_occurrence(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessRequest,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationReadinessAdapterResponse>>{
+        let backend = self.producer_generation(
+            producer,
+            "exact signed qualification observation adapter generation is not installed",
+        )?;
+        backend.observe_snapshot_qualification_occurrence(
+            producer,
+            qualification,
+            credential,
+            request,
             deadline,
         )
     }

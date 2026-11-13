@@ -550,6 +550,16 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(Some)
         }
+        "runtime_snapshot_run" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "external-content-runtime-snapshot-run.yaml",
+            )?;
+            crate::runtime_snapshot_run::run(app_root, snapshot, &parameters)
+                .await
+                .map(Some)
+        }
         other => Err(CliError::Local {
             detail: format!("unknown verified local client handler `{other}`"),
         }),
@@ -1186,6 +1196,31 @@ fn process_creation_busy_wait(
             PROCESS_CREATION_BUSY_MAX_WAIT,
         );
     (wait < remaining).then_some(wait)
+}
+
+/// Execute one node service on the running daemon over the buffered
+/// `/execute` route, returning its authored result.
+pub(crate) async fn execute_service(
+    app_root: &std::path::Path,
+    item_ref: &str,
+    parameters: Value,
+) -> Result<Value, CliError> {
+    let body = serde_json::json!({
+        "item_ref": item_ref,
+        "ref_bindings": {},
+        "product_selections": [],
+        "parameters": parameters,
+        "parameter_encoding": "command",
+        "validate_only": false,
+        "execution_policy": execution_policy_value_with_snapshot(
+            false, false, false, false, None, false, false,
+        ),
+    });
+    let payload = post_to_daemon(app_root, "/execute", &body, |_| Ok(())).await?;
+    if let Some(detail) = crate::tty::structured_result_failure(&payload) {
+        return Err(CliError::Reported { detail });
+    }
+    Ok(payload.get("result").cloned().unwrap_or(payload))
 }
 
 /// POST a JSON body to a daemon execute route and return the response.

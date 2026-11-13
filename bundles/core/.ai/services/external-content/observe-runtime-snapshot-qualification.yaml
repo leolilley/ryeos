@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-13T09:59:46Z:c3d754955ca977fbe5d4a2d7271887a2acced871ccc5f15ea6612bddc0abbb78:0JoPvObS4+yh2CPJ0FAxcX170KsDQ5coJlCkQvVKsMqD66K//NldzERkE7N5P9aWVsdpE6vyyMAmUyAlPgs3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.observe-runtime-snapshot-qualification
+required_caps: ["ryeos.execute.service.external-content/observe-runtime-snapshot-qualification"]
+schema:
+  qualification_operation_id: string
+description: Observe through one bounded read-only provider request whether the exact restored qualification Sandbox is running; claims no verifier attempt

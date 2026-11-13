@@ -1,0 +1,14 @@
+# ryeos:signed:2026-11-13T10:02:20Z:3e6baf1924a4826403895bf4917a058d3a3c3cfbaf32b4a7db067de8000beeeb:vFq7Ehj0yz0PLg7MM/+Ccmqf3ux89p4pVfzS4TU6NRHummUYV3WRm8w3DusXHQ1P05aDErmdDVwXH1ykXZU+DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, runtime-snapshot-run]
+description: "Produce and qualify one runtime snapshot through the node's own services: bootstrap source, produce, snapshot readiness, source termination, restored occurrence, readiness, verify, occurrence termination. No state file: a rerun reads the node's journals and continues; an unsettled step stops the run and names its read verb"
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
+help:
+  usage: "ryeos external-content runtime-snapshot-run '{\"production_binding\":\"render-snapshot\",\"qualification_binding\":\"render-snapshot-qualification\",\"source\":{\"kind\":\"captured_product\",\"witness_hash\":\"<exact-witness>\",\"witness_source\":{\"kind\":\"local_capture\"}},\"maximum_lifetime_seconds\":600,\"keep_occurrence\":false}'"
+dispatch:
+  kind: local_handler
+  handler: runtime_snapshot_run
+  bootstrap: false
