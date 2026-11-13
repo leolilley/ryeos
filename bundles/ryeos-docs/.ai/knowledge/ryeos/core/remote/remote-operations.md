@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:cd58cad10ad98f108ccfd5f870d8ac824e620b2b16f3c8b78933fb5cb580bf4a:6IulmcnH5s0eSo61nt4zC3O9vaDObhPoIT/QksHe+PgpfYpq6gRNF7+i8cJsaDeDhKYiziMH0uZVcQKhlef9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:33:26Z:7a06ef1a4e62ad8e487f431046719d85717cdd34eeaf448c44925d5399d8079b:qYxaEh8KVX1oIkmmsI/xgiYFt/xU/gaOc3fEK7buzHTCr27DoEt4HEqZnGfbahNw9EnGx/LsLwAeOcDsVaZvCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -334,7 +334,7 @@ offline operations, which the controller's signed profile delegates
 
 | Operation | Input | Effect |
 |---|---|---|
-| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_principal` grant (public key, exact scopes, label, origin site, `merge_scopes`). Never an offline-operation scope or a wildcard. |
+| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_principal` grant (public key, exact scopes, label, origin site, `merge_scopes`, optional `lifetime_secs`). Never an offline-operation scope or a wildcard. The grant ends: `lifetime_secs` (default the class maximum of the controller's signed `authorization` policy) above that maximum fails with `grant_lifetime_exceeds_policy`. Its `authorized_by` is the request's signer and the request digest. The configured operator's fingerprint is refused with `grant_is_operator`. |
 | `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its descriptor, as `ryeos remote pin`. |
 | `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
 

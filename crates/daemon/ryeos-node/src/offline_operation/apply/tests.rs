@@ -1604,9 +1604,107 @@ fn grant_arguments(key: &SigningKey, scopes: &[&str], class: &str, merge: bool) 
     })
 }
 
+/// The signed `authorization` policy member a grant operation reads: the
+/// shipped standard lifetimes, signed by the node.
+fn plant_authorization_policy(fx: &Fixture) {
+    let directory = ryeos_node_runtime::node_policy::generation::policy_directory(fx.path());
+    std::fs::create_dir_all(&directory).unwrap();
+    let body = "schema: 1\nmax_lifetime_secs:\n  local_client: 31536000\n  remote_node: 7776000\n  \
+                remote_principal: 2592000\nwarn_before_secs: 1209600\n";
+    std::fs::write(
+        directory.join("authorization.yaml"),
+        lillux::signature::sign_content(body, fx.node.signing_key(), "#", None),
+    )
+    .unwrap();
+}
+
 fn apply_grant(fx: &Fixture, arguments: Value) -> ApplyReport {
+    plant_authorization_policy(fx);
     fx.drop_request(&fx.sign(fx.body("node.authorize-client", arguments)));
     fx.run()
+}
+
+fn grant_failed(report: &ApplyReport) -> bool {
+    report.applied.is_empty() && matches!(report.stopped, Some(StopReason::HandlerFailed { .. }))
+}
+
+#[test]
+fn authorize_client_operation_bounds_the_lifetime_and_records_who_asked() {
+    let fx = fixture();
+    let peer = lillux::crypto::generate_signing_key();
+    let scopes = ["ryeos.execute.service.external-content/product-offer"];
+    let request = fx.sign(fx.body(
+        "node.authorize-client",
+        grant_arguments(&peer, &scopes, "remote_principal", false),
+    ));
+    let digest = request.digest().unwrap();
+    plant_authorization_policy(&fx);
+    fx.drop_request(&request);
+    let before = lillux::time::unix_secs_now();
+    let report = fx.run();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.refused);
+    let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
+        &fingerprint(&peer),
+        &authorized_keys_dir(fx.path()),
+        &fx.node,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        grant.principal_class,
+        ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal
+    );
+    let ryeos_node_runtime::identity::GrantExpiry::At(expires) = grant.expires_at else {
+        panic!("a delegated grant must end");
+    };
+    assert!(expires >= before + 2_592_000 && expires <= before + 2_592_000 + 60);
+    assert_eq!(
+        grant.authorized_by.principal,
+        format!("fp:{}", fingerprint(&fx.operator))
+    );
+    assert_eq!(
+        grant.authorized_by.request_digest.as_deref(),
+        Some(digest.as_str())
+    );
+}
+
+#[test]
+fn authorize_client_operation_refuses_a_lifetime_above_the_class_maximum() {
+    let fx = fixture();
+    let peer = lillux::crypto::generate_signing_key();
+    let mut arguments = grant_arguments(
+        &peer,
+        &["ryeos.execute.service.objects/get"],
+        "remote_principal",
+        false,
+    );
+    arguments["lifetime_secs"] = json!(2_592_000 + 1);
+    let report = apply_grant(&fx, arguments);
+    assert!(grant_failed(&report), "{:?}", report.stopped);
+    assert!(
+        ryeos_node_runtime::identity::load_verified_authorized_key(
+            &fingerprint(&peer),
+            &authorized_keys_dir(fx.path()),
+            &fx.node,
+        )
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[test]
+fn authorize_client_operation_refuses_the_operator_fingerprint() {
+    let fx = fixture();
+    let report = apply_grant(
+        &fx,
+        grant_arguments(
+            &fx.operator,
+            &["ryeos.execute.service.objects/get"],
+            "remote_principal",
+            false,
+        ),
+    );
+    assert!(grant_failed(&report), "{:?}", report.stopped);
 }
 
 #[test]

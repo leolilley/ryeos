@@ -344,6 +344,10 @@ pub struct AuthorizeClientArguments {
     /// stopped while the operation applies, which that change requires.
     #[serde(default)]
     pub allow_semantic_conversion: bool,
+    /// Requested grant lifetime in seconds. Absent: the class maximum of the
+    /// node's signed authorization policy. Above that maximum: refused.
+    #[serde(default)]
+    pub lifetime_secs: Option<u64>,
 }
 
 impl AuthorizeClientArguments {
@@ -1037,6 +1041,45 @@ pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
     arguments.validate()?;
     let public_key = arguments.verifying_key()?;
     let fingerprint = lillux::crypto::fingerprint(&public_key);
+    // The configured operator's grant never lapses and is managed by init and
+    // the authorization reset; a delegated grant must not rewrite it.
+    let operator = NodeIdentity::load(
+        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
+    )
+    .context("load operator identity to guard the operator grant")?;
+    ensure!(
+        fingerprint != operator.fingerprint(),
+        "grant_is_operator: the configured operator's grant is managed by `ryeos init` and \
+         `ryeos node reset authorization`; it cannot be written through node.authorize-client"
+    );
+    let class = match arguments.class {
+        GrantClass::RemoteNode => {
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode
+        }
+        GrantClass::RemotePrincipal => {
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal
+        }
+    };
+    // The grant's lifetime is bounded by the node's signed policy; the
+    // request's signer and digest are the evidence of who asked.
+    let policy =
+        ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy::load_offline(
+            ctx.app_root,
+            ctx.node,
+        )?;
+    let terms = ryeos_node_runtime::identity::GrantTerms {
+        expires_at: policy
+            .expiry_for(
+                class,
+                arguments.lifetime_secs,
+                lillux::time::unix_secs_now(),
+            )
+            .map_err(|error| anyhow::anyhow!("{}: {error}", error.code()))?,
+        authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+            &ctx.request.signer_fingerprint,
+            Some(ctx.request_digest.to_owned()),
+        ),
+    };
     let subject = match arguments.class {
         GrantClass::RemoteNode => ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode {
             origin_site_id: &arguments.origin_site_id,
@@ -1059,6 +1102,7 @@ pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
             &arguments.label,
             &ctx.command_label(),
             &lillux::time::iso8601_now(),
+            &terms,
             ctx.node,
             ryeos_node_runtime::identity::WildcardPolicy::Reject,
             arguments.merge_scopes,
@@ -1077,6 +1121,7 @@ pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
         "previous_origin_site_id": transition.previous_origin_site_id,
         "dropped_scopes": dropped_scopes,
         "merged": arguments.merge_scopes,
+        "expires_at": terms.expires_at.to_grant_text(),
     }))
 }
 

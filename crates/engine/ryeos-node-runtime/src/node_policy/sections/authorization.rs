@@ -78,6 +78,23 @@ impl NodeAuthorizationPolicy {
         Ok(())
     }
 
+    /// Read and verify the `authorization` member of a stopped node's signed
+    /// policy generation.
+    pub fn load_offline(
+        app_root: &std::path::Path,
+        node: &crate::identity::NodeIdentity,
+    ) -> anyhow::Result<Self> {
+        let body = crate::node_policy::generation::load_signed_policy_member(
+            app_root,
+            node,
+            SECTION_NAME,
+        )?;
+        let record: Self =
+            serde_json::from_value(body).context("parse node authorization policy")?;
+        record.validate()?;
+        Ok(record)
+    }
+
     /// The longest lifetime this policy allows a grant of `class`.
     pub fn max_lifetime_secs(&self, class: AuthorizedKeyPrincipalClass) -> u64 {
         match class {
