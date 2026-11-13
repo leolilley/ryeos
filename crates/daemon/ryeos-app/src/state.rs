@@ -364,6 +364,26 @@ pub mod test_support {
     use crate::state_store::BundleAdmissionTrust;
     use crate::state_store::test_native::TestStateStore;
 
+    /// The live platform and dev publisher signers plus `extra`, as one
+    /// in-memory trust store.
+    pub fn live_trust_store_with(
+        extra: Vec<ryeos_engine::trust::TrustedSigner>,
+    ) -> ryeos_engine::trust::TrustStore {
+        let mut signers = Vec::new();
+        for verifying_key in [
+            ryeos_engine::test_support::platform_author_verifying_key(),
+            ryeos_engine::test_support::dev_publisher_verifying_key(),
+        ] {
+            signers.push(ryeos_engine::trust::TrustedSigner {
+                fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+                verifying_key,
+                label: Some("test-support live signer".into()),
+            });
+        }
+        signers.extend(extra);
+        ryeos_engine::trust::TrustStore::from_signers(signers)
+    }
+
     pub fn build(root: &std::path::Path) -> Result<(TestStateStore, AppState)> {
         build_with_bundle_admission(root, |_| BundleAdmissionTrust::unbound())
     }
@@ -383,14 +403,13 @@ pub mod test_support {
         publisher: Option<ryeos_engine::trust::TrustedSigner>,
     ) -> Result<(TestStateStore, AppState)> {
         build_with_bundle_admission(root, |identity| {
-            let mut node_trust = ryeos_engine::test_support::live_trust_store();
             let mut signers = vec![ryeos_engine::trust::TrustedSigner {
                 fingerprint: identity.fingerprint().to_owned(),
                 verifying_key: *identity.verifying_key(),
                 label: Some("test node identity".into()),
             }];
             signers.extend(publisher);
-            node_trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(signers));
+            let node_trust = live_trust_store_with(signers);
             BundleAdmissionTrust::bound(node_trust)
         })
     }

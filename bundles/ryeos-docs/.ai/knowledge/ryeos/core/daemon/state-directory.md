@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-04T09:32:59Z:db2b1e518949450286f85023de6066eca2637c473d61d8f5771cf2e15ea5760f:LOk/Je7XrYs8BLCA/t4b19gY6KkOauHPpw3BGJpU8Pyqh4Z9ZbwUpaCQVqvakTV1u26bA10ZHXqutOr+VZBRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T11:09:13Z:77e788b82d785217fdb43aecc3f6c622ffda1ed15871cf023faf81511a9e0c33:kT5vzkgodc/IRRn9knQtTfhw43hEeygncve9JylWFQ1bULK5cN3WdZe4vu7hGqvg3jMcdanqhpBEACQg2F5EBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -18,9 +18,18 @@ working directories.
 
 Operator artifacts owned by `ryeos init`:
 
-- `<system>/.ai/config/keys/signing/private_key.pem` — operator/CLI key.
-- `<system>/.ai/config/keys/trusted/<fp>.toml` — publisher, operator, and
-  node trust docs.
+- `<system>/.ai/node/operator/signing/private_key.pem` — operator/CLI key.
+- `<system>/.ai/node/trust/signers/<fp>.yaml` — node-signed signer
+  records (publisher, operator, project author).
+- `<system>/.ai/node/trust/events/` — node-signed hash-chained key events.
+- `<system>/.ai/node/operator/genesis.json` — operator-signed genesis record.
+
+Operator artifacts owned by `ryeos remote configure`:
+
+- `<system>/.ai/node/remotes/<name>.yaml` — one node-signed pin record per
+  remote (schema `ryeos/remote-pin/v1`): the remote's pinned node key, URL,
+  site and vault identity, ingest-ignore rules, project bindings, how the key
+  was pinned and when. Only the configured local operator can write one.
 
 System-space artifacts installed or registered by `ryeos init`:
 
@@ -39,7 +48,7 @@ Daemon-local artifacts `ryeosd` may repair after init verification:
 - `<system>/.ai/node/auth/authorized_keys/<user-fp>.toml`
 - daemon-local layout directories
 
-The daemon must not write user trust docs or regenerate the node key.
+The daemon must not write signer records or regenerate the node key.
 
 ## Major directories
 

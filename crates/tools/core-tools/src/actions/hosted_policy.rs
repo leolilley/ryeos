@@ -29,11 +29,8 @@ impl std::ops::Deref for LoadedHostedNodePolicy {
 
 /// Load the required hosted-node policy for `app_root`.
 pub fn load_hosted_policy(app_root: &Path) -> Result<LoadedHostedNodePolicy> {
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .context("hosted policy: load trust store")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("hosted policy: load trust store")?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,
         &trust_store,
@@ -54,11 +51,8 @@ pub fn load_hosted_policy(app_root: &Path) -> Result<LoadedHostedNodePolicy> {
 pub fn load_authorization_policy(
     app_root: &Path,
 ) -> Result<ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy> {
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .context("authorization policy: load trust store")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("authorization policy: load trust store")?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,
         &trust_store,
@@ -144,17 +138,18 @@ allow_loopback_http: true
     }
 
     fn write_node_bootstrap(app_root: &Path, key: &lillux::crypto::SigningKey) {
-        let trust_dir = app_root.join(".ai/config/keys/trusted");
-        std::fs::create_dir_all(&trust_dir).unwrap();
-        ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-
         let identity_dir = app_root.join(".ai/node/identity");
         std::fs::create_dir_all(&identity_dir).unwrap();
+        let identity_path = identity_dir.join("private_key.pem");
         std::fs::write(
-            identity_dir.join("private_key.pem"),
+            &identity_path,
             key.to_pkcs8_pem(Default::default()).unwrap().as_bytes(),
         )
         .unwrap();
+        ryeos_node_runtime::identity::NodeIdentity::load(&identity_path)
+            .unwrap()
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(app_root))
+            .unwrap();
 
         write_required_non_hosted_test_policies(app_root, key);
     }

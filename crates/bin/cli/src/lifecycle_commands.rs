@@ -52,7 +52,7 @@
 //! (see `offline_dispatch.rs`) or forwarded to the daemon.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -230,6 +230,31 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "host-access", "list"],
         summary: "List host_access grants and whether they match a project",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "pin"],
+        summary: "Pin a signer key from a PUBLISHER_TRUST.toml on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "scope"],
+        summary: "Narrow or widen a pinned signer's scope on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "retire"],
+        summary: "Retire a pinned signer on a stopped node; it still verifies existing items",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "revoke"],
+        summary: "Revoke a pinned signer on a stopped node; it verifies nothing",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "succeed"],
+        summary: "Replace a pinned signer by the key a signed succession statement names",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -431,6 +456,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
             run_node_policy_generation_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
+            crate::lifecycle_trust::run(verb, &argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("policy-apply")) => {
@@ -2673,6 +2702,34 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Operator key material left at an old location: init refuses it and
+    // nothing reads it, so the node cannot be initialized until it is moved.
+    match ryeos_node::operator_layout::check_operator_layout(&config.app_root) {
+        Ok(()) => checks.push(check("operator_key", OK, serde_json::json!({}))),
+        Err(error) => checks.push(check(
+            "operator_key",
+            FAIL,
+            serde_json::json!({
+                "code": error.code(),
+                "error": error.to_string(),
+                "fix": error.cure(),
+            }),
+        )),
+    }
+
+    // Remote pins: node-signed records under `.ai/node/remotes`. An unsigned
+    // or edited record, or a leftover unsigned config file, is a failure with
+    // the cure named.
+    if initialized {
+        checks.push(remote_pins_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "remote_pins",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // The wall clock the node issues external execution windows from. Always
     // reported; a node policy that requires a synchronized clock turns an
     // unsatisfied reading into a failure.
@@ -3469,7 +3526,7 @@ fn inspect_schedule_grant_generations(
 ) -> anyhow::Result<Vec<ryeos_scheduler_service::SupersededScheduleGrant>> {
     let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
     let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .map_err(|error| anyhow::anyhow!("load trust store: {error}"))?;
     ryeos_scheduler_service::superseded_schedule_grants(
         app_root,
@@ -3558,10 +3615,7 @@ fn inspect_host_access(app_root: &std::path::Path) -> Result<HostAccessInspectio
     let lane = snapshot
         .require::<ryeos_engine::isolation::IsolationPolicy>()?
         .clone();
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
     let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
     Ok((policy, lane, trust_store, node_key))
 }
@@ -4291,6 +4345,61 @@ fn host_services_check(
             "fix": "run: ryeos node host retire --orphaned --confirm",
         }),
     )
+}
+
+/// The `remote_pins` doctor row.
+fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match ryeos_api::remote::config::load_remotes_report(app_root) {
+        Ok(report) if report.invalid.is_empty() => {
+            let mut remotes: Vec<serde_json::Value> = report
+                .remotes
+                .values()
+                .map(|loaded| {
+                    serde_json::json!({
+                        "name": loaded.config.name,
+                        "pin_source": loaded.pin_source.as_str(),
+                        "signature": "verified",
+                    })
+                })
+                .collect();
+            remotes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            check("remote_pins", OK, serde_json::json!({ "remotes": remotes }))
+        }
+        Ok(report) => {
+            let mut invalid: Vec<serde_json::Value> = report
+                .invalid
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "name": entry.name,
+                        "code": entry.code,
+                        "path": entry.config_path,
+                        "error": entry.error,
+                        "fix": entry.repair_hint,
+                    })
+                })
+                .collect();
+            invalid.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            check(
+                "remote_pins",
+                FAIL,
+                serde_json::json!({ "invalid_remotes": invalid }),
+            )
+        }
+        Err(error) => {
+            let (code, fix) =
+                match error.downcast_ref::<ryeos_api::remote::config::RemotePinError>() {
+                    Some(typed) => (Some(typed.code()), typed.to_string()),
+                    None => (None, format!("{error:#}")),
+                };
+            check(
+                "remote_pins",
+                FAIL,
+                serde_json::json!({ "code": code, "error": format!("{error:#}"), "fix": fix }),
+            )
+        }
+    }
 }
 
 fn check(

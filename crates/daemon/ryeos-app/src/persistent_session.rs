@@ -7828,7 +7828,6 @@ while True:
             isolation_daemon_socket_path: None,
             isolation_captured_callback_socket: false,
             isolation_bundle_roots: Vec::new(),
-            isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
             isolation_external_read_only_mounts: Vec::new(),

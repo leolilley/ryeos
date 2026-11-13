@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:52Z:f71aabc7b3facd107f8cf90a29432d0650792b5f184de26d60bc713d9dc0c0a0:hDMdlc7q8ee6GKmbzYhFjuUgqrINTsx0QSlLQ1rdnYFLe2MIDGkThhJ5LJsHiha6J4PXDeGBhoTUuVPFDZbDAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T18:15:39Z:e66281f3a9bee08abc4fc018229f414f5e570b9b771142b0f30889cd971d5a11:6yA/FpyHnMATIKjbtwIsNyqXK8tskC7DrFyTCRNdPXr6v/B5nDrzAnYOLzgEmqm0qN6MmWLw9sfqlYo5B+g0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -309,7 +309,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -383,7 +382,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"

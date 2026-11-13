@@ -277,6 +277,9 @@ fn build_items_list(
                     .spec_for(&resolution.matched_ext)
                     .map(|spec| &spec.signature),
                 &state.engine.trust_store,
+                resolution.winner_space,
+                kind_name,
+                project_path.map(PathBuf::as_path),
             );
 
             // Shadowed candidates
@@ -396,6 +399,9 @@ fn build_item_inspect(
             .spec_for(&resolution.matched_ext)
             .map(|spec| &spec.signature),
         &state.engine.trust_store,
+        resolution.winner_space,
+        &item_ref.kind,
+        project_path.map(PathBuf::as_path),
     );
 
     // Shadowed
@@ -419,6 +425,7 @@ fn build_item_inspect(
     // Effective content
     let effective = if req.include_effective {
         let effective_req = ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: item_ref.clone(),
             expected_kind: None,
             project_root: project_path.cloned(),

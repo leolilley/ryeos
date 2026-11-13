@@ -89,6 +89,13 @@ fn build_test_state_at(
         ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
             .unwrap();
     }
+    // Node-signed records (remote pins, registry records) verify against the
+    // node public identity document.
+    if create_identity {
+        identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(root))
+            .unwrap();
+    }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));

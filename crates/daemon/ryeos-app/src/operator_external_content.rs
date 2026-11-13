@@ -1819,6 +1819,7 @@ fn resolve_installed_external_content_consumer(
         state
             .engine
             .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: canonical,
                 expected_kind: None,
                 project_root: None,

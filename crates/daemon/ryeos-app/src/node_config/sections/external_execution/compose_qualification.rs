@@ -496,8 +496,14 @@ pub(crate) fn read_installed_policy_facts(
     };
     let header = ryeos_engine::item_resolution::parse_signature_header(signed, &envelope)
         .context("qualification policy has no valid signature line")?;
-    let (class, _) = ryeos_engine::trust::verify_item_signature(signed, &header, &envelope, trust)
-        .context("verify qualification policy signature")?;
+    let (class, _) = ryeos_engine::trust::verify_item_signature(
+        signed,
+        &header,
+        &envelope,
+        trust,
+        &ryeos_engine::trust::SignerContext::bundle("config"),
+    )
+    .context("verify qualification policy signature")?;
     ensure!(
         class == ryeos_engine::contracts::TrustClass::Trusted,
         "qualification policy signature is not trusted"

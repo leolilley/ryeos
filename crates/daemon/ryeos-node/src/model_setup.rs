@@ -41,10 +41,8 @@ pub fn persist_default_model_route(
         .join("config")
         .join("ryeos-runtime")
         .join("model_routing.yaml");
-    let key_path = options
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
+    let key_path =
+        ryeos_engine::roots::RuntimeRoot::new(options.app_root.clone()).operator_signing_key_path();
     let key_metadata = fs::symlink_metadata(&key_path)
         .with_context(|| format!("inspect operator key {}", key_path.display()))?;
     if key_metadata.file_type().is_symlink() || !key_metadata.is_file() {
@@ -178,7 +176,7 @@ mod tests {
     fn app_root() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().expect("temporary app root");
         let root = temp.path().to_path_buf();
-        let key_path = root.join(".ai/config/keys/signing/private_key.pem");
+        let key_path = root.join(".ai/node/operator/signing/private_key.pem");
         fs::create_dir_all(key_path.parent().expect("key parent")).expect("key directory");
         let key = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
         let pem = key.to_pkcs8_pem(Default::default()).expect("encode key");

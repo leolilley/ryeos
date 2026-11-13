@@ -116,15 +116,42 @@ impl RuntimeRoot {
         self.managed_external_content().join("staging")
     }
 
-    pub fn operator_signing_key_path(&self) -> PathBuf {
-        self.config()
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem")
+    /// Node-volume home of the local operator's key material
+    /// (`.ai/node/operator`).
+    pub fn operator_dir(&self) -> PathBuf {
+        self.node().join("operator")
     }
 
-    pub fn trusted_keys_dir(&self) -> PathBuf {
-        self.config().join("keys").join("trusted")
+    /// The local operator's signing key. This is the only owner of the path;
+    /// every reader and writer goes through it.
+    pub fn operator_signing_key_path(&self) -> PathBuf {
+        self.operator_dir().join("signing").join("private_key.pem")
+    }
+
+    /// The operator-signed genesis record created by `ryeos init`.
+    pub fn operator_genesis_path(&self) -> PathBuf {
+        self.operator_dir().join("genesis.json")
+    }
+
+    /// Node-signed remote pin records, one `<name>.yaml` per remote
+    /// (`.ai/node/remotes`).
+    pub fn remote_pins_dir(&self) -> PathBuf {
+        self.node().join("remotes")
+    }
+
+    /// Node-owned signer registry root (`.ai/node/trust`).
+    pub fn trust_dir(&self) -> PathBuf {
+        self.ai().join(crate::trust::NODE_TRUST_DIR)
+    }
+
+    /// Node-signed signer records, one `<fingerprint>.yaml` per signer.
+    pub fn trust_signers_dir(&self) -> PathBuf {
+        crate::trust::signers_dir(self.as_path())
+    }
+
+    /// Hash-chained, node-signed key events.
+    pub fn trust_events_dir(&self) -> PathBuf {
+        crate::trust::events_dir(self.as_path())
     }
 
     pub fn node_signing_key_path(&self) -> PathBuf {

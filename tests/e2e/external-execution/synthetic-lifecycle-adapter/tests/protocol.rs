@@ -182,9 +182,13 @@ fn changed_hosted_worker_bundles_pass_signed_source_preflight() {
     .unwrap();
     let public_fixture = trust_document.decode_verifying_key().unwrap();
     let config = tempfile::tempdir().unwrap();
-    let trusted = config.path().join("keys/trusted");
-    std::fs::create_dir_all(&trusted).unwrap();
-    ryeos_engine::trust::pin_key(&public_fixture, "development-publisher", &trusted, None).unwrap();
+    ryeos_engine::test_support::pin_signer(
+        config.path(),
+        &public_fixture,
+        "development-publisher",
+        ryeos_engine::trust::SignerRole::Publisher,
+        ryeos_engine::trust::SignerScope::publisher_default(),
+    );
     let dependencies = [
         repository.join("bundles/core"),
         repository.join("bundles/knowledge"),
@@ -215,14 +219,25 @@ fn live_bundle_engine(
     identity: &ryeos_node_runtime::identity::NodeIdentity,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> ryeos_engine::engine::Engine {
-    let mut trust = ryeos_engine::test_support::live_trust_store();
-    trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+    let platform_key = ryeos_engine::test_support::platform_author_verifying_key();
+    let publisher_key = ryeos_engine::test_support::dev_publisher_verifying_key();
+    let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+        ryeos_engine::trust::TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&platform_key),
+            verifying_key: platform_key,
+            label: Some("test-support: platform author".into()),
+        },
+        ryeos_engine::trust::TrustedSigner {
+            fingerprint: lillux::signature::compute_fingerprint(&publisher_key),
+            verifying_key: publisher_key,
+            label: Some("test-support: dev publisher".into()),
+        },
         ryeos_engine::trust::TrustedSigner {
             fingerprint: identity.fingerprint().to_owned(),
             verifying_key: *identity.verifying_key(),
             label: Some("external candidate E2E authoring bundle".into()),
         },
-    ]));
+    ]);
     let core = ryeos_engine::test_support::core_bundle_root();
     let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let mut kind_roots = vec![core.join(".ai/node/engine/kinds")];
@@ -748,6 +763,7 @@ fn publish_external_runtime_product_witness(
     let relationship_resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "config:fixtures/build_recipe",
             )
@@ -860,6 +876,7 @@ fn bind_external_runtimes_to_qualification_verifier(
     let mut resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: canonical,
             expected_kind: Some("tool".into()),
             project_root: None,
@@ -1074,6 +1091,7 @@ async fn prepare_external_worker_program_and_binding(
     let roots = engine.resolution_roots(Some(project_root.to_path_buf()));
     let mut resolution = engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                 "worker:test/external-candidate",
             )
@@ -1445,7 +1463,6 @@ fn run_signed_worker_admission_on(
                 .join("identity/public-identity.json"),
         )
         .unwrap();
-    std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
     let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
@@ -1774,6 +1791,7 @@ async fn try_execute_recorded_service(
         caller_scopes: scopes.clone(),
         engine: state.engine.clone(),
         plan_ctx: PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.to_owned(),
                 scopes: scopes.clone(),
@@ -1880,6 +1898,7 @@ fn dispatch_pinned_public_worker(
                 let scopes = vec!["*".to_owned()];
                 let site = state.threads.site_id().to_owned();
                 let plan_ctx = ryeos_engine::contracts::PlanContext {
+                    logical_project_root: None,
                     requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                         ryeos_engine::contracts::Principal {
                             fingerprint: principal.clone(),
@@ -3897,7 +3916,6 @@ async fn run_production_tls_candidate(
                 .join("identity/public-identity.json"),
         )
         .unwrap();
-    std::fs::create_dir_all(state.config.runtime_root().trusted_keys_dir()).unwrap();
     std::fs::create_dir_all(state.config.runtime_uds_path().parent().unwrap()).unwrap();
     let uds_listener = tokio::net::UnixListener::bind(state.config.runtime_uds_path()).unwrap();
     let (candidate_authoring_bundle, authored_profile) = write_candidate_authoring_bundle(
@@ -4222,6 +4240,7 @@ async fn run_production_tls_candidate(
         let scopes = vec!["*".to_owned()];
         let principal = format!("fp:{}", state.identity.fingerprint());
         let plan_ctx = ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: principal.clone(),

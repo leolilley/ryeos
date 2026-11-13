@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:57Z:a9300119335c7f99c17c778dd36312025636fc51ea3955654898cf6f4300c285:woloR/Wyvb95CEvnW3pFYJWx6nS2AdtLL8GWcDjQam5gWRAzJeiFXFQikmDeCLylYcml51zFyDO8kLX0N4CdDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:15:40Z:5e0ce828ed02d23ffba7136e4cf0367b30a1c75cef617523ece1bd5043499119:LfuiWM9ryDeQIjUmONbEHsd8igGMlVsMAXNXKqtuofEHEQKOJfLEykEvrbHD796UK1+aCLTBqNMPRzEN3KIgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -37,16 +37,18 @@ ryeOS has four distinct identity/trust layers:
 
 | Layer | Purpose | Storage | Created by |
 |---|---|---|---|
-| Publisher trust | Verify signed bundle items | `<user>/.ai/config/keys/trusted/<fp>.toml` | `ryeos init` / `ryeos trust pin` |
-| User (CLI) key | Sign local CLI HTTP requests | `<user>/.ai/config/keys/signing/private_key.pem` | `ryeos init` |
+| Signer registry | Verify signed items; node-signed signer records with role, scope and status | `<system>/.ai/node/trust/signers/<fp>.yaml` | `ryeos init` / `ryeos trust pin` |
+| User (CLI) key | Sign local CLI HTTP requests | `<user>/.ai/node/operator/signing/private_key.pem` | `ryeos init` |
 | Node (daemon) key | Sign outbound daemon requests and authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem` | `ryeos init` |
 | Vault X25519 | Seal/unseal vault secrets | `<system>/.ai/node/vault/private_key.pem` | `ryeos init`, repaired if missing after init |
 
 ## Publisher trust
 
 `ryeos init` pins the compiled official publisher key and any
-`--trust-file` entries. Additional publishers are pinned with
-`ryeos trust pin`. Official publisher rotation requires a coordinated
+`--trust-file` entries as signer records (role publisher, space bundle).
+Additional publishers are pinned on a stopped node with
+`ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher`. The node
+key is the implicit root and needs no record. Official publisher rotation requires a coordinated
 binary release because the public key bytes are compiled into
 `ryeos-node` and must hash to the compiled fingerprint.
 
@@ -54,14 +56,14 @@ binary release because the public key bytes are compiled into
 
 The user key is the operator identity for signing local daemon requests.
 The CLI resolves it from `RYEOS_CLI_KEY_PATH` when set, otherwise from
-`<user>/.ai/config/keys/signing/private_key.pem`. It must not fall back
+`<user>/.ai/node/operator/signing/private_key.pem`. It must not fall back
 to the node key.
 
 ## Node (daemon) key
 
 The node key normally signs outbound remote requests, signs authorized-key
-TOMLs, produces the node public identity document, and anchors the node
-self-trust doc. Daemon startup never auto-regenerates it, because doing so
+TOMLs, produces the node public identity document, and signs every signer record
+in the registry; it is the implicit trust root. Daemon startup never auto-regenerates it, because doing so
 would invalidate operator trust and remote authorizations.
 
 ### Who signs node state
@@ -99,8 +101,8 @@ CLI --[user key]--> local daemon --[node key]--> remote daemon
 Authorized-key TOMLs are node-signed local node config. Bootstrap/admin
 may grant wildcard `*`; normal remote delegation should enumerate scopes.
 Daemon startup may repair the local user's authorized-key entry after
-`ryeos init` has created the required keys and trust docs, but the daemon
-never writes user trust.
+`ryeos init` has created the required keys and signer records, but the daemon
+never writes signer records.
 
 ### Grant lifetime, provenance and renewal
 

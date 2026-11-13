@@ -135,19 +135,14 @@ async fn fast_fixture_boots_daemon_without_real_init() {
         .expect("GET /health");
     assert!(resp.status().is_success(), "GET /health: {}", resp.status());
 
-    // The deterministic publisher fingerprint must match what the
-    // self-signed trust doc holds — sanity-check the fixture is
-    // wired correctly. Operator config lives under the app root
-    // (`<app_root>/.ai/config/keys`), see `config.rs` /
-    // `node::init`, so it is rooted at `state_path`.
-    let trust_path = h
-        .state_path
-        .join(".ai/config/keys/trusted")
-        .join(format!("{}.toml", fixture.publisher_fp()));
+    // The deterministic publisher fingerprint must have a signer record in
+    // the node registry — sanity-check the fixture is wired correctly.
+    let record_path = ryeos_engine::trust::signers_dir(&h.state_path)
+        .join(format!("{}.yaml", fixture.publisher_fp()));
     assert!(
-        trust_path.exists(),
-        "publisher trust doc missing at {}",
-        trust_path.display()
+        record_path.exists(),
+        "publisher signer record missing at {}",
+        record_path.display()
     );
 
     // State files written by the fast fixture must be in place.
@@ -161,7 +156,7 @@ async fn fast_fixture_boots_daemon_without_real_init() {
     assert!(h.state_path.join(".ai/node/config.yaml").exists());
     assert!(
         h.state_path
-            .join(".ai/config/keys/signing/private_key.pem")
+            .join(".ai/node/operator/signing/private_key.pem")
             .exists()
     );
 }
@@ -203,7 +198,7 @@ async fn legacy_bundle_execution_config_cannot_replace_node_policy_generation() 
     .await
     .expect("legacy bundle execution config must not replace node-wide policy");
 
-    let trust = ryeos_engine::trust::TrustStore::load(None, &h.state_path.join(".ai/config"))
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(&h.state_path)
         .expect("load exact fixture trust");
     let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         &h.state_path,
@@ -236,8 +231,8 @@ async fn fast_fixture_output_is_byte_stable_across_runs() {
     async fn run_once() -> Vec<(String, String)> {
         let (h, fixture) = DaemonHarness::start_fast().await.expect("daemon must boot");
         let state = h.state_path.clone();
-        // Operator config (signing key + trust docs) is rooted at the
-        // app root alongside node state — `<app_root>/.ai/config/keys`.
+        // Operator config (signing key) and the signer registry are rooted
+        // at the app root alongside node state.
         let mut entries: Vec<(String, String)> = vec![
             (
                 "state/identity/private_key.pem".into(),
@@ -257,28 +252,21 @@ async fn fast_fixture_output_is_byte_stable_across_runs() {
             ),
             (
                 "config/signing/private_key.pem".into(),
-                hash_file(&state.join(".ai/config/keys/signing/private_key.pem")),
+                hash_file(&state.join(".ai/node/operator/signing/private_key.pem")),
             ),
             (
-                "config/trusted/publisher.toml".into(),
-                hash_file(&state.join(format!(
-                    ".ai/config/keys/trusted/{}.toml",
-                    fixture.publisher_fp()
-                ))),
+                "trust/signers/publisher.yaml".into(),
+                hash_file(
+                    &ryeos_engine::trust::signers_dir(&state)
+                        .join(format!("{}.yaml", fixture.publisher_fp())),
+                ),
             ),
             (
-                "config/trusted/node.toml".into(),
-                hash_file(&state.join(format!(
-                    ".ai/config/keys/trusted/{}.toml",
-                    fixture.node_fp()
-                ))),
-            ),
-            (
-                "config/trusted/user.toml".into(),
-                hash_file(&state.join(format!(
-                    ".ai/config/keys/trusted/{}.toml",
-                    fixture.user_fp()
-                ))),
+                "trust/signers/user.yaml".into(),
+                hash_file(
+                    &ryeos_engine::trust::signers_dir(&state)
+                        .join(format!("{}.yaml", fixture.user_fp())),
+                ),
             ),
         ];
         entries.sort();

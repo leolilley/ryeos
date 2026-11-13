@@ -68,13 +68,11 @@ pub async fn handle(
     authorize_execution_refs(&req.item_ref, &req.ref_bindings, &ctx, &state)?;
     req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
         .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error:#}")))?;
-    let report =
-        config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())
-            .map_err(|e| {
-                config::typed_load_error_or(e, |e| {
-                    HandlerError::Internal(format!("load remotes: {e:#}"))
-                })
-            })?;
+    let report = config::load_remotes_report(&state.config.app_root).map_err(|e| {
+        config::typed_load_error_or(e, |e| {
+            HandlerError::Internal(format!("load remotes: {e:#}"))
+        })
+    })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
     let binding = req
@@ -163,7 +161,7 @@ pub async fn handle(
         RemoteClient::from_remote_cfg_as_configured_operator(&state, &remote_cfg, &ctx)
             .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?
     } else {
-        RemoteClient::from_remote_cfg(&state, &remote_cfg)
+        RemoteClient::from_remote_cfg(&state, &remote_cfg)?
     };
     let accepted =
         req.execution_policy.response == ryeos_app::execution_policy::ExecutionResponse::Accepted;
@@ -485,7 +483,8 @@ mod tests {
             use base64::Engine as _;
             let remote = crate::remote::config::RemoteConfig {
                 name: "fixture".into(),
-                url: format!("http://{}", self.address),
+                url: Some(format!("http://{}", self.address)),
+                reachability: Default::default(),
                 principal_id: fixture.state.identity.principal_id(),
                 signing_key: format!(
                     "ed25519:{}",

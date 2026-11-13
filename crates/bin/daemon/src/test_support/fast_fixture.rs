@@ -14,8 +14,9 @@
 //!   * `<state>/.ai/node/substrate-identity.json`
 //!   * `<state>/.ai/node/vault/private_key.pem`      (deterministic X25519)
 //!   * `<state>/.ai/node/vault/public_key.pem`
-//!   * `<user>/.ai/config/keys/signing/private_key.pem`
-//!   * `<user>/.ai/config/keys/trusted/<fp>.toml` for publisher / node / user
+//!   * `<user>/.ai/node/operator/signing/private_key.pem`
+//!   * `<state>/.ai/node/trust/signers/<fp>.yaml` node-signed registry records
+//!     for the publisher and operator keys (the node key is the implicit root)
 //!
 //! Determinism is achieved by signing all fixture-authored content with
 //! [`FAST_FIXTURE_TIME`] via `lillux::signature::sign_content_at` and
@@ -390,7 +391,7 @@ pub fn install_signed_bundle_binary(
 ///
 /// After this returns the daemon can boot without running node initialization:
 /// node identity, vault keypair, layout dirs, user signing key, and
-/// self-signed trust docs are all in place.
+/// signer registry records are all in place.
 ///
 /// What it writes:
 ///
@@ -404,10 +405,9 @@ pub fn install_signed_bundle_binary(
 /// <state>/.ai/state/locators/                          (empty dir)
 /// <state>/.ai/state/refs/                              (empty dir)
 /// <state>/.ai/state/recovery/thread-projection/        (empty dir)
-/// <state>/.ai/config/keys/signing/private_key.pem      (deterministic operator Ed25519)
-/// <state>/.ai/config/keys/trusted/<publisher_fp>.toml  (self-signed trust doc)
-/// <state>/.ai/config/keys/trusted/<node_fp>.toml       (self-signed trust doc)
-/// <state>/.ai/config/keys/trusted/<user_fp>.toml       (self-signed trust doc)
+/// <state>/.ai/node/operator/signing/private_key.pem      (deterministic operator Ed25519)
+/// <state>/.ai/node/trust/signers/<publisher_fp>.yaml   (node-signed signer record)
+/// <state>/.ai/node/trust/signers/<user_fp>.yaml        (node-signed signer record)
 /// ```
 ///
 /// Populate fast-fixture state and node policies from an explicit authored
@@ -450,14 +450,9 @@ pub fn populate_initialized_state_with_profile_and_identities(
         state_path.join(AI_DIR).join("state").join("refs"),
         state_path
             .join(AI_DIR)
-            .join("config")
-            .join("keys")
+            .join("node")
+            .join("operator")
             .join("signing"),
-        state_path
-            .join(AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("trusted"),
     ] {
         fs::create_dir_all(&d).with_context(|| format!("create {}", d.display()))?;
     }
@@ -508,8 +503,8 @@ pub fn populate_initialized_state_with_profile_and_identities(
     write_pem_signing_key(
         &state_path
             .join(AI_DIR)
-            .join("config")
-            .join("keys")
+            .join("node")
+            .join("operator")
             .join("signing")
             .join("private_key.pem"),
         &user,
@@ -523,17 +518,21 @@ pub fn populate_initialized_state_with_profile_and_identities(
     lillux::vault::write_public_key(&vault_dir.join("public_key.pem"), &vault.public_key())
         .context("write vault public key")?;
 
-    // ── Self-signed trust docs (publisher + node + operator) ──
-    let trust_dir = state_path
-        .join(AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("trusted");
-    for sk in [&publisher, &node, &user] {
-        write_self_signed_trust_doc(&trust_dir, sk).with_context(|| {
-            format!("write self-signed trust doc under {}", state_path.display())
-        })?;
-    }
+    // ── Signer registry records (publisher + operator) ──
+    //
+    // The node key is the implicit root of the registry and needs no record.
+    super::pin_signer(
+        state_path,
+        &publisher.verifying_key(),
+        ryeos_engine::trust::SignerRole::Publisher,
+        ryeos_engine::trust::SignerScope::everywhere(),
+    );
+    super::pin_signer(
+        state_path,
+        &user.verifying_key(),
+        ryeos_engine::trust::SignerRole::Operator,
+        ryeos_engine::trust::SignerScope::operator_default(),
+    );
 
     // ── Trust the system-bundle signer (signs `bundles/core` items) ──
     //
@@ -712,7 +711,7 @@ pub fn write_harness_bootstrap_config(
             .join("node/identity/private_key.pem"),
         operator_signing_key_path: state_path
             .join(AI_DIR)
-            .join("config/keys/signing/private_key.pem"),
+            .join("node/operator/signing/private_key.pem"),
         authorized_keys_dir: state_path.join(AI_DIR).join("node/auth/authorized_keys"),
     };
     fs::write(
@@ -927,26 +926,6 @@ fn write_pem_signing_key(path: &Path, sk: &SigningKey) -> Result<()> {
         .to_pkcs8_pem(Default::default())
         .context("encode signing key to PKCS8 PEM")?;
     fs::write(path, pem.as_bytes()).with_context(|| format!("write {}", path.display()))?;
-    Ok(())
-}
-
-fn write_self_signed_trust_doc(trust_dir: &Path, sk: &SigningKey) -> Result<()> {
-    let vk = sk.verifying_key();
-    let fp = lillux::signature::compute_fingerprint(&vk);
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let body = format!(
-        r#"fingerprint = "{fp}"
-owner = "self"
-version = "1.0.0"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    let signed = lillux::signature::sign_content_at(&body, sk, "#", None, FAST_FIXTURE_TIME);
-    fs::write(trust_dir.join(format!("{fp}.toml")), signed)
-        .with_context(|| format!("write trust doc for {fp}"))?;
     Ok(())
 }
 

@@ -261,7 +261,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         operation_type: OPERATION_TYPE.to_owned(),
         schema: OPERATION_SCHEMA.to_owned(),
         remote: req.remote,
-        remote_url: remote.url,
+        remote_url: remote.outbound_url()?.to_owned(),
         source_site_id: state.threads.site_id().to_owned(),
         remote_site_id: remote.site_id,
         remote_principal_id: remote.principal_id,
@@ -489,7 +489,8 @@ async fn run_attempt(
         &operation.operator_authority_digest,
     )
     .map_err(AttemptFailure::permanent)?;
-    let node_client = RemoteClient::from_remote_cfg(&state, remote);
+    let node_client = RemoteClient::from_remote_cfg(&state, remote)
+        .map_err(|error| AttemptFailure::permanent(anyhow::Error::new(error)))?;
     let upload_session = operator_client
         .objects_put(None, &operation.remote_project_path, &[], &[])
         .await
@@ -932,7 +933,7 @@ fn resolve_initial_route(
 ) -> Result<(String, RemoteConfig, String)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&canonical))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
@@ -961,11 +962,11 @@ fn validate_current_route_and_authority(
         bail!("durable project-head reconciliation operator grant changed");
     }
     let project = PathBuf::from(&operation.local_project_path);
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&project))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, &operation.remote)?;
     if loaded.config.site_id != operation.remote_site_id
         || loaded.config.principal_id != operation.remote_principal_id
-        || loaded.config.url != operation.remote_url
+        || loaded.config.url.as_deref() != Some(operation.remote_url.as_str())
     {
         bail!("durable project-head reconciliation remote identity or endpoint changed");
     }

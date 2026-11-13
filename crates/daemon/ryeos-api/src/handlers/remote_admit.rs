@@ -38,7 +38,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // released; a synchronized project must never shadow this coordinate.
     let remotes = config::load_remotes(&state.config.app_root)?;
     let remote_cfg = config::get_remote(&remotes, &req.remote)?;
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let live_identity = client.get_public_key().await?;
     live_identity.validate_configured_identity(&remote_cfg)?;
 

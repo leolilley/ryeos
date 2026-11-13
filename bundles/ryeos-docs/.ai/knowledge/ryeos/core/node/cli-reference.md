@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:10:01Z:71e9acb8d459abc6ba837c48686e93edd3ffd9cdd45886e18dc751f8b930a469:sqn2SWqvCdHkApbJhrs3641djgVtRKlkbv6e5nAjaWN4V9/KQ8qZ2d1FHVB6FToo/31RIDemdl84V7atmutYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:15:40Z:0e4e16d7f02fb191f3a631a9e677643aa77e1b636f2dcbad5bccd093c2cde0fd:32LF2bHzslcXgka9Oa9nfZFn3QouE7hJdvNoyTsmyPxEA0DQIOLAcwmcXrLTuk3FdExGx9ke+F/+NVpad9KtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -13,7 +13,7 @@ description: >
 The `ryeos` CLI has two execution paths:
 
 1. Local verbs that run without daemon dispatch: `init`, `start`, `stop`,
-   `node status`, `node doctor`, the `node reset ...` family, `trust pin`,
+   `node status`, `node doctor`, the `node reset ...` family, the `trust ...` verbs,
    `authorize-key`, `publish`, and local vault maintenance verbs.
 2. Daemon-backed verbs declared by signed bundle YAML and dispatched over
    HTTP to a running daemon.
@@ -263,6 +263,16 @@ cannot be read, and warns for a grant that has expired or will within the
 policy's `warn_before_secs`. Each entry names the grant and its cure: renew a
 lapsed grant with `ryeos renew-key --fingerprint <fp>` (the principal that
 granted it, or the node operator); re-issue a stale one.
+
+The `remote_pins` row verifies every node-signed remote pin record under
+`.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
+cure, for a record that is unsigned (`remote_pin_unsigned`), signed by a key
+other than the node key (`remote_pin_wrong_signer`), edited after signing
+(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`), and for
+an unsigned remotes config file this node no longer reads
+(`remote_config_file_unsupported`): re-pin each remote with
+`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`,
+then delete the file.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and
@@ -541,11 +551,34 @@ until the external snapshot driver is retired.
 
 ## Other local operator verbs
 
-- `ryeos trust pin --from <PUBLISHER_TRUST.toml>` — pin publisher trust.
+- `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
-- `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's remote descriptor trust pin.
+- `ryeos remote-descriptor --name <name> --url <url>` — ask the running daemon for this node's signed remote descriptor (a trust pin signed by the node key inside the daemon). The reply carries the descriptor and its signed `yaml`.
 - `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
+
+## Trust verbs
+
+The signer registry lives in `<app_root>/.ai/node/trust/`. See
+[Signing and Trust](../signing.md) for roles, scopes and statuses.
+
+| Verb | Effect |
+|---|---|
+| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
+| `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope |
+| `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
+| `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
+| `ryeos trust succeed --from <succession.toml>` | Apply a signed succession statement |
+| `ryeos trust list` | List signer records (read-only) |
+| `ryeos trust show <fp>` | Show one signer record and its key events (read-only) |
+
+`list` and `show` work on a running or stopped node. The five mutating
+verbs are signed offline operations (`node.trust.pin`, `node.trust.scope`,
+`node.trust.retire`, `node.trust.revoke`, `node.trust.succeed`; local signer
+only). On a running node they refuse with `node_running_trust_change`; cure
+by stopping the node, or by `ryeos node offline-operation submit --stop`.
+Each change appends a node-signed, hash-chained key event under
+`<app_root>/.ai/node/trust/events/`.
 
 ## Core daemon-backed verbs
 
@@ -624,8 +657,9 @@ threads, token-based admission, remote authorization, live bundle
 install, and vault proxying.
 
 - `ryeos remote pin <name> --descriptor <file>` — pin a remote from its
-  descriptor without contacting it; refused `remote_descriptor_incomplete`
-  without the node's site and vault fingerprint.
+  signed v2 descriptor without contacting it, as a node-signed pin record; a
+  descriptor without a URL pins an inbound-only remote (outbound commands
+  refuse it with `remote_inbound_only`).
 - `ryeos node offline-operation sign --operation node.authorize-client|node.remote.pin|node.bundle.replace ...`
   — wire a hosted node that delegates these operations: a remote grant, a
   remote pin (`--input descriptor=<file>`) or a bundle installed from an

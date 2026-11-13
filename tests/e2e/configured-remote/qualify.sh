@@ -254,11 +254,9 @@ require_source_authority_directory() {
 }
 
 source_ai_root="$source_app_root/.ai"
-source_config_root="$source_ai_root/config"
 source_node_config_root="$source_ai_root/node"
-source_signing_key="$source_config_root/keys/signing/private_key.pem"
+source_signing_key="$source_node_config_root/operator/signing/private_key.pem"
 require_source_authority_directory "source RyeOS authority root" "$source_ai_root"
-require_source_authority_directory "source RyeOS operator configuration" "$source_config_root"
 require_source_authority_directory "source RyeOS node configuration" "$source_node_config_root"
 [[ -f "$source_signing_key" && ! -L "$source_signing_key" ]] || {
     echo "source RyeOS operator signing key must be a regular non-symlink file" >&2

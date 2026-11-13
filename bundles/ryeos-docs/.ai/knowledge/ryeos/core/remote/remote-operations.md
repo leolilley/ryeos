@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:33:26Z:7a06ef1a4e62ad8e487f431046719d85717cdd34eeaf448c44925d5399d8079b:qYxaEh8KVX1oIkmmsI/xgiYFt/xU/gaOc3fEK7buzHTCr27DoEt4HEqZnGfbahNw9EnGx/LsLwAeOcDsVaZvCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:15:40Z:24d3e801afdf45f0fbbd92180b5ee723fd20c56d9af42c6c1283cd3f181dc6ed:/GPQLdId8M89440cQgIqmSArw1OZogvJ+9XiSGNXEWmzBJD82/TeMuiiklPASXvu1zGrHB47vsKE8iAjw98ABQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -45,8 +45,9 @@ untrusted tenants.
   to high-impact remote orchestrators in v1. It does not replace
   target-node authorized-key scopes.
 - A remote's pinned identity (`signing_key`, `principal_id`,
-  `vault_fingerprint`) comes only from the node's own remotes file. A
-  project cannot supply or override it: see [Configuration](#configuration).
+  `vault_fingerprint`) comes only from the node-signed pin records under
+  `.ai/node/remotes/`. A project cannot supply or override it: see
+  [Configuration](#configuration).
 
 ## Identity Requirements
 
@@ -272,9 +273,12 @@ forwarded `remote_principal` principal.
 
    This discovers the remote's public key, principal id, canonical site ID,
    vault fingerprint, and ingest-ignore rules. A descriptor is a trust pin
-   only: it contains the signing key and fingerprint, which are verified
-   against the live `/public-key` document before the complete discovered
-   identity is written to local config.
+   only: it is signed by the remote node key it pins and binds the remote's
+   name, URL, site ID, vault fingerprint and key together. Configure verifies
+   that signature, then checks the pins against the live `/public-key`
+   document before the complete discovered identity is written as a
+   node-signed pin record under `.ai/node/remotes/`. Only the configured local
+   operator can run `remote configure` and `remote bind-project`.
 
    The configured endpoint is one canonical, credential-free base URL. It has
    no user information, query, fragment, control/whitespace characters, or
@@ -287,21 +291,31 @@ forwarded `remote_principal` principal.
    key/fingerprint, site ID, and vault fingerprint with that configured
    coordinate before making signed probes. A mismatch skips all authenticated
    thread/project contact. `remote admit` applies the same check before it
-   releases a one-time token to the target. Admission selects only an
-   operator-owned remote config; a project entry cannot shadow its credential
-   destination.
+   releases a one-time token to the target. Remote pins exist only as
+   node-signed records on the node: a project never supplies or overrides a
+   remote, so a project cannot change a credential destination. A pin record
+   that is unsigned, edited or signed by another key is refused with a typed
+   `remote_pin_*` code that names the cure.
 
 ### Publishing a descriptor
 
-Any node operator can export a descriptor locally:
+Any node operator can export a descriptor from the running daemon (the signed document is the `yaml` field of the reply):
 
 ```bash
 ryeos remote-descriptor \
   --name production \
   --url https://ryeos.example.com \
-  --capabilities "remote-execute,bundle-install" \
-  --output ./production.remote.yaml
+  --capabilities "remote-execute,bundle-install"
 ```
+
+The exported descriptor (version 2) is signed with the node key it pins. The
+signature proves the producer held that key and makes the bound name, URL,
+site ID and vault fingerprint tamper-evident; it does not replace checking the
+fingerprint with the remote operator out of band. Version 1 descriptors are
+unsigned and are refused with `remote_descriptor_unsigned`: ask the remote
+operator to re-export. A descriptor signed by a different key is refused with
+`remote_descriptor_wrong_signer`, and an edited one with
+`remote_descriptor_tampered`.
 
 The descriptor is intentionally generic core data. RyeOS Cloud or another
 hosted/provider bundle may distribute it through a web UI later, but the
@@ -309,21 +323,32 @@ authority model does not depend on that distribution channel. The caller
 still verifies the descriptor against the live node identity during
 `remote configure --descriptor`.
 
-A descriptor also carries the node's site (`node.site_id`), its vault
-fingerprint (`node.vault_fingerprint`) and its signed ingest-ignore rules
-(`ingest_ignore`). With them a node can pin the remote without contacting it:
+A version 2 descriptor always carries the node's site (`site_id`) and vault
+fingerprint (`vault_fingerprint`), and may carry its signed ingest-ignore rules
+(`ingest_ignore`) and a `url`. All of them are covered by the node signature.
+With them a node can pin the remote without contacting it:
 
 ```bash
 ryeos remote pin origin --descriptor ./origin.remote.yaml
 ```
 
-`remote pin` writes a complete entry in the node's own remotes file from the
-descriptor alone. The descriptor is the trust anchor, so it must reach the
-pinning node through a channel its operator trusts. A descriptor without the
-site or vault fingerprint is refused with `remote_descriptor_incomplete`. One
-without ingest rules pins a remote this node never pushes to: push, execute
-and project sync to it refuse with `remote_pinned_without_ingest_rules` until
-`remote configure` (or a pin with the rules) replaces the entry.
+`remote pin` verifies the descriptor's node signature and writes a node-signed
+pin record under `.ai/node/remotes/` from the descriptor alone (`pin_source:
+descriptor_without_contact`). The descriptor is the trust anchor, so it must
+reach the pinning node through a channel its operator trusts. A version 1 or
+unsigned descriptor is refused with `remote_descriptor_unsigned`. One without
+ingest rules pins a remote this node never pushes to: push, execute and project
+sync to it refuse with `remote_pinned_without_ingest_rules` until `remote
+configure` (or a pin with the rules) replaces the entry.
+
+**Inbound-only peers.** A descriptor without a `url` pins an inbound-only
+remote: a node behind NAT that only ever calls in, such as the origin pinned by
+a hosted controller. The pin record carries `reachability: inbound_only` and no
+URL, and still holds the site, node key and vault fingerprint that inbound
+verification and grant origin checks use. Every path that dials a remote (run,
+push, pull, execute, sync, status, doctor, configure) refuses an inbound-only pin
+with `remote_inbound_only`, naming the remote. Export one with
+`ryeos remote-descriptor --name <name>` and no `--url`.
 
 ## Wiring a hosted node without a shell
 
@@ -335,7 +360,7 @@ offline operations, which the controller's signed profile delegates
 | Operation | Input | Effect |
 |---|---|---|
 | `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_principal` grant (public key, exact scopes, label, origin site, `merge_scopes`, optional `lifetime_secs`). Never an offline-operation scope or a wildcard. The grant ends: `lifetime_secs` (default the class maximum of the controller's signed `authorization` policy) above that maximum fails with `grant_lifetime_exceeds_policy`. Its `authorized_by` is the request's signer and the request digest. The configured operator's fingerprint is refused with `grant_is_operator`. |
-| `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its descriptor, as `ryeos remote pin`. |
+| `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its signed v2 descriptor (a URL-less one pins an inbound-only remote), as `ryeos remote pin`: a node-signed record under `.ai/node/remotes/`. |
 | `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
 
 Each is signed against the controller's facts (`authorized_keys`, `remotes`,
@@ -379,13 +404,12 @@ UI or provisioning automation.
 ### Target node / remote operator
 
 Export a descriptor trust pin for the node and mint a one-time admission
-token. Deliver both files/values to the caller out of band.
+token. Save the descriptor `yaml` to a file and deliver it, with the token, to the caller out of band.
 
 ```bash
 ryeos remote-descriptor \
   --name prod \
-  --url https://ryeos.example.com \
-  --output ./prod.remote.yaml
+  --url https://ryeos.example.com
 
 ryeos admission-token \
   --label "dev-machine" \
@@ -456,14 +480,15 @@ keys must enumerate their capabilities explicitly.
 When a node's signing key is compromised or needs rotation, treat it as a
 break-glass operation. The daemon no longer has an `--init-only` path and
 will not auto-regenerate the node key, because doing so would invalidate
-the node trust doc pinned in the node trust store.
+the signer records, which the node key signs.
 
 Safe rotation requires explicit operator action:
 
 1. Stop the daemon.
 2. Replace/regenerate the node signing key under
    `<system>/.ai/node/identity/private_key.pem`.
-3. Recreate and pin the matching node trust doc in the node trust store.
+3. Re-pin every signer with `ryeos trust pin` so each signer record is
+   signed by the new node key.
 4. Re-sign or recreate node-signed local config items as needed.
 5. Reissue every remotely granted authorized key.
 
@@ -794,32 +819,33 @@ producing a clear error if the operator actually tries to invoke one.
 
 ## Configuration
 
-Remotes are stored in `<system_space_dir>/.ai/config/remotes/remotes.yaml`:
+Each remote is one node-signed record,
+`<system_space_dir>/.ai/node/remotes/<name>.yaml` (schema
+`ryeos/remote-pin/v1`), written by `ryeos remote configure`:
 
 ```yaml
-remotes:
-  production:
-    name: production
-    url: https://ryeos.example.com
-    principal_id: fp:<remote-signing-key-fingerprint>
-    signing_key: ed25519:<base64-remote-public-key>
-    site_id: site:production
-    vault_fingerprint: sha256:def456...
-    ingest_ignore:
-      patterns:
-        - ".git/"
-        - "target/"
-        - "*.pyc"
+# ryeos:signed:<timestamp>:<hash>:<signature>:<node-fingerprint>
+schema: ryeos/remote-pin/v1
+pin_source: expected_fingerprint   # descriptor | expected_fingerprint | descriptor_and_expected_fingerprint
+pinned_at: 2026-11-13T00:00:00Z
+request: <digest of the operator request that made the pin>
+remote:
+  name: production
+  url: https://ryeos.example.com
+  principal_id: fp:<remote-signing-key-fingerprint>
+  signing_key: ed25519:<base64-remote-public-key>
+  site_id: site:production
+  vault_fingerprint: sha256:def456...
+  ingest_ignore:
+    patterns:
+      - ".git/"
+      - "target/"
+      - "*.pyc"
 ```
 
-Only the node holds remotes. A project's own
-`<project>/.ai/config/remotes/remotes.yaml` can neither define a remote nor
-override one of the node's. If any entry in it names trust material
-(`signing_key`, `principal_id`, `fingerprint`, `vault_fingerprint` or
-`descriptor`), every remote operation that names that project is refused
-with `project_remote_trust_material` (HTTP 409). The refusal lists each
-entry and field it found, and names the cure: remove those entries from the
-project file and configure the remote on the node with
-`ryeos remote configure <name> --url <https-url> --expect-fingerprint <fingerprint>`
-(or `--descriptor <file>`). Other entries in a
-project remotes file are listed as invalid by `remote list` and never used.
+The loader verifies the node signature on every read, so editing the pinned
+key, URL or a binding in place makes the record unusable until it is pinned
+again. A leftover unsigned remotes config file is refused with
+`remote_config_file_unsupported`; `ryeos node doctor` reports it in its
+`remote_pins` row. Re-pin each remote with `ryeos remote configure`, then
+delete the file.

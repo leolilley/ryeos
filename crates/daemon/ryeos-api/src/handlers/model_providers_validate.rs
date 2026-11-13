@@ -46,6 +46,7 @@ pub async fn handle(
     let effective = state
         .engine
         .effective_item(EffectiveItemRequest {
+            logical_project_root: None,
             item_ref,
             expected_kind: None,
             project_root: None,

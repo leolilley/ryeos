@@ -1183,18 +1183,14 @@ mod tests {
     #[test]
     fn projectless_push_captures_the_effective_source_target_policy() {
         let transfer_ignore = IgnoreMatcher::from_config(&ryeos_state::ignore::IgnoreConfig {
-            patterns: vec![
-                "target/".into(),
-                "/.ai/config/remotes/".into(),
-                ".env".into(),
-            ],
+            patterns: vec!["target/".into(), "/.ai/node/remotes/".into(), ".env".into()],
         })
         .unwrap();
         let policy = no_project_snapshot_policy(&transfer_ignore).unwrap();
 
         assert_eq!(
             policy.node_patterns,
-            vec![".env", "/.ai/config/remotes/", "target/"]
+            vec![".env", "/.ai/node/remotes/", "target/"]
         );
         policy.validate().unwrap();
     }

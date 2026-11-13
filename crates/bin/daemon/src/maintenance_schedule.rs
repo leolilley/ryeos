@@ -328,16 +328,15 @@ fn load_managed_specs(
 fn load_managed_spec_file(
     path: &Path,
     file: &lillux::PinnedRegularFile,
-    trust_store: &ryeos_engine::trust::TrustStore,
+    _trust_store: &ryeos_engine::trust::TrustStore,
     identity: &NodeIdentity,
 ) -> Result<Option<ManagedSpec>> {
     // This is ownership reconciliation, not schedule admission. Authenticate
     // the existing node document without decoding its disposable execution
     // payload. Only pause and registration metadata survive regeneration;
     // all execution authority comes from the current signed node policy.
-    let verified =
-        node_document::verify_pinned_signed_yaml(file, trust_store, identity.fingerprint())
-            .with_context(|| format!("verify existing schedule {}", path.display()))?;
+    let verified = node_document::verify_node_signed_document_file(file, identity.verifying_key())
+        .with_context(|| format!("verify existing schedule {}", path.display()))?;
     let body = verified.body;
     if !is_managed_maintenance_spec(&body) {
         return Ok(None);

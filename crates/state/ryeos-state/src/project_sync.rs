@@ -234,8 +234,6 @@ pub enum ProjectAiSurfaceKind {
     ProjectItems,
     /// Project-authored configuration that materializes as project intent.
     ProjectConfig,
-    /// Project-authored trust pins.
-    TrustPins,
     /// Project-authored schedule declarations; reconciled separately into
     /// node-owned scheduler runtime specs.
     ScheduleDeclarations,
@@ -345,11 +343,6 @@ pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
         true,
     ),
     directory_surface(
-        ".ai/config/keys/trusted",
-        ProjectAiSurfaceKind::TrustPins,
-        true,
-    ),
-    directory_surface(
         ".ai/config/schedules",
         ProjectAiSurfaceKind::ScheduleDeclarations,
         true,
@@ -363,6 +356,7 @@ pub const NEVER_DEPLOY_SECRETS: &[&str] = &[
     ".ai/node/identity",
     ".ai/node/auth",
     ".ai/node/vault",
+    // Frozen snapshot-floor entry: the floor is stored in every snapshot policy, so removing it would invalidate them.
     ".ai/config/keys/signing",
 ];
 
@@ -386,6 +380,19 @@ pub const NODE_OWNED: &[&str] = &[
     NODE_BUNDLES_ROOT,
 ];
 
+/// Node-owned trust registry, operator key material and remote pins. Live
+/// execution must never read or write them. They are not part of the project
+/// snapshot floor: the floor identity is stored in every snapshot policy, so
+/// widening it would invalidate existing policies.
+pub const LIVE_EXECUTION_DENIED_ONLY: &[&str] =
+    &[".ai/node/trust", ".ai/node/operator", ".ai/node/remotes"];
+
+/// True when a `.ai/`-relative path is inside one of the node-owned roots that
+/// only the live-execution floor covers.
+pub fn is_live_execution_denied_only_path(rel_path: &str) -> bool {
+    matched_prefix(rel_path, LIVE_EXECUTION_DENIED_ONLY).is_some()
+}
+
 /// Central, non-bypassable live-execution control-plane floor. The same
 /// classification owns snapshot/deploy safety; live execution serializes this
 /// exact policy into its authority rather than duplicating path literals in an
@@ -394,6 +401,7 @@ pub fn live_execution_denied_control_paths() -> Vec<String> {
     let mut paths = NEVER_DEPLOY_SECRETS
         .iter()
         .chain(NODE_OWNED.iter())
+        .chain(LIVE_EXECUTION_DENIED_ONLY.iter())
         .map(|path| (*path).to_string())
         .collect::<Vec<_>>();
     paths.sort();
@@ -461,7 +469,6 @@ fn surface_kind_str(kind: ProjectAiSurfaceKind) -> &'static str {
         ProjectAiSurfaceKind::ProjectManifest => "project_manifest",
         ProjectAiSurfaceKind::ProjectItems => "project_items",
         ProjectAiSurfaceKind::ProjectConfig => "project_config",
-        ProjectAiSurfaceKind::TrustPins => "trust_pins",
         ProjectAiSurfaceKind::ScheduleDeclarations => "schedule_declarations",
         ProjectAiSurfaceKind::NodeExtensionDeclarations => "node_extension_declarations",
     }
@@ -800,6 +807,16 @@ mod tests {
     }
 
     #[test]
+    fn live_execution_denies_the_node_trust_registry_outside_the_snapshot_floor() {
+        assert!(
+            live_execution_denied_control_paths()
+                .iter()
+                .any(|path| path == ".ai/node/trust")
+        );
+        assert!(!is_project_snapshot_floor_excluded(".ai/node/trust"));
+    }
+
+    #[test]
     fn ai_only_rejects_exact_managed_roots() {
         for path in [
             ".ai/directives",
@@ -807,7 +824,6 @@ mod tests {
             ".ai/graphs",
             ".ai/config/execution",
             ".ai/config/ryeos-runtime",
-            ".ai/config/keys/trusted",
             ".ai/config/schedules",
         ] {
             let err =

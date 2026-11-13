@@ -19,11 +19,11 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// Optional local project path. When supplied, the project's remotes
-    /// file is checked; it can neither define nor override a remote.
+    /// Local project path the CLI may forward. Remote pins are node-level
+    /// records, so a project never changes which remote is used.
     #[serde(default, alias = "project")]
     pub project_path: Option<PathBuf>,
-    /// Pass-through for the CLI's `--no-project` flag.
+    /// Pass-through for the CLI's `--no-project` flag. Has no effect.
     #[serde(default)]
     pub no_project: bool,
 }
@@ -33,12 +33,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let project = if req.no_project {
-        None
-    } else {
-        req.project_path.as_deref()
-    };
-    let report = config::load_remotes_layered_report(&state.config.app_root, project)?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let remote_cfg = match config::get_loaded_remote(&report.remotes, &req.remote) {
         Ok(loaded) => loaded.config,
         Err(e) => {
@@ -48,8 +43,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 .filter(|entry| entry.name == req.remote)
                 .map(|entry| {
                     format!(
-                        "{} remote '{}' in {} is invalid: {}; {}",
-                        entry.scope.label(),
+                        "remote '{}' in {} is invalid: {}; {}",
                         entry.name,
                         entry.config_path.display(),
                         entry.error,
@@ -63,7 +57,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             anyhow::bail!(invalid.join("\n"));
         }
     };
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let health = client.get_health().await?;
     let pubkey = client.get_public_key().await?;
     let configured_identity = pubkey.validate_configured_identity(&remote_cfg);

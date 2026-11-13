@@ -92,6 +92,7 @@ pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
 pub mod remote_configure;
+pub mod remote_descriptor;
 pub mod remote_doctor;
 pub mod remote_execute;
 pub mod remote_import_admitted_head;
@@ -146,6 +147,7 @@ pub mod threads_tail;
 pub mod tool_env_check;
 pub mod trace_branch;
 pub mod trace_inspect;
+pub mod trust_list;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
@@ -281,6 +283,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
+    trust_list::LIST_DESCRIPTOR,
+    trust_list::SHOW_DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
     bundle_catalog_publish::DESCRIPTOR,
     bundle_catalog::UPLOAD,
@@ -346,6 +350,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
     remote_pin::DESCRIPTOR,
+    remote_descriptor::DESCRIPTOR,
     remote_bind_project::DESCRIPTOR,
     remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,

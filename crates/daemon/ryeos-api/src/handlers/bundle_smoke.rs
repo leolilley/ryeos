@@ -116,13 +116,11 @@ pub async fn handle(
         .iter()
         .map(|record| record.path.clone())
         .collect();
-    let operator_config_root =
-        ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).config();
     let preflight_warnings =
         match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
             &source,
             &dependency_roots,
-            &operator_config_root,
+            &state.config.app_root,
             std::sync::Arc::clone(&state.isolation),
         ) {
             Ok(report) => report
@@ -220,6 +218,7 @@ async fn run_entry(
     let site_id = state.threads.site_id().to_string();
     let origin_site_id = ctx.execution_origin(&site_id);
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),

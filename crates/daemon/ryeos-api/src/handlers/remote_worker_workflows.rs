@@ -524,7 +524,7 @@ pub async fn start(
                 &operator_fingerprint,
             )?,
         remote: req.remote,
-        remote_url: remote.url,
+        remote_url: remote.outbound_url()?.to_owned(),
         target_site_id: remote.site_id,
         target_principal_id: remote.principal_id,
         target_signing_key: remote.signing_key,
@@ -1080,6 +1080,7 @@ fn compile_workflow(
         target_product_selections,
     )?;
     let effective = engine.effective_resolution_output(EffectiveItemRequest {
+        logical_project_root: None,
         item_ref: driver,
         expected_kind: Some("graph".to_owned()),
         project_root: Some(context.effective_path.clone()),
@@ -1715,7 +1716,7 @@ fn resolve_route(
 ) -> Result<(String, RemoteConfig, String)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local = config::local_project_identity(&canonical)?.to_owned();
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&canonical))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
@@ -1774,7 +1775,7 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
         &operation.remote,
         Path::new(&operation.local_project_path),
     )?;
-    if remote.url != operation.remote_url
+    if remote.url.as_deref() != Some(operation.remote_url.as_str())
         || remote.site_id != operation.target_site_id
         || remote.principal_id != operation.target_principal_id
         || remote.signing_key != operation.target_signing_key

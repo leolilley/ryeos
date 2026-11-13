@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:53Z:b4bc4339216c81774e1d0dae7e92c812e042865dc52dad8390cf9a339cf7db52:jxNrXBKZ/WRrA51MJKJFQXzTWamKl8oOD4tyIjn1rizIKdOvC+4bpfD9L+qDrRnbtaSOFHczgsV5Cs+zkTYlCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T18:15:40Z:37507c990f61a6311864da7a1173958d24e7d1456491a6bb4e2d886c5ba36c49:X2K0iUAMOWAHMKudsfYNNRxwgdvnN7djJ1jl9mmv73L1NMSRWmlOTcfJBGLNpWKT4hxrfCYZah4vpWPNkdZ6Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -338,7 +338,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -412,7 +411,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       # Exclude this project's build output, not package source directories
       # such as a vendored crate's src/target/ required by its checksums.

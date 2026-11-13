@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-13T05:09:06Z:3b8724205e16afdd24ad78dd57e5eeeeb9b21e09ffc04dded4d6282fa11dcfd2:vi01URE3H3zo2VxPmEuaMLGWOlfZ0Q67yIgvCXmMeK7OlAu6MESLAMHO6oJQgKOpQk0ybn5ZL76eONgHEcqBBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- trust
+- show
+description: Show one pinned signer and its key events
+forms:
+- slots:
+  - field: fingerprint
+dispatch:
+  kind: execute_ref
+  execute: service:trust/show

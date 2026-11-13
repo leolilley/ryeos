@@ -15,8 +15,8 @@ git -C "$project" add input.txt
 git -C "$project" commit -qm fixture
 
 source_app_root="$tmp/source-app-root"
-mkdir -p "$source_app_root/.ai/config/keys/signing" "$source_app_root/.ai/node"
-printf '%s\n' test-only-key > "$source_app_root/.ai/config/keys/signing/private_key.pem"
+mkdir -p "$source_app_root/.ai/node/operator/signing" "$source_app_root/.ai/node"
+printf '%s\n' test-only-key > "$source_app_root/.ai/node/operator/signing/private_key.pem"
 export RYEOS_APP_ROOT="$source_app_root"
 export RYEOSD_URL="http://127.0.0.1:7400"
 
@@ -89,7 +89,7 @@ elif [[ "$args" == *" remote doctor stronger "* ]]; then
     fi
     printf '{"remote":{"health":{"status":"%s"}},"checks":[{"name":"remote_configured","ok":true},{"name":"remote_health","ok":%s},{"name":"remote_identity","ok":true,%s},{"name":"signed_authorization","ok":true},{"name":"project_binding","ok":true,"local_project_path":"%s","remote_project_path":"/srv/ryeos/projects/qualification","sync_scope":"full_project"}]}\n' "$health_status" "$doctor_ok" "$identity_contract" "$project"
 elif [[ "$args" == *" remote list "* ]]; then
-    printf '{"remotes":[{"name":"stronger","config_path":"%s/.ai/config/remotes/remotes.yaml"}],"invalid_remotes":[]}\n' "$RYEOS_APP_ROOT"
+    printf '{"remotes":[{"name":"stronger","config_path":"%s/.ai/node/remotes/stronger.yaml"}],"invalid_remotes":[]}\n' "$RYEOS_APP_ROOT"
 elif [[ "$args" == *" remote status stronger "* ]]; then
     printf '%s\n' '{"status":"ok"}'
 else
@@ -128,9 +128,9 @@ git -C "$captured_root_project" add .gitignore
 git -C "$captured_root_project" -c user.email=qualification@example.invalid \
     -c user.name=Qualification commit -qm ignore-client-root
 captured_app_root="$captured_root_project/client-root"
-mkdir -p "$captured_app_root/.ai/config/keys/signing" "$captured_app_root/.ai/node"
+mkdir -p "$captured_app_root/.ai/node/operator/signing" "$captured_app_root/.ai/node"
 printf '%s\n' target-capturable-key \
-    > "$captured_app_root/.ai/config/keys/signing/private_key.pem"
+    > "$captured_app_root/.ai/node/operator/signing/private_key.pem"
 if RYEOS_APP_ROOT="$captured_app_root" RYEOSD_URL="http://127.0.0.1:7400" \
     "$root/tests/e2e/configured-remote/qualify.sh" \
     --remote stronger \

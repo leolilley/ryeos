@@ -4169,7 +4169,7 @@ async fn run(
     ));
 
     // Repair only daemon-local artifacts. Missing operator artifacts
-    // (user signing key, trust docs) fail with guidance to run
+    // (user signing key, signer record) fail with guidance to run
     // `ryeos init` — daemon never substitutes for operator init.
     bootstrap::repair_daemon_local(&config)?;
 
@@ -4382,6 +4382,7 @@ async fn run(
                     let node_principal = identity.principal_id();
 
                     let plan_ctx = ryeos_engine::contracts::PlanContext {
+                        logical_project_root: None,
                         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                             ryeos_engine::contracts::Principal {
                                 fingerprint: node_principal,
@@ -4403,6 +4404,7 @@ async fn run(
                     let effective_requests = installed_refs
                         .iter()
                         .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
+                            logical_project_root: None,
                             item_ref: canonical.clone(),
                             expected_kind: Some(canonical.kind.clone()),
                             project_root: None,
@@ -8335,6 +8337,7 @@ async fn run_service_standalone(
     let standalone_principal = standalone_operator.principal_id();
     let standalone_handler_context = standalone_operator_handler_context(&standalone_operator);
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: standalone_principal.clone(),

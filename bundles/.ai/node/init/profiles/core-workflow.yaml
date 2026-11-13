@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:52Z:dcb1d43cc14bad4434377cdc7641e7423519efbf20d2b7ae07e13fa56d38194a:5bqKRAEXzZwrGbZ1uj5PwvmT7CNwI4Y/V7yJWyzXWoBu+DdMTVXtoHkMZGaIGoB2zIiFPITvE5GprBD14gd7Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T18:15:39Z:e616ec5faf757fc1598135af489e76927007d82ab2d568ea57a5c4df86a778c3:Ln8EPPoh+Lk+0toQRsVu2h2853EHeG6vVTuU1qdtx5kngD3EKbjz3/CbJuruQQEPMs2be798dRKe4+arf4zBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -282,7 +282,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -356,7 +355,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"

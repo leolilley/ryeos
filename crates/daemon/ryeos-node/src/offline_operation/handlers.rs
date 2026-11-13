@@ -492,6 +492,251 @@ pub fn derived_credential_generation(request_digest: &str) -> String {
     )
 }
 
+// ── Trust ────────────────────────────────────────────────────────────────
+
+/// Role and scope a signer is pinned with. Absent lists mean the role's
+/// default.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustPinArguments {
+    pub role: String,
+    #[serde(default)]
+    pub spaces: Vec<String>,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustScopeArguments {
+    pub fingerprint: String,
+    pub spaces: Vec<String>,
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustFingerprintArguments {
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustSucceedArguments {
+    pub old_fingerprint: String,
+}
+
+fn trust_scope(
+    role: ryeos_engine::trust::SignerRole,
+    spaces: &[String],
+    kinds: &[String],
+    projects: &[String],
+) -> Result<ryeos_engine::trust::SignerScope> {
+    use ryeos_engine::trust::{SignerRole, SignerScope, SignerSpace};
+    let mut scope = match role {
+        SignerRole::Publisher => SignerScope::publisher_default(),
+        SignerRole::Operator => SignerScope::operator_default(),
+        SignerRole::ProjectAuthor => SignerScope {
+            spaces: vec![SignerSpace::Project],
+            kinds: vec![ryeos_engine::trust::ALL_KINDS.to_string()],
+            projects: Vec::new(),
+        },
+    };
+    if !spaces.is_empty() {
+        scope.spaces = spaces
+            .iter()
+            .map(|space| {
+                SignerSpace::parse(space).with_context(|| {
+                    format!("`{space}` is not a signer space (bundle, project, node)")
+                })
+            })
+            .collect::<Result<_>>()?;
+    }
+    if !kinds.is_empty() {
+        scope.kinds = kinds.to_vec();
+    }
+    scope.projects = projects.to_vec();
+    scope
+        .validate()
+        .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))?;
+    Ok(scope)
+}
+
+fn validate_trust_scope_lists(
+    spaces: &[String],
+    kinds: &[String],
+    projects: &[String],
+) -> Result<()> {
+    ensure!(
+        spaces.len() <= 3 && kinds.len() <= 64 && projects.len() <= 256,
+        "scope lists are too long"
+    );
+    Ok(())
+}
+
+impl TrustPinArguments {
+    pub fn validate(&self) -> Result<()> {
+        let role = ryeos_engine::trust::SignerRole::parse(&self.role)
+            .with_context(|| format!("`{}` is not a signer role", self.role))?;
+        validate_trust_scope_lists(&self.spaces, &self.kinds, &self.projects)?;
+        trust_scope(role, &self.spaces, &self.kinds, &self.projects).map(|_| ())
+    }
+}
+
+impl TrustScopeArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(is_digest(&self.fingerprint), "fingerprint is not a digest");
+        validate_trust_scope_lists(&self.spaces, &self.kinds, &self.projects)?;
+        let scope = ryeos_engine::trust::SignerScope {
+            spaces: self
+                .spaces
+                .iter()
+                .map(|s| {
+                    ryeos_engine::trust::SignerSpace::parse(s)
+                        .with_context(|| format!("`{s}` is not a signer space"))
+                })
+                .collect::<Result<_>>()?,
+            kinds: self.kinds.clone(),
+            projects: self.projects.clone(),
+        };
+        scope
+            .validate()
+            .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))
+    }
+}
+
+impl TrustFingerprintArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(is_digest(&self.fingerprint), "fingerprint is not a digest");
+        Ok(())
+    }
+}
+
+fn trust_actor<'a>(
+    ctx: &'a HandlerContext<'_>,
+    operator: &'a str,
+) -> crate::trust_registry::Actor<'a> {
+    crate::trust_registry::Actor {
+        node_key: ctx.node.signing_key(),
+        operator,
+        request_digest: ctx.request_digest,
+    }
+}
+
+fn run_trust_change(
+    ctx: &HandlerContext<'_>,
+    change: crate::trust_registry::Change,
+) -> Result<Value> {
+    let operator = operator_key(ctx)?;
+    let operator_fp = ryeos_engine::trust::compute_fingerprint(&operator.verifying_key());
+    let outcome = crate::trust_registry::apply_change(
+        ctx.app_root,
+        ctx.state_lock,
+        &trust_actor(ctx, &operator_fp),
+        &change,
+    )?;
+    Ok(json!({
+        "records": outcome.records,
+        "events_written": outcome.events_written,
+        "registry_digest": outcome.registry_digest,
+    }))
+}
+
+pub(super) fn trust_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustPinArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let role = ryeos_engine::trust::SignerRole::parse(&arguments.role).context("signer role")?;
+    let scope = trust_scope(
+        role,
+        &arguments.spaces,
+        &arguments.kinds,
+        &arguments.projects,
+    )?;
+    let doc = ryeos_engine::trust::PublisherTrustDoc::parse(utf8(
+        ctx.inputs.require("signer")?,
+        "signer trust document",
+    )?)
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let key = doc
+        .decode_verifying_key()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Pin {
+            key,
+            label: doc.owner,
+            role,
+            scope,
+        },
+    )
+}
+
+pub(super) fn trust_scope_change(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustScopeArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let scope = ryeos_engine::trust::SignerScope {
+        spaces: arguments
+            .spaces
+            .iter()
+            .map(|s| {
+                ryeos_engine::trust::SignerSpace::parse(s)
+                    .with_context(|| format!("`{s}` is not a signer space"))
+            })
+            .collect::<Result<_>>()?,
+        kinds: arguments.kinds,
+        projects: arguments.projects,
+    };
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Scope {
+            fingerprint: arguments.fingerprint,
+            scope,
+        },
+    )
+}
+
+pub(super) fn trust_retire(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustFingerprintArguments = ctx.arguments()?;
+    arguments.validate()?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Retire {
+            fingerprint: arguments.fingerprint,
+        },
+    )
+}
+
+pub(super) fn trust_revoke(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustFingerprintArguments = ctx.arguments()?;
+    arguments.validate()?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Revoke {
+            fingerprint: arguments.fingerprint,
+        },
+    )
+}
+
+pub(super) fn trust_succeed(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustSucceedArguments = ctx.arguments()?;
+    ensure!(
+        is_digest(&arguments.old_fingerprint),
+        "old fingerprint is not a digest"
+    );
+    let statement = utf8(ctx.inputs.require("succession")?, "succession statement")?.to_owned();
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Succeed {
+            old_fingerprint: arguments.old_fingerprint,
+            statement,
+        },
+    )
+}
+
 // ── Policy ───────────────────────────────────────────────────────────────
 
 pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value> {
@@ -575,8 +820,7 @@ fn plan_policy_apply(
             "node policy input declares path-owned field `{forbidden}`"
         );
     }
-    let root = RuntimeRoot::new(app_root.to_path_buf());
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .context("load trust store for current node policies")?;
     if section == ryeos_node_runtime::node_policy::sections::host_access::SECTION_NAME {
         check_host_access_signers(app_root, &trust_store, &body)?;
@@ -1131,6 +1375,7 @@ pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
     ctx.host.pin_remote(super::host::RemotePin {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
+        node: ctx.node,
         name: &arguments.name,
         descriptor: ctx.inputs.require("descriptor")?,
     })

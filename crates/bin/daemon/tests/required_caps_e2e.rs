@@ -9,19 +9,13 @@ use std::collections::HashMap;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
-
-fn manifest_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 fn workspace_root() -> std::path::PathBuf {
     ryeos_engine::test_support::workspace_root()
 }
 
 fn build_test_engine() -> ryeos_engine::engine::Engine {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
 
     let workspace = workspace_root();
     let core_kinds = workspace.join("bundles/core/.ai/node/engine/kinds");
@@ -60,6 +54,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
 
 fn local_plan_ctx() -> PlanContext {
     PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:test-gate".into(),
             scopes: vec![],

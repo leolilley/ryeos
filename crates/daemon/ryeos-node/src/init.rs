@@ -63,7 +63,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
-use ryeos_engine::trust::{TrustStore, compute_fingerprint, pin_key};
+use ryeos_engine::trust::{TrustStore, compute_fingerprint};
 
 mod bundle_install;
 mod derived_views;
@@ -541,7 +541,7 @@ pub struct InitProgress {
 ///   2. Pin official publisher key into user trust dir + additional trust files
 ///   3. Verify the selected profile and refuse, before any key exists, when
 ///      its capability floor needs durable app-root storage the host lacks
-///   4. Operator key (load-or-create at `<app_root>/.ai/config/keys/signing/private_key.pem`)
+///   4. Operator key (load-or-create at `<app_root>/.ai/node/operator/signing/private_key.pem`)
 ///   5. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
 ///   6. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
 ///   7. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
@@ -562,8 +562,7 @@ pub fn preflight_existing_policy_generation(
     schema_cut: bool,
     active_bundles: &[String],
 ) -> Result<()> {
-    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    let trust = TrustStore::load(None, &operator_config_root)
+    let trust = TrustStore::load_node_registry(app_root)
         .context("load node trust for policy-generation preflight")?;
     if schema_cut {
         ryeos_node_runtime::node_policy::generation::validate_schema_cut_policy_occupant(
@@ -598,15 +597,10 @@ pub fn prospective_replacement_policy_digest(
     trust_files: &[PathBuf],
     policy_carry: &ryeos_node_runtime::node_policy::generation::PolicyCarryChoices,
 ) -> Result<String> {
-    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    let mut trust = TrustStore::load(None, &operator_config_root)
+    let trust = TrustStore::load_node_registry(app_root)
         .context("load the node's pinned trust for the replacement profile")?;
     let official = decode_official_publisher_pubkey()?;
-    let mut extra = vec![ryeos_engine::trust::TrustedSigner {
-        fingerprint: compute_fingerprint(&official),
-        verifying_key: official,
-        label: Some("ryeos-official".to_owned()),
-    }];
+    let mut extra = vec![(official, "ryeos-official".to_owned())];
     for trust_file in trust_files {
         let content = fs::read_to_string(trust_file)
             .with_context(|| format!("read trust file {}", trust_file.display()))?;
@@ -615,14 +609,10 @@ pub fn prospective_replacement_policy_digest(
         let verifying_key = doc
             .decode_verifying_key()
             .map_err(|error| anyhow!("{error}"))?;
-        extra.push(ryeos_engine::trust::TrustedSigner {
-            fingerprint: compute_fingerprint(&verifying_key),
-            verifying_key,
-            label: Some(doc.owner),
-        });
+        extra.push((verifying_key, doc.owner));
     }
-    trust.extend_from(&TrustStore::from_signers(extra));
-    let profile = load_trusted_init_node_profile(source_dir, node_profile, &trust)?;
+    let profile_trust = bootstrap_trust_store(Some(&trust), &extra)?;
+    let profile = load_trusted_init_node_profile(source_dir, node_profile, &profile_trust)?;
     let profile = select_profile_host_class(node_profile, &profile, Some(host_class))?
         .admit_import_roots(app_root)
         .context("admit declared external-content import roots")?;
@@ -744,6 +734,9 @@ fn run_init_under_lock_on_storage(
     progress(InitPhase::PreparingLayout, None, None, None)?;
     // ── 0. Source exists? ──
     require_source_dir(opts)?;
+    // A node that still keeps its operator key where an older layout did must
+    // be moved by hand; init never mints a second operator identity beside it.
+    crate::operator_layout::check_operator_layout(&opts.app_root)?;
     state_lock
         .ensure_protects_app_root(&opts.app_root)
         .context("initialization needs the state lock of the app root it initializes")?;
@@ -796,42 +789,39 @@ fn run_init_under_lock_on_storage(
         .context("resolve node bootstrap configuration")?;
     ryeos_node_runtime::config::seed_bootstrap_config(&bootstrap_config, state_lock)
         .context("seed node bootstrap configuration")?;
-    // Operator config root (`<app_root>/.ai/config`) — the single trust
-    // source for `ryeos init`. Bundles are never a trust source.
-    let operator_config_root = opts.app_root.join(ryeos_engine::AI_DIR).join("config");
-
-    let trust_dir = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("trusted");
-    fs::create_dir_all(&trust_dir)
-        .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
-
-    // ── 2. Pin official publisher key ──
+    // ── 2. Publisher keys, held in memory ──
     progress(InitPhase::PinningTrust, None, None, None)?;
     // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
     // ryeos-official`, all release Dockerfiles). The label is informational, but
     // bundle preflight compares it, so a divergence used to brick boot (the
     // mismatch is now a warning, not fatal — see ryeos-bundle preflight).
+    //
+    // No node key exists yet on a fresh node, so these keys cannot be recorded
+    // in the node-signed registry until the node key is created below. They
+    // verify the selected profile from memory until then.
     let official_publisher_vk = decode_official_publisher_pubkey()?;
-    let pinned_fp = pin_key(&official_publisher_vk, "ryeos-official", &trust_dir, None)
-        .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
-    if pinned_fp != OFFICIAL_PUBLISHER_FP {
-        bail!(
-            "official publisher fingerprint mismatch: hardcoded {} but \
-             public key bytes hash to {}",
-            OFFICIAL_PUBLISHER_FP,
-            pinned_fp
+    let mut publisher_pins = vec![(official_publisher_vk, "ryeos-official".to_owned())];
+    for trust_file in &opts.trust_files {
+        publisher_pins.push(
+            read_trust_file(trust_file)
+                .with_context(|| format!("read trust file {}", trust_file.display()))?,
         );
     }
-
-    // ── 2b. Pin additional trust files (--trust-file) ──
-    for trust_file in &opts.trust_files {
-        pin_trust_file(trust_file, &trust_dir)
-            .with_context(|| format!("pin trust file {}", trust_file.display()))?;
+    let existing_registry = load_existing_registry(&opts.app_root)?;
+    if let Some(registry) = existing_registry.as_ref() {
+        for (key, _) in &publisher_pins {
+            let fingerprint = compute_fingerprint(key);
+            if let Some(record) = registry.signer(&fingerprint)
+                && record.status == ryeos_engine::trust::SignerStatus::Revoked
+            {
+                return Err(anyhow!(ryeos_engine::trust::TrustError::SignerRevoked {
+                    fingerprint,
+                    label: record.label.clone(),
+                }));
+            }
+        }
     }
+    let bootstrap_trust = bootstrap_trust_store(existing_registry.as_ref(), &publisher_pins)?;
 
     // ── 3. Durable storage the selected profile requires ──
     // Publisher trust is pinned, so the profile verifies now. A node whose
@@ -839,22 +829,15 @@ fn run_init_under_lock_on_storage(
     // or identity exists: on storage that does not survive a restart, each
     // attempt would otherwise mint a new identity that nothing can pace.
     if let Some(name) = opts.node_profile.as_deref() {
-        let trust = TrustStore::load(None, &operator_config_root)
-            .context("load trust store for the selected node profile")?;
-        let profile = load_trusted_init_node_profile(&opts.source_dir, name, &trust)?;
+        let profile = load_trusted_init_node_profile(&opts.source_dir, name, &bootstrap_trust)?;
         let profile = select_profile_host_class(name, &profile, opts.host_class.as_deref())?;
         require_profile_storage(name, &profile, &opts.app_root, observe_storage)?;
     }
 
     // ── 4. User key ──
     progress(InitPhase::InitializingIdentity, None, None, None)?;
-    let user_key_path = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
+    let user_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(opts.app_root.clone()).operator_signing_key_path();
     if let Some(ceremony) = ceremony.as_ref() {
         validate_operator_ceremony(ceremony)?;
     }
@@ -896,21 +879,45 @@ fn run_init_under_lock_on_storage(
             )
         })?;
 
-    // ── 5b. Self-trust both keys ──
-    pin_key(
-        &user_key.verifying_key(),
-        "user",
-        &trust_dir,
-        Some(&user_key),
+    // ── 5b. Record the signers in the node-signed registry ──
+    // The node key is the implicit root and gets no record. Publishers (the
+    // official key and each --trust-file) are pinned for bundle space; the
+    // operator for project and node space.
+    let mut registry_pins: Vec<(
+        VerifyingKey,
+        String,
+        ryeos_engine::trust::SignerRole,
+        ryeos_engine::trust::SignerScope,
+    )> = publisher_pins
+        .iter()
+        .map(|(key, label)| {
+            (
+                *key,
+                label.clone(),
+                ryeos_engine::trust::SignerRole::Publisher,
+                ryeos_engine::trust::SignerScope::publisher_default(),
+            )
+        })
+        .collect();
+    registry_pins.push((
+        user_key.verifying_key(),
+        "user".to_owned(),
+        ryeos_engine::trust::SignerRole::Operator,
+        ryeos_engine::trust::SignerScope::operator_default(),
+    ));
+    let init_request_digest =
+        lillux::sha256_hex(format!("ryeos/init-trust/v1:{user_fp}:{node_fp}").as_bytes());
+    crate::trust_registry::record_init_signers(
+        &opts.app_root,
+        state_lock,
+        &crate::trust_registry::Actor {
+            node_key: &node_key,
+            operator: &user_fp,
+            request_digest: &init_request_digest,
+        },
+        &registry_pins,
     )
-    .map_err(|e| anyhow!("pin user trust doc: {e}"))?;
-    pin_key(
-        &node_key.verifying_key(),
-        "node",
-        &trust_dir,
-        Some(&node_key),
-    )
-    .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
+    .context("record init signers in the node trust registry")?;
 
     // ── 6. Discover bundles in source_dir ──
     progress(InitPhase::DiscoveringBundles, None, None, None)?;
@@ -931,7 +938,7 @@ fn run_init_under_lock_on_storage(
     // A publisher-signed bootstrap profile selects the exact bundle inventory
     // and proposes the first complete policy generation. Init never turns
     // bundle registrations or bundle names into parallel policy authority.
-    let seed_trust_store = TrustStore::load(None, &operator_config_root)
+    let seed_trust_store = TrustStore::load_node_registry(&opts.app_root)
         .context("load trust store for source-root seed data")?;
     let selected_node_profile = opts
         .node_profile
@@ -1147,7 +1154,7 @@ fn run_init_under_lock_on_storage(
             ryeos_bundle::preflight::preflight_verify_bundle_in_context(
                 &job.subject_root,
                 &job.dependency_roots,
-                &operator_config_root,
+                &opts.app_root,
                 Arc::clone(&isolation),
             )
             .with_context(|| {
@@ -1299,7 +1306,7 @@ fn run_init_under_lock_on_storage(
                         staging,
                         name,
                         &installed_dependency_roots,
-                        &operator_config_root,
+                        &opts.app_root,
                         Arc::clone(&isolation),
                     )
                     .with_context(|| {
@@ -1343,7 +1350,7 @@ fn run_init_under_lock_on_storage(
                         staging,
                         name,
                         &installed_dependency_roots,
-                        &operator_config_root,
+                        &opts.app_root,
                         Arc::clone(&isolation),
                     )
                     .with_context(|| {
@@ -1460,29 +1467,30 @@ fn run_init_under_lock_on_storage(
     // ── 9. Post-init trust verification ──
     progress(InitPhase::Finalizing, None, None, None)?;
     let post_trust =
-        TrustStore::load(None, &operator_config_root).context("load post-init trust store")?;
+        TrustStore::load_node_registry(&opts.app_root).context("load post-init trust store")?;
+    let registry_dir = ryeos_engine::trust::signers_dir(&opts.app_root);
     if !post_trust.is_trusted(OFFICIAL_PUBLISHER_FP) {
         bail!(
             "post-init self-check failed: official publisher key {} is \
-             not in the loaded trust store — trust dir at {}",
+             not in the loaded trust store — registry at {}",
             OFFICIAL_PUBLISHER_FP,
-            trust_dir.display()
+            registry_dir.display()
         );
     }
     if !post_trust.is_trusted(&user_fp) {
         bail!(
             "post-init self-check failed: user key {} not loadable — \
-             trust dir at {}",
+             registry at {}",
             user_fp,
-            trust_dir.display()
+            registry_dir.display()
         );
     }
     if !post_trust.is_trusted(&node_fp) {
         bail!(
             "post-init self-check failed: node key {} not loadable — \
-             trust dir at {}",
+             registry at {}",
             node_fp,
-            trust_dir.display()
+            registry_dir.display()
         );
     }
 
@@ -1653,7 +1661,7 @@ fn write_init_completion(
     expected_capacity_account: &crate::native_capacity::NativeCapacityAccountBinding,
 ) -> Result<()> {
     let substrate_identity = load_substrate_identity_record(app_root)?;
-    let trust = TrustStore::load(None, &app_root.join(".ai/config"))?;
+    let trust = TrustStore::load_node_registry(app_root)?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,
         &trust,
@@ -1834,9 +1842,8 @@ pub(crate) fn seal_current_init_completion(
     app_root: &Path,
     expected_policy_generation_digest: Option<&str>,
 ) -> Result<()> {
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
+    let operator_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
     let operator_pem = Zeroizing::new(String::from_utf8(
         lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
     )?);
@@ -1856,7 +1863,7 @@ pub(crate) fn seal_current_init_completion(
         .join(ryeos_engine::AI_DIR)
         .join("node/vault/public_key.pem");
     let vault_fingerprint = lillux::vault::read_public_key(&vault_path)?.fingerprint();
-    let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))?;
+    let trust_store = TrustStore::load_node_registry(app_root)?;
     let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
         app_root,
         &trust_store,
@@ -1951,9 +1958,8 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
     let first_completion = onboarding
         .open_pinned_regular(OsStr::new("init-completion.json"), false)?
         .is_none();
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
+    let operator_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
     let operator_pem = Zeroizing::new(String::from_utf8(
         lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
     )?);
@@ -1963,7 +1969,7 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
             .join(ryeos_engine::AI_DIR)
             .join("node/identity/private_key.pem"),
     )?;
-    let trust = TrustStore::load(None, config.path())?;
+    let trust = TrustStore::load_node_registry(app_root)?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,
         &trust,
@@ -2021,8 +2027,7 @@ fn verify_init_completion_checking_capacity(
     if document.body.schema != INIT_COMPLETION_SCHEMA {
         bail!("unsupported init completion schema");
     }
-    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    let trust_store = TrustStore::load(None, &operator_config_root)
+    let trust_store = TrustStore::load_node_registry(app_root)
         .context("load pinned operator verification authority")?;
     // The completion record is operator-signed by design, and only this
     // node's own operator may sign it: another pinned key (a publisher's)
@@ -2331,9 +2336,14 @@ fn verify_trusted_seed_yaml(content: &str, path: &Path, trust_store: &TrustStore
     };
     let header = ryeos_engine::item_resolution::parse_signature_header(content, &envelope)
         .with_context(|| format!("seed YAML {} has no valid signature", path.display()))?;
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)
-            .with_context(|| format!("verify seed YAML signature {}", path.display()))?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        content,
+        &header,
+        &envelope,
+        trust_store,
+        &ryeos_engine::trust::SignerContext::bundle("init_seed"),
+    )
+    .with_context(|| format!("verify seed YAML signature {}", path.display()))?;
     if trust_class != TrustClass::Trusted {
         bail!(
             "seed YAML {} is not trusted (trust_class: {:?})",
@@ -2438,20 +2448,50 @@ fn decode_official_publisher_pubkey() -> Result<VerifyingKey> {
     Ok(vk)
 }
 
-/// Parse a `PUBLISHER_TRUST.toml` and pin its key into the trust store.
-fn pin_trust_file(trust_file: &Path, trust_dir: &Path) -> Result<()> {
+/// Parse a `PUBLISHER_TRUST.toml` into its key and owner label.
+fn read_trust_file(trust_file: &Path) -> Result<(VerifyingKey, String)> {
     let content = fs::read_to_string(trust_file)
         .with_context(|| format!("read trust file {}", trust_file.display()))?;
-
     let doc =
         ryeos_engine::trust::PublisherTrustDoc::parse(&content).map_err(|e| anyhow!("{e}"))?;
-
     let vk = doc.decode_verifying_key().map_err(|e| anyhow!("{e}"))?;
+    Ok((vk, doc.owner))
+}
 
-    pin_key(&vk, &doc.owner, trust_dir, None)
-        .map_err(|e| anyhow!("pin trust doc for {}: {e}", doc.owner))?;
+/// The registry of an already-initialized node, or `None` for a fresh one
+/// (no node identity yet). A registry that is present must load cleanly.
+fn load_existing_registry(app_root: &Path) -> Result<Option<TrustStore>> {
+    if !ryeos_engine::trust::node_public_identity_path(app_root).exists() {
+        return Ok(None);
+    }
+    Ok(Some(TrustStore::load_node_registry(app_root)?))
+}
 
-    Ok(())
+/// Trust used to verify the init profile and seed data before the node key
+/// can sign registry records: the existing registry (when there is one) plus
+/// the publisher keys init is about to pin, all held in memory.
+fn bootstrap_trust_store(
+    existing: Option<&TrustStore>,
+    publishers: &[(VerifyingKey, String)],
+) -> Result<TrustStore> {
+    use base64::Engine as _;
+    let mut entries = existing.map(TrustStore::signer_entries).unwrap_or_default();
+    for (key, label) in publishers {
+        let fingerprint = compute_fingerprint(key);
+        if entries.iter().any(|entry| entry.fingerprint == fingerprint) {
+            continue;
+        }
+        entries.push(ryeos_engine::trust::TrustedSignerEntry {
+            fingerprint,
+            public_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(key.as_bytes())
+            ),
+            label: label.clone(),
+            scope: ryeos_engine::trust::SignerScope::publisher_default(),
+        });
+    }
+    Ok(TrustStore::from_signer_entries(&entries)?)
 }
 
 /// Create the Model B directory layout.
@@ -2504,11 +2544,9 @@ fn create_layout(app_root: &Path) -> Result<()> {
             .join("refs"),
         // Installed bundles directory
         app_root.join(ryeos_engine::AI_DIR).join("bundles"),
-        // Operator config (operator-edited)
-        app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
+        // Operator key material
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+            .operator_dir()
             .join("signing"),
         app_root
             .join(ryeos_engine::AI_DIR)
@@ -2635,11 +2673,8 @@ fn ensure_operator_genesis(
     key_created: bool,
     contribution_digest: Option<&str>,
 ) -> Result<()> {
-    let path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("identity")
-        .join("operator-genesis.json");
+    let path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
     lillux::with_exclusive_file_lock(&path, || {
         ensure_operator_genesis_locked(
             &path,
@@ -2990,7 +3025,7 @@ mod tests {
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(
             state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
     }
@@ -3033,7 +3068,7 @@ mod tests {
         assert!(text.contains("No identity or key was created"), "{text}");
         assert!(
             !state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
         assert!(!state.join(".ai/node/identity/private_key.pem").exists());
@@ -3223,7 +3258,7 @@ mod tests {
         );
         assert!(
             !state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
         assert!(!state.join(".ai/node/identity/private_key.pem").exists());
@@ -3254,7 +3289,7 @@ mod tests {
                 .as_deref(),
             Some("local")
         );
-        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let trust = TrustStore::load_node_registry(&state).unwrap();
         let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
             &state,
             &trust,
@@ -3339,15 +3374,25 @@ mod tests {
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(
             state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
+        let registry = TrustStore::load_node_registry(&state).expect("node signer registry");
+        let official = registry
+            .signer(OFFICIAL_PUBLISHER_FP)
+            .expect("official publisher record");
+        assert_eq!(official.role, ryeos_engine::trust::SignerRole::Publisher);
+        assert_eq!(
+            official.scope,
+            ryeos_engine::trust::SignerScope::publisher_default()
+        );
+        let node_fp = registry.node_fingerprint().expect("node root");
         assert!(
-            state
-                .join(".ai/config/keys/trusted")
-                .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
-                .exists()
+            registry.signer(&node_fp).is_none(),
+            "the node key is the implicit root and has no record"
         );
+        let view = crate::trust_registry::load_view(&state).expect("cross-checked registry");
+        assert_eq!(view.chain.len(), view.records.len());
         let config =
             ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
                 app_root: Some(state.clone()),
@@ -3400,7 +3445,7 @@ mod tests {
         let user = tmp.path().join("home");
         let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
-        let genesis_path = state.join(".ai/config/identity/operator-genesis.json");
+        let genesis_path = state.join(".ai/node/operator/genesis.json");
         let genesis = fs::read(&genesis_path).expect("operator genesis #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
@@ -3495,8 +3540,7 @@ mod tests {
         )
         .expect("stopped-node authority");
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
-        let trust_store =
-            TrustStore::load(None, &state.join(".ai/config")).expect("current node trust store");
+        let trust_store = TrustStore::load_node_registry(&state).expect("current node trust store");
         let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
             &state,
             &trust_store,
@@ -3551,8 +3595,7 @@ mod tests {
         )
         .expect("stopped-node authority");
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
-        let trust_store =
-            TrustStore::load(None, &state.join(".ai/config")).expect("current node trust store");
+        let trust_store = TrustStore::load_node_registry(&state).expect("current node trust store");
         let current = ryeos_node_runtime::node_policy::generation::load_policy_generation(
             &state,
             &trust_store,
@@ -3717,8 +3760,7 @@ mod tests {
 
     /// The `native_capacity` member of the node's installed policy generation.
     fn installed_native_capacity(state: &Path) -> serde_json::Value {
-        let trust = TrustStore::load(None, &state.join(ryeos_engine::AI_DIR).join("config"))
-            .expect("node trust");
+        let trust = TrustStore::load_node_registry(state).expect("node trust");
         ryeos_node_runtime::node_policy::generation::load_policy_generation(
             state,
             &trust,
@@ -3756,8 +3798,7 @@ mod tests {
         lock: &ryeos_node_runtime::state_lock::StateLock,
         body: serde_json::Value,
     ) {
-        let trust = TrustStore::load(None, &state.join(ryeos_engine::AI_DIR).join("config"))
-            .expect("node trust");
+        let trust = TrustStore::load_node_registry(state).expect("node trust");
         let update =
             ryeos_node_runtime::node_policy::generation::prepare_policy_member_replacement(
                 state,
@@ -3770,7 +3811,7 @@ mod tests {
             )
             .expect("prepare the native_capacity member replacement");
         let (operator, _, _) = load_or_create_operator_key(
-            &state.join(".ai/config/keys/signing/private_key.pem"),
+            &state.join(".ai/node/operator/signing/private_key.pem"),
             None,
         )
         .expect("operator key");
@@ -3969,7 +4010,8 @@ mod tests {
         let user = tmp.path().join("home");
         run_init(&make_opts(&state, &user)).expect("initial full generation");
         let node_key = fs::read(state.join(".ai/node/identity/private_key.pem")).unwrap();
-        let operator_key = fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap();
+        let operator_key =
+            fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap();
         fs::write(state.join(".ai/state/preserved-sentinel"), b"preserved").unwrap();
 
         let replacement = InitOptions {
@@ -3989,7 +4031,7 @@ mod tests {
         };
         run_init(&replacement).expect("replace policy and exact bundle inventory");
 
-        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let trust = TrustStore::load_node_registry(&state).unwrap();
         let profile =
             load_trusted_init_node_profile(&workspace_root().join("bundles"), "standard", &trust)
                 .unwrap();
@@ -4002,7 +4044,7 @@ mod tests {
             node_key
         );
         assert_eq!(
-            fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap(),
+            fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap(),
             operator_key
         );
         assert_eq!(
@@ -4207,7 +4249,7 @@ mod tests {
         replacement.replace_node_policy_generation = true;
         run_init(&replacement).expect("explicit schema cut replaces predecessor generation");
 
-        let trust = TrustStore::load(None, &state.join(".ai/config")).unwrap();
+        let trust = TrustStore::load_node_registry(&state).unwrap();
         let current = ryeos_node_runtime::node_policy::generation::load_optional_policy_generation(
             &state,
             &trust,

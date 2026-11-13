@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:52Z:789711d0ffffdab06acf25483333ce5d40e367869ea2f7c345a808f497b359a5:Lhu3+qFaXsRo9rZOo8oL3/MSUVFYF6MkbJo6DvnLETv9/6u9SEHhATS4aKlxvw5VLfDgcVGoRc9ZeftlUi7xBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T18:15:39Z:823d291fcf8facfb643582f0a1561c816b1191fc90f5bcbbf6e45a3557b8a3ec:nwy4YKU7axu13DB7e5BEz+XPM0v3LubDI9drCr38JT0ubB9SL3QthuMd7BfCOLNZ6pSUhr4Lw8VS8Xtu+hcrDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -282,7 +282,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -356,7 +355,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"

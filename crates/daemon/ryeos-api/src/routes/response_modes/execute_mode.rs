@@ -767,6 +767,7 @@ pub(crate) fn admit_host_direct_execution(
     // refused by the launch-time gate or the disabled-shape compile.
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: provenance.logical_project_root(),
             item_ref: root.clone(),
             expected_kind: Some(root.kind.clone()),
             project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
@@ -1822,6 +1823,7 @@ async fn admit_execution_with_publication(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
     let plan_ctx = PlanContext {
+        logical_project_root: provenance.logical_project_root(),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),
@@ -2147,35 +2149,27 @@ async fn admit_execution_with_publication(
         && request.method().is_none()
         && request.args().is_none();
     let remotes = if remote_target_requested && request_can_need_remote_config {
-        let project_for_layering: Option<&std::path::Path> = if no_project_requested {
-            None
-        } else {
-            Some(project_ctx.original_path.as_ref())
-        };
         Some(
-            crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                project_for_layering,
-            )
-            .map(|report| report.remotes)
-            .map_err(|e| {
-                match crate::remote::config::typed_load_error_or(e, |e| {
-                    crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
-                }) {
-                    crate::handler_error::HandlerError::Structured { code, status, body } => {
-                        RouteDispatchError::Structured {
-                            code,
-                            status,
-                            body,
-                            thread_id: None,
+            crate::remote::config::load_remotes_report(&state.config.app_root)
+                .map(|report| report.remotes)
+                .map_err(|e| {
+                    match crate::remote::config::typed_load_error_or(e, |e| {
+                        crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                    }) {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
                         }
+                        crate::handler_error::HandlerError::Internal(message) => {
+                            RouteDispatchError::Internal(message)
+                        }
+                        other => RouteDispatchError::Internal(other.to_string()),
                     }
-                    crate::handler_error::HandlerError::Internal(message) => {
-                        RouteDispatchError::Internal(message)
-                    }
-                    other => RouteDispatchError::Internal(other.to_string()),
-                }
-            })?,
+                })?,
         )
     } else {
         None
@@ -2241,7 +2235,8 @@ async fn admit_execution_with_publication(
                 return Ok(dispatch_error_response(error));
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote);
+                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote)
+                    .map_err(|error| RouteDispatchError::Internal(error.to_string()))?;
             let rules = plan
                 .remote
                 .remote
@@ -3875,7 +3870,8 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         crate::remote::config::RemoteConfig {
             name: name.to_string(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
             signing_key: format!(
                 "ed25519:{}",
@@ -3891,8 +3887,9 @@ mod tests {
     fn loaded(remote: crate::remote::config::RemoteConfig) -> LoadedRemote {
         LoadedRemote {
             config: remote,
-            scope: crate::remote::config::RemoteConfigScope::Operator,
             config_path: PathBuf::new(),
+            pin_source: crate::remote::config::PinSource::ExpectedFingerprint,
+            pinned_at: String::new(),
         }
     }
 

@@ -37,8 +37,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
 
     let mut checks = Vec::new();
     let mut next_steps = Vec::new();
-    let report =
-        config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let Some(loaded_remote) = report.remotes.get(&req.remote).cloned() else {
         checks.push(serde_json::json!({
             "name": "remote_configured",
@@ -53,7 +52,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
             checks.push(serde_json::json!({
                 "name": "remote_config_invalid",
                 "ok": false,
-                "scope": invalid.scope.label(),
+                "code": invalid.code,
                 "config_path": invalid.config_path,
                 "detail": invalid.error,
                 "repair_hint": invalid.repair_hint,
@@ -84,8 +83,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
         "principal_id": remote_cfg.principal_id,
     }));
 
+    // Doctor dials the remote; an inbound-only pin is refused with its code.
+    let remote_url = remote_cfg.outbound_url()?.to_owned();
     let client = RemoteClient::new(
-        &remote_cfg.url,
+        &remote_url,
         &remote_cfg.principal_id,
         state.identity.clone(),
     );
@@ -153,7 +154,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
             if !configured_identity_matches {
                 next_steps.push(serde_json::json!({
                     "name": "review_remote_identity_pin",
-                    "command": format!("ryeos remote configure {} --url {} --expect-fingerprint <fingerprint>", req.remote, remote_cfg.url),
+                    "command": format!("ryeos remote configure {} --url {} --expect-fingerprint <fingerprint>", req.remote, remote_url),
                     "note": "The live remote identity differs from the configured principal/key/site/vault coordinate. Only reconfigure if you expect this complete identity change, and pin the new key with a fingerprint or descriptor verified with the remote operator out of band.",
                 }));
             }

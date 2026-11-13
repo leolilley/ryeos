@@ -63,7 +63,7 @@ impl StartupProviderEnvironment {
 /// Call only during single-threaded daemon startup, before any async
 /// runtime, application or foreign library thread exists.
 pub unsafe fn take_at_startup(app_root: &Path) -> Result<StartupProviderEnvironment> {
-    let trust = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))
+    let trust = TrustStore::load_node_registry(app_root)
         .context("load node trust for the provider environment")?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,

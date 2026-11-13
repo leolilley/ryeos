@@ -148,7 +148,7 @@ pub async fn push_product(
     ctx: &HandlerContext,
     request: &ProductPushRequest,
 ) -> Result<ProductPushOutcome> {
-    let remotes = crate::remote::config::load_remotes_layered(&state.config.app_root, None)?;
+    let remotes = crate::remote::config::load_remotes(&state.config.app_root)?;
     let remote = crate::remote::config::get_remote(&remotes, &request.remote)?;
     let client = RemoteClient::from_remote_cfg_as_configured_operator(state, &remote, ctx)?;
 

@@ -172,6 +172,7 @@ impl RetainedRuntimeSnapshotProductionBinding {
             &header,
             &envelope,
             &trust,
+            &ryeos_engine::trust::SignerContext::node("node_config"),
         )?;
         ensure!(
             class == ryeos_engine::contracts::TrustClass::Trusted,

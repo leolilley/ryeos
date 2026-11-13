@@ -129,7 +129,8 @@ fn remote_config(
     };
     Ok(ryeos_api::remote::config::RemoteConfig {
         name: name.to_owned(),
-        url,
+        url: Some(url),
+        reachability: Default::default(),
         principal_id: format!("fp:{}", remote.node_fp()),
         signing_key: format!("ed25519:{public_key}"),
         site_id: site_id.to_owned(),
@@ -143,10 +144,17 @@ fn install_single_remote(
     state_path: &Path,
     remote: ryeos_api::remote::config::RemoteConfig,
 ) -> Result<()> {
-    ryeos_api::remote::config::save_remotes(
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf()).node_signing_key_path(),
+    )?;
+    ryeos_api::remote::config::write_remote_pin(
         state_path,
-        &HashMap::from([(remote.name.clone(), remote)]),
-    )
+        node.signing_key(),
+        &remote,
+        ryeos_api::remote::config::PinSource::ExpectedFingerprint,
+        None,
+    )?;
+    Ok(())
 }
 
 fn authorize_remote_node(
@@ -3092,7 +3100,8 @@ fn plant_target_abort_state(
         TARGET_REMOTE_NAME.to_owned(),
         ryeos_api::remote::config::RemoteConfig {
             name: TARGET_REMOTE_NAME.to_owned(),
-            url: source_url.to_owned(),
+            url: Some(source_url.to_owned()),
+            reachability: Default::default(),
             principal_id: source_principal.clone(),
             signing_key: format!("ed25519:{source_public_key}"),
             site_id: REMOTE_SOURCE_SITE_ID.to_owned(),
@@ -3101,7 +3110,18 @@ fn plant_target_abort_state(
             project_bindings: HashMap::new(),
         },
     );
-    ryeos_api::remote::config::save_remotes(state_path, &remotes)?;
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf()).node_signing_key_path(),
+    )?;
+    for remote in remotes.values() {
+        ryeos_api::remote::config::write_remote_pin(
+            state_path,
+            node.signing_key(),
+            remote,
+            ryeos_api::remote::config::PinSource::ExpectedFingerprint,
+            None,
+        )?;
+    }
 
     let auth_dir = state_path
         .join(ryeos_engine::AI_DIR)

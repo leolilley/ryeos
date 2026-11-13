@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:52Z:70c13499482d328e1899acac80cae14797b6b20b35a8fd4c167537de5a1b27ab:sA3UwSIdFQRZFtyZTJspDUsOvPoWHaupFITzaecr9tCq+7SlmY6sOjqvciOfE5gMwnLi3UPrrHTeBva1qUUwCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T18:15:39Z:5654dec9e35aeedc75e830a599f15c78f52b9570a8c0c92fd68d413a61b7fe43:YvE3M0Q4hbQ2CWg13cs+KHPRSFZhsRURa/OqBu3GE1t3obKjo0etKarfyjloj6/9G1wRsFvoyKTqBP5uWG8uDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -352,7 +352,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -414,7 +413,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"

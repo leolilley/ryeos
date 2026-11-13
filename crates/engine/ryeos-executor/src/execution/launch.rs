@@ -2657,7 +2657,7 @@ pub fn verify_native_executor_chain_attestation_for_engine(
 fn build_verified_loader_for_thread(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
         .authoritative_project_root()?
@@ -2672,12 +2672,13 @@ fn build_verified_loader_for_thread(
             project_root,
             node_config_root.map(Path::to_path_buf),
             bundle_roots,
-            node_trusted_keys_dir,
-        ),
+            trusted_signers,
+        )
+        .map(|loader| loader.with_logical_project_of(engine_roots)),
         None => ryeos_runtime::verified_loader::VerifiedLoader::new_projectless_with_node_config(
             node_config_root.map(Path::to_path_buf),
             bundle_roots,
-            node_trusted_keys_dir,
+            trusted_signers,
         ),
     }
 }
@@ -2685,7 +2686,7 @@ fn build_verified_loader_for_thread(
 fn build_verified_loader_for_thread_under_project_authority(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: &ryeos_state::PinnedProjectMaterialization,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
@@ -2702,19 +2703,19 @@ fn build_verified_loader_for_thread_under_project_authority(
         .into_iter()
         .map(Path::to_path_buf)
         .collect();
-    ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config_under_project_authority(
+    ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
         project_root,
-        project_materialization,
         node_config_root.map(Path::to_path_buf),
         bundle_roots,
-        node_trusted_keys_dir,
+        trusted_signers,
     )
+    .map(|loader| loader.with_logical_project_of(engine_roots))
 }
 
 fn load_limits_snapshot_under_current_authority(
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
     declaration: &ryeos_engine::runtime_registry::RuntimeLimitsDecl,
 ) -> anyhow::Result<LimitsConfigSnapshot> {
@@ -2723,7 +2724,7 @@ fn load_limits_snapshot_under_current_authority(
             let loader = build_verified_loader_for_thread_under_project_authority(
                 roots,
                 node_config_root,
-                node_trusted_keys_dir,
+                trusted_signers,
                 materialization,
             )?;
             load_limits_config_snapshot_under_project_authority(
@@ -2734,7 +2735,7 @@ fn load_limits_snapshot_under_current_authority(
         }
         None => {
             let loader =
-                build_verified_loader_for_thread(roots, node_config_root, node_trusted_keys_dir)?;
+                build_verified_loader_for_thread(roots, node_config_root, trusted_signers)?;
             load_limits_config_snapshot(&loader, declaration)
         }
     }
@@ -2791,7 +2792,7 @@ fn execution_control_snapshot_status(
     snapshot: &ExecutionControlSnapshot,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
 ) -> ExecutionControlProofStatus {
     let project = project_materialization.map(|materialization| {
@@ -2818,21 +2819,12 @@ fn execution_control_snapshot_status(
     if policy_status == ExecutionControlProofStatus::ImmutableAuthorityMismatch {
         return policy_status;
     }
-    let Ok(current_node_trust) =
-        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(
-            node_trusted_keys_dir,
-        )
-    else {
-        return combine_execution_control_status(
-            policy_status,
-            ExecutionControlProofStatus::MutableAuthorityChanged,
-        );
-    };
+    let current_signers_digest = ryeos_engine::trust::trusted_signers_digest(trusted_signers);
     let Some(limits_proof) = snapshot.limits.dependency_proof.as_ref() else {
         return policy_status;
     };
     let limits_status = if let Some(materialization) = project_materialization {
-        if !limits_proof.trust_identities_match(None, &current_node_trust) {
+        if !limits_proof.trusted_signers_match(&current_signers_digest) {
             ExecutionControlProofStatus::MutableAuthorityChanged
         } else {
             match limits_proof.revalidate_under_project_authority_status(
@@ -2852,22 +2844,19 @@ fn execution_control_snapshot_status(
             }
         }
     } else {
-        let Ok(loader) =
-            build_verified_loader_for_thread(roots, node_config_root, node_trusted_keys_dir)
-        else {
+        if build_verified_loader_for_thread(roots, node_config_root, trusted_signers).is_err() {
             return combine_execution_control_status(
                 policy_status,
                 ExecutionControlProofStatus::MutableAuthorityChanged,
             );
-        };
-        if limits_proof.trust_identities_match(
-            Some(&loader.effective_trust_identity()),
-            &current_node_trust,
-        ) && limits_proof.revalidate_mutable_against(
-            roots.authoritative_project_root().ok().flatten(),
-            node_config_root,
-            true,
-        ) {
+        }
+        if limits_proof.trusted_signers_match(&current_signers_digest)
+            && limits_proof.revalidate_mutable_against(
+                roots.authoritative_project_root().ok().flatten(),
+                node_config_root,
+                true,
+            )
+        {
             ExecutionControlProofStatus::Current
         } else {
             ExecutionControlProofStatus::MutableAuthorityChanged
@@ -2896,14 +2885,14 @@ fn execution_control_snapshot_is_current(
     snapshot: &ExecutionControlSnapshot,
     roots: &ryeos_engine::item_resolution::ResolutionRoots,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
 ) -> anyhow::Result<bool> {
     match execution_control_snapshot_status(
         snapshot,
         roots,
         node_config_root,
-        node_trusted_keys_dir,
+        trusted_signers,
         project_materialization,
     ) {
         ExecutionControlProofStatus::Current => Ok(true),
@@ -2921,7 +2910,7 @@ async fn load_execution_control_snapshot_cached(
     item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
     subject_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
     node_config_root: Option<&Path>,
-    node_trusted_keys_dir: &Path,
+    trusted_signers: &[ryeos_engine::trust::TrustedSignerEntry],
     project_materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
     runtime_limits: &ryeos_engine::runtime_registry::RuntimeLimitsDecl,
 ) -> anyhow::Result<Arc<ExecutionControlSnapshot>> {
@@ -2942,18 +2931,15 @@ async fn load_execution_control_snapshot_cached(
             })
         })
         .collect::<Vec<_>>();
-    let node_trust_identity =
-        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(
-            node_trusted_keys_dir,
-        )?;
+    let trusted_signers_digest = ryeos_engine::trust::trusted_signers_digest(trusted_signers);
     let key_value = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "item_ref": item_ref.to_string(),
         "subject_authority": subject_authority,
         "request_engine_generation_identity": request_snapshot.request_engine_generation_identity,
         "registry_fingerprint": request_snapshot.registry_fingerprint,
         "effective_trust_identity": request_snapshot.effective_trust_identity,
-        "node_trust_identity": node_trust_identity,
+        "trusted_signers_digest": trusted_signers_digest,
         "node_config_layer": node_config_root.is_some(),
         "runtime_limits": runtime_limits,
         "roots": root_identity,
@@ -2974,7 +2960,7 @@ async fn load_execution_control_snapshot_cached(
                     &value,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 )? {
                     crate::resolved_config_cache::emit_metric(
@@ -3013,7 +2999,7 @@ async fn load_execution_control_snapshot_cached(
                     &value,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 )? {
                     crate::resolved_config_cache::emit_metric(
@@ -3042,7 +3028,7 @@ async fn load_execution_control_snapshot_cached(
                 let load_trust = request_snapshot.trust_store.clone();
                 let load_project_materialization = project_materialization.cloned();
                 let load_node_config_root = node_config_root.map(Path::to_path_buf);
-                let load_node_trusted_keys_dir = node_trusted_keys_dir.to_path_buf();
+                let load_trusted_signers = trusted_signers.to_vec();
                 let load_runtime_limits = runtime_limits.clone();
                 let loaded = tokio::task::spawn_blocking(move || {
                     let policy = ryeos_engine::execution_policy::ExecutionPolicyResolver::new(
@@ -3066,7 +3052,7 @@ async fn load_execution_control_snapshot_cached(
                     let limits = load_limits_snapshot_under_current_authority(
                         &load_roots,
                         load_node_config_root.as_deref(),
-                        &load_node_trusted_keys_dir,
+                        &load_trusted_signers,
                         load_project_materialization.as_ref(),
                         &load_runtime_limits,
                     )?;
@@ -3091,7 +3077,7 @@ async fn load_execution_control_snapshot_cached(
                     &snapshot,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 ) {
                     Ok(current) => current,
@@ -3155,7 +3141,7 @@ async fn load_execution_control_snapshot_cached(
                 let limits = load_limits_snapshot_under_current_authority(
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                     runtime_limits,
                 )?;
@@ -3164,7 +3150,7 @@ async fn load_execution_control_snapshot_cached(
                     &snapshot,
                     roots,
                     node_config_root,
-                    node_trusted_keys_dir,
+                    trusted_signers,
                     project_materialization,
                 )? {
                     return Ok(snapshot);
@@ -4295,7 +4281,15 @@ async fn prepare_managed_launch_authority(
     })?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            root_admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let bundle_roots: Vec<PathBuf> = engine_roots
         .authoritative_bundle_roots()
         .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?
@@ -6712,7 +6706,15 @@ async fn run_claimed_thread_row_inner(
         .ok_or_else(|| anyhow::anyhow!("managed launch has no exact root admission"))?;
     let subject_resolution_authority = root_admission.resolution_subject_authority().clone();
     let resolution_project_root = root_admission.resolution_workspace();
-    let engine_roots = engine.resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let engine_roots = engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf))
+        .with_logical_project_root(
+            root_admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     let effective_request_snapshot = match resolved
         .root_admission
         .as_ref()
@@ -6733,7 +6735,8 @@ async fn run_claimed_thread_row_inner(
     // 2. Compute limits (root execution: depth = 0)
     let root_item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&resolved.item_ref)
         .map_err(|e| anyhow::anyhow!("build_and_launch: invalid root item ref: {e}"))?;
-    let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let trusted_signers =
+        ryeos_engine::launch_envelope_types::trusted_signer_entries(&engine.node_trust_store);
     let node_config_root = engine.node_config_root();
     let execution_controls = load_execution_control_snapshot_cached(
         engine,
@@ -6742,7 +6745,7 @@ async fn run_claimed_thread_row_inner(
         &root_item_ref,
         &subject_resolution_authority,
         node_config_root.as_deref(),
-        &node_trusted_keys_dir,
+        &trusted_signers,
         provenance.pinned_materialization(),
         &selected_runtime.yaml.limits,
     )
@@ -7361,14 +7364,7 @@ async fn run_claimed_thread_row_inner(
     let envelope = LaunchEnvelopeBuilder::new(
         cap.invocation_id.clone(),
         thread_id.clone(),
-        EnvelopeRoots {
-            project_root: process_project_path.clone(),
-            bundle_roots,
-            node_trusted_keys_dir,
-            // Deliberate runtime state-root override, carried so the runtime
-            // can target its state writes (thread state, transcripts, thread
-            // knowledge) away from the source project.
-        },
+        EnvelopeRoots::new(process_project_path.clone(), bundle_roots, trusted_signers),
         EnvelopeRequest {
             // Strip runtime-control fields from prompt inputs. Parent
             // budget/depth now travels out-of-band, but rejecting prompt leaks

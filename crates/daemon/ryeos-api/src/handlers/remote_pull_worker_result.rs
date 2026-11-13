@@ -241,7 +241,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let intent = PullIntent {
         schema: INTENT_SCHEMA.to_owned(),
         remote: req.remote,
-        remote_url: remote.url.clone(),
+        remote_url: remote.outbound_url()?.to_owned(),
         source_site_id: state.threads.site_id().to_owned(),
         target_site_id: remote.site_id.clone(),
         target_principal_id: remote.principal_id.clone(),
@@ -609,7 +609,7 @@ fn resolve_initial_route(
 ) -> Result<(String, RemoteConfig, String)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&canonical))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
@@ -635,9 +635,9 @@ fn resolve_current_route(state: &AppState, intent: &PullIntent) -> Result<Remote
         bail!("durable hosted worker-result pull operator grant changed");
     }
     let project = PathBuf::from(&intent.local_project_path);
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&project))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, &intent.remote)?;
-    if loaded.config.url != intent.remote_url
+    if loaded.config.url.as_deref() != Some(intent.remote_url.as_str())
         || loaded.config.site_id != intent.target_site_id
         || loaded.config.principal_id != intent.target_principal_id
         || loaded.config.signing_key != intent.target_signing_key

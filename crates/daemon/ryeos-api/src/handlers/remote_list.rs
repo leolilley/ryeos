@@ -14,27 +14,17 @@ use ryeos_executor::executor::ServiceAvailability;
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Request {
-    /// Optional local project path. When supplied, the project's
-    /// `<project>/.ai/config/remotes/remotes.yaml` is checked: it may not
-    /// define or override a remote, and one naming remote trust material
-    /// is refused (`project_remote_trust_material`). Its other entries are
-    /// listed as invalid. The CLI injects this automatically via the
-    /// alias's `project_resolution: optional` field.
+    /// Local project path the CLI may forward. Remote pins are node-level
+    /// records, so a project never changes the listing.
     #[serde(default, alias = "project")]
     pub project_path: Option<PathBuf>,
-    /// Pass-through for the CLI's `--no-project` flag. Ignored here;
-    /// project layering is opt-in via `project_path`.
+    /// Pass-through for the CLI's `--no-project` flag. Has no effect.
     #[serde(default)]
     pub no_project: bool,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let project = if req.no_project {
-        None
-    } else {
-        req.project_path.as_deref()
-    };
-    let report = config::load_remotes_layered_report(&state.config.app_root, project)?;
+pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
+    let report = config::load_remotes_report(&state.config.app_root)?;
 
     let mut entries: Vec<Value> = report
         .remotes
@@ -46,7 +36,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 "url": r.url,
                 "principal_id": r.principal_id,
                 "site_id": r.site_id,
-                "scope": loaded.scope.label(),
+                "pin_source": loaded.pin_source.as_str(),
+                "pinned_at": loaded.pinned_at,
                 "config_path": loaded.config_path,
             })
         })
@@ -58,7 +49,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .map(|entry| {
             serde_json::json!({
                 "name": entry.name,
-                "scope": entry.scope.label(),
+                "code": entry.code,
                 "config_path": entry.config_path,
                 "url": entry.url,
                 "error": entry.error,

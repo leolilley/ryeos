@@ -322,7 +322,6 @@ impl IsolationPolicy {
                     "{node_public_identity}".to_string(),
                     "{daemon_socket}".to_string(),
                     "{bundle_roots}".to_string(),
-                    "{node_trusted_keys}".to_string(),
                     "{verified_code}".to_string(),
                 ],
                 writable: vec!["{project}".to_string(), "{checkpoint_dir}".to_string()],

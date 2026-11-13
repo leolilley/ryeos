@@ -179,7 +179,8 @@ fn remote_config(
         base64::engine::general_purpose::STANDARD.encode(node_key.verifying_key().as_bytes());
     ryeos_api::remote::config::RemoteConfig {
         name: name.to_owned(),
-        url,
+        url: Some(url),
+        reachability: Default::default(),
         principal_id: format!("fp:{}", fingerprint(node_key)),
         signing_key: format!("ed25519:{public_key}"),
         site_id: site_id.to_owned(),
@@ -193,10 +194,17 @@ fn install_single_remote(
     state_path: &Path,
     remote: ryeos_api::remote::config::RemoteConfig,
 ) -> Result<()> {
-    ryeos_api::remote::config::save_remotes(
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf()).node_signing_key_path(),
+    )?;
+    ryeos_api::remote::config::write_remote_pin(
         state_path,
-        &HashMap::from([(remote.name.clone(), remote)]),
-    )
+        node.signing_key(),
+        &remote,
+        ryeos_api::remote::config::PinSource::ExpectedFingerprint,
+        None,
+    )?;
+    Ok(())
 }
 
 fn authorized_keys_dir(state_path: &Path) -> std::path::PathBuf {
@@ -720,7 +728,6 @@ fn resolve_policy_source(
         &config,
         &roots,
         None,
-        None,
         Arc::clone(&isolation),
         execution,
     )
@@ -729,6 +736,7 @@ fn resolve_policy_source(
         |generation| -> Result<ProductQualificationPolicySource> {
             let resolution = generation.effective_resolution_output(
                 ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(policy_ref)?,
                     expected_kind: Some("config".into()),
                     project_root: None,

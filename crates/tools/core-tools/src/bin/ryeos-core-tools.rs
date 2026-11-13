@@ -1,7 +1,6 @@
 //! `ryeos-core-tools` — unified core tools binary.
 //!
-//! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client,
-//! remote-descriptor.
+//! Subcommands: sign, fetch, verify, snapshot, identity, authorize-client.
 //!
 //! Multi-tool binary for signing and inspecting RyeOS items.
 //! Invoked by tool YAMLs via `bin:ryeos-core-tools <subcommand>`.
@@ -16,7 +15,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos-core-tools",
-    about = "Unified core tools binary (sign, fetch, verify, snapshot, identity, authorize-client, admission-token, remote-descriptor)",
+    about = "Unified core tools binary (sign, fetch, verify, snapshot, identity, authorize-client, admission-token)",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -272,48 +271,6 @@ enum Cmd {
         /// node's authorization policy; a larger value is refused.
         #[arg(long)]
         lifetime_secs: Option<u64>,
-    },
-
-    /// Export a remote descriptor trust pin for this node.
-    RemoteDescriptor {
-        /// App root directory for the node being described.
-        #[arg(long)]
-        app_root: Option<String>,
-
-        /// Name callers should use for the remote.
-        #[arg(long)]
-        name: Option<String>,
-
-        /// Public URL callers should use to reach the node.
-        #[arg(long)]
-        url: Option<String>,
-
-        /// Comma-separated informational capability labels.
-        #[arg(long)]
-        capabilities: Option<String>,
-
-        /// Admission mode label to advertise. Defaults to hosted policy or one_time_token.
-        #[arg(long)]
-        admission_mode: Option<String>,
-
-        /// Optional provider/operator label.
-        #[arg(long)]
-        provider_name: Option<String>,
-
-        /// Optional output path for the descriptor YAML.
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-
-    /// Pin one explicit publisher/project-author public trust document.
-    TrustPin {
-        /// App root whose operator trust store will receive the public key.
-        #[arg(long)]
-        app_root: PathBuf,
-
-        /// Publisher trust document containing public_key, fingerprint, and owner.
-        #[arg(long = "from")]
-        trust_file: PathBuf,
     },
 
     /// Author (create or upsert) a signed project item through the daemon
@@ -627,37 +584,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             lifetime_secs,
             cli.stdin_json,
         ),
-        Cmd::RemoteDescriptor {
-            app_root,
-            name,
-            url,
-            capabilities,
-            admission_mode,
-            provider_name,
-            output,
-        } => run_remote_descriptor(
-            app_root,
-            name,
-            url,
-            capabilities,
-            admission_mode,
-            provider_name,
-            output,
-            cli.stdin_json,
-        ),
-        Cmd::TrustPin {
-            app_root,
-            trust_file,
-        } => {
-            let report = ryeos_core_tools::actions::trust::run_pin_from(
-                &ryeos_core_tools::actions::trust::PinFromOptions {
-                    app_root,
-                    trust_file,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            Ok(())
-        }
         Cmd::AuthorItem {
             item_ref,
             content,
@@ -930,8 +856,7 @@ fn run_build(
                 .expect("could not determine XDG data directory")
         });
     let registry_roots = bundle_publish_dependency_roots(&source_path, registry_roots, &app_root)?;
-    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
-    let base_trust_store = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)
+    let base_trust_store = ryeos_engine::trust::TrustStore::load_node_registry(&app_root)
         .context("load trust store for registry roots")?;
     let owner = resolve_publish_owner(owner, &signing_key, &base_trust_store);
 
@@ -1106,7 +1031,7 @@ fn run_doctor(
         .context("load config for offline doctor engine")?;
     let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&app_root);
     let policy_snapshot = (|| -> anyhow::Result<_> {
-        let trust = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(&app_root)?;
         ryeos_node_runtime::node_policy::load_snapshot(
             &app_root,
             &trust,
@@ -1124,7 +1049,6 @@ fn run_doctor(
                     &config,
                     &dependency_roots,
                     Some(&source_path),
-                    None,
                     std::sync::Arc::clone(isolation),
                     execution_policy,
                 )
@@ -1442,8 +1366,7 @@ fn run_bundle_sign(
         });
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
     let signing_key = load_operator_signing_key()?;
-    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(&app_root)
         .context("load trust store for registry roots")?;
 
     let report = ryeos_core_tools::actions::sign_bundle::rebuild_and_sign_bundle_items_with_trust(
@@ -1854,47 +1777,6 @@ fn run_authorize_client(
     Ok(())
 }
 
-fn run_remote_descriptor(
-    app_root: Option<String>,
-    name: Option<String>,
-    url: Option<String>,
-    capabilities: Option<String>,
-    admission_mode: Option<String>,
-    provider_name: Option<String>,
-    output: Option<PathBuf>,
-    stdin_json: bool,
-) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::remote_descriptor::{
-        ExportRemoteDescriptorParams, run_export_remote_descriptor,
-    };
-
-    let params = if stdin_json {
-        serde_json::from_value(read_stdin_json()?)?
-    } else {
-        let name = name.ok_or_else(|| anyhow::anyhow!("--name required"))?;
-        let url = url.ok_or_else(|| anyhow::anyhow!("--url required"))?;
-        let capabilities = capabilities
-            .unwrap_or_default()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
-        ExportRemoteDescriptorParams {
-            system_space_dir: app_root,
-            name,
-            url,
-            capabilities,
-            admission_mode,
-            provider_name,
-            output,
-        }
-    };
-
-    let report = run_export_remote_descriptor(params)?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
-}
-
 fn read_stdin_json() -> anyhow::Result<serde_json::Value> {
     let mut buf = String::new();
     io::stdin().read_to_string(&mut buf)?;
@@ -1955,7 +1837,6 @@ mod tests {
     struct InstalledFixture {
         _tmp: tempfile::TempDir,
         system: PathBuf,
-        _user: PathBuf,
         key: SigningKey,
     }
 
@@ -1963,27 +1844,17 @@ mod tests {
         fn new() -> Self {
             let tmp = tempfile::tempdir().unwrap();
             let system = tmp.path().join("system");
-            let user = tmp.path().join("user");
-            let trust_dir = user
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("trusted");
-            std::fs::create_dir_all(&trust_dir).unwrap();
             let key = SigningKey::generate(&mut OsRng);
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            let system_trust_dir = system
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("trusted");
-            std::fs::create_dir_all(&system_trust_dir).unwrap();
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &system_trust_dir, None)
-                .unwrap();
+            ryeos_engine::test_support::pin_signer(
+                &system,
+                &key.verifying_key(),
+                "test",
+                ryeos_engine::trust::SignerRole::Operator,
+                ryeos_engine::trust::SignerScope::everywhere(),
+            );
             Self {
                 _tmp: tmp,
                 system,
-                _user: user,
                 key,
             }
         }

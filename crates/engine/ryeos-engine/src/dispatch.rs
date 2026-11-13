@@ -1226,10 +1226,6 @@ fn isolation_plan_request(
             } else {
                 &[]
             },
-            node_trusted_keys_dir: ctx
-                .isolation_node_trusted_keys_dir
-                .as_deref()
-                .filter(|_| node_filesystem),
             verified_code: &verified_code,
             verified_command: ctx
                 .isolation_verified_command
@@ -1298,10 +1294,6 @@ fn isolation_plan_request_awaiting_attachment(
             } else {
                 &[]
             },
-            node_trusted_keys_dir: ctx
-                .isolation_node_trusted_keys_dir
-                .as_deref()
-                .filter(|_| node_filesystem),
             verified_code: &verified_code,
             verified_command: ctx
                 .isolation_verified_command
@@ -1562,7 +1554,6 @@ mod tests {
             isolation_daemon_socket_path: None,
             isolation_captured_callback_socket: false,
             isolation_bundle_roots: Vec::new(),
-            isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
             isolation_external_read_only_mounts: Vec::new(),

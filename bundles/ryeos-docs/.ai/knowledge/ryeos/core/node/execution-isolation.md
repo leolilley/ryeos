@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T13:04:03Z:397c1648e417fc29e1323b4e0e7d7c9b9ed586bd2ab0a7c7444e4d6b9b9daa53:jrSKfDYMH8cuDnqpkYiKG75Yax3hwN8KgQf1YAl6bJqThfcIlE4Ps4h8JG6BjDViJjv2pvd9VY8C2xvib9wIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:49:28Z:763305599aac21dadc2aaf737b01317c6c418656907c5c79f2009bd94580a4b4:5KsFLcqAKlai5UShfKXreeIwH7oDnUk8m2qGpKE1eDQ2SP4muD9awOlmGYQbpnexkId51A26qhAlfl8VFx5qAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -261,7 +261,6 @@ policy:
       - "{node_public_identity}"
       - "{daemon_socket}"
       - "{bundle_roots}"
-      - "{node_trusted_keys}"
       - "{verified_code}"
     writable:
       - "{project}"
@@ -358,7 +357,7 @@ refusal is not an executed workload's nonzero exit result.
   intersection of the signed declaration and live inspection.
 - `filesystem.readable` accepts absolute paths plus `{project}`, `{cwd}`,
   `{node_public_identity}`, `{daemon_socket}`, `{bundle_roots}`,
-  `{node_trusted_keys}`, and `{verified_code}`.
+  and `{verified_code}`.
 - `filesystem.writable` accepts absolute paths plus `{project}`, `{cwd}`, and
   `{checkpoint_dir}`.
 - A retained immutable-input or live-project authority intersects an explicit
@@ -509,8 +508,6 @@ The narrow readable placeholders mean:
   socket (for example its parent directory) is refused at launch by name, so
   no entry can hand a sandbox the control socket.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
-- `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
-  directory. The placeholder name matches the existing launch-envelope root.
 - `{verified_code}` is mandatory for executable-item launches. RyeOS rechecks
   the verified whole-file SHA-256, writes those exact bytes to node-owned
   content-addressed storage, mirrors the code's project or bundle authority at

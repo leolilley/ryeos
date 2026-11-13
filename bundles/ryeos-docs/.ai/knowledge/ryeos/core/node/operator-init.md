@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:12:59Z:f3e4c261dd4e09c4ac567de35bb89ea9cde6ff575c32db5f7fc979632ff51347:R9Kjlfo4xFz9bK1E/5XdMyGOfVxBdW+Zv6xHvybjXJfcN4QW4STJLN2bn9l7SYqZYCwWuoeXgC7we4imuo6kDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:49:28Z:b4542bea916344e49051489719c7d252598764b564b74d9b954886ea890b83eb:gUcWqEHikYocwNNUhLzBbPKPOhtMZ8I/EWk1+7taYHUXX/XM/AlGksu5YDpvt7TqlB4cXbUqEiCDgCbFbh7RCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -42,9 +42,12 @@ default.
 2. Create the app-root layout (`<app_root>/.ai/{node,state,bundles,config}`).
 3. Load-or-create the operator Ed25519 signing key.
 4. Load-or-create the node Ed25519 signing key.
-5. Write self-trust docs for both keys into the node trust store.
+5. Initialize the signer registry under `<app_root>/.ai/node/trust/` and
+   write the node-signed signer record for the operator key (the node key is
+   the implicit root and needs no record).
 6. Pin the official publisher key from hardcoded public key bytes.
-7. Pin any additional `--trust-file` publisher docs.
+7. Pin any additional `--trust-file` publisher docs (role publisher, space
+   bundle).
 8. Discover bundles in the source directory.
 9. Build the bundle plan and verify manifest dependency policy.
 10. If a node init profile was selected, verify its publisher signature, use
@@ -106,6 +109,8 @@ publishers enter the node trust store only through an explicit trust
 choice:
 
 - `ryeos init --trust-file <PUBLISHER_TRUST.toml>` pins a named publisher;
+- on an existing node, `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role
+  publisher` pins one while the node is stopped;
 - development/custom containers may opt in to their baked publisher set with
   `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
 - the local source installer may opt in with `--trust-source-publishers`.

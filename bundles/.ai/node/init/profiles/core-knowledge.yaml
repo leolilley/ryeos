@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:52Z:c2c9fbc53779d18b33b9ed4caa71d11baa31383e3a07c01b41d8a44c7e8a37aa:da0M2TQLFcQGLNT/J8VBH3+2DFLlV+qyF4vMNcfhXweoPrVYoPMQAQWaFY12mzhBeRepIwMHumJ+uvgzMeZnAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T18:15:39Z:580b813451d4cf8ac466d375522b4a45141862e4cd782309a9fbe745c70d2c34:0Sm0X0auGmZiergLFc8w/tncoPgVJGh/7k8khXsR9nEE8lROvWHWFVPGIcloQMrrnhG23+BjmQ6TFVUBk2feCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -281,7 +281,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -355,7 +354,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"

@@ -73,7 +73,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .join(ryeos_engine::AI_DIR)
         .join("bundles");
     let local_target = bundles_root.join(&req.bundle_name);
-    let node_config_root = state.config.runtime_root().config();
     let prospective_validator = state
         .extensions
         .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
@@ -104,7 +103,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
 
     // 1. Call bundle_export on the remote.
     let export_resp: BundleExportResponse =
@@ -198,7 +197,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &req.bundle_name,
         &transaction_staging,
         false,
-        &node_config_root,
         &state.engine.node_trust_store,
         &prospective_validator,
         Arc::clone(&state.isolation),

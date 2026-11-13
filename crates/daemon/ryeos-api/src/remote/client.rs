@@ -407,27 +407,30 @@ impl RemoteClient {
 
     /// Build a client from a named remote config + app state.
     ///
-    /// Looks up `remote_name` in the node's remotes config. Pass
-    /// `Some(project_path)` when the caller is acting in the context of a
-    /// local project; that project's remotes file is checked and refused
-    /// if it names remote trust material.
-    pub fn from_named_remote(
-        state: &AppState,
-        remote_name: &str,
-        project_path: Option<&std::path::Path>,
-    ) -> Result<Self> {
-        let remotes = super::config::load_remotes_layered(&state.config.app_root, project_path)?;
+    /// Looks up `remote_name` among the node-signed remote pins. A project
+    /// never contributes remotes.
+    pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
+        let remotes = super::config::load_remotes(&state.config.app_root)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
-        Ok(Self::from_remote_cfg(state, &remote))
+        Ok(Self::from_remote_cfg(state, &remote)?)
     }
 
     /// Build a client from an already-resolved `RemoteConfig`.
-    /// Callers that need project layering should resolve via
-    /// [`super::config::load_remotes_layered`] first.
-    pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {
-        let mut client = Self::new(&remote.url, &remote.principal_id, state.identity.clone());
+    /// Resolve it from [`super::config::load_remotes`] first.
+    ///
+    /// Refuses an inbound-only remote with `remote_inbound_only`: this node
+    /// never dials it.
+    pub fn from_remote_cfg(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+    ) -> Result<Self, super::config::RemotePinError> {
+        let mut client = Self::new(
+            remote.outbound_url()?,
+            &remote.principal_id,
+            state.identity.clone(),
+        );
         client.origin_site_id = Some(state.threads.site_id().to_string());
-        client
+        Ok(client)
     }
 
     /// Build an outbound client that preserves the already-authenticated
@@ -450,7 +453,7 @@ impl RemoteClient {
             NodeIdentity::load(&state.config.operator_signing_key_path)
                 .context("load configured operator identity for remote execution")?,
         );
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let mut client = Self::new(remote.outbound_url()?, &remote.principal_id, identity);
         let site_id = state.threads.site_id().to_string();
         client.origin_site_id = Some(site_id.clone());
         client.required_forwarding_origin_site_id = Some(site_id);
@@ -488,7 +491,7 @@ impl RemoteClient {
         if identity.fingerprint() != operator_fingerprint {
             anyhow::bail!("retained remote operation belongs to another configured operator");
         }
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let mut client = Self::new(remote.outbound_url()?, &remote.principal_id, identity);
         let site_id = state.threads.site_id().to_string();
         client.origin_site_id = Some(site_id.clone());
         client.required_forwarding_origin_site_id = Some(site_id);

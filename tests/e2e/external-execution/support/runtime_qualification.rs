@@ -260,6 +260,7 @@ pub fn publish_guest_runtime_witness(
     let relationship_resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(GUEST_RUNTIME_RECIPE_REF)
                 .unwrap(),
             expected_kind: Some("config".into()),

@@ -962,7 +962,6 @@ struct ReadableMountResolution<'a> {
     daemon_socket: Option<&'a PinnedDaemonSocket>,
     requested_daemon_socket: Option<&'a Path>,
     bundle_roots: &'a [PathBuf],
-    node_trusted_keys_dir: Option<&'a Path>,
     verified_code_mounts: &'a [ReadableMount],
 }
 
@@ -3012,7 +3011,6 @@ impl IsolationRuntime {
                 || context.checkpoint_authority.is_some()
                 || (context.daemon_socket_path.is_some() && !context.captured_callback_socket)
                 || !context.bundle_roots.is_empty()
-                || context.node_trusted_keys_dir.is_some()
             {
                 return Err(refused(
                     "captured execution context carries ambient filesystem authority".to_string(),
@@ -3364,9 +3362,6 @@ impl IsolationRuntime {
         }
         for root in context.bundle_roots {
             validate_namespace_destination("bundle root", root)?;
-        }
-        if let Some(path) = context.node_trusted_keys_dir {
-            validate_namespace_destination("node trusted-keys directory", path)?;
         }
         if let Some(path) = self.app_root_destination.as_deref() {
             validate_namespace_destination("app root", path)?;
@@ -4116,7 +4111,6 @@ impl IsolationRuntime {
             daemon_socket: self.daemon_socket.as_ref(),
             requested_daemon_socket,
             bundle_roots: context.bundle_roots,
-            node_trusted_keys_dir: context.node_trusted_keys_dir,
             verified_code_mounts: &verified_code_mounts,
         };
         if context.project_authority == IsolationProjectAuthority::ReadOnly
@@ -6528,7 +6522,6 @@ fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError
                 | "{node_public_identity}"
                 | "{daemon_socket}"
                 | "{bundle_roots}"
-                | "{node_trusted_keys}"
                 | "{verified_code}"
         );
         if !is_placeholder {
@@ -7354,20 +7347,6 @@ fn resolve_readable_mounts_unchecked(
                 })
             })
             .collect();
-    }
-
-    if configured == "{node_trusted_keys}" {
-        let Some(destination) = resolution.node_trusted_keys_dir else {
-            return Ok(Vec::new());
-        };
-        let source = canonicalize_context_mount("node trusted-keys directory", destination)?;
-        let source_handle = pin_mount_source("node trusted-keys directory", &source)?;
-        return Ok(vec![ReadableMount {
-            source,
-            destination: destination.to_path_buf(),
-            source_handle,
-            layer: 20,
-        }]);
     }
 
     if configured == "{verified_code}" {
@@ -8597,7 +8576,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(command.identity()),
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -8689,7 +8667,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
@@ -8778,7 +8755,6 @@ mod tests {
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: std::slice::from_ref(command.identity()),
                 verified_command: Some(&command),
                 external_read_only_mounts: &[],
@@ -8889,7 +8865,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
@@ -8963,7 +8938,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &verified_code,
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -9094,7 +9068,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&verified),
                     verified_command: None,
                     external_read_only_mounts: std::slice::from_ref(&admitted_mount),
@@ -9367,7 +9340,6 @@ mod tests {
             "{node_public_identity}".to_string(),
             "{daemon_socket}".to_string(),
             "{bundle_roots}".to_string(),
-            "{node_trusted_keys}".to_string(),
             "{verified_code}".to_string(),
         ];
         policy.filesystem.writable = vec!["{project}".to_string(), "{checkpoint_dir}".to_string()];
@@ -9508,7 +9480,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -9650,7 +9621,6 @@ mod tests {
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: Some(&command),
                 external_read_only_mounts: &external_mounts,
@@ -9737,20 +9707,6 @@ mod tests {
                     .expect("overlay outside its exact private root must refuse");
                 assert!(
                     error.to_string().contains("read-only state overlay"),
-                    "{error}"
-                );
-                let error = runtime
-                    .apply_with_provenance(
-                        request(),
-                        IsolationLaunchContext {
-                            node_trusted_keys_dir: Some(app_root.path()),
-                            ..context
-                        },
-                    )
-                    .err()
-                    .expect("an exact private root must not admit ambient trust state");
-                assert!(
-                    error.to_string().contains("ambient filesystem authority"),
                     "{error}"
                 );
             }
@@ -9904,7 +9860,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: std::slice::from_ref(&captured),
                     verified_command: Some(&captured),
                     external_read_only_mounts: &[],
@@ -10112,7 +10067,6 @@ mod tests {
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: std::slice::from_ref(&external),
@@ -10178,7 +10132,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
@@ -10272,7 +10225,6 @@ mod tests {
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: Some(&command),
             external_read_only_mounts: &[],
@@ -10402,7 +10354,6 @@ mod tests {
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: Some(&command),
             external_read_only_mounts: &[],
@@ -10663,7 +10614,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -10745,7 +10695,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &[],
@@ -10802,8 +10751,7 @@ mod tests {
                 checkpoint_authority: None,
                 daemon_socket_path: None,
                 captured_callback_socket: false,
-                bundle_roots: &[],
-                node_trusted_keys_dir: Some(app_root.path()),
+                bundle_roots: &[app_root.path().to_path_buf()],
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
@@ -10905,7 +10853,6 @@ mod tests {
                 daemon_socket_path: with_socket.then_some(socket_ref),
                 captured_callback_socket: admitted,
                 bundle_roots,
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: Some(&command),
                 external_read_only_mounts: &[],
@@ -11081,7 +11028,6 @@ mod tests {
             daemon_socket_path: Some(socket),
             captured_callback_socket: captured,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: Some(&command),
             external_read_only_mounts: &[],
@@ -11258,7 +11204,6 @@ mod tests {
                         daemon_socket_path: Some(runtime_static),
                         captured_callback_socket: false,
                         bundle_roots: &[],
-                        node_trusted_keys_dir: None,
                         verified_code: &[],
                         verified_command: Some(&command),
                         external_read_only_mounts: &[],
@@ -11371,7 +11316,6 @@ mod tests {
                     daemon_socket_path: Some(&socket_path),
                     captured_callback_socket: true,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &mounts,
@@ -11513,7 +11457,6 @@ mod tests {
                     daemon_socket_path: Some(&socket_path),
                     captured_callback_socket: true,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: Some(&command),
                     external_read_only_mounts: &mounts,
@@ -11715,7 +11658,6 @@ mod tests {
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],
@@ -11824,7 +11766,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
@@ -11953,7 +11894,6 @@ mod tests {
                         checkpoint_authority: None,
                         daemon_socket_path: None,
                         bundle_roots: &[],
-                        node_trusted_keys_dir: None,
                         verified_code: &[],
                         verified_command: None,
                         external_read_only_mounts: &[],
@@ -12029,7 +11969,6 @@ mod tests {
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
@@ -12091,7 +12030,6 @@ mod tests {
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
@@ -12144,7 +12082,6 @@ mod tests {
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code: &[],
             verified_command: None,
             external_read_only_mounts: &[],
@@ -12227,7 +12164,6 @@ mod tests {
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &[],
                     verified_command: None,
                     external_read_only_mounts: &[],
@@ -12324,7 +12260,6 @@ mod tests {
             daemon_socket: None,
             requested_daemon_socket: None,
             bundle_roots: &[],
-            node_trusted_keys_dir: None,
             verified_code_mounts: &[],
         };
         let readable = resolve_readable_mounts("{project}", &readable_resolution)
