@@ -58,7 +58,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// authority shape bumps it; a stored record of any other version is refused
 /// before its nested authority is decoded, and the execution-history reset
 /// discards it.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 36;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 37;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -242,6 +242,27 @@ pub struct RuntimeLaunchMetadata {
     /// authority, never a producer parameter or producer stdout field.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub effect_authority: Option<ryeos_effect_contract::PreparedEffectDispatchAuthority>,
+
+    /// The principal whose scopes covered this thread's declared capabilities
+    /// at admission, and the authorized-key grant it authenticated under.
+    /// Recorded so live work can be found when a grant is revoked or replaced.
+    /// An operator follow-up records its own sender; machine continuations
+    /// keep the admitting principal. `None` for launches that no
+    /// grant-bearing caller admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covering_authority: Option<CoveringAuthority>,
+}
+
+/// The caller that lent a thread its declared capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoveringAuthority {
+    /// Fingerprint of the covering principal.
+    pub principal: String,
+    /// Digest (`source_file_hash`) of the authorized-key grant the principal
+    /// authenticated under; `None` when the caller was not grant-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +307,7 @@ impl Default for RuntimeLaunchMetadata {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: None,
         }
     }
 }
@@ -868,6 +890,11 @@ impl RuntimeLaunchMetadata {
                 &self.effect_authority,
                 &attempt.effect_authority,
             )?,
+            covering_authority: exact(
+                "covering authority",
+                &self.covering_authority,
+                &attempt.covering_authority,
+            )?,
         };
         merged.validate()?;
         Ok(merged)
@@ -1057,6 +1084,7 @@ impl RuntimeLaunchMetadata {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: None,
         }
     }
 
@@ -1318,6 +1346,7 @@ impl RuntimeLaunchMetadata {
             // (no allowance reset).
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
+            covering_authority: self.covering_authority.clone(),
         }
     }
 
@@ -1354,8 +1383,16 @@ impl RuntimeLaunchMetadata {
             // ledger exists to prevent (plan constraint 6, §10.3).
             accounting_scope: self.accounting_scope.clone(),
             effect_authority: self.effect_authority.clone(),
+            covering_authority: self.covering_authority.clone(),
             ..Self::default()
         }
+    }
+
+    /// Record the principal (and grant digest, when grant-backed) that covered
+    /// this thread's declared capabilities.
+    pub fn with_covering_authority(mut self, authority: CoveringAuthority) -> Self {
+        self.covering_authority = Some(authority);
+        self
     }
 
     pub fn with_sealed_root_request(mut self, request: SealedRootExecutionRequest) -> Self {
@@ -1907,6 +1944,10 @@ mod tests {
             isolation: None,
             accounting_scope: None,
             effect_authority: None,
+            covering_authority: Some(CoveringAuthority {
+                principal: "fp:caller".to_string(),
+                grant_digest: Some("a".repeat(64)),
+            }),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();

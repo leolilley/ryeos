@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-19T09:42:33Z:1529c615e1230c5fceb5553cf8c3db12086c73440cb0c0aed762c6083740df06:b5oLecx4UZo90lj7wSTfcaTcWv9LmbBwnG4Vd4UTtSaH5KW8jjRCfyqByzJHgZ2bfBR1Z8cgmbgQrBZVJSr5BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:43:16Z:bf633c6b7ffabbd12085e2f4d5f6a3f6d527baa99f33327dabbafd3643a47353:lur6/PG005XqCBp8gtXLdM8CI5yLJ5v0LO3ige9PnDYvSIHM9dS9wpg8BZ/6A/vU1NVMNlIysf8PtyTDHQY6Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, dag, workflow]
@@ -13,7 +13,7 @@ Invariant: a graph is signed YAML describing explicit nodes, edges, conditions, 
 ## Authoring checklist
 
 - Declare `category`, `version`, and a clear description.
-- Declare `requires.capabilities.declared` (a flat list of caps) for every daemon action callback the graph may perform.
+- Declare `requires.capabilities.declared` (a flat list of caps) for every daemon action callback the graph may perform. The caller launching the graph must hold every declared cap (`caller_capability_not_covered` otherwise); declaring never grants authority.
 - Keep node ids stable; persisted state and events refer to them.
 - Use conditional edges for branching and foreach blocks for fan-out.
 - Prefer explicit error edges/hooks over relying on runtime defaults.

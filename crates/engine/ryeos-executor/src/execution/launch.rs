@@ -3401,9 +3401,14 @@ fn machine_continuation_checkpoint_resume_mode(
 /// exists, its exact capability closure wins and live sources are never reopened.
 #[derive(Clone, Copy)]
 pub enum CapabilityPolicy<'a> {
-    /// At first admission, run with exactly the union of live composed sources.
-    /// Recovery/continuation instead preserves the admitted capsule verbatim.
-    AdmissionDefault,
+    /// Root admission: a thread never holds capability its caller did not lend.
+    /// Every composed *declared* cap (the item's own `requires.capabilities.declared`
+    /// plus its `extends` ancestors) must be covered by `caller_scopes`; the
+    /// thread then runs with exactly `declared ∪ runtime_manifest` — never the
+    /// caller's full scopes. Manifest runtime authority is minted from the signed
+    /// bundle manifest and needs no caller coverage. Recovery/continuation
+    /// instead preserves the admitted capsule verbatim.
+    RootAdmission { caller_scopes: &'a [String] },
     /// Continuation / native-resume: the live composed caps MUST equal the caps
     /// the predecessor captured (no silent privilege drift); run with them.
     ExactPinned(&'a [String]),
@@ -3429,6 +3434,129 @@ fn union_cap_sources(declared: Vec<String>, runtime_manifest: Vec<String>) -> Ve
         .collect()
 }
 
+/// The scopes a principal lends to the work it launches: a local principal's
+/// grant scopes, or a delegated principal's delegated scopes.
+pub fn principal_caller_scopes(
+    principal: &ryeos_engine::contracts::EffectivePrincipal,
+) -> &[String] {
+    match principal {
+        ryeos_engine::contracts::EffectivePrincipal::Local(principal) => &principal.scopes,
+        ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
+            &principal.delegated_scopes
+        }
+    }
+}
+
+/// The covering authority recorded on a thread: the acting principal plus the
+/// digest of the authorized-key grant it authenticated under (`None` for a
+/// caller that is not grant-backed). Scheduled fires carry the grant hash their
+/// schedule pinned through the same handler context.
+pub fn covering_authority_for(
+    acting_principal: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+) -> ryeos_app::launch_metadata::CoveringAuthority {
+    ryeos_app::launch_metadata::CoveringAuthority {
+        principal: acting_principal.to_owned(),
+        grant_digest: handler_context
+            .and_then(|context| context.authenticated_grant_authority.as_ref())
+            .map(|authority| authority.principal_grant_hash.clone()),
+    }
+}
+
+/// Typed 403 refusal naming the item, the caller, every uncovered cap, and the cure.
+fn caller_capability_not_covered(
+    item_ref: &str,
+    caller_principal: &str,
+    uncovered: &[String],
+) -> BuildAndLaunchError {
+    let caps = uncovered
+        .iter()
+        .map(|cap| format!("`{cap}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+        code: "caller_capability_not_covered".to_owned(),
+        message: format!(
+            "caller `{caller_principal}` does not hold every capability `{item_ref}` declares: \
+             uncovered {caps}. A thread never holds authority its caller did not lend; \
+             grant the caller {caps}, or narrow the item's `requires.capabilities.declared`"
+        ),
+        binding: None,
+    }))
+}
+
+/// Every cap in `caps` that no caller scope covers, sorted and de-duplicated.
+fn uncovered_by_caller<'c>(
+    caller_scopes: &[String],
+    caps: impl IntoIterator<Item = &'c String>,
+) -> Vec<String> {
+    caps.into_iter()
+        .filter(|cap| {
+            !caller_scopes
+                .iter()
+                .any(|scope| ryeos_state::capability::pattern_covers(scope, cap))
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Root admission: refuse unless the caller covers every declared cap, then run
+/// with exactly `declared ∪ runtime_manifest` (see [`CapabilityPolicy::RootAdmission`]).
+fn apply_root_admission(
+    caller_scopes: &[String],
+    caller_principal: &str,
+    declared: Vec<String>,
+    runtime_manifest: Vec<String>,
+    item_ref: &str,
+) -> Result<Vec<String>, BuildAndLaunchError> {
+    let uncovered = uncovered_by_caller(caller_scopes, &declared);
+    if !uncovered.is_empty() {
+        return Err(caller_capability_not_covered(
+            item_ref,
+            caller_principal,
+            &uncovered,
+        ));
+    }
+    Ok(union_cap_sources(declared, runtime_manifest))
+}
+
+/// Operator follow-up gate: the sender must cover every sealed cap the
+/// follow-up will run with. Caps in the manifest runtime-authority namespace
+/// are minted from the signed bundle manifest (a composed item can never
+/// declare them), so they need no sender coverage.
+fn require_sender_covers_sealed_caps(
+    sender: &ryeos_engine::contracts::EffectivePrincipal,
+    sealed_caps: &[String],
+    item_ref: &str,
+) -> Result<(), BuildAndLaunchError> {
+    let uncovered = uncovered_by_caller(
+        principal_caller_scopes(sender),
+        sealed_caps.iter().filter(|cap| {
+            !ryeos_bundle::runtime_authority::composed_grant_overlaps_manifest_runtime_authority(
+                cap,
+            )
+        }),
+    );
+    if uncovered.is_empty() {
+        return Ok(());
+    }
+    let sender_fingerprint = match sender {
+        ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
+            principal.fingerprint.as_str()
+        }
+        ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
+            principal.caller_fingerprint.as_str()
+        }
+    };
+    Err(caller_capability_not_covered(
+        item_ref,
+        sender_fingerprint,
+        &uncovered,
+    ))
+}
+
 /// Apply a [`CapabilityPolicy`] to the freshly-resolved cap sources, returning the
 /// caps the launch should actually run with (callback token + envelope + launch
 /// metadata all consume the result). `child_execute_cap` is the canonical execute
@@ -3439,10 +3567,17 @@ fn apply_capability_policy(
     runtime_manifest: Vec<String>,
     policy: CapabilityPolicy<'_>,
     item_ref: &str,
+    caller_principal: &str,
     child_execute_cap: &str,
 ) -> Result<Vec<String>, BuildAndLaunchError> {
     match policy {
-        CapabilityPolicy::AdmissionDefault => Ok(union_cap_sources(declared, runtime_manifest)),
+        CapabilityPolicy::RootAdmission { caller_scopes } => apply_root_admission(
+            caller_scopes,
+            caller_principal,
+            declared,
+            runtime_manifest,
+            item_ref,
+        ),
         CapabilityPolicy::ExactPinned(captured) => {
             let composed = union_cap_sources(declared, runtime_manifest);
             let recomputed: BTreeSet<&str> = composed.iter().map(String::as_str).collect();
@@ -3474,7 +3609,7 @@ fn apply_capability_policy(
 /// Recover the exact capability closure sealed at first admission.
 ///
 /// `ExactPinned` is an additional consistency assertion supplied by native
-/// resume/continuation metadata. `AdmissionDefault` and `FollowChildHybrid`
+/// resume/continuation metadata. `RootAdmission` and `FollowChildHybrid`
 /// have already been evaluated before the capsule was persisted, so replaying
 /// either policy would re-enter mutable item/manifest authority and is
 /// deliberately forbidden.
@@ -4936,6 +5071,7 @@ async fn prepare_managed_launch_authority(
             runtime_capability_caps,
             params.capability_policy,
             &params.resolved.item_ref,
+            params.acting_principal,
             &child_execute_cap,
         )?
     };
@@ -5489,6 +5625,16 @@ async fn prepare_managed_launch_authority(
                 executor_ref: Some(executor_ref.clone()),
                 runtime_ref: Some(selected_runtime.canonical_ref.to_string()),
             });
+        // A continuation keeps the authority that covered its seed (the
+        // admitting principal, or the operator follow-up's sender); a fresh
+        // root records the caller that lent it its declared caps and, when that
+        // caller authenticated under an authorized-key grant, the grant digest.
+        if metadata.covering_authority.is_none() {
+            metadata = metadata.with_covering_authority(covering_authority_for(
+                params.acting_principal,
+                params.handler_context,
+            ));
+        }
         if let Some(native_resume) = native_resume {
             metadata = metadata.with_native_resume(native_resume);
         }
@@ -5775,14 +5921,7 @@ async fn condition_workspace_output_authority(
     }
     let context = crate::executor::ExecutionContext {
         principal_fingerprint: params.acting_principal.to_owned(),
-        caller_scopes: match &params.resolved.plan_context.requested_by {
-            ryeos_engine::contracts::EffectivePrincipal::Local(principal) => {
-                principal.scopes.clone()
-            }
-            ryeos_engine::contracts::EffectivePrincipal::Delegated(principal) => {
-                principal.delegated_scopes.clone()
-            }
-        },
+        caller_scopes: principal_caller_scopes(&params.resolved.plan_context.requested_by).to_vec(),
         engine: engine.clone(),
         plan_ctx: params.resolved.plan_context.clone(),
         requested_call: None,
@@ -8755,11 +8894,20 @@ async fn prepare_successor_launch(
                 successor_thread_id,
             )?,
         ),
-        SuccessorMode::Operator => (
-            false,
-            CapabilityPolicy::AdmissionDefault,
-            CheckpointResumeMode::None,
-        ),
+        SuccessorMode::Operator => {
+            // The follow-up runs with the predecessor's sealed caps exactly,
+            // and only a sender that covers them may drive it.
+            require_sender_covers_sealed_caps(
+                &resume.requested_by,
+                &resume.effective_caps,
+                &resume.item_ref,
+            )?;
+            (
+                false,
+                CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
+                CheckpointResumeMode::None,
+            )
+        }
         SuccessorMode::Follow => {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "follow successor authority cannot be prepared by this path"
@@ -8898,7 +9046,11 @@ pub async fn prepare_operator_successor_launch(
     let successor_metadata = source_metadata
         .continuation_successor_seed(resume.clone())
         .with_continuation_source(source_thread_id)
-        .with_sealed_root_request(sealed);
+        .with_sealed_root_request(sealed)
+        .with_covering_authority(covering_authority_for(
+            &handler_context.fingerprint,
+            Some(handler_context),
+        ));
     let mut prepared = prepare_successor_launch(
         state,
         successor_thread_id,
@@ -9608,7 +9760,8 @@ async fn launch_claimed_successor(
 
     // Machine: fold the chain with NO new stimulus and assert the predecessor's
     // captured caps equal the capsule. Operator: inject the seeded input while
-    // preserving that same sealed capability closure.
+    // preserving that same sealed capability closure, which the follow-up
+    // sender must cover.
     let (suppress_stimulus, capability_policy) = match mode {
         // Machine and Follow both fold the chain and assert captured capability
         // identity; they differ only in checkpoint sourcing. Operator injects
@@ -9617,7 +9770,17 @@ async fn launch_claimed_successor(
             true,
             CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
         ),
-        SuccessorMode::Operator => (false, CapabilityPolicy::AdmissionDefault),
+        SuccessorMode::Operator => {
+            require_sender_covers_sealed_caps(
+                &resume.requested_by,
+                &resume.effective_caps,
+                &resume.item_ref,
+            )?;
+            (
+                false,
+                CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
+            )
+        }
     };
 
     let launch_params = BuildAndLaunchParams {
@@ -12315,23 +12478,174 @@ mod tests {
             caps(runtime_manifest),
             policy,
             "i",
+            "fp:caller",
             child_execute_cap,
         )
     }
 
+    fn refusal_parts(error: BuildAndLaunchError) -> (String, String) {
+        match error {
+            BuildAndLaunchError::LaunchPreparation(inner) => match *inner {
+                DispatchError::LaunchPolicyForbidden { code, message, .. } => (code, message),
+                other => panic!("expected typed launch-policy refusal, got {other:?}"),
+            },
+            other => panic!("expected typed launch-policy refusal, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn capability_policy_fresh_unions_both_sources() {
-        // Fresh runs with the union of caller-delegated and manifest caps.
+    fn root_admission_runs_with_exactly_declared_and_manifest_caps() {
+        // A caller that covers the declared cap runs the thread with exactly
+        // declared and manifest caps, not the caller's wider scopes.
+        let scopes = caps(&["ryeos.execute.tool.*", "ryeos.execute.service.*"]);
         let out = apply_policy(
             &["ryeos.execute.tool.echo"],
             &["ryeos.get.vault.child/oauth"],
-            CapabilityPolicy::AdmissionDefault,
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
             "",
         )
         .unwrap();
         assert_eq!(
             out,
             caps(&["ryeos.execute.tool.echo", "ryeos.get.vault.child/oauth"])
+        );
+    }
+
+    #[test]
+    fn root_admission_refuses_every_uncovered_declared_cap() {
+        let scopes = caps(&["ryeos.execute.tool.echo"]);
+        let error = apply_policy(
+            &[
+                "ryeos.execute.tool.echo",
+                "ryeos.execute.service.bundle/list",
+                "ryeos.fetch.knowledge.x/y",
+            ],
+            &[],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
+            "",
+        )
+        .unwrap_err();
+        let (code, message) = refusal_parts(error);
+        assert_eq!(code, "caller_capability_not_covered");
+        assert!(message.contains("`ryeos.execute.service.bundle/list`"));
+        assert!(message.contains("`ryeos.fetch.knowledge.x/y`"));
+        assert!(!message.contains("`ryeos.execute.tool.echo`"));
+        assert!(message.contains("fp:caller"));
+        assert!(message.contains("narrow the item's `requires.capabilities.declared`"));
+    }
+
+    #[test]
+    fn root_admission_wildcard_caller_covers_and_effective_set_stays_exact() {
+        let scopes = caps(&["*"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &[],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, caps(&["ryeos.execute.tool.echo"]));
+    }
+
+    #[test]
+    fn root_admission_manifest_runtime_caps_need_no_caller_coverage() {
+        let scopes: Vec<String> = Vec::new();
+        let out = apply_policy(
+            &[],
+            &["ryeos.get.vault.child/oauth"],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &scopes,
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, caps(&["ryeos.get.vault.child/oauth"]));
+        // A scope-less caller still cannot cover a declared cap.
+        assert!(
+            apply_policy(
+                &["ryeos.execute.tool.echo"],
+                &[],
+                CapabilityPolicy::RootAdmission {
+                    caller_scopes: &scopes,
+                },
+                "",
+            )
+            .is_err()
+        );
+    }
+
+    fn local_sender(scopes: &[&str]) -> ryeos_engine::contracts::EffectivePrincipal {
+        ryeos_engine::contracts::EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
+            fingerprint: "fp:sender".to_owned(),
+            scopes: caps(scopes),
+        })
+    }
+
+    #[test]
+    fn operator_follow_up_requires_sender_to_cover_sealed_caps() {
+        let sealed = caps(&[
+            "ryeos.execute.tool.echo",
+            "ryeos.runtime.dedicated_session.start",
+            "ryeos.get.vault.child/oauth",
+        ]);
+        // Covering sender (wildcards count); manifest runtime caps need no cover.
+        require_sender_covers_sealed_caps(
+            &local_sender(&["ryeos.execute.tool.*", "ryeos.runtime.dedicated_session.*"]),
+            &sealed,
+            "directive:d",
+        )
+        .unwrap();
+        // Uncovering sender is refused with the typed code and every missing cap.
+        let (code, message) = refusal_parts(
+            require_sender_covers_sealed_caps(
+                &local_sender(&["ryeos.execute.tool.echo"]),
+                &sealed,
+                "directive:d",
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(code, "caller_capability_not_covered");
+        assert!(message.contains("`ryeos.runtime.dedicated_session.start`"));
+        assert!(message.contains("fp:sender"));
+        assert!(!message.contains("ryeos.get.vault.child/oauth"));
+    }
+
+    #[test]
+    fn operator_follow_up_pins_sealed_caps_and_refuses_item_drift() {
+        // The operator follow-up uses the machine-continuation pin: the sealed
+        // set is what runs, and a live item whose caps changed is refused.
+        let sealed = caps(&["ryeos.execute.tool.echo", "ryeos.get.vault.child/oauth"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &["ryeos.get.vault.child/oauth"],
+            CapabilityPolicy::ExactPinned(&sealed),
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, sealed);
+        let error = apply_policy(
+            &["ryeos.execute.tool.echo", "ryeos.execute.tool.extra"],
+            &["ryeos.get.vault.child/oauth"],
+            CapabilityPolicy::ExactPinned(&sealed),
+            "",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("continuation capability drift"));
+        // The admitted capsule path never re-unions live sources.
+        assert_eq!(
+            recover_admitted_effective_caps(
+                &sealed,
+                CapabilityPolicy::ExactPinned(&sealed),
+                "tool:echo"
+            )
+            .unwrap(),
+            sealed
         );
     }
 
@@ -12362,7 +12676,7 @@ mod tests {
         assert_eq!(
             recover_admitted_effective_caps(
                 &admitted,
-                CapabilityPolicy::AdmissionDefault,
+                CapabilityPolicy::RootAdmission { caller_scopes: &[] },
                 "tool:echo"
             )
             .unwrap(),
