@@ -143,9 +143,7 @@ pub async fn handle(
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
     let principal = OutboundPrincipal::resolve(req.outbound_principal, &state, &context);
     let client = match principal {
-        OutboundPrincipal::Node => {
-            RemoteClient::from_named_remote(&state, &req.remote)?
-        }
+        OutboundPrincipal::Node => RemoteClient::from_named_remote(&state, &req.remote)?,
         OutboundPrincipal::Delegated => {
             let remote = remote_cfg.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(

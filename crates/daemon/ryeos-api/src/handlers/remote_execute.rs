@@ -119,12 +119,11 @@ pub async fn handle(
     let principal = OutboundPrincipal::resolve(None, &state, &ctx);
     let node_client = match principal {
         OutboundPrincipal::Node => Some(
-            RemoteClient::from_named_remote(&state, &req.remote)
-                .map_err(|e| {
-                    config::typed_load_error_or(e, |e| {
-                        HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote))
-                    })
-                })?,
+            RemoteClient::from_named_remote(&state, &req.remote).map_err(|e| {
+                config::typed_load_error_or(e, |e| {
+                    HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote))
+                })
+            })?,
         ),
         OutboundPrincipal::Delegated => None,
     };

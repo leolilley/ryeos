@@ -2222,4 +2222,41 @@ mod tests {
         node.verify("nonce-delegated-other", Some(&kept), true)
             .expect("only the tombstoned digest is refused");
     }
+
+    #[test]
+    fn delegated_verification_does_not_depend_on_how_the_origin_is_pinned() {
+        // The receiving node admits the forwarding node from its grants and the
+        // delegation alone. An origin this node pinned inbound-only (a node
+        // that only calls in) must still verify.
+        let node = Delegated::new(54);
+        let origin = SigningKey::from_bytes(&[92u8; 32]);
+        let public =
+            base64::engine::general_purpose::STANDARD.encode(origin.verifying_key().as_bytes());
+        crate::remote::config::write_remote_pin(
+            &node.state.config.app_root,
+            node.state.identity.signing_key(),
+            &crate::remote::config::RemoteConfig {
+                name: "origin".to_owned(),
+                url: None,
+                reachability: crate::remote::config::Reachability::InboundOnly,
+                principal_id: format!(
+                    "fp:{}",
+                    lillux::signature::compute_fingerprint(&origin.verifying_key())
+                ),
+                signing_key: format!("ed25519:{public}"),
+                site_id: SITE_A.to_owned(),
+                vault_fingerprint: "vault".to_owned(),
+                ingest_ignore: None,
+                project_bindings: Default::default(),
+            },
+            crate::remote::config::PinSource::DescriptorWithoutContact,
+            None,
+        )
+        .unwrap();
+        let delegation = node.delegation(&["ryeos.execute.service.remote/run"], unix_now() + 600);
+        let principal = node
+            .verify("nonce-delegated-inbound-only", Some(&delegation), true)
+            .expect("an inbound-only pin of the origin does not stop inbound verification");
+        assert_eq!(principal.fingerprint, node.user_fp);
+    }
 }

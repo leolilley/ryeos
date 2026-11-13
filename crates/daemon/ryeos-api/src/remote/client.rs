@@ -6137,14 +6137,13 @@ mod tests {
         let fingerprint = lillux::signature::compute_fingerprint(&user_key.verifying_key());
         let remote = super::super::config::RemoteConfig {
             name: "hosted".into(),
-            url: "https://hosted.invalid".into(),
+            url: Some("https://hosted.invalid".into()),
+            reachability: super::super::config::Reachability::Outbound,
             principal_id: format!("fp:{}", "ab".repeat(32)),
             signing_key: "ed25519:unused".into(),
             site_id: "site:hosted".into(),
             vault_fingerprint: "vault".into(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig {
-                patterns: Vec::new(),
-            },
+            ingest_ignore: None,
             project_bindings: std::collections::HashMap::new(),
         };
         let context = crate::handler_context::HandlerContext::new(

@@ -125,9 +125,14 @@ pub async fn delegate(
     ryeos_node_runtime::identity::reject_offline_scopes(&signed.body.scopes)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
-    let digest =
-        delegation_lib::store_delegation(&delegations_dir(&state), &remote.name, &signed, &state.identity, now)
-            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
+    let digest = delegation_lib::store_delegation(
+        &delegations_dir(&state),
+        &remote.name,
+        &signed,
+        &state.identity,
+        now,
+    )
+    .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     Ok(json!({
         "remote": remote.name,
         "delegation_digest": digest,
@@ -249,8 +254,9 @@ pub async fn revoke(
             })?;
         remote_tombstoned = true;
     }
-    let removed = delegation_lib::remove_delegation(&delegations_dir(&state), &fingerprint, &remote.name)
-        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
+    let removed =
+        delegation_lib::remove_delegation(&delegations_dir(&state), &fingerprint, &remote.name)
+            .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     Ok(json!({
         "remote": remote.name,
         "delegation_digest": digest,
@@ -306,13 +312,14 @@ pub async fn tombstone(
                 .into(),
         ));
     }
-    let revocations =
-        ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).delegation_revocations_dir();
+    let revocations = ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone())
+        .delegation_revocations_dir();
     let tombstone = delegation_lib::write_tombstone(
         &revocations,
         &req.delegation_digest,
         &req.delegator,
         &ctx.fingerprint,
+        ctx.delegated_via.clone(),
         ctx.signed_request_digest.clone(),
         &state.identity,
         lillux::time::unix_secs_now(),
@@ -323,6 +330,7 @@ pub async fn tombstone(
         "delegator": tombstone.delegator,
         "revoked_at": tombstone.revoked_at,
         "revoked_by": tombstone.revoked_by,
+        "delegated_via": tombstone.delegated_via,
     }))
 }
 
@@ -338,3 +346,100 @@ pub const TOMBSTONE: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn pinned_remote(inbound_only: bool) -> config::RemoteConfig {
+        let key = lillux::crypto::SigningKey::from_bytes(&[91u8; 32]);
+        config::RemoteConfig {
+            name: "nat".to_owned(),
+            url: (!inbound_only).then(|| "https://nat.example".to_owned()),
+            reachability: if inbound_only {
+                config::Reachability::InboundOnly
+            } else {
+                config::Reachability::Outbound
+            },
+            principal_id: format!(
+                "fp:{}",
+                lillux::signature::compute_fingerprint(&key.verifying_key())
+            ),
+            signing_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes())
+            ),
+            site_id: "site:nat".to_owned(),
+            vault_fingerprint: "vault".to_owned(),
+            ingest_ignore: None,
+            project_bindings: Default::default(),
+        }
+    }
+
+    fn caller() -> HandlerContext {
+        HandlerContext::new_with_authority(
+            format!("fp:{}", "ab".repeat(32)),
+            vec!["*".to_owned()],
+            true,
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn delegating_for_an_inbound_only_pin_is_refused() {
+        let (_tmp, _store, state) = crate::test_support::build_test_state();
+        let node = state.identity.signing_key().clone();
+        config::write_remote_pin(
+            &state.config.app_root,
+            &node,
+            &pinned_remote(true),
+            config::PinSource::DescriptorWithoutContact,
+            None,
+        )
+        .unwrap();
+        let state = Arc::new(state);
+        let error = delegate(
+            DelegateRequest {
+                remote: "nat".to_owned(),
+                delegation: None,
+            },
+            caller(),
+            state,
+        )
+        .await
+        .expect_err("an inbound-only pin has no outbound path to delegate for");
+        match error {
+            HandlerError::Structured { code, .. } => {
+                assert_eq!(code, config::REMOTE_INBOUND_ONLY)
+            }
+            other => panic!("unexpected refusal {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delegating_for_an_outbound_pin_returns_the_signing_facts() {
+        let (_tmp, _store, state) = crate::test_support::build_test_state();
+        let node = state.identity.signing_key().clone();
+        config::write_remote_pin(
+            &state.config.app_root,
+            &node,
+            &pinned_remote(false),
+            config::PinSource::DescriptorWithoutContact,
+            None,
+        )
+        .unwrap();
+        let answer = delegate(
+            DelegateRequest {
+                remote: "nat".to_owned(),
+                delegation: None,
+            },
+            caller(),
+            Arc::new(state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer["template"]["audience_site"], "site:nat");
+    }
+}

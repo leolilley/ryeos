@@ -195,21 +195,22 @@ async fn start_pair() -> Result<Pair> {
     let hosted_node = hosted_node_key();
     let public =
         base64::engine::general_purpose::STANDARD.encode(hosted_node.verifying_key().as_bytes());
-    ryeos_api::remote::config::save_remotes(
+    ryeos_api::remote::config::write_remote_pin(
         &origin.state_path,
-        &HashMap::from([(
-            HOSTED_REMOTE.to_owned(),
-            ryeos_api::remote::config::RemoteConfig {
-                name: HOSTED_REMOTE.to_owned(),
-                url: format!("http://{}", hosted.bind),
-                principal_id: format!("fp:{}", fingerprint(&hosted_node)),
-                signing_key: format!("ed25519:{public}"),
-                site_id: hosted_fixture.site_id(),
-                vault_fingerprint: "sha256:delegation-e2e-vault".to_owned(),
-                ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-                project_bindings: HashMap::new(),
-            },
-        )]),
+        &origin_fixture.node,
+        &ryeos_api::remote::config::RemoteConfig {
+            name: HOSTED_REMOTE.to_owned(),
+            url: Some(format!("http://{}", hosted.bind)),
+            reachability: ryeos_api::remote::config::Reachability::Outbound,
+            principal_id: format!("fp:{}", fingerprint(&hosted_node)),
+            signing_key: format!("ed25519:{public}"),
+            site_id: hosted_fixture.site_id(),
+            vault_fingerprint: "sha256:delegation-e2e-vault".to_owned(),
+            ingest_ignore: None,
+            project_bindings: HashMap::new(),
+        },
+        ryeos_api::remote::config::PinSource::DescriptorWithoutContact,
+        None,
     )?;
     Ok(Pair {
         origin,
