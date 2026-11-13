@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:55:33Z:2d5ea905e0459d38cf716f09cacc6e3eca812c099e8f70990b57b6d58772fe64:/Tn92sPtWHSpkudybnfJRlWFOhey1p43liFEvhfhOXr4RLYbzD2Qz1WX35vNPVjP3ZNZZSq9PLi3C8gZes2FCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:56:52Z:ef64c67acc3de96c8d242dc3b4541e01fe598f552f23fe2b5bab0bd1cc9fe04e:gARo23t0lQ1VmhPP4imwfMF8b23RWu1DX4AACZ3mZf6Ix6FjpyYl1nqdaOv26HZGJtxSJ40brZROsNgXIABMDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, knowledge, context]
@@ -29,6 +29,10 @@ and its `resolved_items` entry reports `trust_class`.
 the corpus invalid, and an `untrusted_project` item is a warning naming it
 (`untrusted signer in corpus: <ref> ...`). Admitting it stays the launch
 gate's decision.
+
+`query`, like `compose`, refuses an item whose frontmatter does not parse:
+the method fails with an error naming the item instead of indexing its raw
+text.
 
 The runtime registry selects this signed implementation binary for the
 `knowledge` kind. The signed knowledge kind schema separately selects
