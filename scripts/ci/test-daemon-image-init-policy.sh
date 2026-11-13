@@ -339,8 +339,8 @@ assert_composition_pair() {
         echo "Dockerfile.release stage $pair does not take its features from the $bundle_set bundle set" >&2
         exit 1
     }
-    grep -Fq -- '--no-default-features -p ryeosd -p ryeos-cli' <<<"$pair_stage" || {
-        echo "Dockerfile.release stage $pair must build the node pair without default features" >&2
+    grep -Fq -- "ryeos_build_daemon_pair " <<<"$pair_stage" || {
+        echo "Dockerfile.release stage $pair must build the node pair with ryeos_build_daemon_pair" >&2
         exit 1
     }
 }

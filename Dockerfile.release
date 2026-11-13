@@ -98,14 +98,14 @@ RUN mkdir -p /usr/local/cargo/git && \
     RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
     cargo chef cook --release --locked --recipe-path recipe.json --target x86_64-unknown-linux-gnu \
       --package ryeos-workload-client && \
-    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
-      --package ryeosd --package ryeos-cli && \
-    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
-      --package ryeosd --package ryeos-cli \
-      --features ryeosd/scheduling,ryeos-cli/scheduling && \
-    cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
-      --package ryeosd --package ryeos-cli \
-      --features ryeosd/model-provider-setup,ryeosd/scheduling,ryeos-cli/model-provider-setup,ryeos-cli/scheduling && \
+    for package in ryeosd ryeos-cli; do \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" && \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" --features scheduling && \
+      cargo chef cook --release --locked --recipe-path recipe.json --no-default-features \
+        --package "$package" --features model-provider-setup,scheduling || exit 1; \
+    done && \
     cargo chef cook --release --locked --recipe-path recipe.json \
       --package ryeos-core-tools
 
@@ -249,17 +249,19 @@ FROM ${PUBLICATION_STAGE} AS composition-publication
 FROM composition-publication AS scheduler-free-publication
 ARG BUNDLE_BUILD_PROFILE=release
 ARG CARGO_BUILD_JOBS
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/registry,sharing=locked,from=dependency-build,source=/usr/local/cargo/registry \
     --mount=type=cache,id=ryeos-release-cargo-git,target=/usr/local/cargo/git,sharing=locked,from=dependency-build,source=/usr/local/cargo/git \
     --mount=type=cache,id=ryeos-release-cargo-target,target=/build/target-cache,sharing=locked,from=dependency-build,source=/build/target-cache \
     if [ -z "${CARGO_BUILD_JOBS:-}" ]; then unset CARGO_BUILD_JOBS; fi && \
+    source scripts/pkg/composition-features.sh && \
+    features=() && \
     case "$BUNDLE_BUILD_PROFILE" in \
-      release) set -- ;; \
-      latency-profiling) set -- --features ryeosd/latency-profiling ;; \
+      release) ;; \
+      latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "$@" && \
+    ryeos_build_daemon_pair scheduler-free-publication && \
     mkdir -p /build/target/scheduler-free && \
     cp /build/target-cache/release/ryeosd /build/target/scheduler-free/ryeosd && \
     cp /build/target-cache/release/ryeos /build/target/scheduler-free/ryeos
@@ -285,13 +287,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-pair && \
     mkdir -p /build/target/core && \
     cp /build/target-cache/release/ryeosd /build/target/core/ryeosd && \
     ryeos_assert_compiled_features core-pair /build/target/core/ryeosd && \
@@ -318,13 +314,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-scheduling-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-scheduling-pair && \
     mkdir -p /build/target/core-scheduling && \
     cp /build/target-cache/release/ryeosd /build/target/core-scheduling/ryeosd && \
     ryeos_assert_compiled_features core-scheduling-pair /build/target/core-scheduling/ryeosd && \
@@ -351,13 +341,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-workflow-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-workflow-pair && \
     mkdir -p /build/target/core-workflow && \
     cp /build/target-cache/release/ryeosd /build/target/core-workflow/ryeosd && \
     ryeos_assert_compiled_features core-workflow-pair /build/target/core-workflow/ryeosd && \
@@ -384,13 +368,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features core-knowledge-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair core-knowledge-pair && \
     mkdir -p /build/target/core-knowledge && \
     cp /build/target-cache/release/ryeosd /build/target/core-knowledge/ryeosd && \
     ryeos_assert_compiled_features core-knowledge-pair /build/target/core-knowledge/ryeosd && \
@@ -418,13 +396,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features f5r-controller-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair f5r-controller-pair && \
     mkdir -p /build/target/f5r-controller && \
     cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
     ryeos_assert_compiled_features f5r-controller-pair /build/target/f5r-controller/ryeosd && \
@@ -451,13 +423,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features standard-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair standard-pair && \
     mkdir -p /build/target/standard && \
     cp /build/target-cache/release/ryeosd /build/target/standard/ryeosd && \
     ryeos_assert_compiled_features standard-pair /build/target/standard/ryeosd && \
@@ -483,13 +449,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features central-host-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair central-host-pair && \
     mkdir -p /build/target/central-host && \
     cp /build/target-cache/release/ryeosd /build/target/central-host/ryeosd && \
     ryeos_assert_compiled_features central-host-pair /build/target/central-host/ryeosd && \
@@ -515,13 +475,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features local-inference-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair local-inference-pair && \
     mkdir -p /build/target/local-inference && \
     cp /build/target-cache/release/ryeosd /build/target/local-inference/ryeosd && \
     ryeos_assert_compiled_features local-inference-pair /build/target/local-inference/ryeosd && \
@@ -547,13 +501,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features hosted-workflow-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair hosted-workflow-pair && \
     mkdir -p /build/target/hosted-workflow && \
     cp /build/target-cache/release/ryeosd /build/target/hosted-workflow/ryeosd && \
     ryeos_assert_compiled_features hosted-workflow-pair /build/target/hosted-workflow/ryeosd && \
@@ -1062,13 +1010,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    feature_args=() && \
-    if [ "${#features[@]}" -gt 0 ]; then \
-      feature_args=(--features "$(IFS=,; printf '%s' "${features[*]}")"); \
-    fi && \
-    ryeos_report_cargo_features f5r-controller-pair && \
-    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
-    cargo build --release --locked --no-default-features -p ryeosd -p ryeos-cli "${feature_args[@]}" && \
+    ryeos_build_daemon_pair f5r-controller-pair && \
     RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
     cargo build --release --locked -p ryeos-core-tools && \
     mkdir -p /build/target/f5r-controller && \

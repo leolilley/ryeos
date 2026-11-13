@@ -4,16 +4,35 @@
 # its `features` array (entries such as `ryeosd/scheduling`, possibly
 # comma-joined) from `ryeos_bundle_set_cargo_features`.
 #
-# `ryeos_report_cargo_features <stage>` prints the cargo feature arguments the
-# stage is about to build with, so the bake log shows what was selected.
+# `ryeos_build_daemon_pair <stage>` builds ryeosd and then ryeos-cli into
+# /build/target-cache, each in its own Cargo invocation with its own unqualified
+# features, and prints each invocation so the bake log shows what was selected.
+# One multi-package build with package-qualified features (`-p ryeosd -p
+# ryeos-cli --features ryeosd/scheduling,...`) produced a ryeosd compiled with
+# none of them; populate-bundles.sh builds featured packages the same way.
 #
 # `ryeos_assert_compiled_features <stage> <ryeosd-binary>` fails unless the
 # built daemon's `build-info --features` lists exactly the `ryeosd/` features
 # in `features`. A daemon missing a feature (for example the handlers for an
 # installed bundle's services) otherwise only fails at startup.
 
-ryeos_report_cargo_features() {
-  echo "$1: cargo feature args: ${feature_args[*]:-<none>}"
+ryeos_build_daemon_pair() {
+  local stage="$1" package item feature
+  local -a own parts args
+  for package in ryeosd ryeos-cli; do
+    own=()
+    for item in "${features[@]}"; do
+      IFS=, read -r -a parts <<<"$item"
+      for feature in "${parts[@]}"; do
+        if [[ "$feature" == "$package/"* ]]; then own+=("${feature#"$package/"}"); fi
+      done
+    done
+    args=()
+    if [ "${#own[@]}" -gt 0 ]; then args=(--features "$(IFS=,; printf '%s' "${own[*]}")"); fi
+    echo "$stage: cargo build -p $package ${args[*]:-<no features>}"
+    RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
+      cargo build --release --locked --no-default-features -p "$package" "${args[@]}" || return 1
+  done
 }
 
 ryeos_assert_compiled_features() {
