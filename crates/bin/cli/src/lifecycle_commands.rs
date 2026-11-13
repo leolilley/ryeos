@@ -4258,10 +4258,8 @@ mod tests {
     fn doctor_service_window_row_is_na_when_stopped() {
         use ryeos_core_tools::actions::doctor::{NA, OK};
         let stopped = service_window_check(false, None);
-        assert_eq!(
-            (stopped.name.as_str(), stopped.status),
-            ("service_window", NA)
-        );
+        assert_eq!(stopped.name, "service_window");
+        assert_eq!(stopped.status, NA);
         assert_eq!(stopped.detail["fix"], "ryeos start");
         let unreported = service_window_check(true, None);
         assert_eq!(unreported.status, NA);
