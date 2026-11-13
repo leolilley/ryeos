@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-24T17:47:26Z:d41bbbb457891e1b6643c6ddca114a888fdbafe9b3e4d42a815b0ed05cf08d19:unq27PWE1iPFA1i1f5pEgdFW5gP4zL4ClNl8uniZR0xblM+kYiPMFXjzjFCuWA9lByERDwBx4GDrUWn9wwWODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:54:45Z:7eadd55064c146d7d0b0c2f0c1cf1640dd67cc8e77f80fc29c4daa4bd5903288:CxKAj/jOvsJeuY+/CRW8o/AE8Q6DRRnlI+9l1l0HdRtLqGB/klfu3EBg5CHucWEjZuTrZR73DO9Pwm95kkBRDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -69,6 +69,61 @@ A pinned-project consumer containing both literal inputs and product slots on
 that same item instead has a selection-sensitive binding identity. Its selected
 literal provisioning currently requires the same operator as its products;
 cross-owner selected-literal provisioning is not supplied by this contract.
+
+## Generation-scoped bindings and renewal
+
+An installed-bundle binding names the consumer and its publisher, so it keeps
+authorizing the consumer until it is released or its authorizer's grant
+changes. A pinned-project binding also names the exact project snapshot and the
+consumer's effective definition digest. A new project snapshot, or a re-signed
+consumer, is therefore a new consumer authority: every earlier binding stops
+authorizing it. This is deliberate. The node never carries a binding forward on
+its own, and an earlier binding is never a fallback candidate.
+
+Launch and qualification refuse such a consumer with code
+`content_binding_missing` (HTTP 409). The refusal names the consumer, the
+snapshot and effective digest it was resolved at, and each declaration with
+its status (`missing_binding` or `missing_manifest`). Ordinary launch admission
+reports the same condition as `external_content_binding_unavailable`.
+
+Two local-operator verbs inspect and renew bindings:
+
+```
+ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash] [--product-selections <json> --product-owner-principal <fp:hash>]
+ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash> [--product-selections <json> --product-owner-principal <fp:hash>] [--maximum-bytes <n>]
+```
+
+`bindings` is read only. It resolves the consumer at the named generation
+through the same preparation bind uses, lists each of the consumer's binding
+heads as `current`, `stale` or `released`, and gives the reasons a stale one no
+longer applies (`project_snapshot_changed`, `consumer_definition_changed`,
+`source_closure_changed`, `publisher_changed`, `consumer_kind_changed`,
+`manifest_not_declared`, `authorizer_not_current`). For each retained
+declaration it reports `ready`, `missing_binding` or `missing_manifest`, and
+for a missing binding it names the newest stale pinned-project binding of the
+same manifest as `prior_binding_hash`. Run it before a launch on a new
+generation; offline doctor cannot decide this, because staleness depends on the
+snapshot the launch picks.
+
+`rebind` is the explicit, per-generation operator act. It accepts only an
+active pinned-project binding that is the current head of its subject and was
+authorized by the calling operator. Before anything is staged it prepares the
+same consumer at the new snapshot and refuses, with code
+`rebind_consumer_changed`, a consumer that has another publisher, no longer
+depends on the project, or no longer declares the prior manifest. An
+installed-bundle binding is refused with `rebind_not_generation_scoped`, and a
+released or superseded one with `rebind_prior_binding_not_current`. It then
+re-stages the prior binding's exact retained manifest (as
+`import-binding` does) and binds it to the consumer at the new generation
+through the ordinary bind, signed by the node and authorized by the operator.
+The prior binding is left as it was. If the consumer already holds an active
+binding at that generation the call returns it with `idempotent: true` and
+writes nothing.
+
+A consumer bound with product selections is renewed with the same complete
+selection list and product owner it was bound with. `rebind` renews existing
+bindings only; it does not import or compose products, so a product slot whose
+witness changed still goes through `compose-product`.
 
 ## Evidence is not task success
 

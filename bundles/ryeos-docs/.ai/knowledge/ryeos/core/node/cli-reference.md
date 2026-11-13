@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:23ae2ff7abf536732dc45037e52da88ec623890675eba42845994a722fc20cd6:7r8vN1BaY89pnootpyEeqgRZjg2nnMUnhIWLcYU+4RqkxJfH9sJtMAyEe/k+0FUrCac+qnvZjsR5pVbooShdCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:54:45Z:836bf4be18d3fe3d9cac9946991013cbcdf107b1d1a8e2aea9182ba55aea51ee:2SSk/JEmo5XJk3IxhF811Ai8Awi4M2fusDa70XfGlGs7my1c3TqUbX7vgWOZnWrLDKIROwB1r7JAW2gohjmhCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -286,6 +286,12 @@ physical vault key.
 - `ryeos execute <ref> [params...]` — execute an item by canonical ref.
 - `ryeos content pin <ref> --id <declaration>` — atomically complete a signed
   external-content pin through the daemon-owned, local-operator authoring path.
+- `ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash]`
+  — list a consumer's content bindings and whether each still authorizes it at
+  that generation; read only, local operator.
+- `ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash>` —
+  renew a pinned-project content binding for a new snapshot or re-signed
+  consumer; local operator, refused with a typed code when the consumer changed.
 - `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
 - `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
 - `ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` — verify one or more items' signatures, trust, and path anchoring.

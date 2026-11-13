@@ -50,6 +50,7 @@ pub mod external_content_product_offer;
 pub mod external_content_product_push;
 pub mod external_content_product_receive;
 pub mod external_content_products;
+pub mod external_content_rebind;
 pub mod external_content_release;
 pub mod external_content_scrub;
 pub mod external_execution_candidate_program;
@@ -227,6 +228,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     product_qualification_launch::CONTENT_DESCRIPTOR,
     external_content_activate::DESCRIPTOR,
     external_content_bind::DESCRIPTOR,
+    external_content_rebind::BINDINGS_DESCRIPTOR,
+    external_content_rebind::REBIND_DESCRIPTOR,
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
     external_execution_candidate_program::DESCRIPTOR,

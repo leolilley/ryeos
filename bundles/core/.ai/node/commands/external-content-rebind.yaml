@@ -1,0 +1,38 @@
+# ryeos:signed:2026-11-13T02:54:45Z:3702f0a907c5dd1615a26d0072f423ab7273746909edfdb9c4612a7b8623d8ac:rME/0hV4i3hAtmMzacC0uT71Pkbk4GWIbMX3WZL7P+R0cHcYVeABPWhP2aPAF/tlD988IF4x4bGfaQaaNTzZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, rebind]
+description: Renew a pinned-project content binding for a new project snapshot or consumer definition
+arguments:
+  - name: product_selections
+    kind: json
+    positional: 3
+    required: false
+    arity: optional
+    description: Complete typed product-selection list, for a consumer bound with selections
+  - name: product_owner_principal
+    kind: string
+    positional: 4
+    required: false
+    arity: optional
+    description: Exact currently admitted operator principal owning every selected product
+  - name: maximum_bytes
+    kind: string
+    positional: 5
+    required: false
+    arity: optional
+    description: Byte ceiling for the re-staged manifest; defaults to the node import policy ceiling
+forms:
+  - slots:
+      - field: prior_binding_hash
+      - field: project_snapshot_hash
+project:
+  resolution: optional
+  bind_parameter: project_path
+  no_project_flag: true
+help:
+  usage: ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash> [--product-selections <json>] [--product-owner-principal <fp:hash>] [--maximum-bytes <n>] --project <project-root>
+  examples:
+    - ryeos --project /absolute/project external-content rebind <prior-binding-hash> <snapshot>
+    - ryeos --project /absolute/project external-content rebind <prior-binding-hash> <snapshot> --product-selections '<json>' --product-owner-principal fp:<owner>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/rebind

@@ -91,7 +91,27 @@ pub fn extract_handler_error(err: &anyhow::Error) -> Option<HandlerError> {
         if let Some(he) = e.downcast_ref::<HandlerError>() {
             return Some(he.clone());
         }
+        if let Some(refusal) = typed_operator_refusal(e) {
+            return Some(refusal);
+        }
         source = e.source();
+    }
+    None
+}
+
+/// Operator-correctable refusals raised deep in app code keep their own
+/// type (and their full message for non-HTTP callers); this is the single
+/// place they become a structured response.
+fn typed_operator_refusal(error: &(dyn std::error::Error + 'static)) -> Option<HandlerError> {
+    if let Some(missing) =
+        error.downcast_ref::<crate::external_content_admission::ContentBindingMissing>()
+    {
+        return Some(missing.handler_error());
+    }
+    if let Some(refused) =
+        error.downcast_ref::<crate::operator_external_content::rebind::RebindRefused>()
+    {
+        return Some(refused.handler_error());
     }
     None
 }
