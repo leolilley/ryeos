@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:57:28Z:dcae30536c76625785a21eaef7582da0d1c37c6075b289d4bc57f689b53b1928:fLXClAgSdSlg2BCLdKxcpWcwl4bXRXhc3DXX3Iu04QjEM4QDVN8zHS1LPiqSwMBDXbXH8GX4CCbORKrmcwZQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T03:26:28Z:263c7ae58da5dd094025018401f127d410684dd6eaf3c84f47a7160e4f128760:m21hFIypNEGLCemDO61q7HQMF/d9Fvvsa1Dsj3M5DKSya3AclHZcGm878ltybyeLqBvPL88Gi1H4bgSrJs2HBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
@@ -131,9 +131,10 @@ kind, user identity or execution owner. Shared launcher/shortcuts Views must
 remain available with no Surface open. Surface-specific dialog Views may be
 contributed with scoped identities and their own admitted bindings.
 
-The generic opening is neutral Home/background and the shared launcher. Preserve
-that quiet starting point instead of forcing a dashboard, maintenance console or
-application workflow into it. Purpose-specific authored presentations and Surfaces
+The generic opening is Home and the shared launcher. Home is an observation-only
+overview of the node's work (projects, recent threads and work, then the
+Development, Work and Review sets); it reads and never acts, so it is not a
+maintenance console. Purpose-specific authored presentations and Surfaces
 can provide their own Views, tab arrangements and admitted operations. They use
 the same composition model and design system; they do not become a second browser
 application. Installation never silently replaces the user's composition.

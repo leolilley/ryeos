@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T13:04:56Z:69cb32229f3f7649a89652c3edebb30f76bf87678aeb9e0dcc6734007eadb88f:fjdiEFT8LPn2QBYAPGk1aH9c49OPZ9RumTIPgp/o/IGrCBzL3wURrSpRe7WHrUV+CQXL7b/X0s2WdTRJvz6xCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T13:05:06Z:2ecdaddb6baab8a298e14d5ca73fef59643ff8cbe46a91d1454efbabc0bf2227:d8p5UiRxFGhfu3AZB2vNkdp8IHUTqoIzb8sCwvIfqhwNm9p0tIeHWGjlGfYySU1mYwlheSAdDbgE9sAwhzOgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -38,16 +38,19 @@ available before a Surface opens. Surfaces may add scoped contextual dialog
 Views. Shared and contextual entries retain their exact admitted mount identities;
 equal labels/refs do not merge bindings. New bundles do not silently inject UI.
 
-Opening and composition decision (2026-10-08): the generic `ryeos-ui` presentation
-opens neutral Home/background with the shared launcher. It is not a mandatory
-node dashboard or maintenance console. Purpose-specific bundles can author a
+Opening and composition decision (revised 2026-11-13): the generic `ryeos-ui`
+presentation opens Home with the shared launcher. Home observes the Assistant's
+work read-only (`surface:ryeos/ui/base-observe` extends the Assistant, reads every
+service and admits no affordance) and lands on its Overview set: projects and
+sites, the home overview, recent threads and work. Development, Work and Review
+follow as tabs. Purpose-specific bundles can author a
 shared presentation config, Surfaces and Views, arranging ViewSets through the
 existing composition mechanisms; this introduces no new ViewSet kind. An explicitly selected presentation chooses initial
 Surfaces; an explicitly opened Surface supplies its tab seeds. Bundle installation
 does not replace a user's selected presentation, append tabs or confer grants.
 
-Neutral Home has no eager domain polling, conversation input or View library;
-its authored background is sufficient. Chrome derives connection state from
+The neutral base surface (`surface:ryeos/ui/base`) keeps no polling, input or
+View library, for presentations that want a quiet start. Chrome derives connection state from
 transport and identity context from the authenticated BrowserSession, not from
 an optional Node status source or an invented health assertion.
 

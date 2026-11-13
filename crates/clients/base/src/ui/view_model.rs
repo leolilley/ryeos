@@ -4474,8 +4474,10 @@ mod tests {
         assert_eq!(tabs, [tiles[1], tiles[0]]);
     }
 
+    /// The neutral base stays empty; Home observes the Assistant's work
+    /// read-only and lands on its Overview.
     #[test]
-    fn neutral_home_has_no_implicit_domain_observations_or_input_route() {
+    fn neutral_base_is_empty_and_home_observes_without_acting() {
         let surfaces = ryeos_engine::test_support::workspace_root()
             .join("bundles/ryeos-ui/.ai/surfaces/ryeos/ui");
         let home: serde_json::Value =
@@ -4492,8 +4494,13 @@ mod tests {
             &std::fs::read_to_string(surfaces.join("base-observe.yaml")).unwrap(),
         )
         .unwrap();
-        assert_eq!(observe["extends"], "surface:ryeos/ui/base");
-        assert_eq!(observe["capabilities"]["sources"], json!([]));
+        assert_eq!(observe["extends"], "surface:ryeos/ui/assistant");
+        assert_eq!(
+            observe["capabilities"]["sources"],
+            json!(["ryeos.execute.service.*"])
+        );
+        assert_eq!(observe["capabilities"]["affordances"], json!([]));
+        assert_eq!(observe["view_sets"][0]["id"], "overview");
     }
 
     #[test]
