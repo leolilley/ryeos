@@ -21,53 +21,79 @@ use crate::{App, Local, RenameTarget};
 /// The page before the core exists: starting, or why it cannot.
 pub fn boot_screen(failure: Option<&str>) -> El {
     let p = Palette::get();
-    let (kicker, headline, color) = match failure {
-        None => ("Opening presentation", "RyeOS", p.text),
-        Some(_) => ("Cannot continue", "RyeOS stopped", p.red),
-    };
-    let mut copy = col()
-        .gap(12.0)
-        .max_w(544.0)
-        .child(
-            text(kicker.to_uppercase())
-                .font(theme::ui(11.0).tracking(1.8))
-                .color(p.accent_bright),
-        )
-        .child(
-            text(headline)
-                .font(rune::tok::TextStyle::new(40.0, 600.0).tracking(-1.6))
-                .color(color),
-        )
-        .child(el().w_full().h(2.0).fill(p.line));
-    copy = match failure {
-        None => copy.child(
-            text("Reading the session and claiming the seat.")
-                .font(theme::ui(13.0))
-                .color(p.yellow),
+    match failure {
+        None => quiet_frame(
+            "Opening presentation",
+            "Reading the session and claiming the seat.",
+            p.accent,
         ),
-        Some(message) => copy.child(
-            text(message.to_owned())
-                .font(theme::ui(13.0))
-                .color(p.text)
-                .wrap_anywhere()
-                .w_full()
-                .padding(12.0)
-                .border_sides([0.0, 0.0, 0.0, 2.0], p.red),
+        Some(message) => {
+            let frame = frame_column("RyeOS stopped", p.red, p.red);
+            centered(
+                frame.child(
+                    text(message.to_owned())
+                        .font(theme::data(12.0))
+                        .color(p.text)
+                        .wrap_anywhere()
+                        .w_full(),
+                ),
+            )
+        }
+    }
+}
+
+/// A full-page wait in the boot screen's frame: the wordmark, one headline,
+/// a hairline with `accent` on its leading edge, and a muted detail.
+pub fn quiet_frame(headline: &str, detail: &str, accent: rune::Color) -> El {
+    let p = Palette::get();
+    centered(
+        frame_column(headline, p.text, accent).child(
+            text(detail.to_owned())
+                .font(theme::ui(12.0))
+                .color(p.muted)
+                .role("status"),
         ),
-    };
-    let mark = el()
-        .size(112.0, 112.0)
-        .border(2.0, p.accent)
-        .fill(p.accent.alpha(0.14));
+    )
+}
+
+pub(crate) fn frame_column(headline: &str, ink: rune::Color, accent: rune::Color) -> El {
+    let p = Palette::get();
+    let mark = row()
+        .gap(10.0)
+        .center_y()
+        .child(el().size(12.0, 12.0).border(1.0, accent))
+        .child(
+            text("RYEOS")
+                .font(theme::data(10.0).tracking(3.0))
+                .color(p.muted),
+        );
+    let rule = row()
+        .w_full()
+        .h(1.0)
+        .fill(p.line)
+        .child(el().w(48.0).h(1.0).fill(accent));
+    col()
+        .gap(16.0)
+        .w_full()
+        .max_w(440.0)
+        .child(mark)
+        .child(
+            text(headline.to_owned())
+                .font(rune::tok::TextStyle::new(22.0, 400.0).tracking(-0.4))
+                .color(ink),
+        )
+        .child(rule)
+}
+
+pub(crate) fn centered(content: El) -> El {
+    let p = Palette::get();
     row()
         .w_full()
         .h_full()
         .center()
-        .gap(64.0)
         .padding(32.0)
         .fill(p.bg)
-        .child(mark)
-        .child(copy)
+        .child(content)
 }
 
 /// The whole presentation.

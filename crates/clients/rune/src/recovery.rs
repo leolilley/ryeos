@@ -5,7 +5,7 @@
 //! inspects the writer and then chooses a replacement explicitly; the node
 //! checks the predecessor again when that claim arrives.
 
-use rune::{El, col, el, row, text};
+use rune::{El, el, row, text};
 use ryeos_client_runtime::recovery::ReconnectChoice;
 
 use crate::App;
@@ -16,107 +16,102 @@ use crate::theme::{self, Palette};
 /// confirmation in place of its first button.
 pub fn screen(recovery: &Recovery, confirming: bool) -> El {
     let p = Palette::get();
-    let guidance = if recovery.exact_retry {
-        "Retry keeps this document's exact request. Reconcile checks retained receipts before \
-         showing explicit writer choices."
-    } else {
-        "This live presentation is fenced. Reconcile retained receipts, inspect the writer, then \
-         explicitly choose a replacement. No writer death is inferred."
+    let guidance = match (&recovery.observed, recovery.exact_retry) {
+        (Some(_), _) => {
+            "It is open in another tab or window, or in one that closed without letting go. \
+             Taking over moves it here; the node checks the writer again first."
+        }
+        (None, true) => {
+            "Retry sends the same request again. Inspect reads the current writer and checks \
+             retained receipts before offering choices."
+        }
+        (None, false) => {
+            "Changes are paused. Inspect the current writer, then choose how to continue; \
+             nothing is taken over without your choice."
+        }
     };
-    let mut actions = row().gap(10.0).flex_wrap();
+    let mut actions = row().gap(8.0).flex_wrap();
     if recovery.exact_retry {
         actions = actions.child(action(
             "recovery:retry",
-            "Retry exact request",
+            "Retry",
             RecoveryAction::RetryExact,
         ));
     }
     if recovery.can_inspect {
         actions = actions.child(action(
             "recovery:inspect",
-            "Reconcile and inspect writer",
+            "Inspect writer",
             RecoveryAction::Inspect,
         ));
         if !confirming {
             actions = actions.child(
-                button("recovery:independent", "Open independent presentation")
+                button("recovery:independent", "Open separately")
                     .on_press(|app: &mut App| app.local.confirming_independent = true),
             );
         }
     }
-    let mut copy = col()
-        .gap(14.0)
-        .max_w(600.0)
-        .role("alert")
-        .child(
-            text("PRESENTATION NEEDS YOUR DECISION")
-                .font(theme::ui(11.0).tracking(1.8))
-                .color(p.accent_bright),
-        )
-        .child(el().w_full().h(2.0).fill(p.line))
-        .child(
-            text(recovery.message.clone())
-                .font(theme::data(12.0))
-                .color(p.text)
-                .wrap_anywhere()
-                .selectable(true)
-                .w_full()
-                .padding(12.0)
-                .border_sides([0.0, 0.0, 0.0, 2.0], p.yellow),
-        )
-        .child(
-            text(guidance)
-                .font(theme::ui(13.0))
-                .color(p.muted)
-                .wrap()
-                .w_full(),
-        )
-        .child(actions);
+    let mut copy =
+        crate::shell::frame_column("This presentation needs a decision", p.text, p.yellow)
+            .role("alert")
+            .child(
+                text(recovery.message.clone())
+                    .font(theme::data(12.0))
+                    .color(p.yellow)
+                    .wrap_anywhere()
+                    .selectable(true)
+                    .w_full(),
+            )
+            .child(
+                text(guidance)
+                    .font(theme::ui(12.0))
+                    .color(p.muted)
+                    .wrap()
+                    .w_full(),
+            )
+            .child(actions);
     if let Some((writer, choices)) = &recovery.observed {
-        let mut replacements = row().gap(10.0).flex_wrap();
+        let mut replacements = row().gap(8.0).flex_wrap();
         for choice in choices {
-            let label = match choice {
-                ReconnectChoice::Resume { .. } => "Resume relinquished presentation",
-                ReconnectChoice::Takeover { .. } => "Take over this presentation",
+            let (key, label) = match choice {
+                ReconnectChoice::Resume { .. } => ("resume", "Resume"),
+                ReconnectChoice::Takeover { .. } => ("takeover", "Take over"),
                 ReconnectChoice::Independent => continue,
             };
             replacements = replacements.child(action(
-                &format!("recovery:{label}"),
+                &format!("recovery:{key}"),
                 label,
                 RecoveryAction::Choose(choice.clone()),
             ));
         }
         copy = copy
+            .child(el().w_full().h(1.0).fill(p.line))
             .child(
-                text(format!(
-                    "Observed writer: {writer}. Replacement requires an explicit choice; the \
-                     node checks the predecessor again."
-                ))
-                .font(theme::ui(13.0))
-                .color(p.text)
-                .wrap()
-                .w_full(),
+                text(format!("WRITER · {}", writer.to_uppercase()))
+                    .font(theme::data(10.0).tracking(1.6))
+                    .color(p.muted),
             )
             .child(replacements);
     }
     if confirming {
         copy = copy
+            .child(el().w_full().h(1.0).fill(p.line))
             .child(
                 text(
-                    "Open a distinct presentation? This does not resume or take over the \
-                     existing writer. Unresolved local writes still must reconcile.",
+                    "Open a separate presentation? The current writer keeps this one; \
+                     unresolved local writes still reconcile first.",
                 )
-                .font(theme::ui(13.0))
-                .color(p.yellow)
+                .font(theme::ui(12.0))
+                .color(p.text)
                 .wrap()
                 .w_full(),
             )
             .child(
                 row()
-                    .gap(10.0)
+                    .gap(8.0)
                     .child(action(
                         "recovery:independent:confirm",
-                        "Open independent presentation",
+                        "Open separately",
                         RecoveryAction::Choose(ReconnectChoice::Independent),
                     ))
                     .child(
@@ -125,23 +120,16 @@ pub fn screen(recovery: &Recovery, confirming: bool) -> El {
                     ),
             );
     }
-    row()
-        .w_full()
-        .h_full()
-        .center()
-        .padding(32.0)
-        .fill(p.bg)
-        .child(copy)
+    crate::shell::centered(copy.max_w(520.0))
 }
 
 /// The screen while a recovery decision is being carried out.
 pub fn working() -> El {
     let p = Palette::get();
-    row().w_full().h_full().center().fill(p.bg).child(
-        text("Working on your decision…")
-            .font(theme::ui(13.0))
-            .color(p.yellow)
-            .role("status"),
+    crate::shell::quiet_frame(
+        "Working on your decision",
+        "The writer choice is being applied.",
+        p.accent,
     )
 }
 
@@ -149,15 +137,16 @@ fn action(key: &str, label: &str, action: RecoveryAction) -> El {
     button(key, label).on_press(move |app: &mut App| app.recover(action.clone()))
 }
 
+/// A line button: a hairline outline that fills on hover.
 fn button(key: &str, label: &str) -> El {
     let p = Palette::get();
     text(label.to_owned())
-        .font(theme::ui(13.0))
+        .font(theme::ui(12.0))
         .color(p.text)
         .key(key.to_owned())
         .role("button")
         .px(14.0)
-        .py(7.0)
-        .fill(p.plane_raised)
+        .py(6.0)
         .border(1.0, p.line_strong)
+        .hover(p.plane_raised)
 }
