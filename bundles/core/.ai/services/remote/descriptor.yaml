@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-13T11:31:32Z:6210b3e849f110d5a21b8df0b241e5f9243d9d4d9cf3dae9b10c6cd3b94a8e85:dn5JtIFeaSFYxGF6naxBoS1sl3ZCOhZI2eBQ11zgMOrehurVffonmabQ7/Pe43okktLsIn4mmDlC8bPQTno4CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.descriptor
+required_caps: ["ryeos.execute.service.remote/descriptor"]
+schema:
+  name: string
+  url: string
+  capabilities: string[]?
+  admission_mode: string?
+  provider_name: string?
+description: "Export this node's signed remote descriptor; read-only, signed by the node key inside the daemon"

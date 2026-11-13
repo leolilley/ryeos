@@ -734,6 +734,9 @@ fn run_init_under_lock_on_storage(
     progress(InitPhase::PreparingLayout, None, None, None)?;
     // ── 0. Source exists? ──
     require_source_dir(opts)?;
+    // A node that still keeps its operator key where an older layout did must
+    // be moved by hand; init never mints a second operator identity beside it.
+    crate::operator_layout::check_operator_layout(&opts.app_root)?;
     state_lock
         .ensure_protects_app_root(&opts.app_root)
         .context("initialization needs the state lock of the app root it initializes")?;

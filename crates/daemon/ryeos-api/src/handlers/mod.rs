@@ -90,6 +90,7 @@ pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
 pub mod remote_configure;
+pub mod remote_descriptor;
 pub mod remote_doctor;
 pub mod remote_execute;
 pub mod remote_import_admitted_head;
@@ -344,6 +345,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     sync_jobs_inspect::DESCRIPTOR,
     remote_configure::DESCRIPTOR,
     remote_pin::DESCRIPTOR,
+    remote_descriptor::DESCRIPTOR,
     remote_bind_project::DESCRIPTOR,
     remote_doctor::DESCRIPTOR,
     remote_list::DESCRIPTOR,

@@ -545,7 +545,7 @@ until the external snapshot driver is retired.
 
 - `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
-- `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's signed remote descriptor (a trust pin signed by the node key).
+- `ryeos remote-descriptor --name <name> --url <url>` — ask the running daemon for this node's signed remote descriptor (a trust pin signed by the node key inside the daemon). The reply carries the descriptor and its signed `yaml`.
 - `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 

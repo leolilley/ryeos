@@ -290,14 +290,13 @@ forwarded `remote_operator` principal.
 
 ### Publishing a descriptor
 
-Any node operator can export a descriptor locally:
+Any node operator can export a descriptor from the running daemon (the signed document is the `yaml` field of the reply):
 
 ```bash
 ryeos remote-descriptor \
   --name production \
   --url https://ryeos.example.com \
-  --capabilities "remote-execute,bundle-install" \
-  --output ./production.remote.yaml
+  --capabilities "remote-execute,bundle-install"
 ```
 
 The exported descriptor (version 2) is signed with the node key it pins. The
@@ -385,13 +384,12 @@ UI or provisioning automation.
 ### Target node / remote operator
 
 Export a descriptor trust pin for the node and mint a one-time admission
-token. Deliver both files/values to the caller out of band.
+token. Save the descriptor `yaml` to a file and deliver it, with the token, to the caller out of band.
 
 ```bash
 ryeos remote-descriptor \
   --name prod \
-  --url https://ryeos.example.com \
-  --output ./prod.remote.yaml
+  --url https://ryeos.example.com
 
 ryeos admission-token \
   --label "dev-machine" \

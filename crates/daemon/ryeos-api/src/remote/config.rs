@@ -15,9 +15,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-pub use ryeos_core_tools::actions::remote_descriptor::{
-    RemoteDescriptor, RemoteDescriptorError, RemoteDescriptorNode,
-};
+pub use super::descriptor::{RemoteDescriptor, RemoteDescriptorError, RemoteDescriptorNode};
 pub use ryeos_state::project_sync::ProjectSyncScope;
 
 /// Schema of a node-signed remote pin record.

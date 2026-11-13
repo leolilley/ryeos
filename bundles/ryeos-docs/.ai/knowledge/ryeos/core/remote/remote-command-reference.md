@@ -44,7 +44,7 @@ to delegated callers.
 |---|---|---|---|
 | `ryeos remote configure` | `ryeos.execute.service.remote/configure` | none | `GET /public-key`, `GET /ingest-ignore` |
 | `ryeos remote pin` | `ryeos.execute.service.remote/pin` | none | none |
-| `ryeos remote-descriptor` | local tool execution | none | none |
+| `ryeos remote-descriptor` | daemon service (read-only) | `ryeos.execute.service.remote/descriptor` | none |
 | `ryeos admission-token` | local tool execution | none | none |
 | `ryeos remote admit` | `ryeos.execute.service.remote/admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
 | `ryeos remote list` | `ryeos.execute.service.remote/list` | none | none |
@@ -174,21 +174,21 @@ Failure modes:
 
 ## `ryeos remote-descriptor`
 
-Export a local descriptor trust pin for this node.
+Export this node's signed descriptor trust pin.
 
 ```bash
 ryeos remote-descriptor \
   --name prod \
   --url https://ryeos.example.com \
-  --capabilities "remote-execute,bundle-install" \
-  --output ./prod.remote.yaml
+  --capabilities "remote-execute,bundle-install"
 ```
 
-This is local operator tooling. It reads the node's
-`.ai/node/identity/public-identity.json` and vault public key, emits a version
-2 descriptor with the node public key, fingerprint, site ID and vault
-fingerprint, signs it with the node key, and optionally writes it to disk. The
-descriptor can be hosted, emailed, checked into infra, or served by any
+This is a read-only daemon service. The running daemon builds a version 2
+descriptor from its own identity and vault public key (node public key,
+fingerprint, site ID and vault fingerprint), signs it with the node key it
+holds, and returns it: the signed document is the `yaml` field of the reply.
+The node key never reaches a tool process. The hosted-node policy decides which
+URLs and admission modes may be advertised. The descriptor can be hosted, emailed, checked into infra, or served by any
 provider-specific layer. It is still only a trust/discovery pin: callers
 must import it with `remote configure --descriptor`, which verifies the
 signature and the pin against the live `/public-key` response.

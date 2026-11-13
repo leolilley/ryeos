@@ -356,6 +356,7 @@ pub const NEVER_DEPLOY_SECRETS: &[&str] = &[
     ".ai/node/identity",
     ".ai/node/auth",
     ".ai/node/vault",
+    // Frozen snapshot-floor entry: the floor is stored in every snapshot policy, so removing it would invalidate them.
     ".ai/config/keys/signing",
 ];
 

@@ -16,6 +16,7 @@ pub mod metadata;
 pub mod model_setup;
 pub mod native_capacity;
 pub mod offline_operation;
+pub mod operator_layout;
 pub mod provider_env;
 pub mod start;
 pub mod status;

@@ -2702,6 +2702,21 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Operator key material left at an old location: init refuses it and
+    // nothing reads it, so the node cannot be initialized until it is moved.
+    match ryeos_node::operator_layout::check_operator_layout(&config.app_root) {
+        Ok(()) => checks.push(check("operator_key", OK, serde_json::json!({}))),
+        Err(error) => checks.push(check(
+            "operator_key",
+            FAIL,
+            serde_json::json!({
+                "code": error.code(),
+                "error": error.to_string(),
+                "fix": error.cure(),
+            }),
+        )),
+    }
+
     // Remote pins: node-signed records under `.ai/node/remotes`. An unsigned
     // or edited record, or a leftover unsigned config file, is a failure with
     // the cure named.
