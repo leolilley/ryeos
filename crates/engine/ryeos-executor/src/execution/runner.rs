@@ -1911,7 +1911,7 @@ fn post_execution_foldback(
             launch_owner,
             head_ref,
             expected_hash,
-            &generation.snapshot_hash,
+            &generation,
         )?;
     }
     Ok(crate::execution::PendingProjectResult {
@@ -5890,8 +5890,21 @@ pub async fn run_and_wait(
                     completion: &completion,
                     daemon_mediated_source_capture: candidate_integration_completion.is_some(),
                 })
-                .inspect_err(|_| {
-                    guard.fail_thread("foldback_failed");
+                .inspect_err(|error| {
+                    // A HEAD advance refused before any write leaves the bound
+                    // generation retained: report it, distinct from a broken
+                    // fold-back.
+                    match super::HeadAdvanceNotApplied::find(error) {
+                        Some(not_applied) => {
+                            guard.fail_thread_with_error(
+                                super::HEAD_ADVANCE_NOT_APPLIED,
+                                not_applied.error_payload(),
+                            );
+                        }
+                        None => {
+                            guard.fail_thread("foldback_failed");
+                        }
+                    }
                 })?;
                 let generation = pending.generation().clone();
                 pending_project_result = Some(pending);
@@ -7436,10 +7449,21 @@ async fn dispatch_detached_bg_task(
                                 error = format!("{error:#}"),
                                 "authoritative fold-back failed; refusing successful settlement"
                             );
-                            if let Err(cleanup_error) = fail_thread_static_owned(
+                            let (outcome_code, failure) =
+                                match super::HeadAdvanceNotApplied::find(&error) {
+                                    Some(not_applied) => (
+                                        super::HEAD_ADVANCE_NOT_APPLIED,
+                                        not_applied.error_payload(),
+                                    ),
+                                    None => {
+                                        ("foldback_failed", json!({ "code": "foldback_failed" }))
+                                    }
+                                };
+                            if let Err(cleanup_error) = fail_thread_static_owned_with_error(
                                 &bg_state,
                                 &bg_thread_id,
-                                "foldback_failed",
+                                outcome_code,
+                                failure,
                                 &launch_owner,
                             ) {
                                 tracing::error!(
@@ -7700,6 +7724,23 @@ fn fail_thread_static_owned(
     outcome_code: &str,
     launch_owner: &str,
 ) -> Result<ExecutionCleanupOutcome> {
+    fail_thread_static_owned_with_error(
+        state,
+        thread_id,
+        outcome_code,
+        json!({ "code": outcome_code }),
+        launch_owner,
+    )
+}
+
+/// [`fail_thread_static_owned`] with an explicit error payload.
+fn fail_thread_static_owned_with_error(
+    state: &AppState,
+    thread_id: &str,
+    outcome_code: &str,
+    error_payload: serde_json::Value,
+    launch_owner: &str,
+) -> Result<ExecutionCleanupOutcome> {
     match super::process_attachment::finalize_requested_stop_if_present(state, thread_id) {
         Ok(true) => return Ok(ExecutionCleanupOutcome::DurableStopSettled),
         Ok(false) => {}
@@ -7716,7 +7757,7 @@ fn fail_thread_static_owned(
         status: "failed".to_string(),
         outcome_code: Some(outcome_code.to_string()),
         result: None,
-        error: Some(json!({ "code": outcome_code })),
+        error: Some(error_payload),
         metadata: None,
         artifacts: Vec::new(),
         final_cost: None,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:45:28Z:38294faaa4e928dacc10cb232dceed30cc6575546cfe20fa1be94a27f55f3656:Eb9murcA45gHmtDuTznoeXcmWVZ6cEfdZVGxwP322dZoX2HbSOvgCVxGdCUTI8LrPcvkZkH/k5Sr7JnSr78xCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:53:36Z:2d7e9b536ee83f579d14258c126340b359d3f5f4a4a329d8f424fdc6f1d9eed8:RZopGRdzigHy7ZALUpL7X+Tk/MvqTTnOWwOcJ7iYLv4mo3Ep7eh8GWr4dWa8ZrOsF8HckWy+Wr4iTbhmTGIsCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -265,6 +265,17 @@ restart the node.
 `--pin-project` remains the explicit complete-project snapshot/COW workflow. It
 does not control ordinary admitted source or external-content delivery, and is
 not required merely to run a definition that already retains those exact bytes.
+A pinned execution whose terminal publication advances HEAD freezes its result
+generation, binds it to the workspace journal, and only then compare-and-swaps
+HEAD from the admitted base. Three outcomes follow: HEAD advances (published);
+the CAS is refused before any write, most often because HEAD moved off the
+base, and a direct item execution fails with outcome
+`head_advance_not_applied`, its error naming the reason, expected and observed
+HEAD and the retained `retained_snapshot_hash` /
+`retained_output_capture_hash` (a managed runtime reports the same typed
+refusal as its terminal-result error); or fold-back itself breaks, which stays
+`foldback_failed`. A not-applied result is never retried or
+merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
 publication. Their writes are discarded at process cleanup and never fold back
 to the live project. Durable outputs use structured results or explicit
