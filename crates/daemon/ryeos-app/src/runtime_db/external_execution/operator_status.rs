@@ -85,8 +85,7 @@ fn open_local_starts(conn: &Connection) -> Result<Vec<QualificationLocalStartRec
     placements
         .into_iter()
         .map(|placement| {
-            read_local_start(conn, &placement)?
-                .context("Q local start disappeared during listing")
+            read_local_start(conn, &placement)?.context("Q local start disappeared during listing")
         })
         .collect()
 }
@@ -194,7 +193,10 @@ mod tests {
     use super::super::tests::{reservation, reserve};
     use super::*;
 
-    fn open() -> (tempfile::TempDir, crate::runtime_db::test_native::TestRuntime) {
+    fn open() -> (
+        tempfile::TempDir,
+        crate::runtime_db::test_native::TestRuntime,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let db =
             crate::runtime_db::test_native::TestRuntime::open(&dir.path().join("runtime.sqlite3"));

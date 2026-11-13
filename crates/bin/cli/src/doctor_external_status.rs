@@ -225,7 +225,10 @@ mod tests {
         assert_eq!(rows[0].detail["counts"]["operator"], 1);
         assert_eq!(rows[0].detail["allocations"][0]["fix"], "settle it");
         assert_eq!(rows[1].status, FAIL);
-        assert_eq!(rows[1].detail["held"][0]["owner"]["chain_root_id"], "T-chain");
+        assert_eq!(
+            rows[1].detail["held"][0]["owner"]["chain_root_id"],
+            "T-chain"
+        );
     }
 
     #[test]

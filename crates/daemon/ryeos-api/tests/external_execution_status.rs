@@ -5,7 +5,9 @@ use std::sync::Arc;
 use ryeos_api::registry::build_service_registry;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::{DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession};
+use ryeos_app::state_store::{
+    DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession,
+};
 use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
 use serde_json::{Value, json};
 

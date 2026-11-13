@@ -124,7 +124,9 @@ async fn status_and_doctor_name_a_held_profile_lock() {
         )
     });
     let view = printed.get("result").unwrap_or(&printed);
-    let held = view["credential_profiles"].as_array().expect("held profiles");
+    let held = view["credential_profiles"]
+        .as_array()
+        .expect("held profiles");
     assert_eq!(held.len(), 1, "{view}");
     assert_eq!(held[0]["profile_id"], "personal");
     assert_eq!(held[0]["owner"]["kind"], "dedicated_session");

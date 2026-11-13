@@ -118,13 +118,20 @@ impl ExternalExecutionStatus {
         self.allocations
             .iter()
             .map(|row| row.attention)
-            .chain(self.qualification_local_starts.iter().map(|row| row.attention))
+            .chain(
+                self.qualification_local_starts
+                    .iter()
+                    .map(|row| row.attention),
+            )
             .max()
     }
 
     /// The most demanding attention among held credential profiles.
     pub fn credential_attention(&self) -> Option<Attention> {
-        self.credential_profiles.iter().map(|row| row.attention).max()
+        self.credential_profiles
+            .iter()
+            .map(|row| row.attention)
+            .max()
     }
 }
 
@@ -158,7 +165,11 @@ const CLEANUP_UNPROVED_FIX: &str = "this Q start's cleanup is unproved: the node
 Worker is gone without a qualified cgroup scope. A restart settles the rows a dead daemon \
 generation left; on a node without a qualified scope the start stays held";
 
-fn start_status(record: &QualificationLocalStartRecord, current: &str, now: i64) -> QualificationStartStatus {
+fn start_status(
+    record: &QualificationLocalStartRecord,
+    current: &str,
+    now: i64,
+) -> QualificationStartStatus {
     let generation = start_generation(record, current);
     let (attention, fix) = if record.phase == QualificationLocalStartPhase::CleanupUnproved {
         (Attention::Operator, CLEANUP_UNPROVED_FIX.to_owned())
@@ -224,7 +235,9 @@ fn allocation_status(
             .iter()
             .find(|start| &start.placement_thread_id == placement)
         {
-            Some(start) if start.attention != Attention::InUse => (start.attention, start.fix.clone()),
+            Some(start) if start.attention != Attention::InUse => {
+                (start.attention, start.fix.clone())
+            }
             _ => (
                 Attention::InUse,
                 match &reservation.owner {
