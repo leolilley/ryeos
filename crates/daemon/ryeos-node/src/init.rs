@@ -2216,7 +2216,8 @@ fn enforced_admission_refusal(
         String::new()
     };
     anyhow!(
-        "host class `{host_class}` enforces execution isolation, and this host's sandbox probe \
+        "enforced_lane_admission_refused: host class `{host_class}` enforces execution \
+         isolation, and this host's sandbox probe \
          or the prospective source set did not pass admission: {cause:#}. Fix the host (the \
          sandbox needs unprivileged user, mount and pid namespaces and the new mount API), or \
          choose a different host class.{opt_out}"
@@ -3047,6 +3048,10 @@ mod tests {
         let text = format!(
             "{:#}",
             enforced_admission_refusal(&policy, &declared, anyhow!("no user namespace"))
+        );
+        assert!(
+            text.starts_with("enforced_lane_admission_refused:"),
+            "{text}"
         );
         assert!(text.contains("no user namespace"), "{text}");
         assert!(text.contains("--host-class local_unconfined"), "{text}");
