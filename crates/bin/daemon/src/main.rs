@@ -4093,10 +4093,13 @@ async fn run(
         .ensure_protects_app_root(&config.app_root)?;
 
     // Bundle-set recovery must observe the old/new completion fence before
-    // ordinary completion verification. The present v1 journal can safely
-    // discard pre-activation work and finalize an already signed exact-new
-    // completion; activated old-state restoration remains fail-closed until
-    // the journal owns exact backup coordinates.
+    // ordinary completion verification. The journal records both signed
+    // completions and the exact backup and staging coordinates in the
+    // transaction root, so recovery restores the exact old generation from
+    // any crash before the new completion is published (whatever was already
+    // activated) and completes the exact new one once it is. It refuses, for
+    // operator repair, only a completion that is neither, an absent one after
+    // publication started, or a new selection that may already have executed.
     let bundle_set_recovery = {
         let registry_lock =
             ryeos_node_runtime::registry::BundleRegistryMutationLock::acquire(&config.app_root)?;
