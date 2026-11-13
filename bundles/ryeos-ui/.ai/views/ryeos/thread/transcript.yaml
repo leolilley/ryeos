@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:55:34Z:9e64da38b36d3715024744b181a3243fde2548a11b65e11f0342774b3bf58558:qRe0XmeMhtTNO+ZBym9LxDUw80Eq/7cavj3qeb+Q2s2cUSpofCpAB96e/T2FlH9UsA2PDa/539n4qRrfZdo7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:15:49Z:67f7bc8c989ac6b41ccc54183997410c6d3dc372ee615ca538a3312ccd6b5231:4256bQ8UIRILBgERvzH2RLWI1cpTXwzzJC0GNLjHBRejFLC94NB5pS+NF7I8zRmVRFuqfqSDtUmVjHBZlyd2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -130,6 +130,15 @@ projections:
         map:
           hosted_session.approval_requested: warn
         default: warn
+    hosted_session.approval_expired:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.approval_expired: warn
+        default: warn
     hosted_approval.decision_reserved:
       primary: payload.decision
       meta: payload.approval_id
@@ -161,6 +170,15 @@ projections:
         map:
           hosted_approval.delivery_settled: good
         default: good
+    hosted_approval.delivery_expired:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.delivery_expired: warn
+        default: warn
     worker_session.restored:
       primary: payload.successor_placement_thread_id
       meta: payload.source_placement_thread_id
