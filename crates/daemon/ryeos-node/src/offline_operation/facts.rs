@@ -33,7 +33,8 @@ pub const FACT_EXTERNAL_EXECUTION: &str = "external_execution_bindings";
 /// Digest of the installed runtime-snapshot production and qualification
 /// bindings.
 pub const FACT_RUNTIME_SNAPSHOTS: &str = "runtime_snapshot_bindings";
-/// Digest of the node's own remotes file, the remote trust anchors it holds.
+/// Digest of the node-signed remote pin records, the remote trust anchors it
+/// holds.
 pub const FACT_REMOTES: &str = "remotes";
 /// Digest of the signed bundle registrations, the set of bundles the node
 /// runs.
@@ -118,10 +119,7 @@ pub fn measure(app_root: &Path, ledger_head: &str) -> NodeFacts {
             ),
         ]),
     );
-    facts.insert(
-        FACT_REMOTES.to_owned(),
-        file_digest(&remotes_file(app_root)),
-    );
+    facts.insert(FACT_REMOTES.to_owned(), tree_digest(&node.join("remotes")));
     facts.insert(
         FACT_BUNDLE_REGISTRATIONS.to_owned(),
         tree_digest(&node.join("bundles")),
@@ -131,14 +129,6 @@ pub fn measure(app_root: &Path, ledger_head: &str) -> NodeFacts {
         tree_digest(&node.join("trust")),
     );
     facts
-}
-
-/// The node's own remotes file, the one `ryeos remote configure` and
-/// `ryeos remote pin` write.
-pub fn remotes_file(app_root: &Path) -> std::path::PathBuf {
-    RuntimeRoot::new(app_root.to_path_buf())
-        .config()
-        .join("remotes/remotes.yaml")
 }
 
 fn combined_digest(parts: &[(&str, String)]) -> String {

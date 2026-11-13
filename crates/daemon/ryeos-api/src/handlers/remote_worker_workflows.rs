@@ -524,7 +524,7 @@ pub async fn start(
                 &operator_fingerprint,
             )?,
         remote: req.remote,
-        remote_url: remote.url,
+        remote_url: remote.outbound_url()?.to_owned(),
         target_site_id: remote.site_id,
         target_principal_id: remote.principal_id,
         target_signing_key: remote.signing_key,
@@ -1775,7 +1775,7 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
         &operation.remote,
         Path::new(&operation.local_project_path),
     )?;
-    if remote.url != operation.remote_url
+    if remote.url.as_deref() != Some(operation.remote_url.as_str())
         || remote.site_id != operation.target_site_id
         || remote.principal_id != operation.target_principal_id
         || remote.signing_key != operation.target_signing_key

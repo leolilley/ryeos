@@ -40,7 +40,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let expected_deployed_hash = if req.expected_deployed_hash.is_some() {
         req.expected_deployed_hash.clone()
     } else {

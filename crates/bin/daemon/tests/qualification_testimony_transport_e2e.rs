@@ -179,7 +179,8 @@ fn remote_config(
         base64::engine::general_purpose::STANDARD.encode(node_key.verifying_key().as_bytes());
     ryeos_api::remote::config::RemoteConfig {
         name: name.to_owned(),
-        url,
+        url: Some(url),
+        reachability: Default::default(),
         principal_id: format!("fp:{}", fingerprint(node_key)),
         signing_key: format!("ed25519:{public_key}"),
         site_id: site_id.to_owned(),

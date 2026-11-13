@@ -315,7 +315,10 @@ async fn remote_configure_normalizes_direct_url_and_stores_pin_source() {
 
     assert_eq!(result["url"], url);
     let report = config::load_remotes_report(&app_root).unwrap();
-    assert_eq!(report.remotes["normalized"].config.url, url);
+    assert_eq!(
+        report.remotes["normalized"].config.url.as_deref(),
+        Some(url.as_str())
+    );
     assert_eq!(
         report.remotes["normalized"].pin_source,
         PinSource::ExpectedFingerprint
@@ -502,7 +505,10 @@ async fn remote_bind_project_records_binding_in_the_signed_pin() {
     assert!(report.invalid.is_empty());
     let operator_remote = &report.remotes["prod"];
     assert_eq!(operator_remote.pinned_at, before);
-    assert_eq!(operator_remote.config.url, "https://project.example.com");
+    assert_eq!(
+        operator_remote.config.url.as_deref(),
+        Some("https://project.example.com")
+    );
     let local_key = project_root.to_string_lossy().to_string();
     assert_eq!(
         operator_remote
@@ -768,7 +774,8 @@ fn write_descriptor_signed_by(
     let descriptor = config::RemoteDescriptor {
         version: 2,
         name: name.to_string(),
-        url: url.to_string(),
+        url: Some(url.to_string()),
+        ingest_ignore: None,
         site_id: public_key["site_id"].as_str().unwrap().to_string(),
         vault_fingerprint: public_key["vault_fingerprint"]
             .as_str()
@@ -810,7 +817,8 @@ fn remote_config_json(name: &str, url: &str, public_key: &Value) -> Value {
 fn remote_config(name: &str, url: &str, public_key: &Value) -> RemoteConfig {
     RemoteConfig {
         name: name.to_string(),
-        url: url.to_string(),
+        url: Some(url.to_string()),
+        reachability: Default::default(),
         principal_id: public_key["principal_id"].as_str().unwrap().to_string(),
         signing_key: public_key["signing_key"].as_str().unwrap().to_string(),
         site_id: public_key["site_id"].as_str().unwrap().to_string(),

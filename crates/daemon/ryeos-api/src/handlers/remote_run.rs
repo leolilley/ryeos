@@ -161,7 +161,7 @@ pub async fn handle(
         RemoteClient::from_remote_cfg_as_configured_operator(&state, &remote_cfg, &ctx)
             .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?
     } else {
-        RemoteClient::from_remote_cfg(&state, &remote_cfg)
+        RemoteClient::from_remote_cfg(&state, &remote_cfg)?
     };
     let accepted =
         req.execution_policy.response == ryeos_app::execution_policy::ExecutionResponse::Accepted;
@@ -483,7 +483,8 @@ mod tests {
             use base64::Engine as _;
             let remote = crate::remote::config::RemoteConfig {
                 name: "fixture".into(),
-                url: format!("http://{}", self.address),
+                url: Some(format!("http://{}", self.address)),
+                reachability: Default::default(),
                 principal_id: fixture.state.identity.principal_id(),
                 signing_key: format!(
                     "ed25519:{}",

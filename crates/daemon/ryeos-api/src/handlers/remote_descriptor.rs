@@ -19,8 +19,10 @@ use ryeos_executor::executor::ServiceAvailability;
 pub struct Request {
     /// Name callers should use for the remote.
     pub name: String,
-    /// Public URL callers should use to reach this node.
-    pub url: String,
+    /// Public URL callers should use to reach this node. Omit it to export an
+    /// inbound-only descriptor, for a node behind NAT that only calls in.
+    #[serde(default)]
+    pub url: Option<String>,
     /// Informational capability labels advertised by this node.
     #[serde(
         default,

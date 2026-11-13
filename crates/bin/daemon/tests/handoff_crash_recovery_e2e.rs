@@ -129,7 +129,8 @@ fn remote_config(
     };
     Ok(ryeos_api::remote::config::RemoteConfig {
         name: name.to_owned(),
-        url,
+        url: Some(url),
+        reachability: Default::default(),
         principal_id: format!("fp:{}", remote.node_fp()),
         signing_key: format!("ed25519:{public_key}"),
         site_id: site_id.to_owned(),
@@ -3097,7 +3098,8 @@ fn plant_target_abort_state(
         TARGET_REMOTE_NAME.to_owned(),
         ryeos_api::remote::config::RemoteConfig {
             name: TARGET_REMOTE_NAME.to_owned(),
-            url: source_url.to_owned(),
+            url: Some(source_url.to_owned()),
+            reachability: Default::default(),
             principal_id: source_principal.clone(),
             signing_key: format!("ed25519:{source_public_key}"),
             site_id: REMOTE_SOURCE_SITE_ID.to_owned(),

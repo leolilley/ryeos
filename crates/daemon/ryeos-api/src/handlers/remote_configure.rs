@@ -158,11 +158,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let remote_url_input = req
         .url
         .clone()
-        .or_else(|| descriptor.as_ref().map(|d| d.url.clone()))
-        .context("remote URL required: pass --url or descriptor.url")?;
+        .or_else(|| descriptor.as_ref().and_then(|d| d.url.clone()))
+        .context("remote URL required: pass --url or a descriptor that carries one (an inbound-only descriptor is pinned with `ryeos remote pin`)")?;
     let remote_url = config::normalize_url(&remote_url_input)?;
     if let Some(descriptor) = descriptor.as_ref()
-        && descriptor.url != remote_url
+        && descriptor
+            .url
+            .as_deref()
+            .is_some_and(|url| url != remote_url)
     {
         anyhow::bail!(
             "remote descriptor URL is not canonical; expected '{}'",
@@ -232,7 +235,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let signing_key = pubkey.signing_key.clone();
     let remote_config = config::RemoteConfig {
         name: remote_name.clone(),
-        url: remote_url.clone(),
+        url: Some(remote_url.clone()),
+        reachability: config::Reachability::Outbound,
         principal_id: pubkey.principal_id.clone(),
         signing_key: pubkey.signing_key,
         site_id: pubkey.site_id.clone(),

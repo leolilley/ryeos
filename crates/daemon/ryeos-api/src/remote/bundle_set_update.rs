@@ -117,7 +117,7 @@ impl RemoteAuthority {
         cas: &lillux::CasStore,
     ) -> anyhow::Result<consumer::CatalogResolution> {
         let client = RemoteClient::new(
-            &self.remote.url,
+            self.remote.outbound_url()?,
             &self.remote.principal_id,
             self.identity.clone(),
         );

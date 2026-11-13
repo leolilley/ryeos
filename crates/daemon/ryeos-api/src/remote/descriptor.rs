@@ -24,12 +24,19 @@ pub const REMOTE_DESCRIPTOR_VERSION: u32 = 2;
 pub struct RemoteDescriptor {
     pub version: u32,
     pub name: String,
-    pub url: String,
+    /// Public URL callers dial. Signed when present. A descriptor without
+    /// one describes an inbound-only node, one behind NAT that only calls in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// The remote node's site identity (`site:<fingerprint>`).
     pub site_id: String,
     /// Fingerprint of the remote node's vault public key.
     pub vault_fingerprint: String,
     pub node: RemoteDescriptorNode,
+    /// The rules a remote applies before it pushes to this node. A pin made
+    /// from a descriptor without them pushes nothing to the remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_ignore: Option<ryeos_app::ignore::IgnoreConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,7 +201,8 @@ fn decode_node_key(input: &str) -> Result<VerifyingKey> {
 #[derive(Debug, Default)]
 pub struct DescriptorRequest {
     pub name: String,
-    pub url: String,
+    /// `None` exports an inbound-only descriptor.
+    pub url: Option<String>,
     pub capabilities: Vec<String>,
     pub admission_mode: Option<String>,
     pub provider_name: Option<String>,
@@ -212,14 +220,17 @@ pub fn build_signed_descriptor(
     if name.is_empty() {
         bail!("name must not be empty");
     }
-    let url = request.url.trim().trim_end_matches('/').to_string();
-    if url.is_empty() {
-        bail!("url must not be empty");
-    }
+    let url = match request.url.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(url) => {
+            let url = url.trim_end_matches('/').to_string();
+            enforce_hosted_transport_policy(&url, hosted_policy)?;
+            Some(url)
+        }
+    };
     if vault_fingerprint.trim().is_empty() {
         bail!("this node has no vault public key; run `ryeos init` first");
     }
-    enforce_hosted_transport_policy(&url, hosted_policy)?;
 
     let requested_admission_mode = request
         .admission_mode
@@ -262,6 +273,9 @@ pub fn build_signed_descriptor(
         url,
         site_id: identity.site_id(),
         vault_fingerprint: vault_fingerprint.to_string(),
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig {
+            patterns: hosted_policy.ingest_ignore_patterns.clone(),
+        }),
         node: RemoteDescriptorNode {
             public_key: format!(
                 "ed25519:{}",
@@ -335,6 +349,7 @@ mod tests {
                 "allow_loopback_http": loopback,
             }))
             .expect("hosted policy shape"),
+            ingest_ignore_patterns: vec!["target/".into()],
             source_file: std::path::PathBuf::from("hosted.yaml"),
         }
     }
@@ -342,7 +357,7 @@ mod tests {
     fn request(url: &str) -> DescriptorRequest {
         DescriptorRequest {
             name: "hosted-prod".into(),
-            url: url.into(),
+            url: Some(url.into()),
             ..Default::default()
         }
     }
@@ -357,7 +372,8 @@ mod tests {
         let (_dir, identity) = identity();
         let (descriptor, yaml) = build("https://node.example.com/", &identity);
         assert_eq!(RemoteDescriptor::parse_signed(&yaml).unwrap(), descriptor);
-        assert_eq!(descriptor.url, "https://node.example.com");
+        assert_eq!(descriptor.url.as_deref(), Some("https://node.example.com"));
+        assert_eq!(descriptor.ingest_ignore.unwrap().patterns, ["target/"]);
         assert_eq!(descriptor.site_id, identity.site_id());
         assert_eq!(descriptor.admission.unwrap().mode, "one_time_token");
     }

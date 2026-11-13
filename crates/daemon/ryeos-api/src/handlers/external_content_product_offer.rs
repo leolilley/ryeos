@@ -475,7 +475,8 @@ mod tests {
         let key = signer.key();
         RemoteConfig {
             name: name.to_owned(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&key)),
             signing_key: format!(
                 "ed25519:{}",

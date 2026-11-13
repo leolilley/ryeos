@@ -258,7 +258,8 @@ async fn incomplete_closure_response(
 fn remote_config(name: &str, remote: &RemoteNode) -> RemoteConfig {
     RemoteConfig {
         name: name.to_string(),
-        url: remote.url.clone(),
+        url: Some(remote.url.clone()),
+        reachability: Default::default(),
         principal_id: remote.principal_id.clone(),
         signing_key: remote.signing_key.clone(),
         site_id: remote.site_id.clone(),

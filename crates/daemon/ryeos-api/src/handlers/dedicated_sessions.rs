@@ -3045,7 +3045,7 @@ async fn handoff_preflight(
     };
     request.validate().map_err(internal)?;
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let target_value = target_client
         .execute_service_result_with_total_timeout(
             ryeos_app::worker_handoff::WORKER_PLACEMENT_PREFLIGHT_SERVICE,
@@ -3072,7 +3072,7 @@ async fn handoff_preflight(
         .validate_against(&request, &target_key)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let target_node_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let target_closure_options =
         crate::remote::client::NodeAdmittedObjectsClosureRequestOptions::for_node(
             &state,
@@ -3735,7 +3735,7 @@ async fn handoff(
         source_accounting_frontier: source_accounting_frontier.clone(),
     };
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
     let prepare_attempt =
         begin_worker_handoff_attempt(&state, &job_id, "target_prepare", "source-handoff")?;
     #[cfg(any(test, feature = "handoff-test-support"))]
@@ -3772,7 +3772,7 @@ async fn handoff(
             .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
         let target_node_client =
-            crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config);
+            crate::remote::client::RemoteClient::from_remote_cfg(&state, &loaded_remote.config)?;
         let target_roots = vec![
             prepared.placement_attestation_hash.clone(),
             prepared.target_runtime_seed_hash.clone(),
@@ -4434,7 +4434,7 @@ async fn resume_committed_handoff_locked(
         ));
     }
     let target_client =
-        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
     let adopt_request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
         operation_id: operation.operation_id.clone(),
         chain_root_id: operation.chain_root_id.clone(),
@@ -5302,7 +5302,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 continue;
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+                crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
             let request = ryeos_app::worker_handoff::WorkerPlacementAdoptRequest {
                 operation_id: operation.operation_id.clone(),
                 chain_root_id: operation.chain_root_id.clone(),
@@ -5697,7 +5697,8 @@ async fn recover_pre_cut_source_handoff_abort(
     if loaded_remote.config.site_id != operation.target_site_id {
         anyhow::bail!("source handoff configured target site changed before abort");
     }
-    let client = crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config);
+    let client =
+        crate::remote::client::RemoteClient::from_remote_cfg(state, &loaded_remote.config)?;
     let request = ryeos_app::worker_handoff::WorkerPlacementAbortRequest {
         operation: operation.clone(),
         abort_chain_head_hash: abort_head_hash.clone(),

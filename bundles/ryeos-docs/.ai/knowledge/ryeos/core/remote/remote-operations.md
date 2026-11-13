@@ -45,8 +45,9 @@ untrusted tenants.
   to high-impact remote orchestrators in v1. It does not replace
   target-node authorized-key scopes.
 - A remote's pinned identity (`signing_key`, `principal_id`,
-  `vault_fingerprint`) comes only from the node's own remotes file. A
-  project cannot supply or override it: see [Configuration](#configuration).
+  `vault_fingerprint`) comes only from the node-signed pin records under
+  `.ai/node/remotes/`. A project cannot supply or override it: see
+  [Configuration](#configuration).
 
 ## Identity Requirements
 
@@ -314,21 +315,32 @@ authority model does not depend on that distribution channel. The caller
 still verifies the descriptor against the live node identity during
 `remote configure --descriptor`.
 
-A descriptor also carries the node's site (`node.site_id`), its vault
-fingerprint (`node.vault_fingerprint`) and its signed ingest-ignore rules
-(`ingest_ignore`). With them a node can pin the remote without contacting it:
+A version 2 descriptor always carries the node's site (`site_id`) and vault
+fingerprint (`vault_fingerprint`), and may carry its signed ingest-ignore rules
+(`ingest_ignore`) and a `url`. All of them are covered by the node signature.
+With them a node can pin the remote without contacting it:
 
 ```bash
 ryeos remote pin origin --descriptor ./origin.remote.yaml
 ```
 
-`remote pin` writes a complete entry in the node's own remotes file from the
-descriptor alone. The descriptor is the trust anchor, so it must reach the
-pinning node through a channel its operator trusts. A descriptor without the
-site or vault fingerprint is refused with `remote_descriptor_incomplete`. One
-without ingest rules pins a remote this node never pushes to: push, execute
-and project sync to it refuse with `remote_pinned_without_ingest_rules` until
-`remote configure` (or a pin with the rules) replaces the entry.
+`remote pin` verifies the descriptor's node signature and writes a node-signed
+pin record under `.ai/node/remotes/` from the descriptor alone (`pin_source:
+descriptor_without_contact`). The descriptor is the trust anchor, so it must
+reach the pinning node through a channel its operator trusts. A version 1 or
+unsigned descriptor is refused with `remote_descriptor_unsigned`. One without
+ingest rules pins a remote this node never pushes to: push, execute and project
+sync to it refuse with `remote_pinned_without_ingest_rules` until `remote
+configure` (or a pin with the rules) replaces the entry.
+
+**Inbound-only peers.** A descriptor without a `url` pins an inbound-only
+remote: a node behind NAT that only ever calls in, such as the origin pinned by
+a hosted controller. The pin record carries `reachability: inbound_only` and no
+URL, and still holds the site, node key and vault fingerprint that inbound
+verification and grant origin checks use. Every path that dials a remote (run,
+push, pull, execute, sync, status, doctor, configure) refuses an inbound-only pin
+with `remote_inbound_only`, naming the remote. Export one with
+`ryeos remote-descriptor --name <name>` and no `--url`.
 
 ## Wiring a hosted node without a shell
 
@@ -340,7 +352,7 @@ offline operations, which the controller's signed profile delegates
 | Operation | Input | Effect |
 |---|---|---|
 | `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_operator` grant (public key, exact scopes, label, origin site, `merge_scopes`). Never an offline-operation scope or a wildcard. |
-| `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its descriptor, as `ryeos remote pin`. |
+| `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its signed v2 descriptor (a URL-less one pins an inbound-only remote), as `ryeos remote pin`: a node-signed record under `.ai/node/remotes/`. |
 | `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
 
 Each is signed against the controller's facts (`authorized_keys`, `remotes`,

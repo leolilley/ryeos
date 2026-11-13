@@ -119,7 +119,7 @@ pub struct ProjectInfo {
 #[serde(deny_unknown_fields)]
 pub struct RemoteSummary {
     pub name: String,
-    pub url: String,
+    pub url: Option<String>,
     pub principal_id: String,
 }
 

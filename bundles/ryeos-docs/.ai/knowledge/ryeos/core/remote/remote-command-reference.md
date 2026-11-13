@@ -100,14 +100,18 @@ ryeos remote pin origin --descriptor ./origin.remote.yaml
 
 The descriptor is the trust anchor: the entry's key, principal, site and vault
 fingerprint come from it alone, so it must reach this node through a channel
-its operator trusts. It must carry `node.site_id` (the node's own
-`site:<fingerprint>`) and `node.vault_fingerprint`, or the pin is refused with
-`remote_descriptor_incomplete`. Descriptors exported by `ryeos
-remote-descriptor` carry both, plus the node's `ingest_ignore` rules. A remote
-pinned without ingest rules is one this node never pushes to: push, execute
-and project sync refuse with `remote_pinned_without_ingest_rules`. Pinning
-again replaces the entry and keeps its project bindings. A hosted node applies
-the same pin through the signed offline operation `node.remote.pin`.
+its operator trusts. It must be a signed version 2 descriptor (it always
+carries the node's `site_id` and `vault_fingerprint`); a version 1 or unsigned
+one is refused with `remote_descriptor_unsigned`. The pin is written as a
+node-signed record under `.ai/node/remotes/` with `pin_source:
+descriptor_without_contact`. Descriptors exported by `ryeos remote-descriptor`
+carry the node's `ingest_ignore` rules; a remote pinned without them is one this
+node never pushes to: push, execute and project sync refuse with
+`remote_pinned_without_ingest_rules`. A descriptor without a `url` pins an
+inbound-only remote, which every outbound command refuses with
+`remote_inbound_only`. Pinning again replaces the record and keeps its project
+bindings. A hosted node applies the same pin through the signed offline
+operation `node.remote.pin`.
 
 ## `ryeos remote configure`
 

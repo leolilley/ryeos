@@ -62,7 +62,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let key = remote
         .pinned_signing_key()
         .context("product origin has no pinned signing key")?;
-    let client = RemoteClient::from_remote_cfg(&state, &remote);
+    let client = RemoteClient::from_remote_cfg(&state, &remote)?;
     let imported = import_admitted_root_with_job(
         &state,
         &client,

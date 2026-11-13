@@ -626,8 +626,9 @@ threads, token-based admission, remote authorization, live bundle
 install, and vault proxying.
 
 - `ryeos remote pin <name> --descriptor <file>` — pin a remote from its
-  descriptor without contacting it; refused `remote_descriptor_incomplete`
-  without the node's site and vault fingerprint.
+  signed v2 descriptor without contacting it, as a node-signed pin record; a
+  descriptor without a URL pins an inbound-only remote (outbound commands
+  refuse it with `remote_inbound_only`).
 - `ryeos node offline-operation sign --operation node.authorize-client|node.remote.pin|node.bundle.replace ...`
   — wire a hosted node that delegates these operations: a remote grant, a
   remote pin (`--input descriptor=<file>`) or a bundle installed from an

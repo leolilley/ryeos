@@ -2235,7 +2235,8 @@ async fn admit_execution_with_publication(
                 return Ok(dispatch_error_response(error));
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote);
+                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote)
+                    .map_err(|error| RouteDispatchError::Internal(error.to_string()))?;
             let rules = plan
                 .remote
                 .remote
@@ -3869,7 +3870,8 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         crate::remote::config::RemoteConfig {
             name: name.to_string(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
             signing_key: format!(
                 "ed25519:{}",

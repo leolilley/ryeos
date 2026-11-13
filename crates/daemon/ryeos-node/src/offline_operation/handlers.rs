@@ -1330,6 +1330,7 @@ pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
     ctx.host.pin_remote(super::host::RemotePin {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
+        node: ctx.node,
         name: &arguments.name,
         descriptor: ctx.inputs.require("descriptor")?,
     })

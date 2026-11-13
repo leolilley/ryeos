@@ -4,7 +4,7 @@ endpoint: remote.descriptor
 required_caps: ["ryeos.execute.service.remote/descriptor"]
 schema:
   name: string
-  url: string
+  url: string?
   capabilities: string[]?
   admission_mode: string?
   provider_name: string?

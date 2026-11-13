@@ -93,7 +93,7 @@ pub async fn handle_remotes_probe(
     let remotes = ryeos_api::remote::config::load_remotes(&state.config.app_root)?;
     let remote_cfg = ryeos_api::remote::config::get_remote(&remotes, &req.remote)?;
 
-    let client = ryeos_api::remote::client::RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = ryeos_api::remote::client::RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
 
     let health = match tokio::time::timeout(REMOTE_PROBE_TIMEOUT, client.get_health()).await {
         Ok(Ok(health)) => health,

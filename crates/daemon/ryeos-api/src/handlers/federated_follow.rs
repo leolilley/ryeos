@@ -96,7 +96,7 @@ async fn deliver_locked(
         .principal_id
         .strip_prefix("fp:")
         .ok_or_else(|| internal("configured target principal is not a fingerprint"))?;
-    let target_client = RemoteClient::from_remote_cfg(&state, &target_remote.remote);
+    let target_client = RemoteClient::from_remote_cfg(&state, &target_remote.remote)?;
     let reservation_value =
         load_local_object(&state, &req.reservation_attestation_hash).map_err(internal)?;
     let reservation_data = lillux::canonical_json(&reservation_value)
@@ -582,7 +582,7 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
             let remotes = config::load_remotes(&state.config.app_root)?;
             let parent_remote =
                 config::resolve_remote_by_site_id(&remotes, &operation.parent_site_id)?;
-            let client = RemoteClient::from_remote_cfg(state, &parent_remote.remote);
+            let client = RemoteClient::from_remote_cfg(state, &parent_remote.remote)?;
             let attempt_id = format!("remote-follow-attempt:{}", uuid::Uuid::new_v4());
             state.state_store.with_state_db(|db| {
                 db.create_sync_job_attempt(&ryeos_state::NewSyncJobAttempt {

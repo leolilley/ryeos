@@ -412,15 +412,25 @@ impl RemoteClient {
     pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
         let remotes = super::config::load_remotes(&state.config.app_root)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
-        Ok(Self::from_remote_cfg(state, &remote))
+        Ok(Self::from_remote_cfg(state, &remote)?)
     }
 
     /// Build a client from an already-resolved `RemoteConfig`.
     /// Resolve it from [`super::config::load_remotes`] first.
-    pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {
-        let mut client = Self::new(&remote.url, &remote.principal_id, state.identity.clone());
+    ///
+    /// Refuses an inbound-only remote with `remote_inbound_only`: this node
+    /// never dials it.
+    pub fn from_remote_cfg(
+        state: &AppState,
+        remote: &super::config::RemoteConfig,
+    ) -> Result<Self, super::config::RemotePinError> {
+        let mut client = Self::new(
+            remote.outbound_url()?,
+            &remote.principal_id,
+            state.identity.clone(),
+        );
         client.origin_site_id = Some(state.threads.site_id().to_string());
-        client
+        Ok(client)
     }
 
     /// Build an outbound client that preserves the already-authenticated
@@ -443,7 +453,7 @@ impl RemoteClient {
             NodeIdentity::load(&state.config.operator_signing_key_path)
                 .context("load configured operator identity for remote execution")?,
         );
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let mut client = Self::new(remote.outbound_url()?, &remote.principal_id, identity);
         let site_id = state.threads.site_id().to_string();
         client.origin_site_id = Some(site_id.clone());
         client.required_forwarding_origin_site_id = Some(site_id);
@@ -481,7 +491,7 @@ impl RemoteClient {
         if identity.fingerprint() != operator_fingerprint {
             anyhow::bail!("retained remote operation belongs to another configured operator");
         }
-        let mut client = Self::new(&remote.url, &remote.principal_id, identity);
+        let mut client = Self::new(remote.outbound_url()?, &remote.principal_id, identity);
         let site_id = state.threads.site_id().to_string();
         client.origin_site_id = Some(site_id.clone());
         client.required_forwarding_origin_site_id = Some(site_id);

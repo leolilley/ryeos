@@ -57,7 +57,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             anyhow::bail!(invalid.join("\n"));
         }
     };
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let health = client.get_health().await?;
     let pubkey = client.get_public_key().await?;
     let configured_identity = pubkey.validate_configured_identity(&remote_cfg);

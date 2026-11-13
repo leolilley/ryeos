@@ -38,8 +38,10 @@ pub struct RemotePin<'a> {
     pub app_root: &'a Path,
     /// Held by the application for the whole call.
     pub state_lock: &'a StateLock,
+    /// Signs the pin record.
+    pub node: &'a NodeIdentity,
     pub name: &'a str,
-    /// The descriptor bytes, digest-verified.
+    /// The signed descriptor bytes, digest-verified.
     pub descriptor: &'a [u8],
 }
 

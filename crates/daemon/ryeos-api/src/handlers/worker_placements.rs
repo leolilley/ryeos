@@ -156,7 +156,7 @@ pub async fn preflight(
         &req.source_site_id,
         &source_remote.remote.principal_id,
     )?;
-    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
     let mut preflight_roots = vec![req.source_chain_head_hash.clone()];
     if let Some(hash) = &req.follow_delivery_reservation_attestation_hash {
         preflight_roots.push(hash.clone());
@@ -527,7 +527,7 @@ pub async fn prepare(
         return Ok(response);
     }
 
-    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
     let mut roots = vec![
         req.source_chain_head_hash.clone(),
         req.transfer_manifest_hash.clone(),
@@ -1096,7 +1096,7 @@ pub async fn abort(
     )
     .map_err(internal)?;
 
-    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+    let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
     let mut source_roots = vec![req.abort_chain_head_hash.clone()];
     if target_was_absent {
         source_roots.push(source_operation.preflight_attestation_hash.clone());
@@ -1739,7 +1739,7 @@ async fn adopt_authorized(
         }
         payload
     } else {
-        let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote);
+        let source_client = RemoteClient::from_remote_cfg(&state, &source_remote.remote)?;
         let closure = source_client
             .objects_closure_get_with_total_timeout(
                 std::slice::from_ref(&req.target_chain_head_hash),
