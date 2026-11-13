@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:12:59Z:595eeb7a08736a02630625e4fb8755c1835687a5c77ea43af1923b125ee99903:ON2ScC0wh1C/qXNMwJACxpTjOtTXYNjxMIOHhUKsxo7LhpI1n/u3KYhYd6HSVE5Jsrsyz3H31Y0XVosz3BmaDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:13:17Z:dd29c8401900489ad96e67910a9b4362f86f8a0c3922f8f61da150c1b6722f53:RNhTanBv3yUdzHLv24mHkosSZx2a8l1eQyZ405Uw3gXbmIuc3edK7m6K76oFLeNFiTfr+445TuorURjhgf5KCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -243,7 +243,7 @@ forwarded `remote_operator` principal.
    handler — the matcher does not auto-prefix and the daemon's auth
    loader refuses to load TOMLs that contain them.
 
-   `ryeos external-content push-product <remote> <witness-hash> <origin-admission-hash> <maximum-bytes>` is the origin-side counterpart of `receive-product`. It offers the product's witness, admission and closure objects (`product-offer`); the hosted node verifies the admission against the pinned remote key before storing anything. Missing blobs and large objects then go up in bounded chunks (`objects/stage-chunk`, at most 512 KiB each, resumable) into an owned durable stage, and `product-accept` publishes the acceptance under the node identity once the closure and every large object are resident. Large objects live in a separate large-object tier and are read back in bounded chunks through `objects/get` `large_object_chunk`.
+   `ryeos external-content push-product <remote> <witness-hash> <origin-admission-hash> [maximum-bytes]` is the origin-side counterpart of `receive-product`. It offers the product's witness, admission and closure objects (`product-offer`); the hosted node verifies the admission against the pinned remote key before storing anything. Missing blobs and large objects then go up in bounded chunks (`objects/stage-chunk`, at most 512 KiB each, resumable) into an owned durable stage, and `product-accept` publishes the acceptance under the node identity once the closure and every large object are resident. Large objects live in a separate large-object tier and are read back in bounded chunks through `objects/get` `large_object_chunk`. The byte bound defaults to the product declaration's signed `maximum_total_bytes`, the bound its capture already enforced; an explicit bound may only narrow it (above it the push is refused `product_push_bound_exceeds_declaration`), and neither may exceed this node's import policy (`product_push_bound_exceeds_import_policy`).
 
 ### On the caller node
 

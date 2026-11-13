@@ -37,6 +37,7 @@
 //! verified node config loads, because it sequences daemon commands:
 //!
 //!   - `ryeos codex login device` — the Codex device-login ceremony (see `codex_device_login.rs`)
+//!   - `ryeos external-content product publish` — produce, capture, admit and push one product (see `product_publish.rs`)
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -245,6 +246,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         tokens: &["node", "host", "retire"],
         summary: "Retire a stopped node's host service, or every orphaned one",
         category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["external-content", "product", "publish"],
+        summary: "Produce a named product, capture and admit it, and push it when asked",
+        category: "external-content",
     },
     LocalCommandDescriptor {
         tokens: &["codex", "login", "device"],

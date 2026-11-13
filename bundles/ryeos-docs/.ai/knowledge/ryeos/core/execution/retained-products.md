@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T09:56:02Z:5c1d3681c87cc10a6132a13bda5ccefd6f7336d02f0cf737544cdfe59f59578e:BFlxhRSgXQZZ+TP3XyvO5BQnEwqQrlVzBkRkF9ykiSr+G5CacWNwpZtDr0epDqyPZvvjBYUUV9+yRmL4ksNOAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:13:17Z:329a28cd9848fbc551f6c68a1b06578561afd519b5cdcad682b6f118db637b39:UxAj+6BP6qtgmA/UGP9RNALVh0wgb8Cr3YOahTXaAg/qYD+KTP8BsnvqtRx6fx7L2vUAbrggFmpvRb7t/frEAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -229,6 +229,34 @@ its fix: `remote_content_no_local_activation`,
 `remote_content_verifier_differs` and `remote_content_acceptance_superseded`.
 A different release on the receiver needs either the origin's release or a
 re-qualification at the origin against the receiver's release.
+
+## Producing and publishing a product
+
+A product declaration is signed data: a producer (a graph or tool) declares
+named products with their bounds, and capture enforces them. One composite
+runs the whole operator flow over the separate verified commands:
+
+```bash
+ryeos --project <project> external-content product publish <producer-ref> <product-name> \
+  [--activation <config-ref>] [--push-to <remote>] [--json]
+```
+
+In order it activates the named external-content recipe online and waits for
+it, executes the producer with `--async --pin-project` (or `--current-head`,
+`--project-snapshot <hash>`), follows the thread to a terminal state, captures
+the product (`external-content capture-product`), admits the witness under the
+node's local admission policy (`ryeos admission submit <witness>`), and, with
+`--push-to`, pushes it (`external-content push-product`) under the
+declaration's byte bound. It keeps no state file. Capture is keyed by the
+chain, thread and product, admission by subject and policy, and a push resumes
+its staging on the remote, so a run that stopped after production resumes with
+`--from-thread <thread-id>`, which every failure after production names. A
+producer thread that ended other than `completed` has no product.
+
+The steps remain separate commands. `ryeos admission submit <subject-hash>
+[--policy <id>] [--claim accepted]` admits any local CAS root; its defaults are
+the local policy and the accepted claim. There is no export-to-directory verb:
+`push-product` is the product transport.
 
 ## Generation-scoped bindings and renewal
 

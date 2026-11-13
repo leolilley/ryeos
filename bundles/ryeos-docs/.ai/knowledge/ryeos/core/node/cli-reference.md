@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:12:59Z:fb74cf0b3218d126727004df154848eb04b8aa27dec1b1250ae261a676d6ff3c:f3+cpo+IX0niGcXFznuZAZe31TgU1ahgcC6wxjNn2vmsq0XfaDdMVAHLFzsOvNAHkMnuwlH85OuJSsFNDufNAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T15:13:17Z:6f0841c71113bcca00da685f8c30ee411244b16129e1680928d8253752f6162c:NyNZyVUXajmzc6bNHAoNleC3GKqZz6CEq7CdL2+BiOLKPto4w/yISxons1FtxFtdkD90ir/vCYdNGkSbOuZyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -516,6 +516,15 @@ physical vault key.
 - `ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash]`
   — list a consumer's content bindings and whether each still authorizes it at
   that generation; read only, local operator.
+- `ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>]`
+  — produce, capture, admit and optionally push one product, as one client
+  composite over the verified commands; see
+  [Retained products](../execution/retained-products.md).
+- `ryeos admission submit <subject-hash> [--policy <id>] [--claim accepted]` —
+  admit a local CAS root under the node's local admission policy (idempotent
+  per subject and policy).
+- `ryeos external-content push-product <remote> <witness-hash> <admission-hash> [maximum-bytes]`
+  — push an admitted product; the bound defaults to the declaration's.
 - `ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash>` —
   renew a pinned-project content binding for a new snapshot or re-signed
   consumer; local operator, refused with a typed code when the consumer changed.
