@@ -150,11 +150,11 @@ async fn run_caller(h: &mut DaemonHarness, project: &Path, name: &str) -> (Value
         }
     };
     let mut evidence = format!("status={status} body={body}");
-    if let Some(thread_id) = body.pointer("/thread/thread_id").and_then(Value::as_str) {
-        if let Ok(events) = h.existing_thread_events(thread_id).await {
-            for (event_type, payload) in events {
-                evidence.push_str(&format!("\n{event_type}: {payload}"));
-            }
+    if let Some(thread_id) = body.pointer("/thread/thread_id").and_then(Value::as_str)
+        && let Ok(events) = h.existing_thread_events(thread_id).await
+    {
+        for (event_type, payload) in events {
+            evidence.push_str(&format!("\n{event_type}: {payload}"));
         }
     }
     (body, evidence)
