@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:33Z:fca75df76195002defa82d172e5b8f0bd07df4ae09dd076b91a3417218a2c4ec:XAPaciTewNcE7mg4+UeRFPf9VSlFwTLa+3KjXwRysMw3JmBmWwVPg0mnpAAsSrz8/uJkdVCtDaAstoIhaFXfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:57:18Z:8269383daade2b5a2957486f3531933bdcc30628e63501b7fa2028878a946a7e:z8B3jN/IOvc2/9kR4aqzispJoGhuShl00Ca9dHnF2+AVBCSrPgIyMdouVhhtZrKsfnWLPmSsGZ2ooBMuBTiVCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -189,6 +189,32 @@ caps. Configured hook layers use only the dispatch grants declared by their own
 signed config source. Callback preflight selects the exact captured hook before
 capability evaluation, so an operator or project hook cannot borrow a
 privileged bundle program's authority.
+
+#### Tools and child launches
+
+An item's effective caps are its composed declared caps plus the runtime
+caps its own signed manifest grants (`requires.capabilities.manifest`).
+
+- **Tools are leaves.** A tool has no surface to honour self-declared action
+  authority. A tool that carries `requires.capabilities.declared`, even an
+  empty list, is refused before launch. Only manifest runtime authority is
+  honoured for tools.
+- **Dispatching a child.** A callback that dispatches an item requires the
+  caller's effective caps to cover that item's execute capability
+  (`ryeos.execute.<kind>.<id>`).
+- **Inline children** launch under the ordinary admission policy: their
+  effective caps are their own composed caps.
+- **Detached follow children** are bounded by the parent. The parent must
+  hold the child's execute capability, each cap the child declares must be
+  covered by the parent's caps (and is kept at the child's exact shape), and
+  the child keeps the runtime caps its own manifest grants.
+
+A process that needs to drive RyeOS from inside a workload, such as an
+external agent in a hosted worker, uses the admitted workload client (see
+`knowledge:ryeos/core/execution/worker-hosted-execution`). Its grant is the
+intersection of the project's per-item ceilings, the caller's scopes, the
+root delegation ceiling and node policy, over a finite list of items, ref
+bindings and call forms. There is no separate authority class for tools.
 
 ### 5. Effective Caps → Resume
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T09:41:52Z:4c4b8faf655c62f757ab401e208fcc8db3041136dcbd598ff216f39946d7e8f0:esR2UBDiE9x6V/ZHhZZXNt8MU5bopkAoRLJY5Pjx4RgDjVHGgSrT33OWAjOFy2iDtlCt6gr/TKwOYT6UfC3LDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:57:18Z:ca1006f9c7a568d40a7a9a555b21849965d0bdd92ca823bc874d1bf6a804975f:qWtRBYSnDZjqHw0tgtkgXmkp9Lb6lkmPqRHRgMAPOaQ1eRBB4Qat5I+0ikgUB25QBmQzYCtBdzu5KiSQvsYBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
@@ -215,6 +215,90 @@ provider transport and admitted adapter remain part of the trust assumption;
 the observation is not hardware attestation. Each stronger claim requires its
 own accepted evidence, and an ordinary successful checker run is insufficient
 for activation or publication.
+
+## Guest-wire qualification
+
+The guest owner product earns `external_guest_inputs_v5_launcher_v4` through
+`tool:codex/qualification/guest-wire-verifier` and
+`config:codex/guest-wire-qualification-policy`. The claim says the measured
+owner, supervisor and launcher executables performed the guest-inputs (schema
+5) and launcher (spec schema 4) exchange. It is proved under an ephemeral
+controller key and a test configuration. A live session remains the proof of
+operation under the real controller key, connection and credentials.
+
+### A Worker-less remote lane
+
+The restored-sandbox machinery already carries a remote consumer attempt:
+create, owner measurement, consumer attempt, terminate, attempt journals and
+`remote_consumer_attempt` corroboration. But the existing consumer lane is
+welded to a Worker consumer, and the owner runtime has no Worker. Rather than
+narrow the claim or use the opaque lane, policy v5 adds a Worker-less remote
+scenario beside it:
+
+- A scenario's `remote_probe_input` is signed, bounded, opaque data, digested
+  into the scenario source digest. It is exclusive with
+  `consumer_worker_request`. A policy without a consumer execution context
+  requires a probe input on every remote scenario; a policy with one requires
+  a Worker request. `recipe_ref` is optional only for probe scenarios.
+- `RemoteProbeInputRecord` has no Worker requirement. Its prerequisite is
+  the daemon-retained owner measurement of the restored product, never a
+  value the verifier supplies.
+- The Q-transcript requirement applies only when a consumer execution
+  context exists.
+- The claim string appears only in signed data. The verifier checks
+  `claims_on_success` against its compiled schema pins and refuses a
+  mismatch; the mechanism never names the claim.
+
+### Why the probe re-produces the product
+
+The owner needs euid 0 and verifies imports against the controller root baked
+into the subject. Nobody in the guest holds that key. So the guest role
+re-measures the subject, requires it to equal the prerequisite, and produces
+an equivalent owner product from the same owner bytes and profile under an
+ephemeral key. It mounts that product over `/ryeos/guest-runtime`, with tmpfs
+over `/ryeos/activation` and `/ryeos/occurrences`, in a private mount
+namespace (`lillux::sandbox::enter_root_overlay_namespace`). The subject tree
+and snapshot are never touched. It then runs the shipped owner through its
+real privilege drop. The claim binds the subject's owner executable digest
+and manifest hash, never the probe manifest. The probe key and product never
+leave the guest.
+
+### Why a loopback controller
+
+The supervisor's relay transport still rejects relay bootstraps, and the
+controller file relay is structured-session only. The HTTP bootstrap accepts
+any https origin, including an IP literal, with a pinned TLS root. So the
+guest role serves a minimal HTTPS channel controller on 127.0.0.1 with an
+ephemeral root (`loopback_tls.rs`, `guest/controller.rs`) and drives the real
+supervisor and launcher through Bootstrap, Ready, Apply and Applied.
+
+### Archive members
+
+The supervisor and launcher must reach the guest as named bytes. A remote
+verifier names them as `archive_members` (member name to `bin:` ref) in the
+same bundle as the scenario. The retained verifier source records each
+member's sha256 as registered in the installed bundle
+(`archive_member_digests`); the guest's evidence reports the digests it ran;
+the origin compares them. Dual payload ownership is refused by the release
+validators, so `codex` owns both binaries and `render-sandbox` and
+`modal-sandbox` carry byte-identical copies through
+`scripts/release/shared-static-payloads.yaml`. Hosted-workflow nodes load
+`codex` but not `render-sandbox`.
+
+### Settlement and controller key
+
+The policy requires `scope_empty` settlement for the verifier root. That is
+observable only on a host class with delegated per-scope cgroups (`local`
+with `process_scopes: required`). A `local_direct` origin cannot issue the
+claim. Do not weaken the policy to `trusted_process_group_absent`.
+
+The owner product carries `controller-root.hex`, so the relationship
+`owner_to_guest_wire_verifier` produces it per controller through
+`graph:codex/guest-owner-runtime-production-for-controller`. The shipped
+relationship carries the RFC 8032 test-vector key as a placeholder, and the
+verifier refuses a subject rooted at it
+(`refuse_placeholder_controller_root`). A bundle must be re-signed with the
+real controller key before this claim can be issued for that controller.
 
 ## Credential and command boundary
 

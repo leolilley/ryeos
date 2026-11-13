@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-24T17:47:26Z:d41bbbb457891e1b6643c6ddca114a888fdbafe9b3e4d42a815b0ed05cf08d19:unq27PWE1iPFA1i1f5pEgdFW5gP4zL4ClNl8uniZR0xblM+kYiPMFXjzjFCuWA9lByERDwBx4GDrUWn9wwWODA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T23:57:18Z:8d8d580864a795c8856909f971d77ce11a413a23870e0994435ca4bb9b014d9d:S53NQpla6GU0F5w0zk9ZVF89Mme2F6h2G6vQ/r1J8jb8qZq0ZD6fLrqtclVljdYHTr+87dqOCqsh5TTlacWOCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -69,6 +69,114 @@ A pinned-project consumer containing both literal inputs and product slots on
 that same item instead has a selection-sensitive binding identity. Its selected
 literal provisioning currently requires the same operator as its products;
 cross-owner selected-literal provisioning is not supplied by this contract.
+
+## Using a qualification proven on another node
+
+Some qualifications can only be made on another node. A scope-empty
+settlement, for example, needs a host with delegated per-scope cgroups. The
+origin qualifies the product and testifies to it. The receiving node accepts
+that testimony under its own signed policy and selects the product with it.
+The testimony is never loaded as a local qualification, and the receiver
+never runs the verifier.
+
+### Order of operations
+
+1. Push the product from the origin to the receiver. The receiver records a
+   received-product acceptance for that exact witness. The origin must
+   qualify this same witness; a re-capture with the same content has a
+   different witness hash and is refused at acceptance.
+2. Qualify the product on the origin.
+3. Install the acceptance policy on the receiver (below).
+4. Export from the origin. Export is also the acceptance: there is no
+   separate accept command on the receiver.
+5. Select the product on the receiver, naming the acceptance.
+
+### Export
+
+On the origin, as its configured operator:
+
+```bash
+ryeos external-content export-qualification-testimony <remote> <qualification-hash> <acceptance-policy-ref>
+```
+
+The origin re-verifies the qualification the way it would select it now and
+refuses a stale one or one without an expiry. It signs the testimony, posts it
+to the pinned remote's `POST /external-content/accept-qualification-testimony`
+route, and prints `testimony_hash`, `acceptance_hash`, `coordinate_id` and
+`reused_existing`. Keep `acceptance_hash`; selections name it.
+
+The receiver accepts only when the testimony's signer is the authenticated
+caller and holds a current `remote_operator` grant, the named acceptance
+policy resolves and allows the lane, the origin's qualification policy is the
+same signed bytes the receiver resolves for that ref, and the qualified
+product was received from that origin by that operator.
+
+### The acceptance policy
+
+An acceptance policy is a signed `config` item whose
+`remote_qualification_acceptance_policy` field holds:
+
+| Field | Meaning |
+|---|---|
+| `schema` | `ryeos.remote_qualification_acceptance_policy.v2` |
+| `qualification_policy_ref` | the exact origin qualification policy ref this policy accepts |
+| `trusted_attesters` | `{principal, origin_site_id}` pairs; both must match the testimony and the attester's grant |
+| `required_claims`, `allowed_claims` | required must be a subset of allowed |
+| `accepted_verifier_definition_digests` | the evidence's `verifier.effective_definition_digest` |
+| `accepted_verifier_artifact_digests` | the canonical JSON digest of the evidence's `verifier.artifact_identity`, not the raw binary hash |
+| `allowed_lanes` | `product`, `content`, or both |
+| `max_testimony_age_seconds` | 1 to 2678400 (31 days) |
+| `max_clock_skew_seconds` | at most 3600 |
+
+Lists are sorted and unique. Because `qualification_policy_ref` must equal
+the evidence's policy ref, each origin qualification policy needs its own
+acceptance policy.
+
+Finish the verifier digests before signing. Editing an acceptance policy
+voids every acceptance made under it, even an edit that would still admit
+the testimony. An acceptance is also immutable at its coordinate: a different
+testimony for the same coordinate is refused, and re-qualifying on the origin
+is the remedy.
+
+Age and expiry are checked at every use, not only at acceptance. Selection
+and every launch re-run them against the current time, so a
+testimony older than `max_testimony_age_seconds` stops new launches even
+after it was accepted.
+
+Ship the policy as a small downstream bundle signed by a publisher the
+receiver trusts. A `config:<dir>/<id>` ref names a directory, not a bundle,
+so use a directory no other installed bundle uses. Install it with
+`ryeos bundle install <name> <dir>` on a stopped node.
+
+### Selecting the product
+
+A product selection names the remote testimony explicitly:
+
+```json
+{"declaration_id": "guest-runtime",
+ "witness_hash": "<received witness>",
+ "witness_source": {"kind": "received", "acceptance_hash": "<received-product acceptance>"},
+ "qualification_hash": "<origin attestation hash>",
+ "remote_testimony": {"acceptance_hash": "<testimony acceptance>",
+                      "acceptance_policy_ref": "<acceptance policy ref>"}}
+```
+
+`qualification_hash` and `remote_testimony` are required-nullable keys:
+always present. The two acceptance hashes are different records.
+
+The receiver admits the selection only for the attesting operator, who also
+owns the received product. From the origin that is `ryeos remote run
+<receiver> service:external-execution/admit-product-program
+--outbound-principal configured_operator ...`, and the origin operator's
+grant on the receiver needs
+`ryeos.execute.service.external-execution/admit-product-program`.
+
+`admit-product-program` derives the admitted program for a captured-product
+worker and returns `program`, `selections_digest`, `runtime_manifest_hash`
+and `selection_identity_digest`. It writes nothing.
+`ryeos node external-execution compose --program` reads the bare `program`
+object, not that envelope. A product-sourced program carries no runtime
+content qualification: pass `--runtime-content-qualification none`.
 
 ## Evidence is not task success
 
