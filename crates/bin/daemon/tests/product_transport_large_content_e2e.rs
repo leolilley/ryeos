@@ -1395,7 +1395,7 @@ async fn a_hosted_node_wired_by_delegated_offline_operations_takes_a_push() -> R
             &hosted_fixture.site_id(),
         ),
     )?;
-    let mut pair = Pair {
+    let pair = Pair {
         origin,
         hosted,
         hosted_fixture,
