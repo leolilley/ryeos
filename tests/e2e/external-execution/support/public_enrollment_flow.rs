@@ -458,8 +458,7 @@ mod tests {
             .unwrap()
             .retain(|name, _| name == fast_fixture::FAST_FIXTURE_HOST_CLASS);
         fn flag(document: &mut Value) -> &mut Value {
-            &mut document["policy"]["host_classes"][fast_fixture::FAST_FIXTURE_HOST_CLASS]
-                ["trusted_process_group_sessions"]
+            &mut document["policy"]["host_classes"][fast_fixture::FAST_FIXTURE_HOST_CLASS]["trusted_process_group_sessions"]
         }
         assert_eq!(*flag(&mut original), false);
         let node = fast_fixture::node_signing_key();
