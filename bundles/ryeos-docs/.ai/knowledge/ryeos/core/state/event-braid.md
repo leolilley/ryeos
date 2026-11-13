@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:3d7e3ae559afd0f34ef0f9e8b17a075be6ad4b321a63441d445e84c6207b32dc:pRZUCQMM5ZB7hqe5WHN0w97oYNHTwGCrcZOU1sh60E3Ck1o/egGj3BH0zw962u4Utq1/DtRmCYMQ3FT+B0aVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:33:50Z:4116093cd4d9aeaa6498f53a419eb504ff04d2f894825b47f6a6b241379e2663:p7gNMMzCVCetSO9ns1eOm1u/43jmg3ToNcmkr8UG00Z9xLT9jKWLyj/XXi2I5Qx/hJB1omE++weYqOm/fwbzBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -72,17 +72,24 @@ Events are stored as CAS objects in canonical JSON. Each event contains:
 | Tier | CAS Stored? | SQLite Indexed? | Survives Crash? | Use Cases |
 |---|---|---|---|---|
 | `Durable` | Yes | Yes | Yes | Lifecycle events, artifacts, tool dispatch |
-| `Journal` | Yes | No | Yes | Audit trail, progressive events |
-| `Ephemeral` | No | No | No | Token deltas, streaming snapshots |
+| `Journal` | Yes | No | Yes | Observations, foreach iteration results |
+| `Ephemeral` | No | No | No | Token deltas, streaming snapshots, reasoning |
 
 Only durable events appear in the SQLite projection. Journal events are
-recoverable from CAS during a projection rebuild but are not queryable
-at runtime. Ephemeral events are transient — they exist only in the
-broadcast stream and are not persisted.
+signed into the chain in CAS and survive a projection rebuild, but are not
+queryable through the projection. Ephemeral events are transient — they
+exist only in the broadcast stream and are not persisted.
 
-High-frequency progressive events are assigned journal tier:
-`token_delta`, `stream_snapshot`, `cognition_reasoning`,
-`graph_foreach_iteration`. All other events are durable.
+The progressive events are split by what they would lose:
+
+- `token_delta`, `stream_snapshot` and `cognition_reasoning` are ephemeral.
+  The turn-complete `cognition_out` keeps the text and the reasoning, so
+  only their timing is lost.
+- `observation` and `graph_foreach_iteration` are journal-only (API storage
+  class `journal_only`, durability `journal`). Nothing else keeps what they
+  carry, so they are stored in CAS without being indexed.
+
+All other events are durable.
 
 ## Replay
 

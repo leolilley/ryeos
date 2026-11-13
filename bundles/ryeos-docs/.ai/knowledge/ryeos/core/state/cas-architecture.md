@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-23T01:51:04Z:3f31e3043cd3347deb7f902ba46de30b54dfe4d2089f120fb80b6d2302cff0cc:i82ZrR6Uw/A5ptYff7fq7R/ruB+Q/pqcY9l6hOUboxlkDIlbsdeLo5P80Kd1lOEgJt68v211DJ/mBP879c8VAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:33:50Z:74be6649e5eb8a738f256a9af50877bac6a190a34508fc4b6e5f252b03ab7b6e:1iHFLu+CHsYCbmcrqTY5gPFpYN1k2SIrGojlVk6kpZg1O/O61uXZhWqqNeYzwx/DHaxrJ8adLFFwRLIvuMwfCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -399,8 +399,8 @@ Events have three tiers that control CAS storage and SQLite indexing:
 | Tier | CAS Stored? | SQLite Indexed? | Survives Crash? | Use Case |
 |---|---|---|---|---|
 | `Durable` | Yes | Yes | Yes | State changes, artifacts, lifecycle |
-| `Journal` | Yes | No | Yes | Audit trail, tool calls |
-| `Ephemeral` | No | No | No | Token deltas, streaming logs |
+| `Journal` | Yes | No | Yes | Observations, foreach iteration results |
+| `Ephemeral` | No | No | No | Token deltas, streaming snapshots, reasoning |
 
 The SQLite `events` table has a CHECK constraint that only accepts
 `'durable'`:
@@ -413,9 +413,11 @@ Journal events are in CAS (recoverable on rebuild) but not queryable
 through the projection. Ephemeral events are transient — lost on process
 crash.
 
-Events are assigned tiers by the runtime: high-frequency progressive
-events (`token_delta`, `stream_snapshot`, `graph_foreach_iteration`)
-are journal-only; all lifecycle and audit events are durable.
+Token, stream-snapshot and reasoning deltas (`token_delta`,
+`stream_snapshot`, `cognition_reasoning`) are ephemeral: the turn-complete
+`cognition_out` keeps their content. `observation` and
+`graph_foreach_iteration` are journal-only. All lifecycle and audit events
+are durable. See [Event Braid](event-braid.md#durability-tiers).
 
 ## CAS-First Write Contract
 

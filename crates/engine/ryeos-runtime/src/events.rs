@@ -730,18 +730,19 @@ impl RuntimeEventType {
 
     /// Canonical storage class for this event type.
     ///
-    /// High-frequency progressive events (token deltas, reasoning
-    /// chunks, foreach progress) are live-only `ephemeral`; everything
-    /// else is an indexed milestone. The mapping is intentionally
-    /// `match`-exhaustive so adding a new variant requires deciding
-    /// its storage class up front.
+    /// Token, stream-snapshot and reasoning deltas are live-only
+    /// `ephemeral`: the turn-complete `cognition_out` keeps their text, so
+    /// only timing is lost. `observation` and `graph_foreach_iteration`
+    /// carry information nothing else keeps, so they are `journal_only`:
+    /// stored in CAS, not indexed. Everything else is an indexed
+    /// milestone. The mapping is intentionally `match`-exhaustive so adding
+    /// a new variant requires deciding its storage class up front.
     pub fn storage_class(self) -> StorageClass {
         match self {
-            Self::TokenDelta
-            | Self::StreamSnapshot
-            | Self::CognitionReasoning
-            | Self::Observation
-            | Self::GraphForeachIteration => StorageClass::Ephemeral,
+            Self::TokenDelta | Self::StreamSnapshot | Self::CognitionReasoning => {
+                StorageClass::Ephemeral
+            }
+            Self::Observation | Self::GraphForeachIteration => StorageClass::JournalOnly,
             // Everything else: thread lifecycle, edges, commands,
             // cognition turn boundaries, tool dispatch, graph
             // lifecycle/step/branch milestones — indexed.
@@ -976,29 +977,91 @@ mod tests {
         assert!(RuntimeEventType::parse("not_a_real_event").is_err());
     }
 
+    /// Every variant, for whole-vocabulary storage-class assertions.
+    fn every_event_type() -> Vec<RuntimeEventType> {
+        [
+            wire::THREAD_CREATED,
+            wire::THREAD_STARTED,
+            wire::THREAD_COMPLETED,
+            wire::THREAD_FAILED,
+            wire::THREAD_CANCELLED,
+            wire::THREAD_KILLED,
+            wire::THREAD_TIMED_OUT,
+            wire::THREAD_CONTINUED,
+            wire::EDGE_RECORDED,
+            wire::CHILD_THREAD_SPAWNED,
+            wire::CONTINUATION_REQUESTED,
+            wire::CONTINUATION_ACCEPTED,
+            wire::COMMAND_SUBMITTED,
+            wire::COMMAND_CLAIMED,
+            wire::COMMAND_COMPLETED,
+            wire::STREAM_OPENED,
+            wire::TOKEN_DELTA,
+            wire::STREAM_SNAPSHOT,
+            wire::STREAM_CLOSED,
+            wire::OBSERVATION,
+            wire::HOOK_OBSERVATION_RECORDED,
+            wire::HOOK_FAILED,
+            wire::PROJECT_OBSERVATION_RECORDED,
+            wire::PROVIDER_CALL_OBSERVATION_RECORDED,
+            wire::ARTIFACT_PUBLISHED,
+            wire::AS_LAUNCHED_RESOLUTION,
+            wire::AS_LAUNCHED_REF_BINDINGS,
+            wire::RUNTIME_LAUNCH_FACTS,
+            wire::LAUNCH_AUGMENTATION_CACHE_HIT,
+            wire::THREAD_FACET_SET,
+            wire::THREAD_RECONCILED,
+            wire::ORPHAN_PROCESS_KILLED,
+            wire::SYSTEM_PROMPT,
+            wire::CONTEXT_INJECTED,
+            wire::COGNITION_IN,
+            wire::COGNITION_OUT,
+            wire::COGNITION_REASONING,
+            wire::TOOL_CALL_START,
+            wire::TOOL_CALL_RESULT,
+            wire::GRAPH_STARTED,
+            wire::GRAPH_COMPLETED,
+            wire::GRAPH_STEP_STARTED,
+            wire::GRAPH_STEP_COMPLETED,
+            wire::GRAPH_BRANCH_TAKEN,
+            wire::GRAPH_FOREACH_STARTED,
+            wire::GRAPH_FOREACH_ITERATION,
+            wire::GRAPH_FOLLOW_SUSPENDED,
+            wire::GRAPH_NODE_RETRY,
+            wire::PROVIDER_RETRY,
+            wire::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1,
+            wire::COST_UNTRACKED,
+            wire::MILESTONE,
+            wire::THREAD_USAGE,
+        ]
+        .into_iter()
+        .map(|name| RuntimeEventType::parse(name).unwrap())
+        .collect()
+    }
+
+    fn event_types_of_class(class: StorageClass) -> Vec<&'static str> {
+        every_event_type()
+            .into_iter()
+            .filter(|event_type| event_type.storage_class() == class)
+            .map(RuntimeEventType::as_str)
+            .collect()
+    }
+
     #[test]
     fn ephemeral_set_is_exactly_the_progressive_events() {
         // Tightening this list belongs in a deliberate change — the
         // assertion guards against silent storage-class drift.
-        let ephemeral: Vec<&'static str> = [
-            RuntimeEventType::TokenDelta,
-            RuntimeEventType::StreamSnapshot,
-            RuntimeEventType::CognitionReasoning,
-            RuntimeEventType::GraphForeachIteration,
-        ]
-        .iter()
-        .copied()
-        .filter(|v| v.storage_class() == StorageClass::Ephemeral)
-        .map(|v| v.as_str())
-        .collect();
         assert_eq!(
-            ephemeral,
-            vec![
-                "token_delta",
-                "stream_snapshot",
-                "cognition_reasoning",
-                "graph_foreach_iteration"
-            ]
+            event_types_of_class(StorageClass::Ephemeral),
+            vec!["token_delta", "stream_snapshot", "cognition_reasoning"]
+        );
+    }
+
+    #[test]
+    fn journal_set_is_exactly_observation_and_foreach() {
+        assert_eq!(
+            event_types_of_class(StorageClass::JournalOnly),
+            vec!["observation", "graph_foreach_iteration"]
         );
     }
 

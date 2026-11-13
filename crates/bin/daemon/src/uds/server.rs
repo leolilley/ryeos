@@ -5607,6 +5607,78 @@ mod tests {
     }
 
     #[test]
+    fn journal_only_observation_is_stored_but_not_projected() {
+        on_daemon_worker_stack(journal_only_observation_is_stored_but_not_projected_body);
+    }
+
+    async fn journal_only_observation_is_stored_but_not_projected_body() {
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-journal-1");
+        let cbt = generate_test_callback(
+            &state,
+            "T-journal-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+            "0".repeat(64),
+        );
+        let mut rx = state.event_streams.subscribe("T-journal-1");
+
+        let resp = dispatch(
+            rpc(
+                "runtime.append_event",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-journal-1",
+                    "event": {
+                        "event_type": "observation",
+                        "storage_class": "journal_only",
+                        "payload": {"kind": "test.observation", "value": 1},
+                    },
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "append_event failed: {:?}",
+            resp.error
+        );
+        // Stored in CAS: the record carries its signed event hash and a real
+        // chain position.
+        let persisted = rpc_ok(&resp);
+        assert_eq!(persisted["storage_class"], "journal_only");
+        assert!(persisted["event_hash"].is_string(), "{persisted}");
+        assert!(persisted["chain_seq"].as_i64().unwrap() > 0, "{persisted}");
+
+        let live = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("hub did not deliver event in time")
+            .expect("hub channel closed");
+        assert_eq!(live.event_type, "observation");
+        assert!(live.chain_seq > 0);
+
+        // Not indexed: the SQL projection replay does not carry it.
+        let replay = state
+            .events
+            .replay(&EventReplayParams {
+                chain_root_id: None,
+                thread_id: Some("T-journal-1".to_string()),
+                after_chain_seq: None,
+                limit: 100,
+            })
+            .unwrap();
+        assert!(
+            !replay
+                .events
+                .iter()
+                .any(|event| event.event_type == "observation")
+        );
+    }
+
+    #[test]
     fn lifecycle_event_cannot_be_ephemeral() {
         on_daemon_worker_stack(lifecycle_event_cannot_be_ephemeral_body);
     }

@@ -333,8 +333,8 @@ fn is_ephemeral_allowed(event_type: &str, payload: &Value) -> bool {
     // vocabulary is the typed enum, not raw strings.
     match RuntimeEventType::parse(event_type) {
         // Types whose nature is always live-only (token deltas, stream snapshots,
-        // reasoning, foreach progress) — sourced from the enum so a new ephemeral
-        // variant is covered automatically.
+        // reasoning) — sourced from the enum so a new ephemeral variant is
+        // covered automatically.
         Ok(t) if t.storage_class() == StorageClass::Ephemeral => true,
         // cognition_out is indexed by default, but progressive streaming payloads
         // (delta / tool_use_partial / complete tool_use) are live-only. The durable
@@ -432,6 +432,15 @@ mod tests {
     fn always_ephemeral_types_come_from_the_enum() {
         for et in ["token_delta", "stream_snapshot", "cognition_reasoning"] {
             assert!(is_ephemeral_allowed(et, &json!({})));
+        }
+    }
+
+    #[test]
+    fn journal_only_events_cannot_be_ephemeral() {
+        for et in ["observation", "graph_foreach_iteration"] {
+            assert!(!is_ephemeral_allowed(et, &json!({})));
+            assert!(validate_event_storage_class(et, "ephemeral", &json!({})).is_err());
+            assert!(validate_event_storage_class(et, "journal_only", &json!({})).is_ok());
         }
     }
 
