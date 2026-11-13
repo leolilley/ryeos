@@ -902,7 +902,7 @@ pub(crate) mod tests {
                     "cmd":"/python", "args":[{"kind":"admitted_source_member", "relative_path":"lib/run.py"}]
                 }, "executor_chain":[]}],
                 "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
-                "materialization_requirements":[], "network_authority_ceiling":"node_policy", "filesystem_authority_ceiling":"node_policy", "execution_posture":"confined",
+                "materialization_requirements":[], "network_authority_ceiling":"node_policy", "filesystem_authority_ceiling":"node_policy",
                 "target_requirement":null, "endpoint_requirement":{"kind":"local"}, "external_endpoint_binding":null, "subprocess_limits":null, "resource_authority_ceiling":"node_policy", "cache_key":"test", "executor_authorities":[]
             }),
             protocol_descriptor_document: String::new(),

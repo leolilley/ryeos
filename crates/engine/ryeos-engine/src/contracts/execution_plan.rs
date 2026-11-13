@@ -573,9 +573,11 @@ pub const HOST_AUTHORITY_REQUIRED: &str = "required";
 /// `HostDirect` is a tool that declared `host_authority: required`; when the
 /// node lane offers it and the operator granted that exact item, it runs on
 /// the host, unconfined, as the daemon user, whatever the lane's mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPosture {
+    /// Every launch is confined unless its signed root declares otherwise.
+    #[default]
     Confined,
     HostDirect,
 }
@@ -583,6 +585,10 @@ pub enum ExecutionPosture {
 impl ExecutionPosture {
     pub fn is_host_direct(self) -> bool {
         self == Self::HostDirect
+    }
+
+    pub fn is_confined(&self) -> bool {
+        *self == Self::Confined
     }
 
     pub fn as_str(self) -> &'static str {
@@ -613,10 +619,12 @@ pub struct ExecutionPlan {
     /// required in serialized authority; predecessor plans are not reinterpreted.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     /// Signed execution posture projected from the root item's declared host
-    /// authority. Required in serialized authority; a predecessor plan is not
-    /// reinterpreted as confined. `host_direct` is a claim the launch admits
-    /// only under the node lane, the operator's exact grant and the configured
-    /// local operator.
+    /// authority. Omitted when confined, so every confined plan keeps its
+    /// exact serialized identity; no plan could be host-direct before this
+    /// field existed, so absence is the true value, not a fallback.
+    /// `host_direct` is a claim the launch admits only under the node lane,
+    /// the operator's exact grant and the configured local operator.
+    #[serde(default, skip_serializing_if = "ExecutionPosture::is_confined")]
     pub execution_posture: ExecutionPosture,
     /// Signed process suitability/resource request. Required explicit null
     /// distinguishes a workload with no target requirement from a predecessor
@@ -682,10 +690,12 @@ struct ExecutionPlanWire {
     /// required in serialized authority; predecessor plans are not reinterpreted.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
     /// Signed execution posture projected from the root item's declared host
-    /// authority. Required in serialized authority; a predecessor plan is not
-    /// reinterpreted as confined. `host_direct` is a claim the launch admits
-    /// only under the node lane, the operator's exact grant and the configured
-    /// local operator.
+    /// authority. Omitted when confined, so every confined plan keeps its
+    /// exact serialized identity; no plan could be host-direct before this
+    /// field existed, so absence is the true value, not a fallback.
+    /// `host_direct` is a claim the launch admits only under the node lane,
+    /// the operator's exact grant and the configured local operator.
+    #[serde(default, skip_serializing_if = "ExecutionPosture::is_confined")]
     pub execution_posture: ExecutionPosture,
     /// Signed process suitability/resource request. Required explicit null
     /// distinguishes a workload with no target requirement from a predecessor
@@ -1006,7 +1016,7 @@ mod execution_project_file_tests {
             },"executor_chain":[]},{"node_type":"complete","id":"done"}],
             "entrypoint":"spawn", "capabilities":{"requires_model":false,"requires_subprocess":true,
                 "requires_network":false,"custom":[]}, "materialization_requirements":[],
-            "network_authority_ceiling":"isolated", "filesystem_authority_ceiling":"captured_execution", "execution_posture":"confined",
+            "network_authority_ceiling":"isolated", "filesystem_authority_ceiling":"captured_execution",
             "target_requirement":null, "endpoint_requirement":{"kind":"external","binding_id":"test-binding",
                 "stdout_max_bytes":4096,"stderr_max_bytes":2048},
             "external_endpoint_binding":{"binding_id":"test-binding","binding_digest":"a".repeat(64)},
@@ -1045,11 +1055,30 @@ mod current_plan_data_controls {
         serde_json::json!({"plan_id":"data", "root_executor_id":"tool:test/runtime", "root_ref":"worker:test/root",
             "item_kind":"worker", "nodes":[], "entrypoint":"entry",
             "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
-            "materialization_requirements":[],"network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy", "execution_posture":"confined",
+            "materialization_requirements":[],"network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy",
             "target_requirement":{"os":"linux","arch":"x86_64"}, "endpoint_requirement":{"kind":"local"},
             "external_endpoint_binding":null,"resource_authority_ceiling":"node_policy","subprocess_limits":null,
             "cache_key":"data","executor_authorities":[]})
     }
+    #[test]
+    fn confined_plans_keep_their_bytes_and_host_direct_is_explicit() {
+        let confined: ExecutionPlan = serde_json::from_value(wire()).unwrap();
+        assert_eq!(confined.execution_posture, ExecutionPosture::Confined);
+        let value = serde_json::to_value(&confined).unwrap();
+        assert!(value.get("execution_posture").is_none());
+        let mut host = wire();
+        host["execution_posture"] = "host_direct".into();
+        let host: ExecutionPlan = serde_json::from_value(host).unwrap();
+        assert!(host.execution_posture.is_host_direct());
+        assert_eq!(
+            serde_json::to_value(&host).unwrap()["execution_posture"],
+            "host_direct"
+        );
+        let mut unknown = wire();
+        unknown["execution_posture"] = "sandboxed".into();
+        assert!(serde_json::from_value::<ExecutionPlan>(unknown).is_err());
+    }
+
     #[test]
     fn absent_extension_keeps_bytes_outer_null_refuses_and_current_sealing_refuses() {
         let ordinary: ExecutionPlan = serde_json::from_value(wire()).unwrap();

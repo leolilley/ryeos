@@ -3036,6 +3036,29 @@ fn inspect_schedule_grant_generations(
     )
 }
 
+type HostAccessInspection = (
+    ryeos_node_runtime::node_policy::sections::host_access::NodeHostAccessPolicy,
+    ryeos_engine::isolation::IsolationPolicy,
+    ryeos_engine::trust::TrustStore,
+    String,
+);
+
+fn inspect_host_access(app_root: &std::path::Path) -> Result<HostAccessInspection> {
+    let snapshot = crate::node_descriptors::load_verified_policy_snapshot(app_root)?;
+    let policy = snapshot
+        .require::<ryeos_node_runtime::node_policy::sections::host_access::NodeHostAccessPolicy>()?
+        .clone();
+    let lane = snapshot
+        .require::<ryeos_engine::isolation::IsolationPolicy>()?
+        .clone();
+    let trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
+    )?;
+    let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
+    Ok((policy, lane, trust_store, node_key))
+}
+
 /// The operator's host-direct grants. Each one hands an item
 /// operator-equivalent authority, so the row lists them all. It warns when a
 /// grant allows process-group containment (a descendant that leaves the group
@@ -3043,23 +3066,9 @@ fn inspect_schedule_grant_generations(
 /// node's own key, which a valid generation never contains.
 fn host_access_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
     use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
-    use ryeos_node_runtime::node_policy::sections::host_access::{
-        HostAccessContainment, NodeHostAccessPolicy,
-    };
+    use ryeos_node_runtime::node_policy::sections::host_access::HostAccessContainment;
     let fix = "ryeos node host-access grant|revoke|list (with --project to compare grants with an item's current bytes)";
-    let inspected = (|| -> Result<_> {
-        let snapshot = crate::node_descriptors::load_verified_policy_snapshot(app_root)?;
-        let policy = snapshot.require::<NodeHostAccessPolicy>()?.clone();
-        let lane = snapshot
-            .require::<ryeos_engine::isolation::IsolationPolicy>()?
-            .clone();
-        let trust_store = ryeos_engine::trust::TrustStore::load(
-            None,
-            &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-        )?;
-        let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
-        Ok((policy, lane, trust_store, node_key))
-    })();
+    let inspected = inspect_host_access(app_root);
     let (policy, lane, trust_store, node_key) = match inspected {
         Ok(inspected) => inspected,
         Err(error) => {

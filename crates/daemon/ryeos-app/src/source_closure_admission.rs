@@ -1623,7 +1623,7 @@ mod retained_current_worker_source_controls {
         let value = serde_json::json!({"plan_id":"source-data-only", "root_executor_id":"tool:test/runtime",
             "root_ref":resolution.root.resolved_ref,"item_kind":"worker", "nodes":[],"entrypoint":"entry",
             "capabilities":{"requires_model":false,"requires_subprocess":true,"requires_network":false,"custom":[]},
-            "materialization_requirements":[], "network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy", "execution_posture":"confined",
+            "materialization_requirements":[], "network_authority_ceiling":"node_policy","filesystem_authority_ceiling":"node_policy",
             "target_requirement":ordinary,"current_target_request":current,"endpoint_requirement":{"kind":"local"},
             "external_endpoint_binding":null,"resource_authority_ceiling":"node_policy","subprocess_limits":null,
             "cache_key":"data","executor_authorities":[]});

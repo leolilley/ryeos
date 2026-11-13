@@ -363,7 +363,7 @@ pub(super) fn signed_direct_storage_root(store: &StateStore, thread_id: &str, ex
         "entrypoint":"spawn", "capabilities":{"requires_model":false,
             "requires_subprocess":true,"requires_network":false,"custom":[]},
         "materialization_requirements":[],"network_authority_ceiling":"node_policy",
-        "filesystem_authority_ceiling":"node_policy", "execution_posture":"confined","target_requirement":null,
+        "filesystem_authority_ceiling":"node_policy","target_requirement":null,
         "endpoint_requirement":if external {json!({"kind":"external",
             "binding_id":"storage-direct","stdout_max_bytes":4096,"stderr_max_bytes":4096})}
             else {json!({"kind":"local"})},
