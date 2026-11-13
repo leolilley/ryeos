@@ -18,6 +18,11 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_APP_SERVER_LINE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EVENTS: usize = 4_096;
 const MAX_PENDING_SERVER_REQUESTS: usize = 128;
+/// Expired approvals whose expiry RyeOS has not yet acknowledged are never
+/// forgotten. Each one has an unacknowledged expiry event, so they are bounded
+/// by the event queue plus one in-flight observation batch of at most 128
+/// events. Exceeding this is a broken invariant and fails the session.
+const MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS: usize = MAX_EVENTS + 128;
 /// HTTP routes and server-request replies share this finite executor.  A
 /// provider cannot turn a backlog of long requests into unbounded bridge
 /// threads, while several workers preserve full-duplex event handling.
@@ -166,6 +171,12 @@ struct EventQueue {
     events: VecDeque<Value>,
     bytes: usize,
     command_progress: Option<CommandProgressBarrier>,
+    /// Observation sequence of the last pushed event. Observation sequences
+    /// start at 1 and `take_batch` drains the queue in order with contiguous
+    /// sequences, so the n-th pushed event is carried at sequence n.
+    pushed_through: u64,
+    /// Highest observation sequence RyeOS has durably acknowledged.
+    acknowledged_through: u64,
 }
 
 struct CommandProgressBarrier {
@@ -243,6 +254,8 @@ struct HttpRequest {
 struct ExpiredServerRequest {
     id: String,
     request_digest: String,
+    /// Observation sequence of this request's `approval.expired` event.
+    event_sequence: u64,
 }
 
 struct PendingObservationBatch {
@@ -1701,6 +1714,10 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
                     .through_sequence
                     .checked_add(1)
                     .ok_or_else(|| anyhow!("observation sequence overflow"))?;
+                events
+                    .lock()
+                    .map_err(|_| anyhow!("event queue is poisoned"))?
+                    .acknowledge_observations(pending.through_sequence)?;
                 previous_observation_digest = Some(pending.digest);
             }
             _ => bail!("daemon sent a non-request frame"),
@@ -2957,15 +2974,19 @@ impl StructuredWorkload {
             let expiry_event = approval_expired_event(&rule, &context)?;
             let response = evaluate_template(&rule.responses.expire, &context)?;
             self.deliver_server_request_response(&request_id, &rule, &response)?;
-            self.push_event(expiry_event)?;
+            let event_sequence = self.push_sequenced_event(expiry_event)?;
             self.expired_server_requests
                 .push_back(ExpiredServerRequest {
                     id,
                     request_digest: ryeos_state::objects::canonical_value_digest(&pending)?,
+                    event_sequence,
                 });
-            while self.expired_server_requests.len() > MAX_PENDING_SERVER_REQUESTS {
-                self.expired_server_requests.pop_front();
-            }
+            let acknowledged_through = self
+                .events
+                .lock()
+                .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
+                .acknowledged_through;
+            prune_expired_server_requests(&mut self.expired_server_requests, acknowledged_through)?;
         }
         Ok(())
     }
@@ -3625,6 +3646,11 @@ impl StructuredWorkload {
     }
 
     fn push_event(&mut self, event: Value) -> Result<()> {
+        self.push_sequenced_event(event).map(drop)
+    }
+
+    /// Queues one event and returns the observation sequence it will carry.
+    fn push_sequenced_event(&mut self, event: Value) -> Result<u64> {
         self.events
             .lock()
             .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
@@ -3669,6 +3695,31 @@ fn invocation_identity_matches(required: &BTreeMap<String, Value>, context: &Val
     required
         .iter()
         .all(|(pointer, expected)| context.pointer(pointer).unwrap_or(&Value::Null) == expected)
+}
+
+/// Forget an expired approval only after RyeOS has acknowledged the
+/// observation batch carrying its expiry event. Until then the daemon may
+/// still hold the approval as pending and deliver a late decision, which must
+/// get the typed `expired` outcome rather than an unknown-delivery error.
+///
+/// Acknowledged entries are evicted oldest first, and only beyond
+/// `MAX_PENDING_SERVER_REQUESTS`: a decision the daemon reserved before it
+/// projected the expiry can still be in flight after the acknowledgement.
+fn prune_expired_server_requests(
+    expired: &mut VecDeque<ExpiredServerRequest>,
+    acknowledged_through: u64,
+) -> Result<()> {
+    while expired.len() > MAX_PENDING_SERVER_REQUESTS
+        && expired
+            .front()
+            .is_some_and(|entry| entry.event_sequence <= acknowledged_through)
+    {
+        expired.pop_front();
+    }
+    if expired.len() > MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS {
+        bail!("unacknowledged approval expiries exceed the observation backlog bound");
+    }
+    Ok(())
 }
 
 fn approval_expired_event(rule: &ServerRequestRule, context: &Value) -> Result<Value> {
@@ -3732,7 +3783,15 @@ impl EventQueue {
         pending.acknowledged = true;
         Ok(())
     }
-    fn push(&mut self, event: Value) -> Result<()> {
+    fn acknowledge_observations(&mut self, through_sequence: u64) -> Result<()> {
+        if through_sequence < self.acknowledged_through || through_sequence > self.pushed_through {
+            bail!("observation acknowledgement is outside the pushed event sequence");
+        }
+        self.acknowledged_through = through_sequence;
+        Ok(())
+    }
+
+    fn push(&mut self, event: Value) -> Result<u64> {
         if self.events.len() >= MAX_EVENTS {
             bail!("structured workload event backlog is exhausted");
         }
@@ -3744,8 +3803,13 @@ impl EventQueue {
         if self.bytes > 8 * 1024 * 1024 {
             bail!("structured-session event backlog byte ceiling is exhausted");
         }
+        let sequence = self
+            .pushed_through
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("observation sequence overflow"))?;
         self.events.push_back(event);
-        Ok(())
+        self.pushed_through = sequence;
+        Ok(sequence)
     }
 
     fn take_batch(
@@ -5192,6 +5256,78 @@ mod tests {
         }
     }
 
+    fn expired_requests(
+        sequences: std::ops::RangeInclusive<u64>,
+    ) -> VecDeque<ExpiredServerRequest> {
+        sequences
+            .map(|event_sequence| ExpiredServerRequest {
+                id: format!("approval-{event_sequence}"),
+                request_digest: "a".repeat(64),
+                event_sequence,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expired_approval_remembered_until_acknowledged() {
+        let mut expired = expired_requests(1..=200);
+        prune_expired_server_requests(&mut expired, 0).unwrap();
+        assert_eq!(expired.len(), 200);
+        assert_eq!(expired.front().unwrap().event_sequence, 1);
+
+        // Only acknowledged entries are evictable: with expiries through 100
+        // acknowledged, the unacknowledged 101..=200 all stay.
+        prune_expired_server_requests(&mut expired, 100).unwrap();
+        assert_eq!(expired.len(), MAX_PENDING_SERVER_REQUESTS);
+        assert_eq!(expired.front().unwrap().event_sequence, 73);
+        let mut unacknowledged = expired_requests(1..=200);
+        prune_expired_server_requests(&mut unacknowledged, 20).unwrap();
+        assert_eq!(unacknowledged.front().unwrap().event_sequence, 21);
+        assert_eq!(unacknowledged.len(), 180);
+    }
+
+    #[test]
+    fn expired_approval_pruned_after_ack() {
+        let mut expired = expired_requests(1..=200);
+        prune_expired_server_requests(&mut expired, 200).unwrap();
+        assert_eq!(expired.len(), MAX_PENDING_SERVER_REQUESTS);
+        assert_eq!(expired.front().unwrap().event_sequence, 73);
+        assert!(!expired.iter().any(|entry| entry.id == "approval-1"));
+        assert!(expired.iter().any(|entry| entry.id == "approval-200"));
+    }
+
+    #[test]
+    fn unacknowledged_expired_approvals_beyond_the_backlog_bound_fail_closed() {
+        let bound = u64::try_from(MAX_UNACKNOWLEDGED_EXPIRED_SERVER_REQUESTS).unwrap();
+        let mut expired = expired_requests(1..=bound);
+        prune_expired_server_requests(&mut expired, 0).unwrap();
+        expired.push_back(ExpiredServerRequest {
+            id: "approval-overflow".to_owned(),
+            request_digest: "a".repeat(64),
+            event_sequence: bound + 1,
+        });
+        assert!(prune_expired_server_requests(&mut expired, 0).is_err());
+    }
+
+    #[test]
+    fn observation_acknowledgement_tracks_pushed_sequences() {
+        let mut queue = EventQueue::default();
+        for expected in 1..=3 {
+            assert_eq!(
+                queue
+                    .push(json!({"event_type":"delta","payload":{},"session_observations":[]}))
+                    .unwrap(),
+                expected
+            );
+        }
+        let (_, through, _) = queue.take_batch(128, 1, None).unwrap().unwrap();
+        assert_eq!(through, 3);
+        assert!(queue.acknowledge_observations(4).is_err());
+        queue.acknowledge_observations(through).unwrap();
+        assert_eq!(queue.acknowledged_through, 3);
+        assert!(queue.acknowledge_observations(2).is_err());
+    }
+
     #[test]
     fn observation_batches_respect_the_exact_serialized_byte_ceiling() {
         let mut queue = EventQueue::default();
@@ -5792,29 +5928,74 @@ mod tests {
         assert!(!schema_error.contains(sentinel));
         assert!(schema_error.contains("instance digest"));
 
+        // More expiries than the acknowledged-retention floor, none of them
+        // acknowledged yet: the first is still remembered as expired.
         let expired_digest = "a".repeat(64);
-        workload
-            .expired_server_requests
-            .push_back(ExpiredServerRequest {
-                id: canonical_id(&json!("approval-expired")).unwrap(),
-                request_digest: expired_digest.clone(),
-            });
-        let expired_request = json!({
-            "operation":"approval",
-            "requestId":"approval-expired",
-            "decision":"decline",
-        });
+        for index in 0..200 {
+            let event_sequence = workload
+                .push_sequenced_event(json!({"event_type":"approval.expired","payload":{}}))
+                .unwrap();
+            workload
+                .expired_server_requests
+                .push_back(ExpiredServerRequest {
+                    id: canonical_id(&json!(format!("approval-expired-{index}"))).unwrap(),
+                    request_digest: expired_digest.clone(),
+                    event_sequence,
+                });
+            let acknowledged_through = workload.events.lock().unwrap().acknowledged_through;
+            prune_expired_server_requests(
+                &mut workload.expired_server_requests,
+                acknowledged_through,
+            )
+            .unwrap();
+        }
+        assert_eq!(workload.expired_server_requests.len(), 200);
+        let late_decision = |index: usize| {
+            json!({
+                "operation":"approval",
+                "requestId":format!("approval-expired-{index}"),
+                "decision":"decline",
+            })
+        };
         let expired = workload
-            .handle_approval(expired_request.as_object().unwrap(), &expired_digest)
+            .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
             .unwrap();
         assert_eq!(
             expired,
             json!({
                 "resolved":false,
                 "outcome":"expired",
-                "request_id":"approval-expired",
+                "request_id":"approval-expired-0",
                 "request_digest":expired_digest,
             })
+        );
+        // Once RyeOS acknowledges every expiry event, only the newest
+        // retention floor is kept; the oldest is absent.
+        let pushed_through = workload.events.lock().unwrap().pushed_through;
+        workload
+            .events
+            .lock()
+            .unwrap()
+            .acknowledge_observations(pushed_through)
+            .unwrap();
+        prune_expired_server_requests(&mut workload.expired_server_requests, pushed_through)
+            .unwrap();
+        assert_eq!(
+            workload.expired_server_requests.len(),
+            MAX_PENDING_SERVER_REQUESTS
+        );
+        assert!(
+            workload
+                .handle_approval(late_decision(0).as_object().unwrap(), &expired_digest)
+                .unwrap_err()
+                .to_string()
+                .contains("absent, stale, or already resolved")
+        );
+        assert_eq!(
+            workload
+                .handle_approval(late_decision(199).as_object().unwrap(), &expired_digest)
+                .unwrap()["outcome"],
+            "expired"
         );
 
         let reused_key = canonical_id(&json!("approval-reused")).unwrap();
