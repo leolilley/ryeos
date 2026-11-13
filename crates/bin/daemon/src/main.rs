@@ -3616,6 +3616,36 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
+    if let Some(config::DaemonCommand::HostRetire { app_root, orphaned }) = &cli.command {
+        lillux::require_administrator()?;
+        if *orphaned {
+            let retired = ryeos_node::supervision::retire_orphaned_host_services()?;
+            if retired.is_empty() {
+                println!("no orphaned host services");
+            }
+            for service in &retired {
+                println!(
+                    "retired host service {} (app root gone: {})",
+                    service.name,
+                    service
+                        .app_root
+                        .as_deref()
+                        .map(|root| root.display().to_string())
+                        .unwrap_or_default()
+                );
+            }
+        } else {
+            let app_root = app_root
+                .as_deref()
+                .context("host-retire requires --app-root or --orphaned")?;
+            if ryeos_node::supervision::retire_host_service(app_root)? {
+                println!("retired the host service of {}", app_root.display());
+            } else {
+                println!("no host service is associated with {}", app_root.display());
+            }
+        }
+        return Ok(());
+    }
     if let Some(config::DaemonCommand::HostInstall {
         package_root,
         action,
@@ -3965,7 +3995,8 @@ async fn run(
     // their own state lock and must not conflict with the daemon's.
     if let Some(ref cmd) = cli.command {
         match cmd {
-            config::DaemonCommand::HostProvision { .. } => {
+            config::DaemonCommand::HostProvision { .. }
+            | config::DaemonCommand::HostRetire { .. } => {
                 unreachable!("handled before node startup")
             }
             config::DaemonCommand::InitPolicyPreflight { .. }
@@ -6379,6 +6410,9 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
             _ = tick.tick() => {}
+            // A stop left for recovery to settle wakes the pass at once
+            // instead of waiting out the period.
+            _ = ryeos_app::recovery_nudge::nudged() => {}
         }
 
         let pass_result = run_periodic_recovery_pass(&state, &cleanup_backoff).await;
@@ -6598,6 +6632,7 @@ async fn run_periodic_recovery_pass(
     let active = reconcile::reconcile_live_threads(state)
         .await
         .context("periodic active-thread reconcile")?;
+    ryeos_api::handlers::dedicated_sessions::mirror_stale_publication_report(state);
     let mut targets = active.active_thread_ids;
     dispatch_resume_intents(state, active.resume_intents)
         .await
@@ -9368,10 +9403,12 @@ mod shutdown_mapping_tests {
     }
 
     #[test]
-    fn no_mode_falls_back_to_three_second_default() {
+    fn no_mode_uses_named_node_fallback() {
         assert_eq!(
             resolve_shutdown_action(None),
-            ShutdownAction::Graceful(Duration::from_secs(3))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
         );
     }
 

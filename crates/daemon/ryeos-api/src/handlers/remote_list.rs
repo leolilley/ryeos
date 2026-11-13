@@ -14,10 +14,11 @@ use ryeos_executor::executor::ServiceAvailability;
 #[derive(serde::Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Request {
-    /// Optional local project path. When supplied, project-level
-    /// remotes from `<project>/.ai/config/remotes/remotes.yaml` are
-    /// merged on top of user-level remotes (project wins on name
-    /// collision). The CLI injects this automatically via the
+    /// Optional local project path. When supplied, the project's
+    /// `<project>/.ai/config/remotes/remotes.yaml` is checked: it may not
+    /// define or override a remote, and one naming remote trust material
+    /// is refused (`project_remote_trust_material`). Its other entries are
+    /// listed as invalid. The CLI injects this automatically via the
     /// alias's `project_resolution: optional` field.
     #[serde(default, alias = "project")]
     pub project_path: Option<PathBuf>,

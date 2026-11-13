@@ -78,9 +78,9 @@ pub use external_content::{
 };
 pub use head_cache::{CachedHead, HeadCache};
 pub use large_object_store::{
-    IngestedLargeObject, LargeObjectIntegrityFinding, LargeObjectScrubReport,
-    LargeObjectStagingSweepReport, LargeObjectStore, LargeObjectSweepReport, LeasedLargeObject,
-    PinnedLargeObjectSourceIdentity,
+    IngestedLargeObject, LargeObjectIntegrityFinding, LargeObjectQuarantinePurgeReport,
+    LargeObjectQuarantined, LargeObjectScrubReport, LargeObjectStagingSweepReport,
+    LargeObjectStore, LargeObjectSweepReport, LeasedLargeObject, PinnedLargeObjectSourceIdentity,
 };
 pub use locators::ThreadLocator;
 pub use objects::{

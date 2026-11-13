@@ -1311,30 +1311,63 @@ async fn handle_finalize(
     // it while this authenticated callback still blocks the managed runtime;
     // terminal state then commits the exact snapshot identity in the same
     // transition. Discard-only and borrowed executions return `None`.
-    let pending_project_result =
-        ryeos_executor::execution::prepare_managed_runtime_terminal_project_result(
-            state,
-            capability,
-            &completion.status,
-        )
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                thread_id = %params.thread_id,
-                launch_owner,
-                item_ref = capability.item_ref.as_deref().unwrap_or(""),
-                effective_definition_digest = capability
-                    .effective_definition_digest
-                    .as_deref()
-                    .unwrap_or(""),
-                error = %format!("{error:#}"),
-                "failed to prepare managed runtime terminal project result"
-            );
-            error.context("prepare managed runtime terminal project result")
-        })?;
+    let prepared = ryeos_executor::execution::prepare_managed_runtime_terminal_project_result(
+        state,
+        capability,
+        &completion.status,
+    )
+    .await;
+    // A fold-back HEAD advance refused before any write is a terminal fact,
+    // not a callback failure: the thread fails `head_advance_not_applied`
+    // with the retained generation, and the managed envelope is rebuilt from
+    // that failure so a parent following this child never resumes on the
+    // runtime's success.
+    let (completion, managed_envelope, pending_project_result, not_applied_generation) =
+        match prepared {
+            Ok(pending) => (completion, managed_envelope, pending, None),
+            Err(error) => match ryeos_executor::execution::HeadAdvanceNotApplied::find(&error) {
+                Some(not_applied) => {
+                    tracing::warn!(
+                        thread_id = %params.thread_id,
+                        launch_owner,
+                        error = %not_applied,
+                        "managed runtime HEAD advance was not applied; failing with the retained generation"
+                    );
+                    let failed = not_applied.failed_completion(&completion);
+                    let envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+                        &params.thread_id,
+                        failed.status.as_str(),
+                        None,
+                        failed.error.as_ref(),
+                        raw_cost.as_ref(),
+                        &serde_json::Value::Null,
+                        &params.warnings,
+                    );
+                    (failed, envelope, None, Some(not_applied.retained.clone()))
+                }
+                None => {
+                    tracing::error!(
+                        thread_id = %params.thread_id,
+                        launch_owner,
+                        item_ref = capability.item_ref.as_deref().unwrap_or(""),
+                        effective_definition_digest = capability
+                            .effective_definition_digest
+                            .as_deref()
+                            .unwrap_or(""),
+                        error = %format!("{error:#}"),
+                        "failed to prepare managed runtime terminal project result"
+                    );
+                    return Err(error.context("prepare managed runtime terminal project result"));
+                }
+            },
+        };
+    // The retained generation joins the failed terminal, as it does for any
+    // post-exit sealed result, so it stays reachable from thread history
+    // after the workspace journal closes.
     let result_generation = pending_project_result
         .as_ref()
-        .map(|pending| pending.generation());
+        .map(|pending| pending.generation())
+        .or(not_applied_generation.as_ref());
     let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
         launch_owner,
@@ -1488,10 +1521,20 @@ async fn handle_request_continuation(
     Ok((encoded, prepared.with_persisted_birth_audit()))
 }
 
+/// The node's signed `event_storage` policy, which decides the class every
+/// runtime-appended event is stored under.
+fn event_storage_policy(
+    state: &AppState,
+) -> Result<&ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy> {
+    state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy>()
+}
+
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: EventAppendParams =
         serde_json::from_value(params.clone()).context("invalid events.append params")?;
-    let persisted = state.events.append(&params)?;
+    let persisted = state.events.append(&params, event_storage_policy(state)?)?;
     // Publish AFTER persistence so live subscribers receive the same
     // chain_seq the event store recorded. Persistence-first is the
     // contract; SSE consumers replay from the event store on lag.
@@ -1507,7 +1550,9 @@ fn handle_append_event_batch(
 ) -> Result<serde_json::Value> {
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
-    let result = state.events.append_batch(&params)?;
+    let result = state
+        .events
+        .append_batch(&params, event_storage_policy(state)?)?;
     // Publish the whole batch in persisted order under one hub-lock acquire:
     // each thread's lane sees its events in order, and the firehose sees the
     // batch contiguously without interleaving a concurrent publisher.
@@ -2407,6 +2452,7 @@ mod tests {
             node_policy: Arc::new(
                 ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                     ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                    ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                     Arc::new(
                         ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(
                         ),
@@ -5516,7 +5562,6 @@ mod tests {
                     "thread_id": "T-stream-1",
                     "event": {
                         "event_type": "stream_opened",
-                        "storage_class": "indexed",
                         "payload": {"turn": 1},
                     },
                 }),
@@ -5566,7 +5611,6 @@ mod tests {
                     "thread_id": "T-ephemeral-1",
                     "event": {
                         "event_type": "cognition_out",
-                        "storage_class": "ephemeral",
                         "payload": {"turn": 1, "delta": "hello"},
                     },
                 }),
@@ -5607,16 +5651,91 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_event_cannot_be_ephemeral() {
-        on_daemon_worker_stack(lifecycle_event_cannot_be_ephemeral_body);
+    fn journal_only_observation_is_stored_but_not_projected() {
+        on_daemon_worker_stack(journal_only_observation_is_stored_but_not_projected_body);
     }
 
-    async fn lifecycle_event_cannot_be_ephemeral_body() {
+    async fn journal_only_observation_is_stored_but_not_projected_body() {
         let (_tmp, _state_owner, state) = setup_app_state();
-        create_running_test_thread(&state, "T-ephemeral-bad");
+        create_running_test_thread(&state, "T-journal-1");
         let cbt = generate_test_callback(
             &state,
-            "T-ephemeral-bad",
+            "T-journal-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+            "0".repeat(64),
+        );
+        let mut rx = state.event_streams.subscribe("T-journal-1");
+
+        let resp = dispatch(
+            rpc(
+                "runtime.append_event",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-journal-1",
+                    // The runtime names no class: the node's event_storage
+                    // policy stores observations journal-only.
+                    "event": {
+                        "event_type": "observation",
+                        "payload": {"kind": "test.observation", "value": 1},
+                    },
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "append_event failed: {:?}",
+            resp.error
+        );
+        // Stored in CAS: the record carries its signed event hash and a real
+        // chain position.
+        let persisted = rpc_ok(&resp);
+        assert_eq!(persisted["storage_class"], "journal_only");
+        assert!(persisted["event_hash"].is_string(), "{persisted}");
+        assert!(persisted["chain_seq"].as_i64().unwrap() > 0, "{persisted}");
+
+        let live = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("hub did not deliver event in time")
+            .expect("hub channel closed");
+        assert_eq!(live.event_type, "observation");
+        assert!(live.chain_seq > 0);
+
+        // Not indexed: the SQL projection replay does not carry it.
+        let replay = state
+            .events
+            .replay(&EventReplayParams {
+                chain_root_id: None,
+                thread_id: Some("T-journal-1".to_string()),
+                after_chain_seq: None,
+                limit: 100,
+            })
+            .unwrap();
+        assert!(
+            !replay
+                .events
+                .iter()
+                .any(|event| event.event_type == "observation")
+        );
+    }
+
+    #[test]
+    fn floor_event_is_stored_indexed() {
+        on_daemon_worker_stack(floor_event_is_stored_indexed_body);
+    }
+
+    async fn floor_event_is_stored_indexed_body() {
+        // The daemon stores under the node's event_storage policy, whose floor
+        // keeps every non-progressive event indexed.
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-floor-1");
+        let cbt = generate_test_callback(
+            &state,
+            "T-floor-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
@@ -5628,9 +5747,68 @@ mod tests {
                 "runtime.append_event",
                 json!({
                     "callback_token": cbt.token,
-                    "thread_id": "T-ephemeral-bad",
+                    "thread_id": "T-floor-1",
                     "event": {
-                        "event_type": "thread_completed",
+                        "event_type": "stream_closed",
+                        "payload": {},
+                    },
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "append_event failed: {:?}",
+            resp.error
+        );
+        let persisted = rpc_ok(&resp);
+        assert_eq!(persisted["storage_class"], "indexed");
+
+        let replay = state
+            .events
+            .replay(&EventReplayParams {
+                chain_root_id: None,
+                thread_id: Some("T-floor-1".to_string()),
+                after_chain_seq: None,
+                limit: 100,
+            })
+            .unwrap();
+        assert!(
+            replay
+                .events
+                .iter()
+                .any(|event| event.event_type == "stream_closed")
+        );
+    }
+
+    #[test]
+    fn an_event_carrying_a_storage_class_is_refused() {
+        on_daemon_worker_stack(an_event_carrying_a_storage_class_is_refused_body);
+    }
+
+    async fn an_event_carrying_a_storage_class_is_refused_body() {
+        // The wire carries no storage class; a runtime that still sends one is
+        // refused, never silently ignored.
+        let (_tmp, _state_owner, state) = setup_app_state();
+        create_running_test_thread(&state, "T-claim-bad");
+        let cbt = generate_test_callback(
+            &state,
+            "T-claim-bad",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+            "0".repeat(64),
+        );
+        let resp = dispatch(
+            rpc(
+                "runtime.append_event",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-claim-bad",
+                    "event": {
+                        "event_type": "observation",
                         "storage_class": "ephemeral",
                         "payload": {},
                     },
@@ -5642,7 +5820,7 @@ mod tests {
 
         let err = rpc_err(&resp);
         assert!(
-            err.message.contains("cannot use ephemeral"),
+            err.message.contains("unknown field `storage_class`"),
             "got: {}",
             err.message
         );
@@ -5674,9 +5852,9 @@ mod tests {
                 "callback_token": cbt.token,
                 "thread_id": "T-stream-2",
                 "events": [
-                    {"event_type": "tool_call_start",  "payload": {"i": 1, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
-                    {"event_type": "tool_call_result", "payload": {"i": 2, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
-                    {"event_type": "stream_closed",    "payload": {"i": 3}, "storage_class": "indexed"},
+                    {"event_type": "tool_call_start",  "payload": {"i": 1, "operation_id": "a".repeat(64)}},
+                    {"event_type": "tool_call_result", "payload": {"i": 2, "operation_id": "a".repeat(64)}},
+                    {"event_type": "stream_closed",    "payload": {"i": 3}},
                 ],
             })),
             &state,
@@ -6981,7 +7159,7 @@ mod tests {
                         "callback_token": succ.token,
                         "thread_id": "T-pred",
                         "status": "completed",
-                        "event": {"event_type": "cognition_in", "payload": {}, "storage_class": "indexed"},
+                        "event": {"event_type": "cognition_in", "payload": {}},
                     }),
                 ),
                 &state,

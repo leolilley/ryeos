@@ -12,13 +12,29 @@ use crate::env_contract::BASE_ALLOWLIST_NAMES;
 /// Poll interval (ms) when waiting for a process group to exit after SIGTERM.
 const KILL_POLL_INTERVAL_MS: u64 = 100;
 
-/// Wait time (ms) after SIGKILL before checking if the process group is dead.
-const POST_SIGKILL_WAIT_MS: u64 = 200;
-
 /// Workload-authored cancellation policy cannot control daemon availability.
 /// Grace remains cooperative, but the node owns this hard upper bound before
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
+
+/// Bound on proving the pinned group empty after SIGKILL. The proof polls every
+/// [`KILL_POLL_INTERVAL_MS`], so a group that dies quickly returns quickly;
+/// the bound only lets slow kernel teardown (large unmaps, exit through
+/// uninterruptible I/O) finish before the stop is reported unsettled.
+pub const POST_SIGKILL_SETTLE_BOUND: Duration =
+    Duration::from_secs(MAX_GRACEFUL_SHUTDOWN_GRACE_SECS);
+
+/// [`KillResult::method`] when SIGKILL reached the exact pinned group but the
+/// group was still present at [`POST_SIGKILL_SETTLE_BOUND`]. The kill was
+/// delivered; only its settlement is not yet observed. Distinct from
+/// `sigkill_failed`, where no signal was delivered.
+pub const SIGKILL_DELIVERED_UNSETTLED: &str = "sigkill_delivered_unsettled";
+
+/// Grace for stopping a launch whose metadata records no stop policy. Every
+/// managed subprocess launch records one, resolved from the signed execution
+/// config; this applies only where none was recorded (in-process handlers and
+/// metadata-free attaches).
+pub const UNRECORDED_STOP_POLICY_GRACE_SECS: u64 = 3;
 
 /// Bound on waiting for the accounting outbox publisher's in-flight blocking
 /// work when the daemon stops.
@@ -734,12 +750,13 @@ pub enum ShutdownAction {
     Graceful(std::time::Duration),
 }
 
-/// Map a tool-declared `CancellationMode` to a `ShutdownAction`.
+/// Map a launch's recorded stop policy to a `ShutdownAction`.
 ///
 /// - `Some(Hard)` → SIGKILL only.
 /// - `Some(Graceful { grace_secs })` → SIGTERM, wait up to the node-owned cap,
 ///   then SIGKILL.
-/// - `None` → default 3-second graceful.
+/// - `None` (no recorded policy) → graceful with
+///   [`UNRECORDED_STOP_POLICY_GRACE_SECS`].
 pub fn resolve_shutdown_action(
     mode: Option<ryeos_engine::contracts::CancellationMode>,
 ) -> ShutdownAction {
@@ -749,7 +766,15 @@ pub fn resolve_shutdown_action(
         Some(CancellationMode::Graceful { grace_secs }) => ShutdownAction::Graceful(
             std::time::Duration::from_secs(grace_secs.min(MAX_GRACEFUL_SHUTDOWN_GRACE_SECS)),
         ),
-        None => ShutdownAction::Graceful(std::time::Duration::from_secs(3)),
+        None => {
+            tracing::warn!(
+                grace_secs = UNRECORDED_STOP_POLICY_GRACE_SECS,
+                "launch recorded no stop policy; using the node fallback grace"
+            );
+            ShutdownAction::Graceful(std::time::Duration::from_secs(
+                UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
+        }
     }
 }
 
@@ -758,6 +783,12 @@ pub fn resolve_shutdown_action(
 /// Graceful shutdown signals only the reported target. This leaves the retained
 /// launcher group leader alive while the target uses its declared grace. If the
 /// target/group survives the deadline, the already-pinned group is killed.
+///
+/// This is the graceful-stop contract for runtime authors: the target owns
+/// cooperative cancellation of its own children (forwarding SIGTERM, or
+/// stopping them at its own boundary). The node never SIGTERMs descendants;
+/// it guarantees only the SIGKILL of the whole pinned group or scope at the
+/// grace deadline.
 pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownAction) -> KillResult {
     if let Some(scope) = &identity.process_scope {
         if validate_execution_process_identity_shape(identity).is_err() {
@@ -1646,9 +1677,22 @@ fn graceful_kill(
 
 #[cfg(target_os = "linux")]
 fn hard_kill_pinned_group(
+    identity: &ExecutionProcessIdentity,
+    group: &PinnedProcess,
+    method: &'static str,
+) -> KillResult {
+    hard_kill_pinned_group_within(identity, group, method, POST_SIGKILL_SETTLE_BOUND)
+}
+
+/// SIGKILL the pinned group and prove it empty within `settle`. `method`
+/// names a proved kill; a delivered kill whose group is still present at the
+/// bound reports [`SIGKILL_DELIVERED_UNSETTLED`].
+#[cfg(target_os = "linux")]
+fn hard_kill_pinned_group_within(
     _identity: &ExecutionProcessIdentity,
     group: &PinnedProcess,
     method: &'static str,
+    settle: Duration,
 ) -> KillResult {
     match signal_pinned_group(group, lillux::signal::SIGKILL) {
         SignalResult::AlreadyDead => {
@@ -1666,10 +1710,17 @@ fn hard_kill_pinned_group(
         }
     }
     let deadline = std::time::Instant::now()
-        .checked_add(Duration::from_millis(POST_SIGKILL_WAIT_MS))
+        .checked_add(settle)
         .unwrap_or_else(std::time::Instant::now);
     match wait_for_group_exit(group, deadline) {
-        Ok(success) => KillResult { success, method },
+        Ok(true) => KillResult {
+            success: true,
+            method,
+        },
+        Ok(false) => KillResult {
+            success: false,
+            method: SIGKILL_DELIVERED_UNSETTLED,
+        },
         Err(()) => KillResult {
             success: false,
             method: "group_wait_failed",
@@ -2497,6 +2548,131 @@ mod tests {
             "expected SIGKILL fallback, got {:?}",
             status.signal()
         );
+    }
+
+    /// The graceful-stop contract: SIGTERM goes to the exact target only, and
+    /// the runtime owns cooperative cancellation of its own children. The node
+    /// guarantees the pinned group SIGKILL at the grace deadline, which is what
+    /// reaches a descendant the target never forwarded SIGTERM to.
+    #[test]
+    fn graceful_stop_terms_target_and_kills_unresponsive_descendant_at_deadline() {
+        use std::os::unix::process::ExitStatusExt;
+        let tmp = TempDir::new().unwrap();
+        let target_marker = tmp.path().join("target_got_term");
+        let child_marker = tmp.path().join("child_got_term");
+        let child_pid_path = tmp.path().join("child_pid");
+        let child_ready = tmp.path().join("child_ready");
+        let ready = tmp.path().join("target_ready");
+        // The target traps SIGTERM without exiting and does not forward it.
+        // Its child, in the same process group, would record any SIGTERM it
+        // received. Neither exits on SIGTERM, so only the deadline SIGKILL to
+        // the whole pinned group can end them.
+        let script = format!(
+            r#"trap 'echo term > "{tm}"' TERM; ( trap 'echo term > "{cm}"' TERM; : > "{cr}"; while true; do sleep 0.05; done ) & printf %s $! > "{cp}"; while [ ! -e "{cr}" ]; do sleep 0.01; done; : > "{r}"; while true; do sleep 0.05; done"#,
+            tm = target_marker.display(),
+            cm = child_marker.display(),
+            cr = child_ready.display(),
+            cp = child_pid_path.display(),
+            r = ready.display(),
+        );
+        let mut child = unsafe {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn target with descendant")
+        };
+        let pgid = child.id() as i64;
+        wait_for_signal_target_ready(&mut child, &ready);
+        let descendant_pid: i32 = std::fs::read_to_string(&child_pid_path)
+            .expect("read descendant PID")
+            .parse()
+            .expect("parse descendant PID");
+        assert_eq!(unsafe { libc::getpgid(descendant_pid) }, pgid as i32);
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+
+        let (result, status) = run_kill_with_reaper(
+            move || kill_by_action(&identity, ShutdownAction::Graceful(Duration::from_secs(1))),
+            &mut child,
+        );
+
+        assert!(
+            result.success,
+            "group kill was not proved: {}",
+            result.method
+        );
+        assert_eq!(result.method, "killed");
+        assert_eq!(read_marker(&target_marker).as_deref(), Some("term\n"));
+        assert!(
+            !child_marker.exists(),
+            "the descendant received SIGTERM; graceful stop must signal only the target"
+        );
+        assert_eq!(status.signal(), Some(lillux::signal::SIGKILL));
+        // The descendant was reparented when the target died and its new
+        // parent reaps it. Dead means gone or a zombie, never still running.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(") ")
+                        .and_then(|(_, rest)| rest.chars().next())
+                });
+            match state {
+                None | Some('Z') | Some('X') => break,
+                Some(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Some(state) => panic!("descendant survived the group SIGKILL in state {state}"),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hard_kill_reports_unsettled_group_distinctly() {
+        let mut leader = unsafe {
+            Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn group leader")
+        };
+        let pgid = i64::from(leader.id());
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+        let group = pin_group_leader(&identity).expect("pin group leader");
+
+        // The test has not reaped the killed leader, so its zombie keeps the
+        // group present: SIGKILL was delivered, settlement is unobserved.
+        let unsettled = hard_kill_pinned_group_within(&identity, &group, "killed", Duration::ZERO);
+        assert!(!unsettled.success);
+        assert_eq!(unsettled.method, SIGKILL_DELIVERED_UNSETTLED);
+
+        leader.wait().expect("reap group leader");
+        let settled = hard_kill_pinned_group_within(&identity, &group, "killed", Duration::ZERO);
+        assert!(settled.success);
+        assert_eq!(settled.method, "already_dead");
     }
 
     #[test]

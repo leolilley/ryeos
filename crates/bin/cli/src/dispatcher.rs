@@ -211,6 +211,20 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // so every dispatch path observes one data-driven project policy.
     let dispatch_rest = rest_with_global_no_project(&cli.rest, cli.no_project);
 
+    // `codex login device` is a client composite: it sequences verified node
+    // commands and needs the terminal for the device code and confirmation.
+    // Every step is an ordinary signed request the daemon authorizes itself.
+    if crate::codex_device_login::matches(&cli.rest) {
+        return crate::codex_device_login::run(
+            &cli.rest[crate::codex_device_login::TOKENS.len()..],
+            &app_root,
+            snapshot,
+            &command_registration_policy,
+            console,
+        )
+        .await;
+    }
+
     // Node-registered client handlers own local byte-oriented UX that cannot
     // be represented as an `/execute` JSON result. The verified command is
     // still only routing: the handler's signed daemon requests carry the
@@ -261,61 +275,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         cli.project.as_deref(),
     )?;
     let mut presenter = Presenter::for_console(console);
-    let mut body = serde_json::json!({
-        "item_ref": resolved.item_ref,
-        "ref_bindings": resolved.ref_bindings,
-        "product_selections": resolved.product_selections,
-        "parameters": resolved.parameters,
-        "parameter_encoding": "command",
-        "validate_only": resolved.validate_only,
-        "execution_policy": execution_policy_value_with_snapshot(
-            resolved.project_path.is_some(),
-            resolved.async_launch,
-            resolved.pin_project_at_admission,
-            resolved.pin_current_head_at_admission,
-            resolved.project_snapshot.clone(),
-            resolved.retain_child_results,
-            resolved.exclude_operator_vault,
-        ),
-    });
-    insert_source_observation_scope(&mut body, resolved.validation_scope);
-    if let Some(project_path) = &resolved.project_path {
-        body["project_path"] = Value::String(
-            project_path
-                .to_str()
-                .ok_or_else(|| {
-                    CliError::ProjectResolution(
-                        "canonical project path is not valid UTF-8".to_string(),
-                    )
-                })?
-                .to_owned(),
-        );
-    }
-    if resolved.debug_raw {
-        body["debug_raw"] = Value::Bool(true);
-    }
-    if let Some(state_root) = &resolved.state_root {
-        body["state_root"] = Value::String(
-            state_root
-                .to_str()
-                .ok_or_else(|| {
-                    CliError::ProjectResolution("state root is not valid UTF-8".to_string())
-                })?
-                .to_owned(),
-        );
-    }
-    // Method dispatch: a `--method`/`--args` selector lands in `call`, the
-    // control-plane block distinct from data-plane `parameters`.
-    if resolved.call_method.is_some() || resolved.call_args.is_some() {
-        let mut call = serde_json::Map::new();
-        if let Some(method) = &resolved.call_method {
-            call.insert("method".to_string(), Value::String(method.clone()));
-        }
-        if let Some(args) = &resolved.call_args {
-            call.insert("args".to_string(), args.clone());
-        }
-        body["call"] = Value::Object(call);
-    }
+    let mut body = daemon_execute_body(&resolved)?;
 
     // Stream a live execution log for `execute` runs on a terminal, unless the
     // caller opted out. Piped/redirected output and `--no-stream`/`--json` get
@@ -373,7 +333,15 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         )))?;
     }
     let rendered_lines = presenter.loading(&command_label, route_path)?;
-    let result = match post_to_daemon(&app_root, route_path, &body).await {
+    let busy_wait = |wait: std::time::Duration| {
+        console
+            .info(&crate::tty::Diagnostic::info(format!(
+                "process creation is busy on the node; retrying in {} ms",
+                wait.as_millis()
+            )))
+            .map_err(CliError::Io)
+    };
+    let result = match post_to_daemon(&app_root, route_path, &body, busy_wait).await {
         Ok(result) => result,
         Err(error) if launch_id.is_some() && accepted_launch_delivery_is_uncertain(&error) => {
             let launch_id = launch_id.expect("guarded accepted launch id");
@@ -420,6 +388,108 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         rendered_lines,
     )?;
     Ok(())
+}
+
+/// The signed `/execute` body for one verified, compiled command. Every
+/// daemon dispatch, including client composites, builds its request here.
+fn daemon_execute_body(resolved: &CliResolvedExecute) -> Result<Value, CliError> {
+    let mut body = serde_json::json!({
+        "item_ref": resolved.item_ref,
+        "ref_bindings": resolved.ref_bindings,
+        "product_selections": resolved.product_selections,
+        "parameters": resolved.parameters,
+        "parameter_encoding": "command",
+        "validate_only": resolved.validate_only,
+        "execution_policy": execution_policy_value_with_snapshot(
+            resolved.project_path.is_some(),
+            resolved.async_launch,
+            resolved.pin_project_at_admission,
+            resolved.pin_current_head_at_admission,
+            resolved.project_snapshot.clone(),
+            resolved.retain_child_results,
+            resolved.exclude_operator_vault,
+        ),
+    });
+    insert_source_observation_scope(&mut body, resolved.validation_scope);
+    if let Some(project_path) = &resolved.project_path {
+        body["project_path"] = Value::String(
+            project_path
+                .to_str()
+                .ok_or_else(|| {
+                    CliError::ProjectResolution(
+                        "canonical project path is not valid UTF-8".to_string(),
+                    )
+                })?
+                .to_owned(),
+        );
+    }
+    if resolved.debug_raw {
+        body["debug_raw"] = Value::Bool(true);
+    }
+    if let Some(state_root) = &resolved.state_root {
+        body["state_root"] = Value::String(
+            state_root
+                .to_str()
+                .ok_or_else(|| {
+                    CliError::ProjectResolution("state root is not valid UTF-8".to_string())
+                })?
+                .to_owned(),
+        );
+    }
+    // Method dispatch: a `--method`/`--args` selector lands in `call`, the
+    // control-plane block distinct from data-plane `parameters`.
+    if resolved.call_method.is_some() || resolved.call_args.is_some() {
+        let mut call = serde_json::Map::new();
+        if let Some(method) = &resolved.call_method {
+            call.insert("method".to_string(), Value::String(method.clone()));
+        }
+        if let Some(args) = &resolved.call_args {
+            call.insert("args".to_string(), args.clone());
+        }
+        body["call"] = Value::Object(call);
+    }
+    Ok(body)
+}
+
+/// Resolve one verified command and send it exactly as the CLI would,
+/// returning the authored result. An `--async` command returns the accepted
+/// launch acknowledgement, whose echoed coordinate is checked.
+pub(crate) async fn execute_verified_command(
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
+    argv: &[String],
+) -> Result<Value, CliError> {
+    let resolved = resolve_command_for_daemon(argv, snapshot, command_registration_policy, None)?;
+    let mut body = daemon_execute_body(&resolved)?;
+    if resolved.async_launch {
+        let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());
+        body["launch_id"] = Value::String(launch_id.clone());
+        let acknowledgement = match post_to_daemon(app_root, "/execute/launch", &body).await {
+            Ok(acknowledgement) => acknowledgement,
+            Err(error) if accepted_launch_delivery_is_uncertain(&error) => {
+                return Err(CliError::Local {
+                    detail: format!(
+                        "{error}; launch acknowledgement was not received. Query GET /launches/{launch_id} before opening another session"
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        if acknowledgement.get("launch_id").and_then(Value::as_str) != Some(launch_id.as_str()) {
+            return Err(CliError::Local {
+                detail: format!(
+                    "accepted launch response did not echo request coordinate {launch_id}; query GET /launches/{launch_id} before opening another session"
+                ),
+            });
+        }
+        return Ok(acknowledgement);
+    }
+    let payload = post_to_daemon(app_root, "/execute", &body).await?;
+    if let Some(detail) = crate::tty::structured_result_failure(&payload) {
+        return Err(CliError::Local { detail });
+    }
+    Ok(payload.get("result").cloned().unwrap_or(payload))
 }
 
 async fn try_dispatch_client_handler(
@@ -1045,11 +1115,60 @@ fn strip_project_control_flags(tail: &[String]) -> Vec<String> {
     ryeos_app::command_invocation::strip_project_control_flags(tail)
 }
 
+/// How long the CLI keeps reissuing a request the daemon refused as
+/// `process_creation_busy`. Matches the control-plane request bound.
+const PROCESS_CREATION_BUSY_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bounds on a daemon-supplied retry hint.
+const PROCESS_CREATION_BUSY_MIN_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+const PROCESS_CREATION_BUSY_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The wait before reissuing a request the daemon refused with the typed
+/// `process_creation_busy` 503. The daemon raises that refusal only before it
+/// admits the request, so nothing ran and reissuing the same request is safe.
+/// Returns `None` for any other failure, a refusal not marked retryable, or a
+/// wait that does not fit in what is left of the retry budget.
+fn process_creation_busy_wait(
+    error: &crate::error::CliDispatchError,
+    remaining: std::time::Duration,
+) -> Option<std::time::Duration> {
+    let crate::error::CliDispatchError::Transport(crate::error::CliTransportError::HttpError {
+        status: 503,
+        body,
+    }) = error
+    else {
+        return None;
+    };
+    let body: Value = serde_json::from_str(body).ok()?;
+    if body.get("code").and_then(Value::as_str) != Some("process_creation_busy")
+        || body.get("retryable").and_then(Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    let wait = body
+        .get("retry_after_ms")
+        .and_then(Value::as_u64)
+        .map_or(
+            PROCESS_CREATION_BUSY_MIN_WAIT,
+            std::time::Duration::from_millis,
+        )
+        .clamp(
+            PROCESS_CREATION_BUSY_MIN_WAIT,
+            PROCESS_CREATION_BUSY_MAX_WAIT,
+        );
+    (wait < remaining).then_some(wait)
+}
+
 /// POST a JSON body to a daemon execute route and return the response.
+///
+/// A typed `process_creation_busy` refusal is reissued, freshly signed, within
+/// [`PROCESS_CREATION_BUSY_RETRY_BUDGET`]; `on_busy_wait` reports each wait.
+/// Every other failure is returned at once.
 async fn post_to_daemon(
     app_root: &std::path::Path,
     route_path: &str,
     body: &Value,
+    mut on_busy_wait: impl FnMut(std::time::Duration) -> Result<(), CliError>,
 ) -> Result<Value, CliError> {
     crate::daemon_preflight::lifecycle_preflight(app_root).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
@@ -1060,11 +1179,23 @@ async fn post_to_daemon(
     let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
-
     let url = format!("{}{}", discovered.base_url, route_path);
-    let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
-    Ok(payload)
+    let retry_until = std::time::Instant::now() + PROCESS_CREATION_BUSY_RETRY_BUDGET;
+    loop {
+        // Each attempt carries its own nonce and timestamp.
+        let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
+        match crate::transport::http::post_json(&url, &headers, &body_bytes).await {
+            Ok(payload) => return Ok(payload),
+            Err(error) => {
+                let remaining = retry_until.saturating_duration_since(std::time::Instant::now());
+                let Some(wait) = process_creation_busy_wait(&error, remaining) else {
+                    return Err(error.into());
+                };
+                on_busy_wait(wait)?;
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
 }
 
 /// POST to the gateway `/execute/stream`, render the live execution log to
@@ -1289,6 +1420,86 @@ mod tests {
     use super::*;
     use clap::Parser as _;
     use ryeos_runtime::CommandArgumentKind;
+
+    fn http_refusal(status: u16, body: Value) -> crate::error::CliDispatchError {
+        crate::error::CliDispatchError::Transport(crate::error::CliTransportError::HttpError {
+            status,
+            body: body.to_string(),
+        })
+    }
+
+    #[test]
+    fn busy_refusal_is_retried_within_budget() {
+        let refusal = http_refusal(
+            503,
+            serde_json::json!({
+                "code": "process_creation_busy",
+                "error": "process creation is busy; retry after 250 ms",
+                "retryable": true,
+                "retry_after_ms": 250,
+            }),
+        );
+        assert_eq!(
+            process_creation_busy_wait(&refusal, std::time::Duration::from_secs(30)),
+            Some(std::time::Duration::from_millis(250))
+        );
+        // The wait must fit in what is left of the budget.
+        assert_eq!(
+            process_creation_busy_wait(&refusal, std::time::Duration::from_millis(100)),
+            None
+        );
+        // A hint outside the bounds is clamped.
+        let unbounded = http_refusal(
+            503,
+            serde_json::json!({
+                "code": "process_creation_busy",
+                "retryable": true,
+                "retry_after_ms": 3_600_000,
+            }),
+        );
+        assert_eq!(
+            process_creation_busy_wait(&unbounded, std::time::Duration::from_secs(30)),
+            Some(PROCESS_CREATION_BUSY_MAX_WAIT)
+        );
+    }
+
+    #[test]
+    fn other_refusals_are_not_retried() {
+        let budget = std::time::Duration::from_secs(30);
+        for refusal in [
+            // Another bounded-resource refusal.
+            http_refusal(
+                503,
+                serde_json::json!({"code": "service_unavailable", "retryable": true}),
+            ),
+            // Not marked retryable by the daemon.
+            http_refusal(
+                503,
+                serde_json::json!({"code": "process_creation_busy", "retryable": false}),
+            ),
+            // The code under another status is not the typed refusal.
+            http_refusal(
+                500,
+                serde_json::json!({"code": "process_creation_busy", "retryable": true}),
+            ),
+            crate::error::CliDispatchError::Transport(crate::error::CliTransportError::HttpError {
+                status: 503,
+                body: "not json".to_string(),
+            }),
+            crate::error::CliDispatchError::Transport(
+                crate::error::CliTransportError::Unreachable {
+                    bind: "127.0.0.1:1".to_string(),
+                    detail: "refused".to_string(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                process_creation_busy_wait(&refusal, budget),
+                None,
+                "{refusal}"
+            );
+        }
+    }
 
     #[test]
     fn no_project_is_a_global_selector_before_the_command() {

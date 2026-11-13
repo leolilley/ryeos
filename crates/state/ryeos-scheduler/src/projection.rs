@@ -37,19 +37,25 @@ impl VerifiedScheduleSource {
 pub fn load_verified_schedule_source(
     path: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
 ) -> Result<VerifiedScheduleSource> {
     let content = lillux::read_regular_file_to_string_no_follow(path)
         .with_context(|| format!("securely read schedule source {}", path.display()))?;
-    verify_schedule_source_content(path, &content, trust_store)
+    verify_schedule_source_content(path, &content, trust_store, node_fingerprint)
 }
 
 /// Verify schedule bytes already read from an inode pinned by the caller. This
 /// prevents read/verify/mutate workflows from reopening a pathname between the
 /// trust decision and an inode-conditional replacement or deletion.
+///
+/// Schedules are node state: only the node key (`node_fingerprint`) may sign
+/// one. Any other signer, pinned or not, is refused with
+/// [`ryeos_engine::trust::NodeDocumentWrongSigner`].
 pub fn verify_schedule_source_content(
     path: &Path,
     content: &str,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
 ) -> Result<VerifiedScheduleSource> {
     let schedules_dir = path
         .parent()
@@ -97,9 +103,20 @@ pub fn verify_schedule_source_content(
             );
         }
     }
-    let (trust_class, _) =
-        ryeos_engine::trust::verify_item_signature(content, &header, &envelope, trust_store)
-            .with_context(|| format!("verify schedule source {}", path.display()))?;
+    ryeos_engine::trust::require_document_signer(
+        path,
+        &header.signer_fingerprint,
+        node_fingerprint,
+        "node",
+        ryeos_engine::trust::NODE_DOCUMENT_CURE,
+    )?;
+    let (trust_class, _) = ryeos_engine::trust::verify_item_signature(
+        content,
+        &header,
+        &envelope,
+        &trust_store.restricted_to(node_fingerprint),
+    )
+    .with_context(|| format!("verify schedule source {}", path.display()))?;
     if trust_class != ryeos_engine::contracts::TrustClass::Trusted {
         bail!(
             "schedule source {} signer {} is not trusted",
@@ -302,11 +319,12 @@ pub fn rebuild_specs_from_dir(
     schedules_dir: &Path,
     db: &SchedulerDb,
     trust_store: &ryeos_engine::trust::TrustStore,
+    node_fingerprint: &str,
 ) -> Result<Vec<String>> {
     let mut seen = std::collections::HashSet::new();
     let mut records = Vec::new();
     for path in canonical_schedule_source_paths(schedules_dir)? {
-        let verified = load_verified_schedule_source(&path, trust_store)?;
+        let verified = load_verified_schedule_source(&path, trust_store, node_fingerprint)?;
         if !seen.insert(verified.record.schedule_id.clone()) {
             bail!(
                 "duplicate schedule source for {}",
@@ -602,6 +620,38 @@ mod tests {
         }])
     }
 
+    fn test_fp(key: [u8; 32]) -> String {
+        let signing_key = lillux::crypto::SigningKey::from_bytes(&key);
+        lillux::cas::sha256_hex(signing_key.verifying_key().to_bytes().as_ref())
+    }
+
+    /// A schedule signed by a pinned key that is not the node key is refused
+    /// by name, even though that key is trusted for items.
+    #[test]
+    fn schedule_signed_by_pinned_non_node_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let schedules_dir = schedule_dir(dir.path());
+        write_signed_source(
+            &schedules_dir,
+            "publisher.yaml",
+            &test_source("publisher"),
+            TEST_KEY,
+        );
+        let node_key = [7; 32];
+        let mut signers: Vec<ryeos_engine::trust::TrustedSigner> =
+            test_trust_store(TEST_KEY).signers().cloned().collect();
+        signers.extend(test_trust_store(node_key).signers().cloned());
+        let trust = ryeos_engine::trust::TrustStore::from_signers(signers);
+        let error = rebuild_specs_from_dir(&schedules_dir, &test_db(), &trust, &test_fp(node_key))
+            .unwrap_err();
+        let refusal = error
+            .downcast_ref::<ryeos_engine::trust::NodeDocumentWrongSigner>()
+            .unwrap_or_else(|| panic!("expected node_document_wrong_signer, got {error:#}"));
+        assert_eq!(refusal.signer, test_fp(TEST_KEY));
+        assert_eq!(refusal.expected, test_fp(node_key));
+        assert!(format!("{error:#}").contains(ryeos_engine::trust::NODE_DOCUMENT_WRONG_SIGNER));
+    }
+
     fn write_signed_body(
         schedules_dir: &Path,
         filename: &str,
@@ -705,8 +755,13 @@ mod tests {
             ryeos_engine::item_resolution::parse_signature_header(&signed, &envelope).unwrap();
 
         let db = test_db();
-        let live_ids =
-            rebuild_specs_from_dir(&schedules_dir, &db, &test_trust_store(TEST_KEY)).unwrap();
+        let live_ids = rebuild_specs_from_dir(
+            &schedules_dir,
+            &db,
+            &test_trust_store(TEST_KEY),
+            &test_fp(TEST_KEY),
+        )
+        .unwrap();
 
         assert_eq!(live_ids, vec!["trusted"]);
         let spec = db.get_spec("trusted").unwrap().unwrap();
@@ -728,8 +783,13 @@ mod tests {
             .unwrap();
         db.replace_specs(&[previous]).unwrap();
 
-        let error =
-            rebuild_specs_from_dir(&schedules_dir, &db, &test_trust_store(TEST_KEY)).unwrap_err();
+        let error = rebuild_specs_from_dir(
+            &schedules_dir,
+            &db,
+            &test_trust_store(TEST_KEY),
+            &test_fp(TEST_KEY),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("unsupported non-.yaml file"));
         assert!(db.get_spec("previous").unwrap().is_some());
         assert!(db.get_spec("new").unwrap().is_none());
@@ -742,8 +802,13 @@ mod tests {
         fs::create_dir_all(&schedules_dir).unwrap();
         fs::write(schedules_dir.join("README"), "unexpected").unwrap();
 
-        let error = rebuild_specs_from_dir(&schedules_dir, &test_db(), &test_trust_store(TEST_KEY))
-            .unwrap_err();
+        let error = rebuild_specs_from_dir(
+            &schedules_dir,
+            &test_db(),
+            &test_trust_store(TEST_KEY),
+            &test_fp(TEST_KEY),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("unsupported non-.yaml file"));
     }
 
@@ -758,8 +823,13 @@ mod tests {
             TEST_KEY,
         );
 
-        let error = rebuild_specs_from_dir(&schedules_dir, &test_db(), &test_trust_store(TEST_KEY))
-            .unwrap_err();
+        let error = rebuild_specs_from_dir(
+            &schedules_dir,
+            &test_db(),
+            &test_trust_store(TEST_KEY),
+            &test_fp(TEST_KEY),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("declares schedule_id"));
     }
 
@@ -772,8 +842,13 @@ mod tests {
         let body = serde_yaml::to_string(&value).unwrap();
         write_signed_body(&schedules_dir, "no-execution.yaml", &body, TEST_KEY);
 
-        let error = rebuild_specs_from_dir(&schedules_dir, &test_db(), &test_trust_store(TEST_KEY))
-            .unwrap_err();
+        let error = rebuild_specs_from_dir(
+            &schedules_dir,
+            &test_db(),
+            &test_trust_store(TEST_KEY),
+            &test_fp(TEST_KEY),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("missing field"));
     }
 
@@ -788,8 +863,13 @@ mod tests {
         )
         .unwrap();
         assert!(
-            rebuild_specs_from_dir(&unsigned_schedules, &test_db(), &test_trust_store(TEST_KEY),)
-                .is_err()
+            rebuild_specs_from_dir(
+                &unsigned_schedules,
+                &test_db(),
+                &test_trust_store(TEST_KEY),
+                &test_fp(TEST_KEY),
+            )
+            .is_err()
         );
 
         let untrusted_dir = tempfile::tempdir().unwrap();
@@ -805,6 +885,7 @@ mod tests {
                 &untrusted_schedules,
                 &test_db(),
                 &test_trust_store([99; 32]),
+                &test_fp([99; 32]),
             )
             .is_err()
         );
@@ -821,8 +902,13 @@ mod tests {
         assert_ne!(tampered, signed);
         fs::write(tampered_schedules.join("tampered.yaml"), tampered).unwrap();
         assert!(
-            rebuild_specs_from_dir(&tampered_schedules, &test_db(), &test_trust_store(TEST_KEY),)
-                .is_err()
+            rebuild_specs_from_dir(
+                &tampered_schedules,
+                &test_db(),
+                &test_trust_store(TEST_KEY),
+                &test_fp(TEST_KEY),
+            )
+            .is_err()
         );
     }
 
@@ -835,9 +921,13 @@ mod tests {
             .unwrap();
         db.replace_specs(&[previous]).unwrap();
 
-        let live_ids =
-            rebuild_specs_from_dir(&schedule_dir(dir.path()), &db, &test_trust_store(TEST_KEY))
-                .unwrap();
+        let live_ids = rebuild_specs_from_dir(
+            &schedule_dir(dir.path()),
+            &db,
+            &test_trust_store(TEST_KEY),
+            &test_fp(TEST_KEY),
+        )
+        .unwrap();
 
         assert!(live_ids.is_empty());
         assert!(db.get_spec("previous").unwrap().is_none());

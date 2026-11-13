@@ -1974,6 +1974,24 @@ pub enum LinuxOverlayMutationKind {
     DeletePath,
     EnsureDirectory,
     OpaqueDirectory,
+    /// An entry that has no portable representation. The scan reports it by
+    /// path instead of failing, because only the caller's ignore policy knows
+    /// whether the path matters; the scan never applies that policy.
+    Unrepresentable {
+        reason: LinuxOverlayUnrepresentableReason,
+    },
+}
+
+/// Why an overlay entry has no portable representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxOverlayUnrepresentableReason {
+    /// A symlink whose target is absolute, empty, not UTF-8 or contains NUL.
+    UnportableSymlinkTarget,
+    /// A socket, FIFO or device other than an overlay whiteout.
+    UnsupportedEntryType,
+    /// A name that is not UTF-8. The reported path replaces each invalid byte
+    /// with U+FFFD, and the entry is never descended into.
+    NonUtf8Name,
 }
 
 /// Portable retained-output link bound, applied before allocating its target.
@@ -6252,10 +6270,23 @@ mod imp {
             if mutations.len() >= max_mutations {
                 return Err(format!("overlay delta exceeds {max_mutations} mutations"));
             }
-            let name = entry
-                .name
-                .into_string()
-                .map_err(|_| "overlay mutation path is not UTF-8".to_string())?;
+            let name = match entry.name.into_string() {
+                Ok(name) => name,
+                Err(raw) => {
+                    let lossy = String::from_utf8_lossy(raw.as_bytes()).into_owned();
+                    mutations.push(LinuxOverlayMutation {
+                        path: if prefix.is_empty() {
+                            lossy
+                        } else {
+                            format!("{prefix}/{lossy}")
+                        },
+                        kind: LinuxOverlayMutationKind::Unrepresentable {
+                            reason: LinuxOverlayUnrepresentableReason::NonUtf8Name,
+                        },
+                    });
+                    continue;
+                }
+            };
             if matches!(name.as_str(), "." | "..") || name.contains('/') {
                 return Err("overlay mutation has an invalid path component".to_string());
             }
@@ -6291,9 +6322,14 @@ mod imp {
                         sha256,
                     }
                 }
-                libc::S_IFLNK => LinuxOverlayMutationKind::UpsertSymlink {
-                    target: read_overlay_symlink_at(directory_fd, &name_c, &stat, &relative)?,
-                },
+                libc::S_IFLNK => {
+                    match read_overlay_symlink_at(directory_fd, &name_c, &stat, &relative)? {
+                        Some(target) => LinuxOverlayMutationKind::UpsertSymlink { target },
+                        None => LinuxOverlayMutationKind::Unrepresentable {
+                            reason: LinuxOverlayUnrepresentableReason::UnportableSymlinkTarget,
+                        },
+                    }
+                }
                 libc::S_IFDIR => {
                     let child = unsafe {
                         libc::openat(
@@ -6339,11 +6375,9 @@ mod imp {
                     continue;
                 }
                 libc::S_IFCHR if stat.st_rdev == 0 => LinuxOverlayMutationKind::DeletePath,
-                _ => {
-                    return Err(format!(
-                        "overlay delta contains unsupported entry type at {relative}"
-                    ));
-                }
+                _ => LinuxOverlayMutationKind::Unrepresentable {
+                    reason: LinuxOverlayUnrepresentableReason::UnsupportedEntryType,
+                },
             };
             mutations.push(LinuxOverlayMutation {
                 path: relative,
@@ -6353,12 +6387,15 @@ mod imp {
         Ok(())
     }
 
+    /// The link's exact target, or `None` when it is not portable relative
+    /// content (absolute, empty, not UTF-8 or containing NUL). An overlong or
+    /// moving link is still an error: it is not a stable observation.
     fn read_overlay_symlink_at(
         directory_fd: RawFd,
         name: &CStr,
         expected: &libc::stat,
         relative: &str,
-    ) -> Result<String, String> {
+    ) -> Result<Option<String>, String> {
         if expected.st_size < 1
             || expected.st_size as u64 > MAX_LINUX_OVERLAY_SYMLINK_TARGET_BYTES as u64
         {
@@ -6445,14 +6482,13 @@ mod imp {
             ));
         }
         bytes.truncate(read as usize);
-        let target = String::from_utf8(bytes)
-            .map_err(|_| format!("overlay symlink target is not UTF-8: {relative}"))?;
+        let Ok(target) = String::from_utf8(bytes) else {
+            return Ok(None);
+        };
         if target.is_empty() || target.starts_with('/') || target.as_bytes().contains(&0) {
-            return Err(format!(
-                "overlay symlink target is not portable relative content: {relative}"
-            ));
+            return Ok(None);
         }
-        Ok(target)
+        Ok(Some(target))
     }
 
     #[cfg(test)]
@@ -10845,7 +10881,115 @@ mod tests {
         );
         bin.create_symlink(OsStr::new("absolute"), b"/outside")
             .unwrap();
-        assert!(observe().unwrap_err().contains("relative"));
+        // The scan does not know the ignore policy: it reports the absolute
+        // link by path and lets the caller skip or refuse it.
+        let observed = observe().unwrap();
+        assert!(observed.mutations.contains(&LinuxOverlayMutation {
+            path: "bin/absolute".into(),
+            kind: LinuxOverlayMutationKind::Unrepresentable {
+                reason: LinuxOverlayUnrepresentableReason::UnportableSymlinkTarget,
+            },
+        }));
+        assert!(
+            !observed
+                .mutations
+                .iter()
+                .any(|mutation| matches!(&mutation.kind, LinuxOverlayMutationKind::UpsertSymlink { target } if target == "/outside"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlay_scan_reports_unrepresentable_entries_instead_of_failing() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let project_path = temporary.path().join("project");
+        let state_path = temporary.path().join("state");
+        std::fs::create_dir_all(&project_path).unwrap();
+        std::fs::create_dir_all(state_path.join("upper/.venv/bin")).unwrap();
+        std::fs::create_dir_all(state_path.join("work")).unwrap();
+        std::os::unix::fs::symlink(
+            "/usr/bin/python3",
+            state_path.join("upper/.venv/bin/python"),
+        )
+        .unwrap();
+        let fifo =
+            std::ffi::CString::new(state_path.join("upper/.venv/pipe").as_os_str().as_bytes())
+                .unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let socket =
+            std::os::unix::net::UnixListener::bind(state_path.join("upper/.venv/sock")).unwrap();
+        std::fs::create_dir(
+            state_path
+                .join("upper/.venv")
+                .join(OsStr::from_bytes(b"bad\xffdir")),
+        )
+        .unwrap();
+        std::fs::write(
+            state_path
+                .join("upper/.venv")
+                .join(OsStr::from_bytes(b"bad\xffdir"))
+                .join("hidden"),
+            b"never scanned",
+        )
+        .unwrap();
+        std::fs::write(state_path.join("upper/out.txt"), b"kept").unwrap();
+        let project = crate::PinnedDirectory::open(&project_path)
+            .unwrap()
+            .unwrap();
+        let state = crate::PinnedDirectory::open(&state_path).unwrap().unwrap();
+        let project_fd = project.try_clone_descriptor().unwrap();
+        let state_fd = state.try_clone_descriptor().unwrap();
+        let observed = operate_linux_overlay_workspace(
+            project_fd.as_raw_fd() as u32,
+            state_fd.as_raw_fd() as u32,
+            LinuxOverlayWorkspaceOperation::Observe,
+            16,
+        )
+        .unwrap();
+        drop(socket);
+        let unrepresentable = |path: &str, reason| LinuxOverlayMutation {
+            path: path.into(),
+            kind: LinuxOverlayMutationKind::Unrepresentable { reason },
+        };
+        for expected in [
+            unrepresentable(
+                ".venv/bin/python",
+                LinuxOverlayUnrepresentableReason::UnportableSymlinkTarget,
+            ),
+            unrepresentable(
+                ".venv/pipe",
+                LinuxOverlayUnrepresentableReason::UnsupportedEntryType,
+            ),
+            unrepresentable(
+                ".venv/sock",
+                LinuxOverlayUnrepresentableReason::UnsupportedEntryType,
+            ),
+            unrepresentable(
+                ".venv/bad\u{fffd}dir",
+                LinuxOverlayUnrepresentableReason::NonUtf8Name,
+            ),
+        ] {
+            assert!(
+                observed.mutations.contains(&expected),
+                "{expected:?} missing from {:?}",
+                observed.mutations
+            );
+        }
+        assert!(
+            observed
+                .mutations
+                .iter()
+                .all(|mutation| !mutation.path.ends_with("hidden")),
+            "a non-UTF-8 directory is not descended into"
+        );
+        assert!(
+            observed
+                .mutations
+                .iter()
+                .any(|mutation| mutation.path == "out.txt")
+        );
     }
 
     #[cfg(target_os = "linux")]

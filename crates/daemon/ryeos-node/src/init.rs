@@ -2014,6 +2014,23 @@ fn verify_init_completion_checking_capacity(
     let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     let trust_store = TrustStore::load(None, &operator_config_root)
         .context("load pinned operator verification authority")?;
+    // The completion record is operator-signed by design, and only this
+    // node's own operator may sign it: another pinned key (a publisher's)
+    // naming itself as operator is refused. A node with no operator key on
+    // its volume has no local operator to compare against; the record must
+    // then still name a pinned key (the layout cut moves the operator key
+    // home and makes this unconditional).
+    if let Some((local_operator, _)) = crate::offline_operation::local_operator(app_root)
+        .context("read the local operator key for init-completion verification")?
+    {
+        ryeos_engine::trust::require_document_signer(
+            &path,
+            &document.body.operator_fingerprint,
+            &local_operator,
+            "operator",
+            "only this node's operator signs its init completion record: re-run `ryeos init` on this node with its own operator key",
+        )?;
+    }
     let operator_key = trust_store
         .get(&document.body.operator_fingerprint)
         .map(|signer| &signer.verifying_key)
@@ -3050,7 +3067,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         names.sort();
-        assert!(names.contains(&"f5r-controller".to_owned()), "{names:?}");
+        assert!(names.contains(&"hosted-controller".to_owned()), "{names:?}");
         for name in names {
             let profile = authored_profile(&name);
             let path = directory.join(format!("{name}.yaml"));

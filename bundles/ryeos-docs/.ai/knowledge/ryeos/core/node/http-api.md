@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:31Z:5579875b4a42e4f24a6336e4464ecaa7a1fec3d695f8cb2064cf73a880324178:sDHhcOv+oMoBt4EJs+7Ugz7+VtB2jfH5eTr460OnOKcoN/1pazjllgF+lp949HuWRFwzmGGEv1OUgZk4SjPPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:49:49Z:04532a02c96939356cb121d1215541b948bbda2354bd1d215227aa587c82aee6:GxTsHaBSB+2WeX8dfoE21rZoGn7ZvM3B63y+Yox3NTgmY3voxvMkbCoV1GLEbTPrSapPLA/zB7PGv5NiZhW0Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -36,6 +36,27 @@ Execute an item or service. Authenticated.
 - **Request:** JSON execution envelope (`item_ref`, `parameters`,
   `project_path`, and optional project source fields)
 - **Response:** execution result envelope
+
+#### Transient refusal: `process_creation_busy`
+
+When the daemon cannot create a handler process it needs to resolve the
+requested item, because fork-sensitive descriptor authority stayed held past
+the five-second setup deadline, it refuses with HTTP 503 and:
+
+```json
+{
+  "code": "process_creation_busy",
+  "error": "process creation is busy; retry after 250 ms",
+  "retryable": true,
+  "retry_after_ms": 250
+}
+```
+
+The refusal is raised only while resolving the root item, before the request
+is admitted, so nothing ran and the same request may be reissued after
+`retry_after_ms`. The body names no holder; the daemon log records the held
+lease sites. A stranded fork window or a missing handler binary is not this
+refusal and is not retryable.
 
 ### `POST /execute/stream`
 
@@ -126,6 +147,10 @@ Cancel a running thread. Authenticated.
 
 - **Source:** thread cancellation control surface
 - **Response:** cancellation confirmation or error
+- **`409 stop_pending_settlement`:** SIGKILL reached the thread's process
+  group, but the group was still present at the 5-second settle bound. The
+  stop request is durable; recovery is woken at once and finalizes the thread
+  once the group is gone. Poll the thread rather than retrying the cancel.
 
 ## Object and CAS Routes
 

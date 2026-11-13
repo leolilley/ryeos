@@ -21,7 +21,10 @@ use ryeos_state::objects::{
 const MAX_SCHEMA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SCHEMA_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 /// v11 seals the finite absence inventory checked before workload bootstrap.
-pub use ryeos_state::objects::STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION;
+/// v12 removes the approval `cancel` response template.
+pub use ryeos_state::objects::{
+    STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION, StructuredSessionProfileSchemaRefusal,
+};
 
 /// The closed workload transport vocabulary. The admission compiler and the
 /// bridge must accept exactly this set; adding a transport is a schema
@@ -87,10 +90,11 @@ pub fn compile(
         "server_requests",
     ]
     .to_vec();
-    if object.get("schema_version").and_then(Value::as_u64)
-        != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION))
-    {
-        bail!("structured-session profile schema is not admitted");
+    let schema_version = object.get("schema_version").and_then(Value::as_u64);
+    if schema_version != Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION)) {
+        return Err(anyhow::Error::new(StructuredSessionProfileSchemaRefusal {
+            found: schema_version,
+        }));
     }
     required.push("transport");
     let http_transport = match object.get("transport").and_then(Value::as_str) {
@@ -901,7 +905,7 @@ pub fn compile(
             .get("responses")
             .and_then(Value::as_object)
             .ok_or_else(|| anyhow!("structured-session server-request responses are invalid"))?;
-        const RESPONSE_KEYS: [&str; 4] = ["accept", "cancel", "decline", "expire"];
+        const RESPONSE_KEYS: [&str; 3] = ["accept", "decline", "expire"];
         if responses.len() != RESPONSE_KEYS.len()
             || RESPONSE_KEYS
                 .iter()
@@ -2845,7 +2849,25 @@ mod tests {
 
         let mut retired = profile.clone();
         retired["schema_version"] = json!(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION - 1);
-        assert!(compile(&serde_json::to_vec(&retired).unwrap(), &schemas()).is_err());
+        let refusal = compile(&serde_json::to_vec(&retired).unwrap(), &schemas()).unwrap_err();
+        assert_eq!(
+            refusal.downcast_ref::<StructuredSessionProfileSchemaRefusal>(),
+            Some(&StructuredSessionProfileSchemaRefusal {
+                found: Some(u64::from(STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION - 1)),
+            })
+        );
+        assert!(refusal.to_string().contains("Cure: migrate the profile"));
+        let mut unversioned = profile.clone();
+        unversioned
+            .as_object_mut()
+            .unwrap()
+            .remove("schema_version");
+        assert_eq!(
+            compile(&serde_json::to_vec(&unversioned).unwrap(), &schemas())
+                .unwrap_err()
+                .downcast_ref::<StructuredSessionProfileSchemaRefusal>(),
+            Some(&StructuredSessionProfileSchemaRefusal { found: None })
+        );
 
         for invalid in ["", "stdio", "auto", "HTTP_SSE", "unix_socket"] {
             let mut closed = profile.clone();
@@ -2961,7 +2983,6 @@ mod tests {
             },
             "responses":{
                 "accept":{"op":"literal","value":{"response":"once"}},
-                "cancel":{"op":"literal","value":{"response":"deny"}},
                 "decline":{"op":"literal","value":{"response":"deny"}},
                 "expire":{"op":"literal","value":{"response":"deny"}}
             },

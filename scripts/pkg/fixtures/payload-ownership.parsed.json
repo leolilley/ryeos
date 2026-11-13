@@ -24,8 +24,8 @@
     "bundle_name": "codex",
     "bundle_sets": [
      "development",
-     "f5r-controller",
      "full",
+     "hosted-controller",
      "hosted-workflow",
      "release-artifacts"
     ],
@@ -97,8 +97,8 @@
      "core-scheduling",
      "core-workflow",
      "development",
-     "f5r-controller",
      "full",
+     "hosted-controller",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -234,8 +234,8 @@
      "central-host",
      "core-workflow",
      "development",
-     "f5r-controller",
      "full",
+     "hosted-controller",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -283,8 +283,8 @@
      "central-host",
      "core-knowledge",
      "development",
-     "f5r-controller",
      "full",
+     "hosted-controller",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -326,7 +326,7 @@
     "bundle_name": "render-sandbox",
     "bundle_sets": [
      "development",
-     "f5r-controller",
+     "hosted-controller",
      "release-artifacts"
     ],
     "host_features": [],

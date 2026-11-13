@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-15T00:55:34Z:9e64da38b36d3715024744b181a3243fde2548a11b65e11f0342774b3bf58558:qRe0XmeMhtTNO+ZBym9LxDUw80Eq/7cavj3qeb+Q2s2cUSpofCpAB96e/T2FlH9UsA2PDa/539n4qRrfZdo7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:48:58Z:cbdd5863581574bc777549bae034d5ca9638fe01b07fb8e0574e48389e5cfe7a:+R12agbX+timvizwAAIgnpmvg5Gx9F5pEHZWcyhXQwpTCaxEWSeW3Va5U+cE6GZm/lHYkyPzAgS39JzoVyUKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
@@ -130,6 +130,15 @@ projections:
         map:
           hosted_session.approval_requested: warn
         default: warn
+    hosted_session.approval_expired:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_session.approval_expired: warn
+        default: warn
     hosted_approval.decision_reserved:
       primary: payload.decision
       meta: payload.approval_id
@@ -161,6 +170,15 @@ projections:
         map:
           hosted_approval.delivery_settled: good
         default: good
+    hosted_approval.delivery_expired:
+      primary: payload.approval_id
+      meta: event_type
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_approval.delivery_expired: warn
+        default: warn
     worker_session.restored:
       primary: payload.successor_placement_thread_id
       meta: payload.source_placement_thread_id
@@ -209,6 +227,15 @@ projections:
         field: event_type
         map:
           hosted_candidate.publication_not_applied: warn
+        default: warn
+    hosted_candidate.publication_superseded:
+      primary: payload.candidate_snapshot_hash
+      meta: payload.observed_head
+      role: line
+      tone:
+        field: event_type
+        map:
+          hosted_candidate.publication_superseded: warn
         default: warn
     hosted_candidate.publication_unknown:
       primary: payload.candidate_snapshot_hash

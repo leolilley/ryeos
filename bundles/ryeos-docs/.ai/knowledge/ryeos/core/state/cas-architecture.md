@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-23T01:51:04Z:3f31e3043cd3347deb7f902ba46de30b54dfe4d2089f120fb80b6d2302cff0cc:i82ZrR6Uw/A5ptYff7fq7R/ruB+Q/pqcY9l6hOUboxlkDIlbsdeLo5P80Kd1lOEgJt68v211DJ/mBP879c8VAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:49:46Z:3f9a5c8d269ae24afd623f5de6be1058b4ab996ec0d76366c2ba6c52b17bcedf:CsO4zufd0of+LCtO4/elDYuLs/k2CgNGym7lRQRBY6yqIsrfPOBm1bq3LdFcb0Zlv4YPSUBvGqQAKqrUHq3+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -234,6 +234,19 @@ ryeos external-content import-binding <exact-active-binding-hash> <maximum-bytes
 ryeos external-content import-product <exact-product-witness-hash> <maximum-bytes>
 ```
 
+A pinned-project binding is scoped to one project snapshot and one effective
+consumer definition. To see which bindings a consumer holds at a generation and
+renew one made at an earlier generation, use:
+
+```
+ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash]
+ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash>
+```
+
+`rebind` re-stages the prior binding's manifest exactly as `import-binding`
+does and binds it through the ordinary bind; see
+`ryeos/core/execution/retained-products` for its refusals.
+
 The optional binding owner is required when the active source binding belongs
 to an admitted remote operator. Only the configured local operator may perform
 the import. The node revalidates the named owner's current grant and the exact
@@ -246,6 +259,28 @@ ordinary content manifest; files above the small-content ceiling use the existin
 verified large-store ingest and chunk commitments. Producer/snapshot provenance
 changes acquisition identity, not the resulting payload manifest. Current node
 capture exclusions and all selected-tier limits still apply.
+
+### Large-object scrub and quarantine
+
+Launch verifies a large object's manifest commitment, residency and identity,
+never its bytes; `ryeos external-content scrub` is where bytes are re-hashed.
+An object whose bytes no longer hash to the name it was published under is
+moved, with its sidecar, from the served namespace into the store's
+`quarantine/` directory, and the scrub response lists it under
+`objects_quarantined`. Executions that already hold it keep their descriptors;
+every later launch that needs it is refused with `large_object_quarantined`,
+naming the cure. Re-importing the original bytes (or pushing the product
+again) publishes a clean copy under the same hash; materialized generations
+built on the damaged inode are rebuilt on next use. A chunk or size mismatch
+beside a matching whole-file hash is sidecar damage, and an unreadable object
+may be a transient fault: both are reported and left in place. Quarantined
+copies are evidence. They count against the large-object budget but are never
+eviction candidates, and nothing removes them except an operator purge on the
+stopped node:
+
+```
+ryeos node large-objects purge-quarantine [--dry-run | --confirm]
+```
 
 ### Named producer products
 
@@ -399,8 +434,8 @@ Events have three tiers that control CAS storage and SQLite indexing:
 | Tier | CAS Stored? | SQLite Indexed? | Survives Crash? | Use Case |
 |---|---|---|---|---|
 | `Durable` | Yes | Yes | Yes | State changes, artifacts, lifecycle |
-| `Journal` | Yes | No | Yes | Audit trail, tool calls |
-| `Ephemeral` | No | No | No | Token deltas, streaming logs |
+| `Journal` | Yes | No | Yes | Observations, foreach iteration results |
+| `Ephemeral` | No | No | No | Token deltas, streaming snapshots, reasoning |
 
 The SQLite `events` table has a CHECK constraint that only accepts
 `'durable'`:
@@ -413,9 +448,13 @@ Journal events are in CAS (recoverable on rebuild) but not queryable
 through the projection. Ephemeral events are transient — lost on process
 crash.
 
-Events are assigned tiers by the runtime: high-frequency progressive
-events (`token_delta`, `stream_snapshot`, `graph_foreach_iteration`)
-are journal-only; all lifecycle and audit events are durable.
+The daemon assigns tiers from the node's signed `event_storage` policy; a
+runtime sends no storage class. In every shipped profile, token, stream-snapshot and
+reasoning deltas (`token_delta`, `stream_snapshot`, `cognition_reasoning`) are
+ephemeral, because the turn-complete `cognition_out` keeps their content, and
+`observation` and `graph_foreach_iteration` are journal-only. Only these
+progressive events can leave the durable tier; all lifecycle and audit events
+are always durable. See [Event Braid](event-braid.md#durability-tiers).
 
 ## CAS-First Write Contract
 

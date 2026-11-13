@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:35Z:11510f27ac0cebcbd8976f02dadb1b84c55e85f822ee6981aa4f8bbcd9b8e108:UrwNrRsi8k/Wa0pWbd1OKfUXyIUjiVEaXGBEZXUkiOkckCllYu629KExFTuP6vjXp//qo6P1N+kPQUJVAZsgBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:39:38Z:2edd21a662fce546d0e7d4ca4bbce899dabdc53fd52804b4224e1e172acfd965:dZz4ca54CfAq0RbrDGdSnuxA9Hm10E3wll38F17eehYIosU4eKb9QCZ/UD0soA5k9xzIBct7nMBSMqXbPuJCAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, vault, secrets, remote]
@@ -72,6 +72,16 @@ if any declared secret is missing. Sources are checked in this order:
 
 Only declared names are injected into the subprocess environment. The
 daemon never pours the whole vault into a tool process.
+
+Delivery from the operator vault is operator authority. An execution policy
+that exposes it (a project overlay with `include_operator_vault: true`, or the
+`operator` vault namespace) requires the fixed capability
+`ryeos.use.vault.operator` at preauthorization; without it the daemon refuses
+with `operator_vault_capability_required` before any launch or secret read.
+The configured operator's bootstrap `*` grant covers it. Remote caller nodes
+and narrower principals need it granted explicitly, and it should not be
+granted to remote caller nodes by default. See
+[Secrets & credentials](../../standard/secrets.md#who-may-read-the-operator-vault).
 
 ```yaml
 category: agent-kiwi/oauth/connect

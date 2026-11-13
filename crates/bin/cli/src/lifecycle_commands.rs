@@ -19,16 +19,23 @@
 //!   - `ryeos node reset execution-history-scratch` — clear stranded reset scratch
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
 //!   - `ryeos node reset external-content-bindings` — retire realization bindings
+//!   - `ryeos node large-objects purge-quarantine` — discard large objects scrub quarantined
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
 //!   - `ryeos node reset policy-generation` — explicit node-policy schema cut
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
 //!   - `ryeos node bundle-set update` — install one exact remotely published bundle set
 //!   - `ryeos node host setup` — one-time administrator-owned host association
+//!   - `ryeos node host retire` — retire a stopped node's host service, or every orphaned one
 //!   - `ryeos node external-execution compose` — compose and install a node-signed external placement binding on a stopped node
 //!   - `ryeos node external-execution provision-credential` — provision the placement credential an installed binding names into the node vault
 //!   - `ryeos node external-execution qualification-session-compose` — compose and install the node-signed qualification-only session binding on a stopped node
 //!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
 //!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
+//!
+//! One client composite is listed here for help but dispatched after the
+//! verified node config loads, because it sequences daemon commands:
+//!
+//!   - `ryeos codex login device` — the Codex device-login ceremony (see `codex_device_login.rs`)
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -194,6 +201,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "large-objects", "purge-quarantine"],
+        summary: "Discard the damaged large objects scrub quarantined",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "reset", "policy-generation"],
         summary: "Replace an obsolete node-policy generation",
         category: "maintenance",
@@ -212,6 +224,16 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         tokens: &["node", "host", "setup"],
         summary: "Provision one administrator-owned local hosted-worker service",
         category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "host", "retire"],
+        summary: "Retire a stopped node's host service, or every orphaned one",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["codex", "login", "device"],
+        summary: "Log a Codex credential profile in with a device code, end to end",
+        category: "credentials",
     },
     LocalCommandDescriptor {
         tokens: &["help"],
@@ -378,6 +400,13 @@ pub async fn try_dispatch(
             run_node_external_content_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("large-objects"))
+            if argv.get(2).map(String::as_str) == Some("purge-quarantine") =>
+        {
+            run_node_large_object_quarantine_purge_command(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
             run_node_policy_generation_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
@@ -394,6 +423,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("host")) if argv.get(2).map(String::as_str) == Some("setup") => {
             run_node_host_setup_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("host")) if argv.get(2).map(String::as_str) == Some("retire") => {
+            run_node_host_retire_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("start", _) => {
@@ -465,11 +498,7 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
         args.uds_path,
     )?;
     let account = lillux::ControllerAccount::current().map_err(anyhow::Error::msg)?;
-    let daemon = std::env::current_exe()
-        .context("locate installed ryeos CLI")?
-        .parent()
-        .context("installed ryeos CLI has no binary directory")?
-        .join("ryeosd");
+    let daemon = installed_daemon()?;
     let arguments = vec![
         "host-provision".into(),
         "--app-root".into(),
@@ -481,6 +510,86 @@ fn run_node_host_setup_command(argv: &[String], _console: &crate::tty::Console) 
     ];
     lillux::run_as_administrator(&daemon, &arguments)
         .with_context(|| format!("run administrator host setup through {}", daemon.display()))?;
+    Ok(())
+}
+
+/// The daemon installed beside this CLI: host maintenance runs exactly it.
+fn installed_daemon() -> Result<PathBuf> {
+    Ok(std::env::current_exe()
+        .context("locate installed ryeos CLI")?
+        .parent()
+        .context("installed ryeos CLI has no binary directory")?
+        .join("ryeosd"))
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node host retire",
+    about = "Retire an administrator-owned host service",
+    long_about = "Removes the native host service that `ryeos node host setup` provisioned: the service is brought down, deactivated, and its service definition and logs are removed. With --app-root (or the default node), the node must be stopped; nothing is written in its app root, and the node can still run unsupervised. With --orphaned, every RyeOS node service whose recorded app root no longer exists is listed and retired; a service whose app root exists is never touched by the sweep. Runs the installed ryeosd as administrator, like host setup.",
+    no_binary_name = true
+)]
+struct NodeHostRetireArgs {
+    /// App root whose host service to retire (defaults to the normal local node).
+    #[arg(long, conflicts_with = "orphaned")]
+    app_root: Option<PathBuf>,
+
+    /// Retire every RyeOS node service whose recorded app root no longer exists.
+    #[arg(long)]
+    orphaned: bool,
+
+    /// Required acknowledgement that this removes a root-owned service
+    /// association.
+    #[arg(long)]
+    confirm: bool,
+}
+
+/// The administrator daemon arguments for one retirement request.
+fn host_retire_arguments(args: &NodeHostRetireArgs) -> Result<Vec<std::ffi::OsString>> {
+    if !args.confirm {
+        anyhow::bail!("host retire requires --confirm");
+    }
+    if args.orphaned {
+        return Ok(vec!["host-retire".into(), "--orphaned".into()]);
+    }
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    Ok(vec![
+        "host-retire".into(),
+        "--app-root".into(),
+        app_root.into_os_string(),
+    ])
+}
+
+fn run_node_host_retire_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeHostRetireArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let arguments = host_retire_arguments(&args)?;
+    if args.orphaned {
+        // The listing is unprivileged; the administrator re-checks every root
+        // before it retires anything.
+        let orphans = ryeos_node::supervision::orphaned_host_services()?.context(
+            "this host has no native service directory readable without root; nothing to list",
+        )?;
+        if orphans.is_empty() {
+            println!("no orphaned host services");
+            return Ok(());
+        }
+        for service in &orphans {
+            println!(
+                "orphaned host service {} (app root gone: {})",
+                service.name,
+                service
+                    .app_root
+                    .as_deref()
+                    .map(|root| root.display().to_string())
+                    .unwrap_or_default()
+            );
+        }
+    }
+    let daemon = installed_daemon()?;
+    lillux::run_as_administrator(&daemon, &arguments)
+        .with_context(|| format!("run administrator host retire through {}", daemon.display()))?;
     Ok(())
 }
 
@@ -908,6 +1017,93 @@ fn run_node_external_content_reset_command(
     } else {
         console.text(&format!(
             "External-content binding cutover complete: retired {bindings} binding head(s).\nAll required realizations must be imported and rebound before launch.\n"
+        ))?;
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node large-objects purge-quarantine",
+    about = "Discard the damaged large objects scrub quarantined",
+    long_about = "Remove every large object, and its sidecar, that `external-content scrub` moved into quarantine because its bytes no longer matched their hash. The daemon must be stopped. Quarantined copies are kept as evidence and count against the large-object budget until this is run; nothing else removes them. Served objects, bindings and staging are untouched. --dry-run only counts.",
+    no_binary_name = true
+)]
+struct NodeLargeObjectQuarantinePurgeArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Count the quarantined objects without removing them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Required acknowledgement that the quarantined evidence is discarded.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_large_object_quarantine_purge_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeLargeObjectQuarantinePurgeArgs>(argv, console)?
+    else {
+        return Ok(());
+    };
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("purging the large-object quarantine requires --confirm");
+    }
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let report = if args.dry_run {
+        // A preview changes nothing, so it is not an operation: it only needs
+        // the existing lock held read-only to prove the daemon is stopped.
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(app_root.clone()),
+                ..Default::default()
+            })
+            .context("load local node configuration for large-object quarantine purge")?;
+        let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire_existing_read_only(
+            &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
+        )
+        .context("large-object quarantine purge requires the daemon to be stopped")?;
+        serde_json::to_value(
+            ryeos_app::operator_external_content::purge_quarantined_large_objects(
+                &config,
+                &state_lock,
+                true,
+            )
+            .context("inspect the large-object quarantine")?,
+        )?
+    } else {
+        let host = crate::offline_apply::CliHost::new();
+        host.apply(
+            &app_root,
+            "node.large-objects.purge-quarantine",
+            serde_json::json!({}),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )?
+        .result
+    };
+    if args.json {
+        crate::tty::write_json(&report)?;
+        return Ok(());
+    }
+    let objects = report["objects"].as_u64().unwrap_or_default();
+    let bytes = report["bytes"].as_u64().unwrap_or_default();
+    if args.dry_run {
+        console.text(&format!(
+            "Large-object quarantine preview: {objects} damaged object(s), {bytes} byte(s) would be removed.\n"
+        ))?;
+    } else {
+        console.text(&format!(
+            "Large-object quarantine purged: removed {objects} damaged object(s), {bytes} byte(s).\n"
         ))?;
     }
     Ok(())
@@ -2380,6 +2576,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // The complete signed policy generation, compiled as the daemon compiles
+    // it. A section this release newly requires is named with its cure.
+    if initialized {
+        checks.push(node_policy_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "node_policy",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // Use the same policy loader as daemon and offline execution. Disabled is
     // an explicit, healthy opt-out; enforced policy failures remain fail-closed.
     if initialized {
@@ -2501,6 +2709,29 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // their next fire and pause; report them before that happens.
     #[cfg(feature = "scheduling")]
     checks.push(schedule_authority_check(&config.app_root, initialized));
+
+    // Process quarantine: recovery holds an attached identity it cannot prove
+    // gone. The daemon mirrors its runtime rows into a report after each
+    // recovery pass; the rows stay the authority.
+    if initialized {
+        checks.push(process_quarantine_check(&config.app_root));
+        checks.push(stale_publication_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "stale_publication",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+        checks.push(check(
+            "process_quarantine",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
+    // Host-wide: native services of nodes whose app root is gone. Read-only
+    // enumeration of administrator-owned records; nothing is retired here.
+    checks.push(host_services_check(ryeos_node::supervision::host_services()));
 
     // 4. Socket bindability — only meaningful when nothing should be holding
     //    them. A running daemon holding both is the healthy case; a STALE
@@ -3050,6 +3281,70 @@ fn inspect_schedule_grant_generations(
     )
 }
 
+fn process_quarantine_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+    match ryeos_app::process_quarantine_report::read_report(&state_dir) {
+        Ok(None) => check("process_quarantine", OK, serde_json::json!({})),
+        Ok(Some(report)) => check(
+            "process_quarantine",
+            WARN,
+            serde_json::json!({
+                "message": format!(
+                    "{} thread(s) quarantined: process group unproved",
+                    report.threads.len()
+                ),
+                "written_at": report.written_at,
+                "threads": report.threads,
+                "note": "recovery cannot prove these same-boot process groups gone, so it neither clears nor signals them; each recovery pass rechecks and the record clears once the group is gone",
+                "fix": "inspect the group (`ps -o pid,stat,cmd -g <pgid>`); a member stuck in uninterruptible I/O clears when that I/O completes",
+            }),
+        ),
+        Err(error) => check(
+            "process_quarantine",
+            WARN,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "path": ryeos_app::process_quarantine_report::report_path(&state_dir),
+            }),
+        ),
+    }
+}
+
+fn stale_publication_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+    match ryeos_app::stale_publication_report::read_report(&state_dir) {
+        Ok(None) => check("stale_publication", OK, serde_json::json!({})),
+        Ok(Some(report)) => check(
+            "stale_publication",
+            WARN,
+            serde_json::json!({
+                "message": format!(
+                    "{} publish_ready session(s) whose base HEAD has moved",
+                    report.sessions.len()
+                ),
+                "written_at": report.written_at,
+                "sessions": report.sessions,
+                "note": "each candidate was built on a base that is no longer the project HEAD, so it can never publish; it settles to `base_superseded` (candidate kept as evidence) on the owner's next publish",
+                "fix": "the owner runs the session's publish once to settle it, then starts a new session from the current HEAD to redo the work",
+            }),
+        ),
+        Err(error) => check(
+            "stale_publication",
+            WARN,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "path": ryeos_app::stale_publication_report::report_path(&state_dir),
+            }),
+        ),
+    }
+}
+
 fn native_capacity_check(
     app_root: &std::path::Path,
 ) -> ryeos_core_tools::actions::doctor::CheckResult {
@@ -3544,6 +3839,72 @@ fn floor_entry_text(entry: &lillux::process_control::CapabilityRequirement) -> S
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
+/// The `host_services` row: WARN when a RyeOS node service records an app
+/// root that no longer exists; NA when this host has no native service
+/// directory readable without root.
+fn host_services_check(
+    listing: Result<Option<Vec<ryeos_node::supervision::NodeHostService>>>,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+    let services = match listing {
+        Ok(Some(services)) => services,
+        Ok(None) => {
+            return check(
+                "host_services",
+                NA,
+                serde_json::json!({
+                    "note": "no native service directory is readable without root here; orphaned host services cannot be listed",
+                }),
+            );
+        }
+        Err(error) => {
+            return check(
+                "host_services",
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "note": "native host services could not be enumerated",
+                }),
+            );
+        }
+    };
+    let orphaned: Vec<_> = services
+        .iter()
+        .filter(|service| service.orphaned())
+        .map(|service| serde_json::json!({ "name": service.name, "app_root": service.app_root }))
+        .collect();
+    let unrecognized: Vec<_> = services
+        .iter()
+        .filter_map(|service| {
+            service
+                .problem
+                .as_ref()
+                .map(|problem| serde_json::json!({ "name": service.name, "problem": problem }))
+        })
+        .collect();
+    if orphaned.is_empty() {
+        return check(
+            "host_services",
+            OK,
+            serde_json::json!({
+                "services": services.len(),
+                "unrecognized": unrecognized,
+            }),
+        );
+    }
+    check(
+        "host_services",
+        WARN,
+        serde_json::json!({
+            "services": services.len(),
+            "orphaned": orphaned,
+            "unrecognized": unrecognized,
+            "note": "these host services belong to nodes whose app root no longer exists",
+            "fix": "run: ryeos node host retire --orphaned --confirm",
+        }),
+    )
+}
+
 fn check(
     name: &str,
     status: &str,
@@ -3560,6 +3921,44 @@ fn check(
 struct IsolationPolicyInspection {
     detail: serde_json::Value,
     status: &'static str,
+}
+
+/// Compile the node's signed policy generation as the daemon does.
+fn node_policy_check(app_root: &std::path::Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match crate::node_descriptors::load_verified_policy_snapshot(app_root) {
+        Ok(snapshot) => check(
+            "node_policy",
+            OK,
+            serde_json::json!({ "generation_digest": snapshot.generation_digest() }),
+        ),
+        Err(error) => check("node_policy", FAIL, node_policy_failure_detail(&error)),
+    }
+}
+
+/// A generation missing a newly required section gets its typed code and the
+/// replacement that cures it; any other failure is reported as it is.
+fn node_policy_failure_detail(error: &anyhow::Error) -> serde_json::Value {
+    use ryeos_node_runtime::node_policy::generation::{
+        NodePolicySectionsMissing, POLICY_GENERATION_RESET_COMMAND,
+    };
+    match error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<NodePolicySectionsMissing>())
+    {
+        Some(missing) => serde_json::json!({
+            "code": "node_policy_section_missing",
+            "sections": missing.sections,
+            "error": format!("{error:#}"),
+            "fix": format!(
+                "stop the daemon, then run: {POLICY_GENERATION_RESET_COMMAND}"
+            ),
+        }),
+        None => serde_json::json!({
+            "error": format!("{error:#}"),
+            "fix": "publish a complete valid `.ai/node/policies/` generation; then run `ryeos node doctor` again",
+        }),
+    }
 }
 
 fn inspect_isolation_policy(app_root: &std::path::Path) -> Result<IsolationPolicyInspection> {
@@ -4260,6 +4659,106 @@ mod tests {
         assert_eq!(value(&unmoved, "document"), None);
     }
 
+    fn host_service_for(root: &std::path::Path) -> ryeos_node::supervision::NodeHostService {
+        let launch: lillux::HostServiceLaunch = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "executable": "/usr/bin/ryeosd",
+            "arguments": ["host-service", "--app-root", root],
+            "environment": {},
+            "account": {"implementation": "unix", "uid": 1000, "gid": 1000}
+        }))
+        .unwrap();
+        // The association name is the digest host setup derives from the root.
+        let name = format!(
+            "ryeos-{}",
+            lillux::sha256_hex(
+                lillux::canonical_json(&serde_json::to_value(root).unwrap())
+                    .unwrap()
+                    .as_bytes()
+            )
+        );
+        ryeos_node::supervision::NodeHostService::from_association(lillux::HostServiceAssociation {
+            name,
+            launch: Ok(launch),
+            activated: true,
+        })
+    }
+
+    #[test]
+    fn doctor_host_services_warns_on_orphan() {
+        use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+        let directory = tempfile::tempdir().unwrap();
+        let live = directory.path().join("live");
+        std::fs::create_dir(&live).unwrap();
+        let gone = directory.path().join("gone");
+
+        let healthy = host_services_check(Ok(Some(vec![host_service_for(&live)])));
+        assert_eq!(healthy.status, OK);
+        assert_eq!(healthy.detail["services"], 1);
+
+        let orphaned = host_services_check(Ok(Some(vec![
+            host_service_for(&live),
+            host_service_for(&gone),
+        ])));
+        assert_eq!(orphaned.name, "host_services");
+        assert_eq!(orphaned.status, WARN);
+        let listed = orphaned.detail["orphaned"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["app_root"], serde_json::json!(gone));
+        assert!(
+            orphaned.detail["fix"]
+                .as_str()
+                .unwrap()
+                .contains("ryeos node host retire --orphaned --confirm")
+        );
+
+        assert_eq!(host_services_check(Ok(None)).status, NA);
+        assert_eq!(
+            host_services_check(Err(anyhow::anyhow!("unsafe ownership"))).status,
+            WARN
+        );
+    }
+
+    #[test]
+    fn host_retire_requires_confirm() {
+        let unconfirmed = NodeHostRetireArgs::try_parse_from(["--orphaned"]).unwrap();
+        let error = host_retire_arguments(&unconfirmed).unwrap_err();
+        assert!(error.to_string().contains("--confirm"));
+
+        let sweep = NodeHostRetireArgs::try_parse_from(["--orphaned", "--confirm"]).unwrap();
+        assert_eq!(
+            host_retire_arguments(&sweep).unwrap(),
+            ["host-retire", "--orphaned"]
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("node");
+        let by_root = NodeHostRetireArgs::try_parse_from([
+            std::ffi::OsStr::new("--app-root"),
+            root.as_os_str(),
+            std::ffi::OsStr::new("--confirm"),
+        ])
+        .unwrap();
+        assert_eq!(
+            host_retire_arguments(&by_root).unwrap(),
+            [
+                std::ffi::OsString::from("host-retire"),
+                "--app-root".into(),
+                root.clone().into_os_string(),
+            ]
+        );
+
+        assert!(
+            NodeHostRetireArgs::try_parse_from([
+                std::ffi::OsStr::new("--orphaned"),
+                std::ffi::OsStr::new("--app-root"),
+                root.as_os_str(),
+                std::ffi::OsStr::new("--confirm"),
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn doctor_has_no_remote_content_testimony_row_finding_on_an_empty_root() {
         let directory = tempfile::tempdir().unwrap();
@@ -4286,6 +4785,36 @@ mod tests {
         );
         let missing = durable_identity_check(&directory.path().join("absent"));
         assert_eq!(missing.status, ryeos_core_tools::actions::doctor::FAIL);
+    }
+
+    #[test]
+    fn doctor_names_the_cure_for_a_newly_required_policy_section() {
+        use ryeos_node_runtime::node_policy::generation::{
+            NodePolicySectionsMissing, POLICY_GENERATION_RESET_COMMAND,
+        };
+        let error = anyhow::Error::new(NodePolicySectionsMissing {
+            directory: PathBuf::from("/node/.ai/node/policies"),
+            sections: vec!["event_storage".to_owned()],
+        })
+        .context("load verified node policy generation");
+        let detail = node_policy_failure_detail(&error);
+        assert_eq!(detail["code"], "node_policy_section_missing");
+        assert_eq!(detail["sections"], serde_json::json!(["event_storage"]));
+        assert!(
+            detail["fix"]
+                .as_str()
+                .unwrap()
+                .contains(POLICY_GENERATION_RESET_COMMAND)
+        );
+
+        let other = node_policy_failure_detail(&anyhow::anyhow!("signature mismatch"));
+        assert!(other.get("code").is_none());
+        assert!(
+            other["error"]
+                .as_str()
+                .unwrap()
+                .contains("signature mismatch")
+        );
     }
 
     #[test]

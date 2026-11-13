@@ -51,7 +51,9 @@ print(json.dumps({"schema_version": 1, "candidate_snapshot_hash": candidate,
         (
             ".ai/config/keys/trusted/e2e.toml".into(),
             (
-                trust.into_bytes(),
+                // A project trust document counts only when a node-trusted
+                // key signed it; this identity is pinned on the test node.
+                lillux::signature::sign_content(&trust, signing_key, "#", None).into_bytes(),
                 ryeos_state::objects::ProjectFile::REGULAR_MODE,
             ),
         ),

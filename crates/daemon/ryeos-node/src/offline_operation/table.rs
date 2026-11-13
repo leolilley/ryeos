@@ -483,6 +483,23 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.large-objects.purge-quarantine",
+        authority_bearing: false,
+        local_signer_only: false,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: arguments_of::<handlers::EmptyArguments>,
+        handler: Handler::EffectThenReceipt(handlers::purge_quarantined_large_objects),
+        recovery: Recovery {
+            record: "none needed: the quarantine it empties is the only state it touches",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a second run finds nothing left in quarantine to remove",
+        },
+    },
+    OperationSpec {
         id: "node.reset.authorization",
         authority_bearing: true,
         local_signer_only: true,
@@ -586,11 +603,12 @@ mod tests {
             "node.reset.execution-history-scratch",
             "node.reset.replay-indexes",
             "node.reset.external-content-bindings",
+            "node.large-objects.purge-quarantine",
             "node.reset.authorization",
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 14);
+        assert_eq!(operations().len(), 15);
     }
 
     #[test]

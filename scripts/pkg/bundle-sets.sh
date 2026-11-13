@@ -22,7 +22,7 @@
 # compiled payloads and is published only when the selected set includes it.
 
 ryeos_bundle_set_ids() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller release-authority development
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller release-authority development
 }
 
 ryeos_bundle_set_names() {
@@ -46,7 +46,7 @@ ryeos_bundle_set_names() {
     # Controller of remote Codex authoring leases. Graph and knowledge supply
     # the kinds codex and render-sandbox require; the controller runs no
     # schedules, so scheduling is absent.
-    f5r-controller)  printf '%s\n' core graph knowledge codex render-sandbox ;;
+    hosted-controller)  printf '%s\n' core graph knowledge codex render-sandbox ;;
     bundle-source)   printf '%s\n' core bundle-source ;;
     release-authority)
       printf '%s\n' core graph environment-qualification bundle-release
@@ -63,11 +63,11 @@ ryeos_bundle_set_names() {
 }
 
 # Bundles carried by the released bundle archive: the sorted unique union of
-# the `full` distribution and the `f5r-controller` distribution. The archive
+# the `full` distribution and the `hosted-controller` distribution. The archive
 # must hold every exact bundle each of those distributions' init profiles
 # names; `full` itself is unchanged.
 ryeos_release_archive_bundle_names() {
-  { ryeos_bundle_set_names full; ryeos_bundle_set_names f5r-controller; } | LC_ALL=C sort -u
+  { ryeos_bundle_set_names full; ryeos_bundle_set_names hosted-controller; } | LC_ALL=C sort -u
 }
 
 # Select native capabilities from the same explicit distribution
@@ -87,7 +87,7 @@ ryeos_bundle_set_cargo_features() {
 # source-root `.ai`. Keep this closed rather than discovering arbitrary YAML:
 # anything named here becomes selectable authority after publisher signing.
 ryeos_node_init_profile_names() {
-  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge f5r-controller contained-workflow development release-authority
+  printf '%s\n' full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority
 }
 
 # Exact installed bundle set required by one publisher-authored profile.
@@ -95,7 +95,7 @@ ryeos_node_init_profile_names() {
 # generation may intentionally operate the same distribution.
 ryeos_node_init_profile_bundle_set() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller) printf '%s\n' "$1" ;;
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller) printf '%s\n' "$1" ;;
     # The hosted-node profile is the core set under hosted admission policy.
     hosted-node) printf '%s\n' core ;;
     contained-workflow) printf '%s\n' hosted-workflow ;;
@@ -201,7 +201,7 @@ ryeos_validate_node_init_profile() {
 
 ryeos_bundle_set_node_init_profile() {
   case "$1" in
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|development)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|development)
       printf '%s\n' "$1"
       ;;
     *) return 1 ;;
@@ -230,7 +230,7 @@ ryeos_bundle_set_bin_managed_names() {
 ryeos_bundle_set_host_support_bins() {
   case "$1" in
     release-authority) printf '%s\n' ryeos-bundle-publisher ;;
-    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-artifacts|development)
+    full|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-artifacts|development)
       return 0
       ;;
     *) return 1 ;;

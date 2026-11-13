@@ -281,7 +281,7 @@ actual_node_policies="$(find "$policy_directory" -mindepth 1 -maxdepth 1 -type f
 # The released archive also feeds the remote-authoring controller image, so
 # its profile gets the same production preflight. The controller runs in a
 # hosting provider's container, which is the `hosted` host class.
-controller_profile=f5r-controller
+controller_profile=hosted-controller
 controller_verify_app_root="$tmp/verify-profile-$controller_profile"
 ryeos_term_update "verifying staged node init profile" "$controller_profile"
 "$ryeos_bin" init \

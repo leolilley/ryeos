@@ -137,9 +137,13 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub in_process_lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
 
-    /// Cancellation policy resolved at decorate-spec time and snapshotted
-    /// here so the daemon can route cancellation without re-loading the spec.
-    /// `None` = use the default 3s graceful shutdown.
+    /// Stop policy resolved for this launch and snapshotted here so the
+    /// daemon can route cancellation without re-loading the spec: the
+    /// `native_async` declaration, else the signed execution config's
+    /// `cancellation_mode` / `cancellation_grace_secs`. Every managed launch
+    /// records one. `None` remains only where no subprocess policy applies
+    /// (in-process handlers, metadata-free attaches); a stop then uses the
+    /// node's named fallback, `process::UNRECORDED_STOP_POLICY_GRACE_SECS`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cancellation_mode: Option<CancellationMode>,
 
@@ -1019,8 +1023,9 @@ impl RuntimeLaunchMetadata {
 
     /// Build metadata from a finalized engine `SubprocessSpec`.
     ///
-    /// Captures the `native_async` cancellation policy and the
-    /// `native_resume` policy, both of which are spec-level
+    /// Captures the compiled stop policy (`native_async`, else the
+    /// execution-config policy) and the `native_resume` policy, both of
+    /// which are spec-level
     /// `DecorateSpec`-phase outputs the daemon needs to route
     /// shutdown / resume without re-loading the spec.
     ///
@@ -1036,11 +1041,7 @@ impl RuntimeLaunchMetadata {
             // DirectItemExecutor before thread birth.
             launch_driver: None,
             in_process_lifecycle_authority: None,
-            cancellation_mode: spec
-                .execution
-                .native_async
-                .as_ref()
-                .map(|na| na.cancellation_mode),
+            cancellation_mode: spec.execution.stop_policy(),
             native_resume: spec.execution.native_resume.clone(),
             checkpoint_dir: None,
             resume_context: None,
@@ -1862,6 +1863,28 @@ mod tests {
     }
 
     #[test]
+    fn from_spec_without_native_async_records_execution_config_policy() {
+        let mut spec = empty_spec();
+        spec.execution.cancellation_mode = Some(CancellationMode::Graceful { grace_secs: 2 });
+        let m = RuntimeLaunchMetadata::from_spec(&spec);
+        assert_eq!(
+            m.cancellation_mode,
+            Some(CancellationMode::Graceful { grace_secs: 2 })
+        );
+    }
+
+    #[test]
+    fn from_spec_native_async_declaration_owns_the_stop_policy() {
+        let mut spec = empty_spec();
+        spec.execution.native_async = Some(NativeAsyncSpec {
+            cancellation_mode: CancellationMode::Hard,
+        });
+        spec.execution.cancellation_mode = Some(CancellationMode::Graceful { grace_secs: 2 });
+        let m = RuntimeLaunchMetadata::from_spec(&spec);
+        assert_eq!(m.cancellation_mode, Some(CancellationMode::Hard));
+    }
+
+    #[test]
     fn from_spec_native_async_hard_propagates() {
         let mut spec = empty_spec();
         spec.execution.native_async = Some(NativeAsyncSpec {
@@ -2074,7 +2097,10 @@ mod tests {
         let live_dir = tempfile::tempdir().unwrap();
         let live_authority = crate::execution_policy::resolve_standard_local_live_authority(
             live_dir.path(),
-            vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            vec![
+                crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+                crate::execution_policy::OPERATOR_VAULT_CAPABILITY.to_string(),
+            ],
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap()

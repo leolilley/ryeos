@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T00:50:49Z:b91e20a555d5a31651fb8b7c1af4687373aa076f9ace36051c91eed619d64164:Z56xOrmYV2+pGKf90n9Cm6GsNWQDyECuTVIkxbg0vcBaJ6hTo6jIfr5LEQdICxgRijkuFwQq+kPeUvmCqJP4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:48:28Z:565e2d30be5f50390aeb90d43b1150873d245fe2528d27f8d95f16128567bf7d:JWdi5vkSy21JDuMbSLNKPnY/B88I7Nj4JCPLGvJ1SfnpURhPCZZ3/pHaCvTaQu85h/adqeo1025pHDgv9mQECA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.7.6"
+version: "3.7.7"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -44,6 +44,9 @@ untrusted tenants.
 - Granting the local `remote.admin` capability is operator-level access
   to high-impact remote orchestrators in v1. It does not replace
   target-node authorized-key scopes.
+- A remote's pinned identity (`signing_key`, `principal_id`,
+  `vault_fingerprint`) comes only from the node's own remotes file. A
+  project cannot supply or override it: see [Configuration](#configuration).
 
 ## Identity Requirements
 
@@ -219,12 +222,22 @@ forwarded `remote_operator` principal.
    | `remote push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` |
    | `remote reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` |
    | `remote pull` | `ryeos.execute.service.objects/get` |
-   | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires |
+   | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires; `ryeos.use.vault.operator` only if the policy exposes the target's operator vault (not by default, see below) |
    | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
    | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_operator` principal) |
+
+   `ryeos.use.vault.operator` lets an execution read the target's
+   operator vault (`include_operator_vault: true`, or the `operator` vault
+   namespace). `remote execute` and `remote run` send
+   `include_operator_vault: false` by default, so no remote scope list needs
+   it. Do not grant it to a remote caller node by default: that node could
+   then run any item it may execute on the target operator's secrets. Grant
+   it only to a principal that should hold operator-level secret access, and
+   prefer a target-side project `.env` or provider environment. The source
+   also requires its own caller to hold it before forwarding such a policy.
 
    Short-form scopes like `bundle.install` will never authorize a
    handler — the matcher does not auto-prefix and the daemon's auth
@@ -729,3 +742,15 @@ remotes:
         - "target/"
         - "*.pyc"
 ```
+
+Only the node holds remotes. A project's own
+`<project>/.ai/config/remotes/remotes.yaml` can neither define a remote nor
+override one of the node's. If any entry in it names trust material
+(`signing_key`, `principal_id`, `fingerprint`, `vault_fingerprint` or
+`descriptor`), every remote operation that names that project is refused
+with `project_remote_trust_material` (HTTP 409). The refusal lists each
+entry and field it found, and names the cure: remove those entries from the
+project file and configure the remote on the node with
+`ryeos remote configure <name> --url <https-url> --expect-fingerprint <fingerprint>`
+(or `--descriptor <file>`). Other entries in a
+project remotes file are listed as invalid by `remote list` and never used.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:de771e0a38f7842fbdb75f4175d52259492922b15103158d99fcb088ffde467c:2zuXbzHLxCnZ7cOVOf7pDyqk3dMxqp3cCVqh8pEhrZ4UyhOGQq/sEQKrxPvUt8lwAj5MFA4XG1RNGnukP97vBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:49:33Z:0736d95abb12a05016d6300368b561855a442a87e9011cb200588ead80f35afa:0sffqeatECfIT4jFLvoKxHUlxgEi37uEaQ+9y8n/eqemCTMGYPRNj7RYp3u4Fe2AXrbhIsKBicNyj95U4LHaBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signed-offline-operations"
@@ -99,7 +99,7 @@ Some operations change what the node trusts or runs: policy replacement,
 `policy-apply`, the compose forms and the authorization reset. Granting one
 is equivalent to granting all. A remote signer may request one only when the
 node's signed maintenance policy lists it under `remote_offline_operations`.
-That is profile data: the `f5r-controller` profile delegates exactly
+That is profile data: the `hosted-controller` profile delegates exactly
 `node.external-execution.compose`, every other shipped profile delegates
 nothing. The authorization reset is local-signer only whatever the policy
 says.

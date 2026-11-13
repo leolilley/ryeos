@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-14T14:38:11Z:b2fa185efe6a7ea4525e9acc33b0c2c72def3d62a6adaa64b3656b1616fa5075:LuX9BY/kxHHuuapb9JPsJPJPIUVvvcKUTKfKxqEHQ2T6J1ndwaHil2efXlXgLBioApr0RjMaCIklkdXIoZLeCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:51:43Z:11285275bca6bc360b5f3987de557f9f538d40c6c552944e86244e0db17be31d:5nawGibl6zaOQuRCfYr9+l1KxTEvzn+RMyCbFiKpNV/sl12VbGsKrmrvgAXz0UVtqwLFupV5KXvkxbzZztvNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
@@ -21,6 +21,7 @@ ryeos start
 ryeos stop
 ryeos node status
 ryeos node host setup --confirm
+ryeos node host retire --confirm
 ```
 
 There is no `restart`, no enable/disable command, and no separate probe
@@ -155,6 +156,14 @@ installer neither copies into that prefix nor claims it upgraded the service.
 The retained journal binds the expected image digest and original Up/Down
 intent, and is removed only after the installed image proves the restored
 state. Interrupted upgrades remain inhibited and retryable.
+
+`ryeos node host retire --confirm [--app-root <dir>]` is the reverse
+administrator transition. It requires the node to be stopped, writes nothing in
+the app root, and removes the native service, its activation and its logs; the
+node then runs as an ordinary direct node. Deleting an app root does not remove
+its service. `ryeos node host retire --orphaned --confirm` retires every RyeOS
+node service whose recorded app root no longer exists, and `ryeos node doctor`
+warns about them in its `host_services` row.
 
 ## Lifecycle RPC timeout
 

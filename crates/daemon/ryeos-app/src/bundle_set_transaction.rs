@@ -131,6 +131,37 @@ pub struct ActiveBundleSelectionSchemaRefused {
     pub expected: u32,
 }
 
+/// Why a bundle-set step refused to make a staged generation visible. Nothing
+/// is published when either is returned.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BundleSetPublicationRefusal {
+    #[error(
+        "bundle_set_copy_mismatch: the copy of {original} at {copy} does not reproduce tree \
+         digest {expected}, so it was not published; the transaction's own generation is \
+         unchanged, and startup recovery retries from it"
+    )]
+    CopyMismatch {
+        original: String,
+        copy: String,
+        expected: String,
+    },
+    #[error(
+        "bundle_set_staged_entry_conflict: {path} already holds something other than the \
+         generation {expected} the journal records there; it is transaction-owned state this \
+         node did not write, so it is not overwritten, and the transaction needs operator repair"
+    )]
+    StagedEntryConflict { path: String, expected: String },
+}
+
+impl BundleSetPublicationRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::CopyMismatch { .. } => "bundle_set_copy_mismatch",
+            Self::StagedEntryConflict { .. } => "bundle_set_staged_entry_conflict",
+        }
+    }
+}
+
 fn validate_high_water(
     label: &str,
     high_water: &BTreeMap<String, CatalogPosition>,
@@ -221,9 +252,13 @@ impl ActiveBundleSelectionStore {
         {
             bail!("active bundle selection CAS failed at commit");
         }
+        // The staged record lives in the transaction root, another directory,
+        // so it cannot be renamed into place durably. The verified record is
+        // published by private atomic replacement in the active record's own
+        // directory; the staged copy is removed with the transaction root.
         let target = active_selection_path(&self.app_root);
         create_parent(&target)?;
-        lillux::rename_path_durable(&staged, &target)?;
+        lillux::atomic_write_private(&target, &serde_json::to_vec_pretty(&expected)?)?;
         Ok(())
     }
 
@@ -952,19 +987,30 @@ fn materialize_new_candidates(
             app_root,
             action.new_registration_staging_path.as_deref().unwrap(),
         )?;
-        create_parent(&tree_target)?;
-        create_parent(&registration_target)?;
-        lillux::rename_path_noreplace_durable(&tree_source, &tree_target)?;
-        lillux::rename_path_noreplace_durable(&registration_source, &registration_target)?;
-        require_tree_digest(&tree_target, action.new_tree_digest.as_deref().unwrap())?;
-        require_file_digest(
+        // The caller's sources live outside the transaction root, so they are
+        // copied in through a sibling and consumed only once the transaction
+        // holds its own verified generation.
+        stage_exact_tree(
+            &tree_source,
+            &tree_target,
+            action.new_tree_digest.as_deref().unwrap(),
+            &journal.transaction_id,
+        )?;
+        stage_exact_file(
+            &registration_source,
             &registration_target,
             action.new_registration_digest.as_deref().unwrap(),
         )?;
+        remove_tree_if_present(&tree_source)?;
+        remove_file_if_present(&registration_source)?;
     }
     Ok(())
 }
 
+/// Back up and replace the live trees. The old tree is copied into the
+/// transaction root before the live path changes; the new one is published
+/// through a sibling in `.ai/bundles`, so the live path names a complete old
+/// tree, a complete new tree, or (for a removal) nothing.
 fn activate_trees(app_root: &Path, journal: &BundleSetJournal) -> anyhow::Result<()> {
     for action in &journal.actions {
         if matches!(action.kind, BundleSetActionKind::Keep) {
@@ -975,19 +1021,21 @@ fn activate_trees(app_root: &Path, journal: &BundleSetJournal) -> anyhow::Result
             &format!("{}/bundles/{}", ryeos_engine::AI_DIR, action.bundle_name),
         )?;
         if let Some(backup) = action.old_tree_backup_path.as_deref() {
-            let backup = recovery_path(app_root, backup)?;
-            create_parent(&backup)?;
-            if live.exists() && !backup.exists() {
-                lillux::rename_path_noreplace_durable(&live, &backup)?;
-            }
-            require_tree_digest(&backup, action.old_tree_digest.as_deref().unwrap())?;
+            stage_exact_tree(
+                &live,
+                &recovery_path(app_root, backup)?,
+                action.old_tree_digest.as_deref().unwrap(),
+                &journal.transaction_id,
+            )?;
         }
-        if let Some(staging) = action.new_tree_staging_path.as_deref() {
-            let staging = recovery_path(app_root, staging)?;
-            if !live.exists() {
-                lillux::rename_path_noreplace_durable(&staging, &live)?;
-            }
-            require_tree_digest(&live, action.new_tree_digest.as_deref().unwrap())?;
+        match action.new_tree_staging_path.as_deref() {
+            Some(staging) => install_exact_tree(
+                &recovery_path(app_root, staging)?,
+                &live,
+                action.new_tree_digest.as_deref().unwrap(),
+                &journal.transaction_id,
+            )?,
+            None => remove_tree_if_present(&live)?,
         }
     }
     Ok(())
@@ -1007,19 +1055,19 @@ fn commit_registrations(app_root: &Path, journal: &BundleSetJournal) -> anyhow::
             ),
         )?;
         if let Some(backup) = action.old_registration_backup_path.as_deref() {
-            let backup = recovery_path(app_root, backup)?;
-            create_parent(&backup)?;
-            if live.exists() && !backup.exists() {
-                lillux::rename_path_noreplace_durable(&live, &backup)?;
-            }
-            require_file_digest(&backup, action.old_registration_digest.as_deref().unwrap())?;
+            stage_exact_file(
+                &live,
+                &recovery_path(app_root, backup)?,
+                action.old_registration_digest.as_deref().unwrap(),
+            )?;
         }
-        if let Some(staging) = action.new_registration_staging_path.as_deref() {
-            let staging = recovery_path(app_root, staging)?;
-            if !live.exists() {
-                lillux::rename_path_noreplace_durable(&staging, &live)?;
-            }
-            require_file_digest(&live, action.new_registration_digest.as_deref().unwrap())?;
+        match action.new_registration_staging_path.as_deref() {
+            Some(staging) => install_exact_file(
+                &recovery_path(app_root, staging)?,
+                &live,
+                action.new_registration_digest.as_deref().unwrap(),
+            )?,
+            None => remove_file_if_present(&live)?,
         }
     }
     Ok(())
@@ -1155,7 +1203,7 @@ impl BootstrapBundleSetRecoveryExecutor {
 impl BundleSetRecoveryExecutor for BootstrapBundleSetRecoveryExecutor {
     fn restore_exact_old(&self, journal: &BundleSetJournal) -> anyhow::Result<()> {
         for action in journal.actions.iter().rev() {
-            restore_old_action(&self.app_root, action)?;
+            restore_old_action(&self.app_root, action, &journal.transaction_id)?;
         }
         ActiveBundleSelectionStore::new(&self.app_root).restore_old(journal)?;
         write_completion(&self.app_root, &journal.old_completion_bytes_base64)?;
@@ -1164,7 +1212,7 @@ impl BundleSetRecoveryExecutor for BootstrapBundleSetRecoveryExecutor {
 
     fn complete_exact_new(&self, journal: &BundleSetJournal) -> anyhow::Result<()> {
         for action in &journal.actions {
-            complete_new_action(&self.app_root, action)?;
+            complete_new_action(&self.app_root, action, &journal.transaction_id)?;
         }
         write_completion(&self.app_root, &journal.new_completion_bytes_base64)?;
         ActiveBundleSelectionStore::new(&self.app_root).commit_new(journal)?;
@@ -1172,7 +1220,11 @@ impl BundleSetRecoveryExecutor for BootstrapBundleSetRecoveryExecutor {
     }
 }
 
-fn restore_old_action(app_root: &Path, action: &BundleSetAction) -> anyhow::Result<()> {
+fn restore_old_action(
+    app_root: &Path,
+    action: &BundleSetAction,
+    transaction_id: &str,
+) -> anyhow::Result<()> {
     let live_tree = recovery_path(
         app_root,
         &format!("{}/bundles/{}", ryeos_engine::AI_DIR, action.bundle_name),
@@ -1185,6 +1237,9 @@ fn restore_old_action(app_root: &Path, action: &BundleSetAction) -> anyhow::Resu
             action.bundle_name
         ),
     )?;
+    // A crash can leave this transaction's publication sibling beside the
+    // live tree whichever way recovery goes; it is never live state.
+    remove_tree_if_present(&publication_sibling(&live_tree, transaction_id)?)?;
     match action.kind {
         BundleSetActionKind::Add => {
             remove_tree_if_present(&live_tree)?;
@@ -1201,6 +1256,7 @@ fn restore_old_action(app_root: &Path, action: &BundleSetAction) -> anyhow::Resu
                 &tree_backup,
                 &live_tree,
                 action.old_tree_digest.as_deref().unwrap(),
+                transaction_id,
             )?;
             install_exact_file(
                 &registration_backup,
@@ -1219,7 +1275,11 @@ fn restore_old_action(app_root: &Path, action: &BundleSetAction) -> anyhow::Resu
     Ok(())
 }
 
-fn complete_new_action(app_root: &Path, action: &BundleSetAction) -> anyhow::Result<()> {
+fn complete_new_action(
+    app_root: &Path,
+    action: &BundleSetAction,
+    transaction_id: &str,
+) -> anyhow::Result<()> {
     let live_tree = recovery_path(
         app_root,
         &format!("{}/bundles/{}", ryeos_engine::AI_DIR, action.bundle_name),
@@ -1232,6 +1292,7 @@ fn complete_new_action(app_root: &Path, action: &BundleSetAction) -> anyhow::Res
             action.bundle_name
         ),
     )?;
+    remove_tree_if_present(&publication_sibling(&live_tree, transaction_id)?)?;
     match action.kind {
         BundleSetActionKind::Add | BundleSetActionKind::Replace => {
             let tree_staging =
@@ -1244,6 +1305,7 @@ fn complete_new_action(app_root: &Path, action: &BundleSetAction) -> anyhow::Res
                 &tree_staging,
                 &live_tree,
                 action.new_tree_digest.as_deref().unwrap(),
+                transaction_id,
             )?;
             install_exact_file(
                 &registration_staging,
@@ -1286,23 +1348,204 @@ fn recovery_path(app_root: &Path, relative: &str) -> anyhow::Result<PathBuf> {
     Ok(current)
 }
 
-fn install_exact_tree(source: &Path, target: &Path, expected: &str) -> anyhow::Result<()> {
-    if target.is_dir() && crate::bundle_transaction::tree_digest(target)? == expected {
+// Publication across directories.
+//
+// A transaction's staged generations and backups live in its own root,
+// `.ai/transactions/bundle-set/<id>/`, but they are published to
+// `.ai/bundles/<name>`, `.ai/node/bundles/<name>.yaml` and
+// `.ai/node/active-bundle-selection.json`. lillux renames durably only between
+// siblings, because flushing one directory does not make a rename between two
+// directories durable. So nothing here renames across directories: each entry
+// is copied to a sibling in its destination's directory, flushed and verified
+// there, and published by a same-directory rename or exchange. Files go
+// through `atomic_write_private`, which does exactly that.
+//
+// A tree's sibling is `.<name>.bundle-set-<transaction id>`, derived from the
+// journal, so recovery finds and removes one left by a crash without any
+// further coordinate. The transaction root keeps its generations until the
+// journal is consumed, so every step can be repeated.
+
+/// The hidden sibling through which this transaction publishes `entry`.
+fn publication_sibling(entry: &Path, transaction_id: &str) -> anyhow::Result<PathBuf> {
+    let parent = entry
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("bundle-set publication target has no parent"))?;
+    let name = entry
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("bundle-set publication target has no UTF-8 name"))?;
+    Ok(parent.join(format!(".{name}.bundle-set-{transaction_id}")))
+}
+
+/// Whether `path` is a real directory holding exactly `expected`. Absence is
+/// `false`; a symlink or special entry is refused.
+fn tree_matches(path: &Path, expected: &str) -> anyhow::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.is_dir() => {
+            Ok(crate::bundle_transaction::tree_digest(path)? == expected)
+        }
+        Ok(_) => bail!("bundle-set recovery tree target is not a safe directory"),
+    }
+}
+
+/// Whether `path` is a regular file holding exactly `expected`. Absence is
+/// `false`; a symlink or special entry is refused.
+fn file_matches(path: &Path, expected: &str) -> anyhow::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.is_file() => Ok(file_digest(path)? == expected),
+        Ok(_) => bail!("bundle-set recovery registration target is not a safe file"),
+    }
+}
+
+/// Copy the exact tree `source` to the fresh path `copy`, flush it, and prove
+/// the copy reproduces `expected`.
+fn copy_verified_tree(source: &Path, copy: &Path, expected: &str) -> anyhow::Result<()> {
+    require_tree_digest(source, expected)?;
+    remove_tree_if_present(copy)?;
+    copy_tree_exact(source, copy)?;
+    lillux::sync_tree_durable(copy)?;
+    if crate::bundle_transaction::tree_digest(copy)? != expected {
+        return Err(BundleSetPublicationRefusal::CopyMismatch {
+            original: source.display().to_string(),
+            copy: copy.display().to_string(),
+            expected: expected.to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Reproduce every entry `tree_digest` covers: names, permission bits, file
+/// bytes and symlink targets. Directory permissions are applied after their
+/// children are written.
+fn copy_tree_exact(source: &Path, copy: &Path) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        copy_symlink(source, copy)?;
+    } else if file_type.is_dir() {
+        std::fs::create_dir(copy)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            copy_tree_exact(&entry.path(), &copy.join(entry.file_name()))?;
+        }
+        std::fs::set_permissions(copy, metadata.permissions())?;
+    } else if file_type.is_file() {
+        std::fs::copy(source, copy)?;
+        std::fs::set_permissions(copy, metadata.permissions())?;
+    } else {
+        bail!("unsupported bundle tree entry: {}", source.display());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(source: &Path, copy: &Path) -> anyhow::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(source)?, copy)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(source: &Path, _copy: &Path) -> anyhow::Result<()> {
+    bail!(
+        "bundle-set tree copy cannot reproduce symlink {} on this platform",
+        source.display()
+    )
+}
+
+/// Give the transaction its own copy of the tree `source` at the journal
+/// coordinate `target`, which must be absent or already exact. `source` is
+/// left alone.
+fn stage_exact_tree(
+    source: &Path,
+    target: &Path,
+    expected: &str,
+    transaction_id: &str,
+) -> anyhow::Result<()> {
+    let sibling = publication_sibling(target, transaction_id)?;
+    remove_tree_if_present(&sibling)?;
+    if tree_matches(target, expected)? {
         return Ok(());
     }
-    require_tree_digest(source, expected)?;
-    remove_tree_if_present(target)?;
-    lillux::rename_path_durable(source, target)?;
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(BundleSetPublicationRefusal::StagedEntryConflict {
+            path: target.display().to_string(),
+            expected: expected.to_owned(),
+        }
+        .into());
+    }
+    create_parent(target)?;
+    copy_verified_tree(source, &sibling, expected)?;
+    lillux::rename_path_noreplace_durable(&sibling, target)?;
     require_tree_digest(target, expected)
 }
 
-fn install_exact_file(source: &Path, target: &Path, expected: &str) -> anyhow::Result<()> {
-    if target.is_file() && file_digest(target)? == expected {
+/// Make the live tree `target` exactly the transaction's generation `source`.
+/// A present target is exchanged atomically with the verified sibling, so it
+/// never names a partial tree; the exchanged-out tree is then removed.
+fn install_exact_tree(
+    source: &Path,
+    target: &Path,
+    expected: &str,
+    transaction_id: &str,
+) -> anyhow::Result<()> {
+    let sibling = publication_sibling(target, transaction_id)?;
+    remove_tree_if_present(&sibling)?;
+    if tree_matches(target, expected)? {
         return Ok(());
     }
-    require_file_digest(source, expected)?;
-    remove_file_if_present(target)?;
-    lillux::rename_path_durable(source, target)?;
+    create_parent(target)?;
+    copy_verified_tree(source, &sibling, expected)?;
+    if std::fs::symlink_metadata(target).is_ok() {
+        lillux::atomic_exchange_paths(target, &sibling)?;
+        remove_tree_if_present(&sibling)?;
+    } else {
+        lillux::rename_path_noreplace_durable(&sibling, target)?;
+    }
+    require_tree_digest(target, expected)
+}
+
+/// Read `source` once and prove it is exactly `expected`.
+fn read_exact_file(source: &Path, expected: &str) -> anyhow::Result<Vec<u8>> {
+    let bytes = lillux::read_regular_file_bounded_no_follow(source, JOURNAL_MAX_BYTES)?;
+    if format!("{:x}", Sha256::digest(&bytes)) != expected {
+        bail!("bundle-set recovery registration digest mismatch");
+    }
+    Ok(bytes)
+}
+
+/// Give the transaction its own copy of the file `source` at the journal
+/// coordinate `target`, which must be absent or already exact.
+fn stage_exact_file(source: &Path, target: &Path, expected: &str) -> anyhow::Result<()> {
+    if file_matches(target, expected)? {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(BundleSetPublicationRefusal::StagedEntryConflict {
+            path: target.display().to_string(),
+            expected: expected.to_owned(),
+        }
+        .into());
+    }
+    let bytes = read_exact_file(source, expected)?;
+    create_parent(target)?;
+    lillux::atomic_write_private(target, &bytes)?;
+    require_file_digest(target, expected)
+}
+
+/// Make the live file `target` exactly the transaction's `source`, by private
+/// atomic replacement in the target's own directory.
+fn install_exact_file(source: &Path, target: &Path, expected: &str) -> anyhow::Result<()> {
+    if file_matches(target, expected)? {
+        return Ok(());
+    }
+    let bytes = read_exact_file(source, expected)?;
+    create_parent(target)?;
+    lillux::atomic_write_private(target, &bytes)?;
     require_file_digest(target, expected)
 }
 
@@ -1651,6 +1894,580 @@ mod tests {
         let mut moved = value.clone();
         moved.new_catalog_high_water = high_water(6, '9');
         assert!(moved.validate().is_err());
+    }
+
+    #[test]
+    fn restore_old_before_commit_keeps_the_predecessor_and_drops_the_staged_record() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = journal(BundleSetPhase::ActiveSelectionStaged);
+        write_active(
+            root.path(),
+            &serde_json::to_value(predecessor(&journal)).unwrap(),
+        );
+        let store = ActiveBundleSelectionStore::new(root.path());
+        store.stage(&journal).unwrap();
+        let staged = staged_selection_path(root.path(), &journal.transaction_id);
+        assert!(staged.is_file());
+
+        store.restore_old(&journal).unwrap();
+        assert_eq!(store.load().unwrap().unwrap(), predecessor(&journal));
+        assert!(!staged.exists());
+        // Restoring is repeatable: recovery may run it again after a crash.
+        store.restore_old(&journal).unwrap();
+        assert_eq!(store.load().unwrap().unwrap(), predecessor(&journal));
+    }
+
+    #[test]
+    fn restore_old_without_a_predecessor_removes_the_new_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let mut journal = journal(BundleSetPhase::ActiveSelectionStaged);
+        journal.expected_active_selection = None;
+        journal.old_catalog_high_water.clear();
+        journal.validate().unwrap();
+        let store = ActiveBundleSelectionStore::new(root.path());
+        store.stage(&journal).unwrap();
+        store.commit_new(&journal).unwrap();
+        assert_eq!(
+            store.load().unwrap().unwrap().selection_hash,
+            journal.selection_hash
+        );
+
+        store.restore_old(&journal).unwrap();
+        assert_eq!(store.load().unwrap(), None);
+        assert!(!active_selection_path(root.path()).exists());
+    }
+
+    #[test]
+    fn restore_old_refuses_a_selection_from_neither_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = journal(BundleSetPhase::ActiveSelectionStaged);
+        let mut unrelated = predecessor(&journal);
+        unrelated.selection_hash = hash('e');
+        write_active(root.path(), &serde_json::to_value(&unrelated).unwrap());
+        let store = ActiveBundleSelectionStore::new(root.path());
+        assert!(
+            store
+                .restore_old(&journal)
+                .unwrap_err()
+                .to_string()
+                .contains("unrelated to either transaction generation")
+        );
+        assert_eq!(store.load().unwrap().unwrap(), unrelated);
+    }
+
+    #[test]
+    fn commit_new_refuses_without_the_staged_record() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = journal(BundleSetPhase::CompletionPublicationStarted);
+        write_active(
+            root.path(),
+            &serde_json::to_value(predecessor(&journal)).unwrap(),
+        );
+        let store = ActiveBundleSelectionStore::new(root.path());
+        assert!(store.commit_new(&journal).is_err());
+        assert_eq!(store.load().unwrap().unwrap(), predecessor(&journal));
+    }
+
+    // Filesystem fixtures in the real layout: live trees in `.ai/bundles`,
+    // registrations in `.ai/node/bundles`, the transaction's generations in
+    // `.ai/transactions/bundle-set/<id>`, and the caller's prepared sources in
+    // `.ai/transactions/bundle-set-prepared/<id>` as the remote update writes
+    // them. Every one of those is in a different directory from its target.
+
+    fn live_tree(app_root: &Path, name: &str) -> PathBuf {
+        app_root.join(".ai/bundles").join(name)
+    }
+
+    fn live_registration(app_root: &Path, name: &str) -> PathBuf {
+        app_root
+            .join(".ai/node/bundles")
+            .join(format!("{name}.yaml"))
+    }
+
+    fn transaction_entry(app_root: &Path, transaction_id: &str, relative: &str) -> PathBuf {
+        app_root
+            .join(".ai/transactions/bundle-set")
+            .join(transaction_id)
+            .join(relative)
+    }
+
+    /// Write a small bundle tree with nested files, an executable and a
+    /// symlink, all of which the tree digest covers. Returns its digest.
+    fn write_tree(root: &Path, marker: &str) -> String {
+        std::fs::create_dir_all(root.join(".ai/knowledge")).unwrap();
+        std::fs::write(root.join(".ai/knowledge/item.md"), marker).unwrap();
+        std::fs::write(root.join("bundle.yaml"), format!("marker: {marker}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = root.join("tool.sh");
+            std::fs::write(&tool, format!("#!/bin/sh\necho {marker}\n")).unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::os::unix::fs::symlink(".ai/knowledge/item.md", root.join("link")).unwrap();
+        }
+        crate::bundle_transaction::tree_digest(root).unwrap()
+    }
+
+    fn write_file(path: &Path, bytes: &[u8]) -> String {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    /// Hidden entries a publication could leave in a directory.
+    fn leftovers(directory: &Path) -> Vec<String> {
+        match std::fs::read_dir(directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("read {}: {error}", directory.display()),
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.contains(".bundle-set-") || name.contains(".tmp."))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn install_exact_tree_replaces_a_live_tree_from_the_transaction_root() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        let tx = hash('a');
+        let live = live_tree(app, "knowledge");
+        let old = write_tree(&live, "old");
+        let staging = transaction_entry(app, &tx, "new/trees/knowledge");
+        let new = write_tree(&staging, "new");
+        assert_ne!(old, new);
+        assert_ne!(live.parent(), staging.parent());
+        // A crash between exchange and cleanup leaves a sibling behind.
+        let stale = publication_sibling(&live, &tx).unwrap();
+        write_tree(&stale, "stale");
+
+        install_exact_tree(&staging, &live, &new, &tx).unwrap();
+        assert_eq!(crate::bundle_transaction::tree_digest(&live).unwrap(), new);
+        assert_eq!(
+            crate::bundle_transaction::tree_digest(&staging).unwrap(),
+            new,
+            "the transaction keeps its generation until the journal is consumed"
+        );
+        assert!(leftovers(&app.join(".ai/bundles")).is_empty());
+
+        // Repeating the step is a no-op, as recovery requires.
+        install_exact_tree(&staging, &live, &new, &tx).unwrap();
+        assert_eq!(crate::bundle_transaction::tree_digest(&live).unwrap(), new);
+    }
+
+    #[test]
+    fn install_exact_tree_adds_an_absent_live_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        let tx = hash('a');
+        let staging = transaction_entry(app, &tx, "new/trees/fresh");
+        let new = write_tree(&staging, "fresh");
+        let live = live_tree(app, "fresh");
+
+        install_exact_tree(&staging, &live, &new, &tx).unwrap();
+        assert_eq!(crate::bundle_transaction::tree_digest(&live).unwrap(), new);
+        assert!(leftovers(&app.join(".ai/bundles")).is_empty());
+    }
+
+    #[test]
+    fn install_exact_tree_refuses_a_generation_that_disagrees_with_the_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        let tx = hash('a');
+        let live = live_tree(app, "knowledge");
+        let old = write_tree(&live, "old");
+        let staging = transaction_entry(app, &tx, "new/trees/knowledge");
+        write_tree(&staging, "tampered");
+
+        assert!(
+            install_exact_tree(&staging, &live, &hash('5'), &tx)
+                .unwrap_err()
+                .to_string()
+                .contains("tree digest mismatch")
+        );
+        assert_eq!(crate::bundle_transaction::tree_digest(&live).unwrap(), old);
+        assert!(leftovers(&app.join(".ai/bundles")).is_empty());
+    }
+
+    #[test]
+    fn install_exact_file_replaces_a_live_registration_from_the_transaction_root() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        let tx = hash('a');
+        let live = live_registration(app, "knowledge");
+        write_file(&live, b"registration: old\n");
+        let staging = transaction_entry(app, &tx, "new/registrations/knowledge.yaml");
+        let new = write_file(&staging, b"registration: new\n");
+        assert_ne!(live.parent(), staging.parent());
+
+        install_exact_file(&staging, &live, &new).unwrap();
+        assert_eq!(std::fs::read(&live).unwrap(), b"registration: new\n");
+        assert!(staging.is_file());
+        assert!(leftovers(&app.join(".ai/node/bundles")).is_empty());
+        install_exact_file(&staging, &live, &new).unwrap();
+
+        let added = live_registration(app, "fresh");
+        install_exact_file(&staging, &added, &new).unwrap();
+        assert_eq!(std::fs::read(&added).unwrap(), b"registration: new\n");
+    }
+
+    #[test]
+    fn install_exact_file_refuses_a_registration_that_disagrees_with_the_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        let tx = hash('a');
+        let live = live_registration(app, "knowledge");
+        write_file(&live, b"registration: old\n");
+        let staging = transaction_entry(app, &tx, "new/registrations/knowledge.yaml");
+        write_file(&staging, b"registration: tampered\n");
+
+        assert!(install_exact_file(&staging, &live, &hash('7')).is_err());
+        assert_eq!(std::fs::read(&live).unwrap(), b"registration: old\n");
+    }
+
+    #[test]
+    fn staging_refuses_a_transaction_entry_it_did_not_write() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        let tx = hash('a');
+        let source = app.join(".ai/transactions/bundle-set-prepared/x/knowledge.tree");
+        let expected = write_tree(&source, "new");
+        let target = transaction_entry(app, &tx, "new/trees/knowledge");
+        write_tree(&target, "foreign");
+
+        let error = stage_exact_tree(&source, &target, &expected, &tx).unwrap_err();
+        let refusal = error
+            .downcast_ref::<BundleSetPublicationRefusal>()
+            .expect("typed publication refusal");
+        assert_eq!(refusal.code(), "bundle_set_staged_entry_conflict");
+        assert!(
+            error
+                .to_string()
+                .starts_with("bundle_set_staged_entry_conflict:")
+        );
+        assert_ne!(
+            crate::bundle_transaction::tree_digest(&target).unwrap(),
+            expected
+        );
+
+        let registration_source = app.join(".ai/transactions/bundle-set-prepared/x/k.yaml");
+        let registration = write_file(&registration_source, b"registration: new\n");
+        let registration_target = transaction_entry(app, &tx, "new/registrations/k.yaml");
+        write_file(&registration_target, b"registration: foreign\n");
+        let error = stage_exact_file(&registration_source, &registration_target, &registration)
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<BundleSetPublicationRefusal>()
+                .expect("typed publication refusal")
+                .code(),
+            "bundle_set_staged_entry_conflict"
+        );
+    }
+
+    /// One stopped-node update in the real layout: replace `knowledge`, add
+    /// `fresh`, remove `retired`.
+    struct StoppedSet {
+        root: tempfile::TempDir,
+        request: StoppedBundleSetApplyRequest,
+        old: BTreeMap<&'static str, (String, String)>,
+        new: BTreeMap<&'static str, (String, String)>,
+        sources: Vec<PathBuf>,
+    }
+
+    const OLD_COMPLETION: &[u8] = b"old signed completion";
+    const NEW_COMPLETION: &[u8] = b"new signed completion";
+
+    fn stopped_set() -> StoppedSet {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path();
+        let tx = hash('a');
+        let mut old = BTreeMap::new();
+        let mut new = BTreeMap::new();
+        for name in ["knowledge", "retired"] {
+            let tree = write_tree(&live_tree(app, name), &format!("{name} old"));
+            let registration = write_file(
+                &live_registration(app, name),
+                format!("bundle: {name}\ngeneration: old\n").as_bytes(),
+            );
+            old.insert(name, (tree, registration));
+        }
+        let prepared = app.join(".ai/transactions/bundle-set-prepared").join(&tx);
+        let mut sources = Vec::new();
+        for name in ["fresh", "knowledge"] {
+            let tree_source = prepared.join(format!("{name}.tree"));
+            let registration_source = prepared.join(format!("{name}.yaml"));
+            let tree = write_tree(&tree_source, &format!("{name} new"));
+            let registration = write_file(
+                &registration_source,
+                format!("bundle: {name}\ngeneration: new\n").as_bytes(),
+            );
+            new.insert(name, (tree, registration));
+            sources.push(tree_source);
+            sources.push(registration_source);
+        }
+        write_file(&init_completion_path(app), OLD_COMPLETION);
+        let selection = ActiveBundleSelection {
+            schema: ActiveBundleSelection::SCHEMA,
+            selection_hash: hash('c'),
+            installed_set_digest: hash('2'),
+            catalog_high_water: high_water(5, '8'),
+        };
+        write_active(app, &serde_json::to_value(selection).unwrap());
+
+        let prepared_action = |name: &str,
+                               kind: BundleSetActionKind,
+                               old_entry: Option<&(String, String)>| {
+            let new_entry = new.get(name);
+            PreparedBundleSetAction {
+                bundle_name: name.to_owned(),
+                kind,
+                old_tree_digest: old_entry.map(|(tree, _)| tree.clone()),
+                new_tree_digest: new_entry.map(|(tree, _)| tree.clone()),
+                old_registration_digest: old_entry.map(|(_, reg)| reg.clone()),
+                new_registration_digest: new_entry.map(|(_, reg)| reg.clone()),
+                new_tree_source: new_entry.map(|_| prepared.join(format!("{name}.tree"))),
+                new_registration_source: new_entry.map(|_| prepared.join(format!("{name}.yaml"))),
+            }
+        };
+        let actions = vec![
+            prepared_action(
+                "knowledge",
+                BundleSetActionKind::Replace,
+                old.get("knowledge"),
+            ),
+            prepared_action("fresh", BundleSetActionKind::Add, None),
+            prepared_action("retired", BundleSetActionKind::Remove, old.get("retired")),
+        ];
+        let request = StoppedBundleSetApplyRequest {
+            transaction_id: tx,
+            selection_hash: hash('b'),
+            expected_active_selection: Some(hash('c')),
+            old_completion_hash: format!("{:x}", Sha256::digest(OLD_COMPLETION)),
+            old_completion_bytes: OLD_COMPLETION.to_vec(),
+            new_completion_hash: format!("{:x}", Sha256::digest(NEW_COMPLETION)),
+            new_completion_bytes: NEW_COMPLETION.to_vec(),
+            old_installed_set_digest: hash('2'),
+            new_installed_set_digest: hash('3'),
+            old_catalog_high_water: high_water(5, '8'),
+            new_catalog_high_water: high_water(6, '9'),
+            catalog_rollback: None,
+            actions,
+        };
+        StoppedSet {
+            root,
+            request,
+            old,
+            new,
+            sources,
+        }
+    }
+
+    /// Stopped-node authority for tests: real selection staging and commit,
+    /// with an injected failure standing in for a crash at one hook.
+    struct TestAuthority {
+        store: ActiveBundleSelectionStore,
+        fail_at: Option<&'static str>,
+    }
+
+    impl TestAuthority {
+        fn step(&self, name: &str) -> anyhow::Result<()> {
+            if self.fail_at == Some(name) {
+                bail!("injected crash at {name}");
+            }
+            Ok(())
+        }
+    }
+
+    impl StoppedBundleSetApplyAuthority for TestAuthority {
+        fn admit_complete_set(&self, _journal: &BundleSetJournal) -> anyhow::Result<()> {
+            self.step("admit")
+        }
+
+        fn stage_active_selection(&self, journal: &BundleSetJournal) -> anyhow::Result<()> {
+            self.step("stage")?;
+            self.store.stage(journal)
+        }
+
+        fn verify_new_completion(
+            &self,
+            _app_root: &Path,
+            _journal: &BundleSetJournal,
+        ) -> anyhow::Result<()> {
+            self.step("verify")
+        }
+
+        fn commit_active_selection(&self, journal: &BundleSetJournal) -> anyhow::Result<()> {
+            self.step("commit")?;
+            self.store.commit_new(journal)
+        }
+    }
+
+    fn apply(set: &StoppedSet, lock: &BundleRegistryMutationLock, fail_at: Option<&'static str>) {
+        let app = set.root.path();
+        let result = apply_stopped_bundle_set(
+            app,
+            lock,
+            set.request.clone(),
+            &TestAuthority {
+                store: ActiveBundleSelectionStore::new(app),
+                fail_at,
+            },
+        );
+        match fail_at {
+            None => result.unwrap(),
+            Some(name) => assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&format!("injected crash at {name}"))
+            ),
+        }
+    }
+
+    fn assert_installed(set: &StoppedSet, generation: &BTreeMap<&'static str, (String, String)>) {
+        let app = set.root.path();
+        for name in ["fresh", "knowledge", "retired"] {
+            match generation.get(name) {
+                Some((tree, registration)) => {
+                    assert_eq!(
+                        &crate::bundle_transaction::tree_digest(&live_tree(app, name)).unwrap(),
+                        tree,
+                        "{name} tree"
+                    );
+                    assert_eq!(
+                        &file_digest(&live_registration(app, name)).unwrap(),
+                        registration,
+                        "{name} registration"
+                    );
+                }
+                None => {
+                    assert!(!live_tree(app, name).exists(), "{name} tree is absent");
+                    assert!(
+                        !live_registration(app, name).exists(),
+                        "{name} registration is absent"
+                    );
+                }
+            }
+        }
+        for directory in [".ai/bundles", ".ai/node/bundles", ".ai/node"] {
+            assert!(
+                leftovers(&app.join(directory)).is_empty(),
+                "{directory} holds publication leftovers"
+            );
+        }
+    }
+
+    fn assert_old_generation(set: &StoppedSet) {
+        let app = set.root.path();
+        assert_installed(set, &set.old);
+        let active = ActiveBundleSelectionStore::new(app)
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.selection_hash, hash('c'));
+        assert_eq!(active.catalog_high_water, high_water(5, '8'));
+        assert_eq!(
+            std::fs::read(init_completion_path(app)).unwrap(),
+            OLD_COMPLETION
+        );
+    }
+
+    fn assert_new_generation(set: &StoppedSet) {
+        let app = set.root.path();
+        assert_installed(set, &set.new);
+        let active = ActiveBundleSelectionStore::new(app)
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.selection_hash, hash('b'));
+        assert_eq!(active.installed_set_digest, hash('3'));
+        assert_eq!(active.catalog_high_water, high_water(6, '9'));
+        assert_eq!(
+            std::fs::read(init_completion_path(app)).unwrap(),
+            NEW_COMPLETION
+        );
+    }
+
+    fn assert_transaction_consumed(set: &StoppedSet) {
+        let app = set.root.path();
+        assert_eq!(load_journal(app).unwrap(), None);
+        assert!(!transaction_entry(app, &set.request.transaction_id, "").exists());
+    }
+
+    #[test]
+    fn stopped_apply_publishes_every_entry_across_directories() {
+        let set = stopped_set();
+        let lock = BundleRegistryMutationLock::acquire(set.root.path()).unwrap();
+        assert_old_generation(&set);
+
+        apply(&set, &lock, None);
+        assert_new_generation(&set);
+        assert_transaction_consumed(&set);
+        for source in &set.sources {
+            assert!(!source.exists(), "prepared source {source:?} is consumed");
+        }
+    }
+
+    #[test]
+    fn startup_recovery_converges_from_every_crash_point() {
+        // (failing hook, extra phases a crash after it could have finished
+        // by hand, expected decision)
+        let cases: [(&str, usize, RecoveryDecision); 6] = [
+            ("admit", 0, RecoveryDecision::RestoreExactOld),
+            ("admit", 1, RecoveryDecision::RestoreExactOld),
+            ("admit", 2, RecoveryDecision::RestoreExactOld),
+            ("stage", 0, RecoveryDecision::RestoreExactOld),
+            ("verify", 0, RecoveryDecision::CompleteExactNew),
+            ("commit", 0, RecoveryDecision::CompleteExactNew),
+        ];
+        for (fail_at, extra_phases, decision) in cases {
+            let set = stopped_set();
+            let app = set.root.path();
+            let tx = set.request.transaction_id.clone();
+            let lock = BundleRegistryMutationLock::acquire(app).unwrap();
+            apply(&set, &lock, Some(fail_at));
+            let journal = load_journal(app)
+                .unwrap()
+                .expect("journal survives a crash");
+            if extra_phases >= 1 {
+                activate_trees(app, &journal).unwrap();
+            }
+            if extra_phases >= 2 {
+                commit_registrations(app, &journal).unwrap();
+            }
+            // A crash inside a publication leaves its sibling behind.
+            for name in ["fresh", "knowledge"] {
+                write_tree(
+                    &publication_sibling(&live_tree(app, name), &tx).unwrap(),
+                    "interrupted",
+                );
+            }
+
+            let recovered =
+                recover_for_bootstrap(app, &lock, &BootstrapBundleSetRecoveryExecutor::new(app))
+                    .unwrap();
+            assert_eq!(
+                recovered,
+                Some(decision),
+                "crash at {fail_at}+{extra_phases}"
+            );
+            match decision {
+                RecoveryDecision::RestoreExactOld => {
+                    assert_old_generation(&set);
+                    assert_transaction_consumed(&set);
+                }
+                RecoveryDecision::CompleteExactNew => {
+                    assert_new_generation(&set);
+                    // Startup consumes the journal only after verifying the
+                    // new completion.
+                    assert!(load_journal(app).unwrap().is_some());
+                    consume_journal(app).unwrap();
+                    assert_transaction_consumed(&set);
+                }
+                RecoveryDecision::RefuseOperatorRepair => unreachable!(),
+            }
+        }
     }
 
     #[test]

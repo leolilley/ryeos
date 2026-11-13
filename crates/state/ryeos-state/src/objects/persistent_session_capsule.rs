@@ -1216,7 +1216,36 @@ pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
 /// without accepting an unbounded document before parsing.
 pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
 /// Current signed source and retained compiled profile vocabulary.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 11;
+/// v12 removes the approval `cancel` response template: RyeOS records only
+/// `accept` and `decline`, so no decision can render it.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 12;
+
+/// A signed structured-session profile whose `schema_version` is not the
+/// current one. There is no compatibility reader: an older profile is refused
+/// and the message names the migration that cures it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructuredSessionProfileSchemaRefusal {
+    pub found: Option<u64>,
+}
+
+impl std::fmt::Display for StructuredSessionProfileSchemaRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let found = self
+            .found
+            .map_or_else(|| "missing".to_owned(), |version| version.to_string());
+        write!(
+            formatter,
+            "structured-session profile schema_version {found} is not admitted; current is \
+             {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION}. Cure: migrate the profile to \
+             schema_version {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION} (v12 removes every \
+             server request's `cancel` response template), then update its Worker's source \
+             digest and re-sign the Worker"
+        )
+    }
+}
+
+impl std::error::Error for StructuredSessionProfileSchemaRefusal {}
+
 pub const MAX_SESSION_AUXILIARY_CONFIGS: usize = 16;
 
 /// Immutable data from captured worker source, mounted at an exact path in

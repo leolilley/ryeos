@@ -1,5 +1,5 @@
 {
-  "schema_version": 11,
+  "schema_version": 12,
   "external_candidate": null,
   "transport": "http_sse",
   "http_sse": {
@@ -618,12 +618,6 @@
           "op": "literal",
           "value": {
             "response": "once"
-          }
-        },
-        "cancel": {
-          "op": "literal",
-          "value": {
-            "response": "reject"
           }
         },
         "decline": {

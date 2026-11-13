@@ -166,7 +166,7 @@ release_daemon_stages=(
     ryeos-core-scheduling
     ryeos-core-workflow
     ryeos-core-knowledge
-    ryeos-f5r-controller
+    ryeos-hosted-controller
 )
 release_runtime_base() {
     local stage="$1" base
@@ -264,7 +264,7 @@ assert_runtime_bundle_inventory Dockerfile.release core ryeos-core
 assert_runtime_bundle_inventory Dockerfile.release core-scheduling ryeos-core-scheduling
 assert_runtime_bundle_inventory Dockerfile.release core-workflow ryeos-core-workflow
 assert_runtime_bundle_inventory Dockerfile.release core-knowledge ryeos-core-knowledge
-assert_runtime_bundle_inventory Dockerfile.release f5r-controller ryeos-f5r-controller
+assert_runtime_bundle_inventory Dockerfile.release hosted-controller ryeos-hosted-controller
 
 assert_runtime_init_profile() {
     local image="$1" bundle_set="$2" stage="${3:-}" instructions final_stage expected_selector actual_selector
@@ -302,7 +302,7 @@ assert_runtime_init_profile Dockerfile.release core ryeos-core
 assert_runtime_init_profile Dockerfile.release core-scheduling ryeos-core-scheduling
 assert_runtime_init_profile Dockerfile.release core-workflow ryeos-core-workflow
 assert_runtime_init_profile Dockerfile.release core-knowledge ryeos-core-knowledge
-assert_runtime_init_profile Dockerfile.release f5r-controller ryeos-f5r-controller
+assert_runtime_init_profile Dockerfile.release hosted-controller ryeos-hosted-controller
 
 # The host class selects which of a profile's signed capability floors the node
 # holds. It describes where an image is deployed, so no image may preset it.
@@ -348,7 +348,7 @@ assert_composition_pair ryeos-core core-pair core
 assert_composition_pair ryeos-core-scheduling core-scheduling-pair core-scheduling
 assert_composition_pair ryeos-core-workflow core-workflow-pair core-workflow
 assert_composition_pair ryeos-core-knowledge core-knowledge-pair core-knowledge
-assert_composition_pair ryeos-f5r-controller controller-pair f5r-controller
+assert_composition_pair ryeos-hosted-controller controller-pair hosted-controller
 assert_composition_pair ryeos-standard standard-pair standard
 assert_composition_pair ryeos-central-host central-host-pair central-host
 assert_composition_pair ryeos-local-inference local-inference-pair local-inference
@@ -374,7 +374,7 @@ published_copies="$(dockerfile_instructions "$root/Dockerfile.release" | grep -E
 [[ "$(ryeos_bundle_set_cargo_features core-scheduling ryeosd)" == ryeosd/scheduling ]]
 [[ -z "$(ryeos_bundle_set_cargo_features core-workflow ryeosd)" ]]
 [[ -z "$(ryeos_bundle_set_cargo_features core-knowledge ryeosd)" ]]
-[[ -z "$(ryeos_bundle_set_cargo_features f5r-controller ryeosd)" ]]
+[[ -z "$(ryeos_bundle_set_cargo_features hosted-controller ryeosd)" ]]
 [[ "$(ryeos_bundle_set_cargo_features standard ryeosd)" == ryeosd/model-provider-setup,ryeosd/scheduling ]]
 
 # Contained startup receives its profile through the admitted worker binding,
@@ -729,7 +729,7 @@ if grep -Fq 'contained-workflow-qualification' "$release_workflow"; then
     exit 1
 fi
 composition_bake="$root/docker-bake.composition.hcl"
-for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source f5r-controller; do
+for target in core core-scheduling core-workflow core-knowledge standard central-host local-inference hosted-workflow bundle-source hosted-controller; do
     grep -Fq "target \"$target\"" "$composition_bake" || {
         echo "composition Bake contract is missing target $target" >&2
         exit 1
@@ -783,7 +783,7 @@ image_bundle_sets=(
     core-scheduling
     core-workflow
     core-knowledge
-    f5r-controller
+    hosted-controller
 )
 no_image_bundle_sets=(
     full
@@ -861,9 +861,9 @@ fi
 # composition candidate.
 controller_release_bake="$root/docker-bake.controller-release.hcl"
 controller_release_workflow="$root/.github/workflows/build-controller-from-release.yml"
-controller_release_stage=ryeos-f5r-controller-released
-[[ "$(sed -nE 's/^target "([^"]+)" \{$/\1/p' "$controller_release_bake")" == f5r-controller-released ]] || {
-    echo "controller-release Bake contract must define exactly the f5r-controller-released target" >&2
+controller_release_stage=ryeos-hosted-controller-released
+[[ "$(sed -nE 's/^target "([^"]+)" \{$/\1/p' "$controller_release_bake")" == hosted-controller-released ]] || {
+    echo "controller-release Bake contract must define exactly the hosted-controller-released target" >&2
     exit 1
 }
 grep -Eq "^[[:space:]]*target[[:space:]]*=[[:space:]]*\"$controller_release_stage\"" "$controller_release_bake" || {

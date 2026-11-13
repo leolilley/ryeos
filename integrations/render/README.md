@@ -1,7 +1,7 @@
 # Render controller deployment
 
 `controller.render.yaml.example` is the Render packaging for one RyeOS
-controller. It pins the f5r-controller image built from a release's officially
+controller. It pins the hosted-controller image built from a release's officially
 signed bundle assets by the controller-from-release workflow; the example
 carries a `<DIGEST>` placeholder in two places, to be replaced with the digest
 printed in that workflow run's summary.

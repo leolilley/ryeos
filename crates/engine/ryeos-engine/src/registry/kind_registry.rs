@@ -1013,6 +1013,13 @@ pub struct EffectiveValidatorDecl {
 #[serde(deny_unknown_fields)]
 pub struct EffectClassCeilingDecl {
     pub path: Vec<String>,
+    /// The highest class this kind admits on the authored field alone. A
+    /// subject that projects above it keeps its authored ceiling, but a
+    /// request for a class above this cap is refused
+    /// (`durable_effect_sealed_unqualified`) until qualification evidence for
+    /// the subject exists. Absent, the projected class is admitted as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unproven_max: Option<ryeos_effect_contract::EffectClass>,
 }
 
 /// Workspace relationship selected by an exact signed child definition.
@@ -5723,6 +5730,61 @@ execution:
         match delegation.via {
             DelegationVia::RuntimeRegistry { serves_kind } => {
                 assert_eq!(serves_kind.as_deref(), Some("directive"));
+            }
+        }
+    }
+
+    #[test]
+    fn effect_class_ceiling_unproven_max_parses() {
+        let yaml = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+    unproven_max: recorded
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        let ceiling = exec.effect_class_ceiling.expect("ceiling declared");
+        assert_eq!(ceiling.path, vec!["effects".to_owned()]);
+        assert_eq!(
+            ceiling.unproven_max,
+            Some(ryeos_effect_contract::EffectClass::Recorded)
+        );
+
+        let without = "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+";
+        let exec = parse_exec(without).unwrap().expect("execution present");
+        assert_eq!(exec.effect_class_ceiling.unwrap().unproven_max, None);
+    }
+
+    #[test]
+    fn effect_class_ceiling_unproven_max_rejects_unknown_class() {
+        for unknown in ["live", "proven", "\"\""] {
+            let yaml = format!(
+                "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/opaque
+  effect_class_ceiling:
+    path: [effects]
+    unproven_max: {unknown}
+"
+            );
+            match parse_exec(&yaml).unwrap_err() {
+                EngineError::SchemaLoaderError { reason } => assert!(
+                    reason.contains("invalid execution.effect_class_ceiling declaration"),
+                    "{unknown}: {reason}"
+                ),
+                other => panic!("{unknown}: unexpected error {other:?}"),
             }
         }
     }

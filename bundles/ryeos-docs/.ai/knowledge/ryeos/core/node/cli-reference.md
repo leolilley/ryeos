@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T03:56:20Z:7c79dc704e32a1d3324217bd5ad18e8446c23cbc32fbfc5c5295e95512340252:ZrWg2+NO4LUb1P6Y5U+6YRYT7dY/+uN7u5Fike2uylBu5iWMblM7AVfvFX19ouMVYpM+EFpk2X+/t5xe7ha4Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:56:02Z:9655c382d89858a40320e593cd526b17449168b640ea1d9d2a7e21b7d3946f94:twlOOVicEQm8O/fR1K6f7pFl4bwUqrlmxAaXrOYdEopibfCe7Qsxj1act8xiQIHVrHc/5wjtRUtIRqKEBoHLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -155,6 +155,38 @@ stopping the node. A service intentionally pinned to another prefix must be
 upgraded by that prefix's owning installation mechanism; the ordinary package
 installer never writes there or silently changes the association.
 
+### `ryeos node host retire`
+
+```bash
+ryeos node host retire --confirm [--app-root <dir>]
+ryeos node host retire --orphaned --confirm
+```
+
+Retires the native service that `ryeos node host setup` provisioned, through
+the installed daemon as administrator, like setup. The service is brought down,
+deactivated, and its service definition and logs are removed. Every form
+requires `--confirm`.
+
+With `--app-root` (or the default node), the node must be stopped: retirement
+takes the node's existing lifecycle and state locks and refuses while either is
+held. It creates and writes nothing in the app root, and the node remains a
+usable direct node. A service whose recorded launch is not a RyeOS node
+service for exactly that app root is refused.
+
+With `--orphaned`, the CLI first lists every RyeOS node service whose recorded
+app root no longer exists, then the administrator step re-checks each root and
+retires only those still missing. A service whose app root exists is never
+touched by the sweep. `ryeos node doctor` reports such services in its
+`host_services` row.
+
+Retirement needs root and a live service manager, so it has no automated
+end-to-end test. A manual check on a runit host: set up a throwaway node with
+`ryeos node host setup --confirm --app-root <dir>`, confirm
+`/etc/runit/runsvdir/default/ryeos-<digest>` exists, run
+`ryeos node host retire --confirm --app-root <dir>`, and confirm the link, the
+`/etc/runit/sv/ryeos-<digest>` directory and
+`/var/log/lillux-host-service/ryeos-<digest>` are gone.
+
 ### `ryeos node status`
 
 ```bash
@@ -177,7 +209,12 @@ Runs the offline node checklist. Its isolation row uses the production strict
 loader: disabled is a healthy inactive opt-out, while enforced mode resolves
 and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
-[Execution Isolation](execution-isolation.md).
+[Execution Isolation](execution-isolation.md). Its `process_quarantine` row
+warns about threads whose attached process group recovery cannot prove gone,
+from the report the daemon writes after each recovery pass. Its
+`stale_publication` row lists `publish_ready` hosted candidates whose base HEAD
+has moved (session, candidate, base and current HEAD); each settles to
+`base_superseded` on its owner's next publish.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and
@@ -225,6 +262,12 @@ warns but never fails the doctor, and is `n/a` when nothing is accepted.
 See [Retained products](../execution/retained-products.md) for the content
 testimony workflow.
 
+The host-wide `host_services` row reads the administrator-owned native service
+records without root. It warns when a RyeOS node service records an app root
+that no longer exists, and names the fix,
+`ryeos node host retire --orphaned --confirm`. It reports `n/a` where no native
+service directory is readable without root.
+
 ### `ryeos node reset execution-history`
 
 ```bash
@@ -268,6 +311,14 @@ ryeos node reset policy-generation --node-profile <name> --host-class <class> --
 Each reset names one authority/schema epoch. None is a storage-reclamation
 shortcut, and none broadens into another reset scope implicitly.
 
+Large objects that `ryeos external-content scrub` quarantined for byte damage
+stay on disk as evidence, counted against the large-object budget, until an
+operator discards them with the daemon stopped:
+
+```bash
+ryeos node large-objects purge-quarantine [--dry-run | --confirm]
+```
+
 `policy-generation` is the clean-cut path for a node whose complete signed
 policy generation predates the current registered section set. It verifies a
 publisher-signed init profile from the selected source root, treats that
@@ -302,6 +353,25 @@ incarnation debit is outstanding, or the account's image does not fit the new
 policy, the cut refuses with nothing changed; settle the account with
 `ryeos node capacity reissue --reason "..."` and rerun it. A rerun after a
 crash converges on the same amendment.
+
+The same cut moves a node to a renamed profile. A node records the profile it
+was initialized under in its substrate identity; a release that renames a
+profile ships no profile under the old name, so the node keeps running on its
+current generation but cannot be cut again under the old name. The remote
+Codex controller profile `f5r-controller` is now `hosted-controller`, built
+as the image `ryeos-hosted-controller`. Move a controller with:
+
+```bash
+ryeos node reset policy-generation --node-profile hosted-controller --host-class <recorded class> --confirm
+```
+
+The host class is the one the node recorded; it does not change. The cut
+records `hosted-controller` in the substrate identity. On a hosted container,
+sign the same `node.reset.policy-generation` operation against the
+`ryeos-hosted-controller` image's seed and substrate digest (see
+`deploy/composition-images.md`), move the service to that image, and set
+`RYEOS_INIT_NODE_PROFILE=hosted-controller` wherever the deployment overrides
+the image's value.
 
 ### `ryeos node external-execution compose`
 
@@ -358,9 +428,22 @@ physical vault key.
 - `ryeos execute <ref> [params...]` — execute an item by canonical ref.
 - `ryeos content pin <ref> --id <declaration>` — atomically complete a signed
   external-content pin through the daemon-owned, local-operator authoring path.
+- `ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash]`
+  — list a consumer's content bindings and whether each still authorizes it at
+  that generation; read only, local operator.
+- `ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash>` —
+  renew a pinned-project content binding for a new snapshot or re-signed
+  consumer; local operator, refused with a typed code when the consumer changed.
 - `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
 - `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
 - `ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` — verify one or more items' signatures, trust, and path anchoring.
+
+When the daemon refuses a buffered request with the typed
+`process_creation_busy` 503 (see [HTTP API](http-api.md)), the CLI prints
+the wait and reissues the same request, freshly signed, after the daemon's
+`retry_after_ms`, for up to 30 seconds. The daemon raises that refusal only
+before it admits the request, so the retry repeats nothing. Every other
+failure, and a streamed run, is reported at once.
 
 ## Bundle Management
 

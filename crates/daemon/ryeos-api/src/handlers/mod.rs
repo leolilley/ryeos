@@ -50,6 +50,7 @@ pub mod external_content_product_offer;
 pub mod external_content_product_push;
 pub mod external_content_product_receive;
 pub mod external_content_products;
+pub mod external_content_rebind;
 pub mod external_content_release;
 pub mod external_content_scrub;
 pub mod external_execution_candidate_program;
@@ -229,6 +230,8 @@ pub const ALL: &[ServiceDescriptor] = &[
     product_qualification_launch::CONTENT_DESCRIPTOR,
     external_content_activate::DESCRIPTOR,
     external_content_bind::DESCRIPTOR,
+    external_content_rebind::BINDINGS_DESCRIPTOR,
+    external_content_rebind::REBIND_DESCRIPTOR,
     external_content_release::DESCRIPTOR,
     external_content_scrub::DESCRIPTOR,
     external_execution_candidate_program::DESCRIPTOR,
@@ -245,6 +248,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     credential_profiles::GET_DESCRIPTOR,
     credential_profiles::LIST_DESCRIPTOR,
     credential_profiles::CONFIRM_DESCRIPTOR,
+    credential_profiles::ABANDON_LOGIN_DESCRIPTOR,
     credential_profiles::REVOKE_DESCRIPTOR,
     credential_profiles::DELETE_DESCRIPTOR,
     dedicated_sessions::STATUS_DESCRIPTOR,

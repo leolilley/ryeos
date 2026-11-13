@@ -10,7 +10,7 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
 #   full            core + central-auth + scheduling + knowledge + directive + graph +
@@ -32,7 +32,7 @@
 #   core-scheduling core + scheduling — explicit schedule selection
 #   core-workflow   core + graph — graph workflows without model providers
 #   core-knowledge  core + knowledge — knowledge kind and runtime only
-#   f5r-controller  core + graph + knowledge + codex + render-sandbox — remote Codex
+#   hosted-controller  core + graph + knowledge + codex + render-sandbox — remote Codex
 #                   authoring controller without the scheduler or directive runtime
 #   release-authority core + graph + environment-qualification + bundle-release —
 #                   isolated release authoring node
@@ -105,7 +105,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|f5r-controller|release-authority|release-artifacts) ;;
+  full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -459,7 +459,7 @@ case "$BUNDLE_SET" in
           ryeos-external-candidate-launcher ryeos-external-candidate-supervisor \
           ryeos-guest-wire-verifier)
     ;;
-  f5r-controller)
+  hosted-controller)
     pkgs=(lillux ryeosd ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter ryeos-external-candidate-connector \

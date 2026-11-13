@@ -16,7 +16,10 @@ use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::cascade::{CascadeMode, cancel_queued_descendants, cascade_descendants};
-use ryeos_app::process::{ShutdownAction, kill_by_action, resolve_shutdown_action};
+use ryeos_app::process::{
+    KillResult, SIGKILL_DELIVERED_UNSETTLED, ShutdownAction, kill_by_action,
+    resolve_shutdown_action,
+};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{StopIntent, is_terminal_status};
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
@@ -27,6 +30,42 @@ use ryeos_executor::executor::ServiceAvailability;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub thread_id: String,
+}
+
+/// Map a failed stop kill to its API error. A delivered SIGKILL whose group
+/// is not yet observed empty is the typed, retryable `stop_pending_settlement`
+/// conflict: the stop intent is durable and recovery finalizes it once the
+/// group is gone. Every other failure means no kill was proved delivered and
+/// stays internal.
+fn kill_failure_error(
+    result: &KillResult,
+    thread_id: &str,
+    pgid: i64,
+    stop_intent: StopIntent,
+) -> HandlerError {
+    if result.method == SIGKILL_DELIVERED_UNSETTLED {
+        return HandlerError::Structured {
+            code: "stop_pending_settlement".to_string(),
+            status: 409,
+            body: json!({
+                "code": "stop_pending_settlement",
+                "message": format!(
+                    "SIGKILL reached process group {pgid} for thread {thread_id}, but the group \
+                     was still present at the settle bound; the {} request is durable and \
+                     recovery finalizes the thread once the group is gone",
+                    stop_intent.as_str()
+                ),
+                "thread_id": thread_id,
+                "stop_intent": stop_intent.as_str(),
+                "pgid": pgid,
+                "method": result.method,
+            }),
+        };
+    }
+    HandlerError::Internal(format!(
+        "failed to kill process group {pgid} for thread {thread_id}: {}",
+        result.method
+    ))
 }
 
 fn in_process_stop_refusal_error(
@@ -131,14 +170,20 @@ pub async fn handle(
                 ))
             })?;
 
-        // If the kill genuinely failed (not already_dead), don't
-        // finalize — the process is still alive and marking it
-        // cancelled would be a lie.
+        // If the kill was not proved (not already_dead), don't finalize —
+        // the process may still be alive and marking it cancelled would be a
+        // lie. A delivered-but-unsettled kill wakes recovery now rather than
+        // at its next scheduled pass.
         if !result.success {
-            return Err(HandlerError::Internal(format!(
-                "failed to kill process group {} for thread {}: {}",
-                pgid, req.thread_id, result.method
-            )));
+            if result.method == SIGKILL_DELIVERED_UNSETTLED {
+                ryeos_app::recovery_nudge::nudge();
+            }
+            return Err(kill_failure_error(
+                &result,
+                &req.thread_id,
+                pgid,
+                effective_intent,
+            ));
         }
 
         json!({
@@ -334,6 +379,42 @@ mod tests {
                 "expected '{}' to NOT be terminal",
                 status
             );
+        }
+    }
+
+    #[test]
+    fn unsettled_sigkill_maps_to_stop_pending_conflict() {
+        let result = KillResult {
+            success: false,
+            method: SIGKILL_DELIVERED_UNSETTLED,
+        };
+        match kill_failure_error(&result, "T-1", 4242, StopIntent::Cancel) {
+            HandlerError::Structured { code, status, body } => {
+                assert_eq!(code, "stop_pending_settlement");
+                assert_eq!(status, 409);
+                assert_eq!(body["code"], "stop_pending_settlement");
+                assert_eq!(body["thread_id"], "T-1");
+                assert_eq!(body["stop_intent"], "cancel");
+            }
+            other => panic!("expected stop_pending_settlement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_sigkill_stays_internal() {
+        for method in [
+            "sigkill_failed",
+            "group_wait_failed",
+            "identity_unavailable",
+        ] {
+            let result = KillResult {
+                success: false,
+                method,
+            };
+            assert!(matches!(
+                kill_failure_error(&result, "T-1", 4242, StopIntent::Kill),
+                HandlerError::Internal(_)
+            ));
         }
     }
 

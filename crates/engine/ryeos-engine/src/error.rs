@@ -439,6 +439,22 @@ pub enum EngineError {
         second_item_id: String,
     },
 
+    // ── Project trust documents ──────────────────────────────────────
+    /// A trust document in a project's `.ai/config/keys/trusted/` that is
+    /// not vouched for by the node: unsigned (including raw `.pub`/`.key`
+    /// files), self-signed by a key the node does not hold, or signed by a
+    /// key outside the node's own trust store. `code` is one of
+    /// [`crate::trust::PROJECT_TRUST_UNSIGNED`],
+    /// [`crate::trust::PROJECT_TRUST_SELF_SIGNED`] and
+    /// [`crate::trust::PROJECT_TRUST_UNTRUSTED_SIGNER`].
+    #[error("{code}: project trust document {path}: {reason}. {cure}")]
+    ProjectTrustDocumentRefused {
+        code: &'static str,
+        path: String,
+        reason: String,
+        cure: String,
+    },
+
     // ── Internal ─────────────────────────────────────────────────────
     #[error("internal engine error: {0}")]
     Internal(String),
@@ -453,6 +469,13 @@ pub enum EngineError {
 
     #[error("handler `{handler}` spawn failed: {detail}")]
     HandlerSpawnFailed { handler: String, detail: String },
+
+    /// The handler process could not be created because fork-sensitive
+    /// descriptor authority stayed retained past the setup deadline. No
+    /// process ran; the same request may succeed once the holders release.
+    /// `detail` names the holder sites for the daemon log only.
+    #[error("process creation is busy for `{subject}`: {detail}")]
+    ProcessCreationBusy { subject: String, detail: String },
 
     #[error("handler `{handler}` exited with code {exit_code}; stderr: {stderr}")]
     HandlerExitNonZero {
@@ -504,6 +527,19 @@ pub enum EngineError {
         #[source]
         source: Box<crate::protocols::ProtocolError>,
     },
+}
+
+impl EngineError {
+    /// Whether this failure, or the engine failure it shares or wraps, is the
+    /// transient process-creation refusal.
+    pub fn is_process_creation_busy(&self) -> bool {
+        match self {
+            Self::ProcessCreationBusy { .. } => true,
+            Self::Shared(error) => error.is_process_creation_busy(),
+            Self::InventoryItemFailed { source, .. } => source.is_process_creation_busy(),
+            _ => false,
+        }
+    }
 }
 
 impl From<crate::handlers::HandlerError> for EngineError {

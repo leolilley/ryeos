@@ -1069,12 +1069,16 @@ pub(crate) fn admit_or_verify_prepared_sessions(
     Ok(AdmittedSessionPublications { publications })
 }
 
-/// Preserve the operator-correctable external-content absence across the
-/// otherwise opaque admission boundary. All other failures retain their
+/// Preserve the operator-correctable external-content absence (an unbound
+/// realization, or a large object scrub quarantined) across the otherwise
+/// opaque admission boundary. All other failures retain their
 /// existing internal/integrity classification.
 pub(crate) fn classify_prepared_session_admission_error(
     error: &anyhow::Error,
 ) -> Option<crate::dispatch_error::DispatchError> {
+    if let Some(quarantined) = super::external_content::classify_quarantined_large_object(error) {
+        return Some(quarantined);
+    }
     let unavailable = error
         .downcast_ref::<ryeos_app::external_content_admission::ExternalContentBindingUnavailable>(
     )?;
@@ -1082,8 +1086,8 @@ pub(crate) fn classify_prepared_session_admission_error(
         crate::dispatch_error::DispatchError::LaunchResourceNotFound {
             code: "external_content_binding_unavailable".to_owned(),
             message: format!(
-                "no active operator binding for manifest {} and consumer {}",
-                unavailable.manifest_hash, unavailable.consumer_ref
+                "no active operator binding for manifest {} and consumer {}; run `ryeos external-content bindings {} <installed_bundle|pinned_project> [project-snapshot-hash]` to list its bindings, and `ryeos external-content rebind` to renew one made at an earlier generation",
+                unavailable.manifest_hash, unavailable.consumer_ref, unavailable.consumer_ref
             ),
             binding: Some(unavailable.consumer_ref.clone()),
         },

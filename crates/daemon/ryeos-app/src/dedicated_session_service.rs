@@ -540,6 +540,14 @@ fn append_authoritative_observation_batch(
         worker_boot_epoch,
         result,
     )?);
+    observation_events.extend(approval_expiry_fact_events(
+        session,
+        worker_boot_epoch,
+        batch_digest,
+        first_sequence,
+        through_sequence,
+        result,
+    )?);
     crate::authoritative_root_fact::append_once_with_followups(
         state,
         &session.placement_thread_id,
@@ -2449,6 +2457,193 @@ fn approval_request_authority(
     })
 }
 
+/// The approval identity a worker's `approval.expired` observation projects
+/// to: one exact worker incarnation, upstream request id and request digest.
+fn observed_expiry_approval_id(
+    worker_boot_epoch: u64,
+    upstream_request_id: &Value,
+    request_digest: &str,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "worker_boot_epoch":worker_boot_epoch,
+        "upstream_request_id":upstream_request_id,
+        "request_digest":request_digest,
+    }))
+}
+
+const APPROVAL_EXPIRY_FACT: &str = "hosted_session.approval_expired";
+
+fn approval_expiry_fact_operation_id(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    approval_id: &str,
+) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&json!({
+        "schema":"ryeos.hosted_approval_expiry_observation.v1",
+        "chain_root_id":session.chain_root_id,
+        "placement_thread_id":session.placement_thread_id,
+        "worker_boot_epoch":worker_boot_epoch,
+        "approval_id":approval_id,
+    }))
+}
+
+/// Root testimony for each `approval.expired` event a pushed batch carries,
+/// naming the exact observation sequence of the event. A later owner decision
+/// that the worker answers as absent cites this fact as its explanation.
+fn approval_expiry_fact_events(
+    session: &DedicatedSessionRecord,
+    worker_boot_epoch: u64,
+    batch_digest: &str,
+    first_sequence: u64,
+    through_sequence: u64,
+    result: &Value,
+) -> Result<Vec<NewEventRecord>> {
+    let mut facts = Vec::new();
+    let events = result
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("worker events are not a bounded array"))?;
+    for (index, event) in events.iter().enumerate() {
+        let event: WorkerEvent = serde_json::from_value(event.clone())?;
+        if event.event_type != "approval.expired" {
+            continue;
+        }
+        let upstream_request_id = event
+            .payload
+            .get("request_id")
+            .ok_or_else(|| anyhow!("expired approval event has no request id"))?;
+        let request_digest = event
+            .payload
+            .get("request_digest")
+            .and_then(Value::as_str)
+            .filter(|digest| lillux::valid_hash(digest))
+            .ok_or_else(|| anyhow!("expired approval event has no canonical request digest"))?;
+        let event_sequence = first_sequence
+            .checked_add(u64::try_from(index)?)
+            .filter(|sequence| *sequence <= through_sequence)
+            .ok_or_else(|| anyhow!("expired approval event lies outside its batch sequence"))?;
+        let approval_id =
+            observed_expiry_approval_id(worker_boot_epoch, upstream_request_id, request_digest)?;
+        facts.push(NewEventRecord {
+            event_type: APPROVAL_EXPIRY_FACT.to_owned(),
+            storage_class: "indexed".to_owned(),
+            payload: json!({
+                "schema":1,
+                "operation_id":approval_expiry_fact_operation_id(
+                    session,
+                    worker_boot_epoch,
+                    &approval_id,
+                )?,
+                "origin":"daemon_accepted_worker_observation",
+                "chain_root_id":session.chain_root_id,
+                "placement_thread_id":session.placement_thread_id,
+                "worker_boot_epoch":worker_boot_epoch,
+                "approval_id":approval_id,
+                "upstream_request_id":upstream_request_id,
+                "request_digest":request_digest,
+                "batch_digest":batch_digest,
+                "first_sequence":first_sequence,
+                "through_sequence":through_sequence,
+                "event_sequence":event_sequence,
+            }),
+        });
+    }
+    Ok(facts)
+}
+
+/// The acknowledged worker observation that recorded one approval's expiry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservedApprovalExpiry {
+    pub batch_digest: String,
+    pub first_sequence: u64,
+    pub through_sequence: u64,
+    pub event_sequence: u64,
+}
+
+/// Explain a worker's typed `absent` answer to a reserved owner decision.
+///
+/// The bridge forgets an expired approval once RyeOS acknowledges the batch
+/// carrying its expiry, so a decision reserved before that expiry was
+/// projected can reach the worker after it is forgotten. That answer is
+/// explained only by this exact worker incarnation's own acknowledged
+/// `approval.expired` observation for this exact upstream request: the same
+/// placement, worker boot epoch, request id and request digest, with this
+/// reservation's row already projected `expired`. Anything else returns
+/// `None`, and the caller keeps treating the delivery as unknown.
+#[allow(clippy::too_many_arguments)]
+pub fn observed_expiry_explaining_absent_delivery(
+    state: &AppState,
+    session: &DedicatedSessionRecord,
+    approval_id: &str,
+    worker_boot_epoch: u64,
+    request_digest: &str,
+    reservation_token: &str,
+    decision_digest: &str,
+    upstream_request_id: &Value,
+) -> Result<Option<ObservedApprovalExpiry>> {
+    if observed_expiry_approval_id(worker_boot_epoch, upstream_request_id, request_digest)?
+        != approval_id
+    {
+        return Ok(None);
+    }
+    if !state.state_store.dedicated_approval_has_exact_state(
+        &session.placement_thread_id,
+        approval_id,
+        worker_boot_epoch,
+        request_digest,
+        reservation_token,
+        decision_digest,
+        "expired",
+    )? {
+        return Ok(None);
+    }
+    let operation_id = approval_expiry_fact_operation_id(session, worker_boot_epoch, approval_id)?;
+    let fact = crate::authoritative_root_fact::lookup(
+        state,
+        &session.placement_thread_id,
+        APPROVAL_EXPIRY_FACT,
+        &operation_id,
+    )?;
+    if fact.count != 1 {
+        return Ok(None);
+    }
+    let Some(payload) = fact.payload else {
+        return Ok(None);
+    };
+    let exact = payload.get("schema").and_then(Value::as_u64) == Some(1)
+        && payload.get("origin").and_then(Value::as_str)
+            == Some("daemon_accepted_worker_observation")
+        && payload.get("chain_root_id").and_then(Value::as_str)
+            == Some(session.chain_root_id.as_str())
+        && payload.get("placement_thread_id").and_then(Value::as_str)
+            == Some(session.placement_thread_id.as_str())
+        && payload.get("worker_boot_epoch").and_then(Value::as_u64) == Some(worker_boot_epoch)
+        && payload.get("approval_id").and_then(Value::as_str) == Some(approval_id)
+        && payload.get("upstream_request_id") == Some(upstream_request_id)
+        && payload.get("request_digest").and_then(Value::as_str) == Some(request_digest);
+    if !exact {
+        return Ok(None);
+    }
+    let sequence = |key: &str| payload.get(key).and_then(Value::as_u64);
+    let (Some(batch_digest), Some(first_sequence), Some(through_sequence), Some(event_sequence)) = (
+        payload.get("batch_digest").and_then(Value::as_str),
+        sequence("first_sequence"),
+        sequence("through_sequence"),
+        sequence("event_sequence"),
+    ) else {
+        return Ok(None);
+    };
+    if !(first_sequence..=through_sequence).contains(&event_sequence) {
+        return Ok(None);
+    }
+    Ok(Some(ObservedApprovalExpiry {
+        batch_digest: batch_digest.to_owned(),
+        first_sequence,
+        through_sequence,
+        event_sequence,
+    }))
+}
+
 fn approval_request_fact_events(
     session: &DedicatedSessionRecord,
     worker_boot_epoch: u64,
@@ -2795,11 +2990,11 @@ fn project_worker_events(
             {
                 bail!("expired approval event does not correlate to the retained thread and turn");
             }
-            let approval_id = ryeos_state::objects::canonical_value_digest(&json!({
-                "worker_boot_epoch":worker_boot_epoch,
-                "upstream_request_id":upstream_request_id,
-                "request_digest":request_digest,
-            }))?;
+            let approval_id = observed_expiry_approval_id(
+                worker_boot_epoch,
+                upstream_request_id,
+                request_digest,
+            )?;
             state
                 .state_store
                 .observe_dedicated_session_approval_expiry(
@@ -4971,6 +5166,91 @@ pub fn candidate_publication_result_payload(
     })
 }
 
+/// Rooted fact for a publication whose admitted base HEAD was superseded:
+/// the project HEAD moved to `observed_head` (none when the project has no
+/// HEAD), so the candidate can never publish against its admitted base. The
+/// candidate stays retained as evidence and the session settles terminal.
+pub const CANDIDATE_PUBLICATION_SUPERSEDED_EVENT: &str = "hosted_candidate.publication_superseded";
+
+pub fn candidate_publication_superseded_payload(
+    session: &crate::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    operation_id: &str,
+    observed_head: Option<&str>,
+) -> Value {
+    let mut payload = candidate_publication_result_payload(
+        session,
+        authority,
+        publication_root_id,
+        operation_id,
+        "base_superseded",
+        false,
+    );
+    let object = payload
+        .as_object_mut()
+        .expect("candidate publication result is an object");
+    object.insert("reason".into(), Value::String("head_moved".into()));
+    object.insert(
+        "observed_head".into(),
+        observed_head.map_or(Value::Null, |head| Value::String(head.to_owned())),
+    );
+    payload
+}
+
+/// The rooted superseded fact of this publication operation, if any, as the
+/// HEAD it observed. `Some(None)` means the project had no HEAD.
+pub fn verify_candidate_publication_superseded(
+    state: &AppState,
+    session: &crate::state_store::DedicatedSessionRecord,
+    authority: &CandidatePublicationAuthority,
+    publication_root_id: &str,
+    operation_id: &str,
+) -> Result<Option<Option<String>>, crate::handler_error::HandlerError> {
+    let fact = crate::authoritative_root_fact::lookup(
+        state,
+        publication_root_id,
+        CANDIDATE_PUBLICATION_SUPERSEDED_EVENT,
+        operation_id,
+    )
+    .map_err(candidate_publication_error)?;
+    if fact.count == 0 {
+        return Ok(None);
+    }
+    let contradiction = || {
+        candidate_publication_error(
+            "candidate publication superseded fact contradicts its reservation",
+        )
+    };
+    let payload = match (fact.count, fact.payload) {
+        (1, Some(payload)) => payload,
+        _ => return Err(contradiction()),
+    };
+    let observed_head = match payload.get("observed_head") {
+        Some(Value::Null) => None,
+        Some(Value::String(head)) if lillux::valid_hash(head) => Some(head.clone()),
+        _ => return Err(contradiction()),
+    };
+    let mut expected = candidate_publication_superseded_payload(
+        session,
+        authority,
+        publication_root_id,
+        operation_id,
+        observed_head.as_deref(),
+    );
+    expected
+        .as_object_mut()
+        .expect("candidate publication result is an object")
+        .insert(
+            "operation_id".into(),
+            Value::String(operation_id.to_owned()),
+        );
+    if payload != expected {
+        return Err(contradiction());
+    }
+    Ok(Some(observed_head))
+}
+
 pub fn verify_candidate_publication_reservation(
     state: &AppState,
     session: &crate::state_store::DedicatedSessionRecord,
@@ -5142,9 +5422,11 @@ fn terminal_candidate_publication_outcome(
     }
     let published = format!("published:{}", authority.candidate_snapshot_hash);
     let unknown = format!("publication_unknown:{}", authority.candidate_snapshot_hash);
+    let superseded = format!("base_superseded:{}", authority.candidate_snapshot_hash);
     match session.publication_result.as_deref() {
         Some(result) if result == published => Ok("published"),
         Some(result) if result == unknown => Ok("unknown"),
+        Some(result) if result == superseded => Ok("base_superseded"),
         _ => bail!("terminal candidate publication result names another target or outcome"),
     }
 }
@@ -5217,6 +5499,12 @@ pub fn verify_terminal_candidate_publication(
         {
             bail!("terminal candidate publication has contradictory result facts");
         }
+    }
+    if verify_candidate_publication_superseded(state, session, &authority, root_id, operation_id)?
+        .is_some()
+        && rooted_outcome.replace("base_superseded").is_some()
+    {
+        bail!("terminal candidate publication has contradictory result facts");
     }
     if rooted_outcome != Some(outcome) {
         bail!("terminal candidate publication has no exact rooted result");
@@ -7006,6 +7294,49 @@ mod tests {
     }
 
     #[test]
+    fn superseded_publication_fact_names_the_observed_head() {
+        let session = session_fixture();
+        let authority = CandidatePublicationAuthority {
+            source_candidate_snapshot_hash: "c".repeat(64),
+            candidate_snapshot_hash: "d".repeat(64),
+            candidate_validation_hash: "e".repeat(64),
+            base_snapshot_hash: "b".repeat(64),
+            principal_key: "owner".into(),
+            project_hash: "f".repeat(64),
+            candidate_evaluation_hash: "9".repeat(64),
+        };
+        let observed = "7".repeat(64);
+        let payload = candidate_publication_superseded_payload(
+            &session,
+            &authority,
+            "T-publish",
+            "op",
+            Some(&observed),
+        );
+        assert_eq!(payload["outcome"], "base_superseded");
+        assert_eq!(payload["reason"], "head_moved");
+        assert_eq!(payload["observed_head"], observed);
+        assert_eq!(payload["expected_previous_hash"], "b".repeat(64));
+        let mut base = candidate_publication_result_payload(
+            &session,
+            &authority,
+            "T-publish",
+            "op",
+            "base_superseded",
+            false,
+        );
+        let object = base.as_object_mut().unwrap();
+        object.insert("reason".into(), json!("head_moved"));
+        object.insert("observed_head".into(), json!(observed));
+        assert_eq!(payload, base, "superseded extends the result payload only");
+        assert_eq!(
+            candidate_publication_superseded_payload(&session, &authority, "T-publish", "op", None)
+                ["observed_head"],
+            Value::Null
+        );
+    }
+
+    #[test]
     fn settled_publication_recovery_keeps_source_c_and_exact_target_d() {
         let mut session = session_fixture();
         let source = "c".repeat(64);
@@ -7040,6 +7371,7 @@ mod tests {
         for (prefix, outcome) in [
             ("published", "published"),
             ("publication_unknown", "unknown"),
+            ("base_superseded", "base_superseded"),
         ] {
             session.publication_result = Some(format!("{prefix}:{target}"));
             let recovered: DedicatedSessionRecord =

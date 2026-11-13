@@ -1,9 +1,9 @@
-# ryeos:signed:2026-11-11T02:56:41Z:f2ab6486ff90924b37b772e0e7b0b42b98700ab0b868c347c2a2285dddef7e3a:GFaKVqMBkI91/E+F3kbk4einV3N34wvOU6CpArkOGcK24Th4bh+VlejLz2DHH1zfRWFGBJ2gOYNMkV5P6lWDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T01:40:10Z:23fd9e1d6e7b4a11adb44968c1d4af3a8af194b277f6cd82000eee398687d264:yUrZ5euI78fM/Grcgh9+mfbGbQspXLMsW7EFnqRKkypcpqwHSIezJRFO1gFVoSkV4auc2Kusi39KsyMfn25hDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 inventory_policy:
   admission:
     capability_template: "ryeos.execute.{kind}.{bare_id}"
-version: "1.0.0"
+version: "1.1.0"
 location:
   directory: graphs
 resolution:
@@ -19,9 +19,13 @@ launch_trust:
 execution:
   # Kind-owned location of the graph author's durable-effect ceiling. The
   # generic dispatcher projects this signed field exactly as it does for
-  # Tools; absence (or `live`) remains ineligible for durable dispatch.
+  # Tools; absence (or `live`) remains ineligible for durable dispatch. A
+  # declared `sealed` is the author's testimony: without qualification
+  # evidence a caller may claim at most `recorded`, and a `sealed` request is
+  # refused (`durable_effect_sealed_unqualified`).
   effect_class_ceiling:
     path: [effects]
+    unproven_max: recorded
   # Explicit delegation to the runtime registry. The dispatcher will
   # call `RuntimeRegistry::lookup_for("graph")` to find the default
   # runtime serving this kind (today: `runtime:graph-runtime`).

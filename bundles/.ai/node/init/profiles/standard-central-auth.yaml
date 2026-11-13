@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T04:16:48Z:961d77eef5ad266f2dc30fef156760872f42e5c96a3a2a66c549064026818b7e:gvWDzxClyRGnd6RNDIuRGNBw5kS1VytAicPQQJsH6kNqmZ1J7lU9xINA9ObQdVWb0ny3Odyn+J1b2RZIjvnUBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T00:39:45Z:e5776116de0600391f7469255f80cbb469be10b236299069eb17b7ce4cba2ad5:BOEe62Gs7Kde00EGzWVMg8aveebOxVgOKvMGfVX1Qh0Q2iLpAhoHhE885JF9xQ+gMeWpk8vcGD7Oqx8+t1wSBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Optional application authentication above the standard set.
 schema: 1
 exact_bundles:
@@ -309,6 +309,16 @@ policies:
   launch_trust:
     schema: 1
     admit: {}
+  # Storage class of each progressive runtime event. Every other event is
+  # always indexed; only these may be ephemeral or journal_only.
+  event_storage:
+    schema: 1
+    classes:
+      cognition_reasoning: ephemeral
+      graph_foreach_iteration: journal_only
+      observation: journal_only
+      stream_snapshot: ephemeral
+      token_delta: ephemeral
   ingest_ignore:
     schema: 2
     patterns:
