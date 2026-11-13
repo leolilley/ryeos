@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T03:06:11Z:6a3fbdc60d13cf618023a6b77fe3329d58e9796ad23cdeea8bb25b69e02a7097:pTOQjgLIuiXqkB0mX+lWZqR0Tsd7r75RR7aIkV3CrlYhLtuYUqDklCOjEBFNDJOzaixpAvYW1V3d+YhvDZTlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T03:26:54Z:2bd0b1cb3532c0ee4ad093b925a470c16baa282c702f6838c9055042b1d4feec:DxkHK4OMxLcgJoaIs5Xf73pRFuaUeM8nwJkWEChQ2/Kop7xIYlYEbSN5q3L7FVYAucw1FqcUeww+jLUYmbnsCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -281,7 +281,11 @@ never publishes. A run interrupted after its freeze has the generation bound by
 recovery; if it cannot resume it fails `head_advance_not_applied` with reason
 `interrupted` (expected and, if readable, observed HEAD and the retained
 hashes) and the generation joins that failed terminal, while a resumable run
-relaunches and its next finish takes the normal path. A not-applied result is never retried or
+relaunches and its next finish takes the normal path. If HEAD already names
+the recovered generation, the advance applied before the interruption: the
+thread fails `head_advanced_before_interruption`, recording the generation,
+the new HEAD and the base it advanced from, with the generation joined to the
+terminal, since the run never confirmed its own completion. A not-applied result is never retried or
 merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
 publication. Their writes are discarded at process cleanup and never fold back

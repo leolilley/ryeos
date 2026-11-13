@@ -436,19 +436,23 @@ fn finalize_dead(
     // but before it advanced HEAD, is never published by recovery: it fails
     // with the typed head-advance outcome, and the retained generation joins
     // the failed terminal so it stays reachable after the workspace closes.
-    if let Some((payload, generation)) = interrupted_head_advance(state, thread_id) {
+    // If HEAD already names the generation, the advance applied before the
+    // interruption: the thread fails `head_advanced_before_interruption`,
+    // recording the publication although the run never confirmed completion.
+    if let Some((outcome_code, payload, generation)) = interrupted_head_advance(state, thread_id) {
         let mut error = payload;
         error["recovery"] = error_obj;
         tracing::warn!(
             thread_id,
-            retained_snapshot_hash = %generation.snapshot_hash,
-            "interrupted run's HEAD advance was not applied; failing with the retained generation"
+            outcome_code,
+            snapshot_hash = %generation.snapshot_hash,
+            "interrupted advance-head run settled from its recovered generation"
         );
         state.threads.finalize_thread_retaining_generation(
             &ThreadFinalizeParams {
                 thread_id: thread_id.to_string(),
                 status: "failed".to_string(),
-                outcome_code: Some(ryeos_executor::execution::HEAD_ADVANCE_NOT_APPLIED.to_string()),
+                outcome_code: Some(outcome_code.to_string()),
                 result: None,
                 error: Some(error),
                 metadata: None,
@@ -476,14 +480,15 @@ fn finalize_dead(
     Ok(())
 }
 
-/// The not-applied payload and retained generation of a dead thread whose
+/// The outcome code, payload and retained generation of a dead thread whose
 /// admitted terminal publication advances HEAD and whose workspace froze and
-/// bound a result generation that HEAD does not name. `None` for every other
-/// thread, which keeps its ordinary recovery failure.
+/// bound a result generation. `None` for every other thread, which keeps its
+/// ordinary recovery failure.
 fn interrupted_head_advance(
     state: &AppState,
     thread_id: &str,
 ) -> Option<(
+    &'static str,
     serde_json::Value,
     ryeos_state::objects::WorkspaceGenerationPair,
 )> {
@@ -520,12 +525,12 @@ fn interrupted_head_advance(
             .ok()
             .flatten()
     });
-    let payload = ryeos_executor::execution::interrupted_head_advance_payload(
+    let (outcome_code, payload) = ryeos_executor::execution::interrupted_head_advance_outcome(
         expected_hash,
         observed.as_deref(),
         &generation,
-    )?;
-    Some((payload, generation))
+    );
+    Some((outcome_code, payload, generation))
 }
 
 /// The principal and project of a canonical `projects/<principal>/<project>/head`.
