@@ -16,11 +16,12 @@ pub struct EventStoreService {
     state_store: Arc<StateStore>,
 }
 
+/// One runtime-appended event. It carries no storage class: the daemon
+/// decides it from the node's signed `event_storage` policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventAppendItem {
     pub event_type: String,
-    pub storage_class: String,
     #[serde(default)]
     pub payload: Value,
 }
@@ -100,8 +101,7 @@ impl EventStoreService {
     }
 
     /// Append a runtime event batch. Each event is stored under the class the
-    /// node's signed `event_storage` policy gives it, never under the class
-    /// the runtime claims; the claim must still be a valid class.
+    /// node's signed `event_storage` policy gives it.
     #[tracing::instrument(
         level = "debug",
         name = "event:append_batch",
@@ -319,14 +319,12 @@ fn validate_event_type(event_type: &str) -> Result<()> {
 /// The class one runtime event is stored under: the node's signed
 /// `event_storage` policy decides for progressive events, and every other
 /// event is indexed (a `cognition_out` streaming fragment excepted, whose
-/// turn-complete record is the durable one). The runtime's claimed class is
-/// checked for shape only; it never lowers or raises what is stored.
+/// turn-complete record is the durable one).
 fn stored_storage_class(
     event: &EventAppendItem,
     storage: &EventStoragePolicy,
 ) -> Result<ryeos_runtime::StorageClass> {
     validate_event_type(&event.event_type)?;
-    ryeos_runtime::StorageClass::parse(&event.storage_class)?;
     let event_type = ryeos_runtime::RuntimeEventType::parse(&event.event_type)?;
     Ok(storage.class_for(event_type, &event.payload))
 }
@@ -336,11 +334,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn stored(event_type: &str, claimed: &str, payload: Value) -> Result<&'static str> {
+    fn stored(event_type: &str, payload: Value) -> Result<&'static str> {
         stored_storage_class(
             &EventAppendItem {
                 event_type: event_type.to_owned(),
-                storage_class: claimed.to_owned(),
                 payload,
             },
             &EventStoragePolicy::as_shipped(),
@@ -356,35 +353,28 @@ mod tests {
             json!({"tool_use_partial": {"id": "x"}}),
             json!({"tool_use": {"id": "x", "name": "f", "arguments": {}}}),
         ] {
-            for claimed in ["ephemeral", "indexed"] {
-                assert_eq!(
-                    stored("cognition_out", claimed, payload.clone()).unwrap(),
-                    "ephemeral",
-                    "cognition_out {payload} claimed {claimed}"
-                );
-            }
+            assert_eq!(
+                stored("cognition_out", payload.clone()).unwrap(),
+                "ephemeral",
+                "cognition_out {payload}"
+            );
         }
     }
 
     #[test]
-    fn durable_cognition_out_is_stored_indexed_whatever_the_claim() {
+    fn durable_cognition_out_is_stored_indexed() {
         // A turn-complete cognition_out (tool_calls array) or interrupted seal is
-        // the durable record; a claim cannot lower it.
+        // the durable record.
         for payload in [
             json!({"content": "done", "tool_calls": []}),
             json!({"content": "partial", "interrupted": true}),
         ] {
-            for claimed in ["ephemeral", "journal_only", "indexed"] {
-                assert_eq!(
-                    stored("cognition_out", claimed, payload.clone()).unwrap(),
-                    "indexed"
-                );
-            }
+            assert_eq!(stored("cognition_out", payload).unwrap(), "indexed");
         }
     }
 
     #[test]
-    fn the_policy_not_the_claim_decides_progressive_events() {
+    fn the_policy_decides_progressive_events() {
         for (event_type, class) in [
             ("token_delta", "ephemeral"),
             ("stream_snapshot", "ephemeral"),
@@ -392,27 +382,31 @@ mod tests {
             ("observation", "journal_only"),
             ("graph_foreach_iteration", "journal_only"),
         ] {
-            for claimed in ["ephemeral", "journal_only", "indexed"] {
-                assert_eq!(
-                    stored(event_type, claimed, json!({})).unwrap(),
-                    class,
-                    "{event_type} claimed {claimed}"
-                );
-            }
+            assert_eq!(
+                stored(event_type, json!({})).unwrap(),
+                class,
+                "{event_type}"
+            );
         }
     }
 
     #[test]
-    fn floor_events_are_stored_indexed_and_claims_must_be_classes() {
-        for claimed in ["ephemeral", "journal_only", "indexed"] {
-            assert_eq!(
-                stored("thread_completed", claimed, json!({})).unwrap(),
-                "indexed"
-            );
-        }
-        assert!(stored("observation", "discard", json!({})).is_err());
-        assert!(stored("observation", "", json!({})).is_err());
-        assert!(stored("not_an_event", "indexed", json!({})).is_err());
+    fn floor_events_are_stored_indexed() {
+        assert_eq!(stored("thread_completed", json!({})).unwrap(), "indexed");
+        assert!(stored("not_an_event", json!({})).is_err());
+    }
+
+    #[test]
+    fn an_event_carrying_a_storage_class_is_refused() {
+        // The wire has no storage class; a runtime that still sends one is
+        // refused rather than silently ignored.
+        let error = serde_json::from_value::<EventAppendItem>(json!({
+            "event_type": "observation",
+            "storage_class": "ephemeral",
+            "payload": {},
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("storage_class"), "{error}");
     }
 
     #[test]
@@ -423,7 +417,6 @@ mod tests {
         ] {
             let event = |payload| EventAppendItem {
                 event_type: event_type.to_string(),
-                storage_class: "indexed".to_string(),
                 payload,
             };
             assert!(
@@ -480,7 +473,6 @@ mod tests {
     fn runtime_cannot_forge_state_anchor_milestones() {
         let error = validate_runtime_event_batch(&[EventAppendItem {
             event_type: ryeos_state::event_types::MILESTONE.to_string(),
-            storage_class: "indexed".to_string(),
             payload: json!({
                 "kind": "state_anchor",
                 "payload": {
@@ -502,7 +494,6 @@ mod tests {
             .cloned()
             .map(|payload| EventAppendItem {
                 event_type: "cognition_in".to_string(),
-                storage_class: "indexed".to_string(),
                 payload,
             })
             .collect::<Vec<_>>();

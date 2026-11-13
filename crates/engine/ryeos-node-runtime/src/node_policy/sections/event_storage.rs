@@ -1,7 +1,7 @@
 //! Node-owned storage class of each progressive runtime event.
 //!
 //! The daemon stores every runtime-appended event under this section, not
-//! under the class the runtime claims. The code floor is
+//! under any class a runtime chooses; runtimes send none. The code floor is
 //! [`RuntimeEventType::is_progressive`]: only progressive events (token,
 //! stream and reasoning deltas, observations, foreach iteration results) are
 //! named here, and each must be named exactly once. Every other event is
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_body_parses_and_matches_the_runtime_claims() {
+    fn the_shipped_body_parses_and_matches_the_shipped_classes() {
         let policy = parse(shipped_body()).unwrap();
         assert_eq!(policy, EventStoragePolicy::as_shipped());
         assert_eq!(

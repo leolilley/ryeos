@@ -63,10 +63,6 @@ pub async fn handle(
                 thread_id: req.thread_id.clone(),
                 event: EventAppendItem {
                     event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
-                    storage_class: RuntimeEventType::ThreadFacetSet
-                        .storage_class()
-                        .as_str()
-                        .to_string(),
                     payload: json!({ "key": req.key, "value": req.value }),
                 },
             },

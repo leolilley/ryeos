@@ -11,8 +11,8 @@
 //! `event_storage` policy. `RuntimeEventType::is_progressive()` is the code
 //! floor: only progressive events may be stored as `ephemeral` or
 //! `journal_only`; every lifecycle, audit, launch and terminal event is
-//! always `indexed`. `RuntimeEventType::storage_class()` is the class the
-//! shipped init profiles assign, which runtimes send as their claim.
+//! always `indexed`. Runtimes send no storage class. `RuntimeEventType::storage_class()`
+//! is the class the shipped init profiles assign.
 
 use std::collections::BTreeMap;
 
@@ -792,10 +792,11 @@ impl RuntimeEventType {
         }
     }
 
-    /// The storage class every shipped init profile assigns, which a
-    /// runtime sends as its claim. The daemon does not store under the
-    /// claim: it applies the node's signed `event_storage` policy within the
-    /// floor of [`Self::is_progressive`].
+    /// The storage class every shipped init profile assigns. Daemon-authored
+    /// events written straight to the state store (all on the indexed floor)
+    /// use it; a runtime-appended event carries no class and is stored under
+    /// the node's signed `event_storage` policy within the floor of
+    /// [`Self::is_progressive`].
     ///
     /// Token, stream-snapshot and reasoning deltas are live-only
     /// `ephemeral`: the turn-complete `cognition_out` keeps their text, so

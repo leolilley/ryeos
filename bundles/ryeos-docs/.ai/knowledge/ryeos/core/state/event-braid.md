@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:40:46Z:88db8dd07cc57d43316bd63548bd7e381d6996ff9dc440f29da246851d99e5f3:rQXvdNsS0pDmVoLFYYDlPZp127QuSj3p9tAAafWP2EwkUk8eLay7TB+VWVsrHSe6SUoPi9y9nmh/e+CKUaPcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:19:00Z:ef0da4e9b3f2e5d7e9f9f88a8301d5187d8057cc2cee18ed4434d5e11ffe0ba0:cErDHbUYjgciBE5cLgqroLv8ulN4TGVKNpemuMGBdLjspvKv0RIDyZuEHTeBVrA9NI7cYZTbWtIvPOJl/cEJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -83,8 +83,10 @@ exist only in the broadcast stream and are not persisted.
 ### Storage class is node policy
 
 The daemon stores each runtime-appended event under the node's signed
-`event_storage` policy section (`.ai/node/policies/event_storage.yaml`), not
-under the class the runtime claims. The section is mandatory and has no code
+`event_storage` policy section (`.ai/node/policies/event_storage.yaml`). A
+runtime's `runtime.append_event(s)` event carries only `event_type` and
+`payload`; one that also sends `storage_class` is refused. The section is
+mandatory and has no code
 fallback. Its floor is in code: only the progressive events take a class from
 policy, and the policy must name each of them exactly once. Every lifecycle,
 audit, launch, terminal and transcript event is always durable; a policy that

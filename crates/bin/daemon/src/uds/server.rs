@@ -5529,7 +5529,6 @@ mod tests {
                     "thread_id": "T-stream-1",
                     "event": {
                         "event_type": "stream_opened",
-                        "storage_class": "indexed",
                         "payload": {"turn": 1},
                     },
                 }),
@@ -5579,7 +5578,6 @@ mod tests {
                     "thread_id": "T-ephemeral-1",
                     "event": {
                         "event_type": "cognition_out",
-                        "storage_class": "ephemeral",
                         "payload": {"turn": 1, "delta": "hello"},
                     },
                 }),
@@ -5644,11 +5642,10 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-journal-1",
-                    // The runtime's claim does not decide: the node's
-                    // event_storage policy stores observations journal-only.
+                    // The runtime names no class: the node's event_storage
+                    // policy stores observations journal-only.
                     "event": {
                         "event_type": "observation",
-                        "storage_class": "ephemeral",
                         "payload": {"kind": "test.observation", "value": 1},
                     },
                 }),
@@ -5694,14 +5691,13 @@ mod tests {
     }
 
     #[test]
-    fn floor_event_claimed_ephemeral_is_stored_indexed() {
-        on_daemon_worker_stack(floor_event_claimed_ephemeral_is_stored_indexed_body);
+    fn floor_event_is_stored_indexed() {
+        on_daemon_worker_stack(floor_event_is_stored_indexed_body);
     }
 
-    async fn floor_event_claimed_ephemeral_is_stored_indexed_body() {
+    async fn floor_event_is_stored_indexed_body() {
         // The daemon stores under the node's event_storage policy, whose floor
-        // keeps every non-progressive event indexed: a runtime's ephemeral
-        // claim cannot drop one.
+        // keeps every non-progressive event indexed.
         let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-floor-1");
         let cbt = generate_test_callback(
@@ -5721,7 +5717,6 @@ mod tests {
                     "thread_id": "T-floor-1",
                     "event": {
                         "event_type": "stream_closed",
-                        "storage_class": "ephemeral",
                         "payload": {},
                     },
                 }),
@@ -5755,11 +5750,13 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_storage_class_claim_is_refused() {
-        on_daemon_worker_stack(an_invalid_storage_class_claim_is_refused_body);
+    fn an_event_carrying_a_storage_class_is_refused() {
+        on_daemon_worker_stack(an_event_carrying_a_storage_class_is_refused_body);
     }
 
-    async fn an_invalid_storage_class_claim_is_refused_body() {
+    async fn an_event_carrying_a_storage_class_is_refused_body() {
+        // The wire carries no storage class; a runtime that still sends one is
+        // refused, never silently ignored.
         let (_tmp, _state_owner, state) = setup_app_state();
         create_running_test_thread(&state, "T-claim-bad");
         let cbt = generate_test_callback(
@@ -5779,7 +5776,7 @@ mod tests {
                     "thread_id": "T-claim-bad",
                     "event": {
                         "event_type": "observation",
-                        "storage_class": "discard",
+                        "storage_class": "ephemeral",
                         "payload": {},
                     },
                 }),
@@ -5790,7 +5787,7 @@ mod tests {
 
         let err = rpc_err(&resp);
         assert!(
-            err.message.contains("invalid storage_class"),
+            err.message.contains("unknown field `storage_class`"),
             "got: {}",
             err.message
         );
@@ -5822,9 +5819,9 @@ mod tests {
                 "callback_token": cbt.token,
                 "thread_id": "T-stream-2",
                 "events": [
-                    {"event_type": "tool_call_start",  "payload": {"i": 1, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
-                    {"event_type": "tool_call_result", "payload": {"i": 2, "operation_id": "a".repeat(64)}, "storage_class": "indexed"},
-                    {"event_type": "stream_closed",    "payload": {"i": 3}, "storage_class": "indexed"},
+                    {"event_type": "tool_call_start",  "payload": {"i": 1, "operation_id": "a".repeat(64)}},
+                    {"event_type": "tool_call_result", "payload": {"i": 2, "operation_id": "a".repeat(64)}},
+                    {"event_type": "stream_closed",    "payload": {"i": 3}},
                 ],
             })),
             &state,
@@ -7129,7 +7126,7 @@ mod tests {
                         "callback_token": succ.token,
                         "thread_id": "T-pred",
                         "status": "completed",
-                        "event": {"event_type": "cognition_in", "payload": {}, "storage_class": "indexed"},
+                        "event": {"event_type": "cognition_in", "payload": {}},
                     }),
                 ),
                 &state,

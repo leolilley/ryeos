@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:40:46Z:b23ba854fc5875827ff7765bec77e2a354779ef9b81543da615064f6a8c62036:2GtOxtTUmQC3OGvWIXBSooUPDxKDnK4Iy+2XYEmC3Bjn2JQ92KU44DHKzLu9FL5BQEXHb/S++yvgGTd2WFOEAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:19:00Z:61c768e8f7034fbbeeb48cbde63c94d31894d16592a582f87a642647662cdf7b:z12Qoi6JsCQZ0JWfFH89X5SKi/PpXjuK3jRzncFKaQQW6DrVbscpNgf3TSaMkxkIFKvf6y2x4Rnz9zAc9PN2BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -413,8 +413,8 @@ Journal events are in CAS (recoverable on rebuild) but not queryable
 through the projection. Ephemeral events are transient — lost on process
 crash.
 
-The daemon assigns tiers from the node's signed `event_storage` policy, not
-from the runtime's claim. In every shipped profile, token, stream-snapshot and
+The daemon assigns tiers from the node's signed `event_storage` policy; a
+runtime sends no storage class. In every shipped profile, token, stream-snapshot and
 reasoning deltas (`token_delta`, `stream_snapshot`, `cognition_reasoning`) are
 ephemeral, because the turn-complete `cognition_out` keeps their content, and
 `observation` and `graph_foreach_iteration` are journal-only. Only these
