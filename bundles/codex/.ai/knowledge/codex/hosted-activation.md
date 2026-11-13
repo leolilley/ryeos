@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-15T23:21:00Z:ca72356ed4cdf43157d1cc18f7d2bb232243c3469f24452ff64d32caaa6eaa5e:rbUX+13tvqwKxnwO/GBgSEv5mig0Hckop6ABNGnuA3r04seHfHBURLHORp/z8nBM3P15gdzORII/bLmB2nQJDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:52:55Z:36ee6d97308e9c1a76a355da1ec450f42ac4a0d5880868957df7039762155172:t6yRDia4O6SmBjQiTvyhRaj6vdp+jiqxonK0PMTtOx9CJF6gaRfLkIpVZk+wNOc8rcQ9o59eIcJdQsQJG+7YAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -297,6 +297,52 @@ configured-operator forwarding route to inspect profiles on a remote node.
    Never copy `auth.json`, tokens, or the remaining private profile home between
    nodes. Handoff proves only that each target-local confirmed account derives
    the same signed credential-subject digest.
+
+   On the node the CLI addresses, one client command runs that whole ceremony:
+
+   ```sh
+   ryeos codex login device <profile-id> [--create] [--trusted] [--yes]
+   ```
+
+   It creates the profile when `--create` is given, opens the login session
+   (`codex login open`, or `codex login open-trusted` with `--trusted`), waits
+   until the session's worker is attached and idle, sends
+   `credential.login.start` and shows the device URL and code, polls
+   `credential.account.read` until the account is observed, ends the login
+   session so its worker releases the profile lock, shows the sanitized account
+   and its digest, and on the operator's yes confirms that login epoch and
+   digest. Every step is an ordinary signed command the node authorizes on its
+   own; the two-step authority (the worker observes, the operator confirms) is
+   unchanged. A failure while the session is open ends the session. Without a
+   terminal on stdin, pass `--yes` to confirm without asking. For a remote
+   hosted node, run the same steps through `service:remote/run` (step 6).
+
+   Confirmation needs the login session ended: its worker holds the profile
+   lock as the fence for the credential home it writes. The node refuses with
+   HTTP 409 and a typed code instead of a generic error:
+
+   - `credential_confirm_lock_held`: a worker still holds the profile. The
+     refusal names the holder and its login session; end it with
+     `ryeos worker session terminate <chain-root-id> cancelled`, wait until
+     `codex profile get` shows no `lock_owner`, then confirm.
+   - `credential_confirm_expired`: the login window (at most 15 minutes) closed.
+   - `credential_confirm_wrong_state`: the profile is not `confirming` at that
+     login epoch.
+
+   A login that nobody finished leaves the profile `enrolling` or `confirming`,
+   and a new login then refuses with `credential_enrollment_abandoned` (or
+   `credential_enrollment_in_progress` while the window is still open). Clear it
+   explicitly, naming the login epoch from `codex profile get`:
+
+   ```sh
+   ryeos codex profile abandon-login <profile-id> <login-epoch>
+   ```
+
+   This returns the profile to `unauthenticated` only when that login is
+   `enrolling` or `confirming`, its window has closed and no worker holds the
+   profile; anything else refuses with `credential_abandon_refused` and the
+   reason. It advances the profile's authority revision, keeps the credential
+   generation, and is never automatic.
 6. Establish the configured operator's principal-scoped project HEAD through
    the standard local `commit` or an explicit full-project
    `service:remote/push` with `outbound_principal: configured_operator`. A

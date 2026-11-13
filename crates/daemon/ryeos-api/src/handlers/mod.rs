@@ -243,6 +243,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     credential_profiles::GET_DESCRIPTOR,
     credential_profiles::LIST_DESCRIPTOR,
     credential_profiles::CONFIRM_DESCRIPTOR,
+    credential_profiles::ABANDON_LOGIN_DESCRIPTOR,
     credential_profiles::REVOKE_DESCRIPTOR,
     credential_profiles::DELETE_DESCRIPTOR,
     dedicated_sessions::STATUS_DESCRIPTOR,

@@ -987,6 +987,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Sign RyeOS items by canonical ref, glob, or .ai path",
             "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
         ),
+        "codex login device" => (
+            "ryeos codex login device",
+            "Log a Codex credential profile in with a device code: open the login session, show the code, wait for the account, end the session, and confirm",
+            "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
+        ),
         "identity" => (
             "ryeos identity",
             "Print the local node public identity",
@@ -1036,6 +1041,21 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         ],
         #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "codex login device" => &[
+            (
+                "--create",
+                "Create the profile first; an existing owned profile is kept",
+            ),
+            (
+                "--trusted",
+                "Open the login on an explicitly trusted process-group node",
+            ),
+            (
+                "--yes",
+                "Confirm the observed account without asking (needed without a terminal)",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
         "node host setup" => &[
             (
                 "--confirm",

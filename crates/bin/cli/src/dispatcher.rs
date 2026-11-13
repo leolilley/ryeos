@@ -211,6 +211,20 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // so every dispatch path observes one data-driven project policy.
     let dispatch_rest = rest_with_global_no_project(&cli.rest, cli.no_project);
 
+    // `codex login device` is a client composite: it sequences verified node
+    // commands and needs the terminal for the device code and confirmation.
+    // Every step is an ordinary signed request the daemon authorizes itself.
+    if crate::codex_device_login::matches(&cli.rest) {
+        return crate::codex_device_login::run(
+            &cli.rest[crate::codex_device_login::TOKENS.len()..],
+            &app_root,
+            snapshot,
+            &command_registration_policy,
+            console,
+        )
+        .await;
+    }
+
     // Node-registered client handlers own local byte-oriented UX that cannot
     // be represented as an `/execute` JSON result. The verified command is
     // still only routing: the handler's signed daemon requests carry the
@@ -261,61 +275,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         cli.project.as_deref(),
     )?;
     let mut presenter = Presenter::for_console(console);
-    let mut body = serde_json::json!({
-        "item_ref": resolved.item_ref,
-        "ref_bindings": resolved.ref_bindings,
-        "product_selections": resolved.product_selections,
-        "parameters": resolved.parameters,
-        "parameter_encoding": "command",
-        "validate_only": resolved.validate_only,
-        "execution_policy": execution_policy_value_with_snapshot(
-            resolved.project_path.is_some(),
-            resolved.async_launch,
-            resolved.pin_project_at_admission,
-            resolved.pin_current_head_at_admission,
-            resolved.project_snapshot.clone(),
-            resolved.retain_child_results,
-            resolved.exclude_operator_vault,
-        ),
-    });
-    insert_source_observation_scope(&mut body, resolved.validation_scope);
-    if let Some(project_path) = &resolved.project_path {
-        body["project_path"] = Value::String(
-            project_path
-                .to_str()
-                .ok_or_else(|| {
-                    CliError::ProjectResolution(
-                        "canonical project path is not valid UTF-8".to_string(),
-                    )
-                })?
-                .to_owned(),
-        );
-    }
-    if resolved.debug_raw {
-        body["debug_raw"] = Value::Bool(true);
-    }
-    if let Some(state_root) = &resolved.state_root {
-        body["state_root"] = Value::String(
-            state_root
-                .to_str()
-                .ok_or_else(|| {
-                    CliError::ProjectResolution("state root is not valid UTF-8".to_string())
-                })?
-                .to_owned(),
-        );
-    }
-    // Method dispatch: a `--method`/`--args` selector lands in `call`, the
-    // control-plane block distinct from data-plane `parameters`.
-    if resolved.call_method.is_some() || resolved.call_args.is_some() {
-        let mut call = serde_json::Map::new();
-        if let Some(method) = &resolved.call_method {
-            call.insert("method".to_string(), Value::String(method.clone()));
-        }
-        if let Some(args) = &resolved.call_args {
-            call.insert("args".to_string(), args.clone());
-        }
-        body["call"] = Value::Object(call);
-    }
+    let mut body = daemon_execute_body(&resolved)?;
 
     // Stream a live execution log for `execute` runs on a terminal, unless the
     // caller opted out. Piped/redirected output and `--no-stream`/`--json` get
@@ -420,6 +380,108 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         rendered_lines,
     )?;
     Ok(())
+}
+
+/// The signed `/execute` body for one verified, compiled command. Every
+/// daemon dispatch, including client composites, builds its request here.
+fn daemon_execute_body(resolved: &CliResolvedExecute) -> Result<Value, CliError> {
+    let mut body = serde_json::json!({
+        "item_ref": resolved.item_ref,
+        "ref_bindings": resolved.ref_bindings,
+        "product_selections": resolved.product_selections,
+        "parameters": resolved.parameters,
+        "parameter_encoding": "command",
+        "validate_only": resolved.validate_only,
+        "execution_policy": execution_policy_value_with_snapshot(
+            resolved.project_path.is_some(),
+            resolved.async_launch,
+            resolved.pin_project_at_admission,
+            resolved.pin_current_head_at_admission,
+            resolved.project_snapshot.clone(),
+            resolved.retain_child_results,
+            resolved.exclude_operator_vault,
+        ),
+    });
+    insert_source_observation_scope(&mut body, resolved.validation_scope);
+    if let Some(project_path) = &resolved.project_path {
+        body["project_path"] = Value::String(
+            project_path
+                .to_str()
+                .ok_or_else(|| {
+                    CliError::ProjectResolution(
+                        "canonical project path is not valid UTF-8".to_string(),
+                    )
+                })?
+                .to_owned(),
+        );
+    }
+    if resolved.debug_raw {
+        body["debug_raw"] = Value::Bool(true);
+    }
+    if let Some(state_root) = &resolved.state_root {
+        body["state_root"] = Value::String(
+            state_root
+                .to_str()
+                .ok_or_else(|| {
+                    CliError::ProjectResolution("state root is not valid UTF-8".to_string())
+                })?
+                .to_owned(),
+        );
+    }
+    // Method dispatch: a `--method`/`--args` selector lands in `call`, the
+    // control-plane block distinct from data-plane `parameters`.
+    if resolved.call_method.is_some() || resolved.call_args.is_some() {
+        let mut call = serde_json::Map::new();
+        if let Some(method) = &resolved.call_method {
+            call.insert("method".to_string(), Value::String(method.clone()));
+        }
+        if let Some(args) = &resolved.call_args {
+            call.insert("args".to_string(), args.clone());
+        }
+        body["call"] = Value::Object(call);
+    }
+    Ok(body)
+}
+
+/// Resolve one verified command and send it exactly as the CLI would,
+/// returning the authored result. An `--async` command returns the accepted
+/// launch acknowledgement, whose echoed coordinate is checked.
+pub(crate) async fn execute_verified_command(
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
+    argv: &[String],
+) -> Result<Value, CliError> {
+    let resolved = resolve_command_for_daemon(argv, snapshot, command_registration_policy, None)?;
+    let mut body = daemon_execute_body(&resolved)?;
+    if resolved.async_launch {
+        let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());
+        body["launch_id"] = Value::String(launch_id.clone());
+        let acknowledgement = match post_to_daemon(app_root, "/execute/launch", &body).await {
+            Ok(acknowledgement) => acknowledgement,
+            Err(error) if accepted_launch_delivery_is_uncertain(&error) => {
+                return Err(CliError::Local {
+                    detail: format!(
+                        "{error}; launch acknowledgement was not received. Query GET /launches/{launch_id} before opening another session"
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        if acknowledgement.get("launch_id").and_then(Value::as_str) != Some(launch_id.as_str()) {
+            return Err(CliError::Local {
+                detail: format!(
+                    "accepted launch response did not echo request coordinate {launch_id}; query GET /launches/{launch_id} before opening another session"
+                ),
+            });
+        }
+        return Ok(acknowledgement);
+    }
+    let payload = post_to_daemon(app_root, "/execute", &body).await?;
+    if let Some(detail) = crate::tty::structured_result_failure(&payload) {
+        return Err(CliError::Local { detail });
+    }
+    Ok(payload.get("result").cloned().unwrap_or(payload))
 }
 
 async fn try_dispatch_client_handler(
