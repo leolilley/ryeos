@@ -89,7 +89,7 @@ elif [[ "$args" == *" remote doctor stronger "* ]]; then
     fi
     printf '{"remote":{"health":{"status":"%s"}},"checks":[{"name":"remote_configured","ok":true},{"name":"remote_health","ok":%s},{"name":"remote_identity","ok":true,%s},{"name":"signed_authorization","ok":true},{"name":"project_binding","ok":true,"local_project_path":"%s","remote_project_path":"/srv/ryeos/projects/qualification","sync_scope":"full_project"}]}\n' "$health_status" "$doctor_ok" "$identity_contract" "$project"
 elif [[ "$args" == *" remote list "* ]]; then
-    printf '{"remotes":[{"name":"stronger","config_path":"%s/.ai/config/remotes/remotes.yaml"}],"invalid_remotes":[]}\n' "$RYEOS_APP_ROOT"
+    printf '{"remotes":[{"name":"stronger","config_path":"%s/.ai/node/remotes/stronger.yaml"}],"invalid_remotes":[]}\n' "$RYEOS_APP_ROOT"
 elif [[ "$args" == *" remote status stronger "* ]]; then
     printf '%s\n' '{"status":"ok"}'
 else
