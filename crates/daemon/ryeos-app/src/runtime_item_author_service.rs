@@ -69,12 +69,27 @@ pub enum AuthorItemRefusal {
          it as the operator"
     )]
     UpsertOverUnauthoredItem { item_ref: String, path: String },
+    #[error(
+        "author_item refused: the body for `{item_ref}` would carry the capability \
+         `{capability}`, which the authoring run (thread `{thread_id}`) does not hold; the \
+         authoring run must hold `{capability}`, or remove it from the body"
+    )]
+    AuthoredCapabilityNotCovered {
+        capability: String,
+        item_ref: String,
+        thread_id: String,
+    },
 }
 
 impl AuthorItemRefusal {
     /// Stable code for the callback error envelope.
     pub fn code(&self) -> &'static str {
-        "author_item_expected_digest_required"
+        match self {
+            Self::UpsertRequiresExpectedDigest { .. } | Self::UpsertOverUnauthoredItem { .. } => {
+                "author_item_expected_digest_required"
+            }
+            Self::AuthoredCapabilityNotCovered { .. } => "authored_capability_not_covered",
+        }
     }
 }
 
@@ -229,6 +244,15 @@ impl RuntimeItemAuthorService {
             anyhow!("path-anchoring validator refused authored item `{canonical}`: {e}")
         })?;
 
+        enforce_authored_capability_ceiling(
+            engine,
+            kind_schema,
+            &parsed,
+            cap,
+            &canonical,
+            &params.thread_id,
+        )?;
+
         let content_digest = lillux::cas::sha256_hex(params.content.as_bytes());
         let provenance = json!({
             "authored_by": "runtime",
@@ -323,6 +347,178 @@ impl RuntimeItemAuthorService {
             required_capability: required_cap,
         })
     }
+}
+
+/// Walk `value` along `path`, returning the node it names.
+fn value_at_path<'a>(
+    value: &'a serde_json::Value,
+    path: &[String],
+) -> Option<&'a serde_json::Value> {
+    path.iter()
+        .try_fold(value, |current, segment| current.get(segment))
+}
+
+/// The value path of the policy fact `name` as the kind schema declares it in
+/// its composer configuration. `None` when the kind declares no such fact.
+fn policy_fact_path(composer_config: &serde_json::Value, name: &str) -> Option<Vec<String>> {
+    composer_config
+        .get("policy_facts")?
+        .as_array()?
+        .iter()
+        .find(|fact| fact.get("name").and_then(|n| n.as_str()) == Some(name))?
+        .get("path")?
+        .as_array()?
+        .iter()
+        .map(|segment| segment.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// The field the kind schema walks as its `extends` chain, if it declares one.
+fn extends_field(
+    resolution: &[ryeos_engine::resolution::decl::ResolutionStepDecl],
+) -> Option<&str> {
+    resolution.iter().find_map(|step| match step {
+        ryeos_engine::resolution::decl::ResolutionStepDecl::ResolveExtendsChain {
+            field, ..
+        } => Some(field.as_str()),
+        _ => None,
+    })
+}
+
+/// A string array, with an error naming `label` for any other shape.
+fn string_seq(value: &serde_json::Value, label: &str) -> Result<Vec<String>> {
+    value
+        .as_array()
+        .ok_or_else(|| anyhow!("`{label}` must be an array of strings"))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("`{label}` must be an array of strings"))
+        })
+        .collect()
+}
+
+/// The capabilities an authored body would carry: its own `effective_caps`
+/// policy fact when it declares one, otherwise the composed fact of the parent
+/// it extends (the narrowing rule bounds the child by that parent). Kinds that
+/// declare no such policy fact carry none. `parent_caps` resolves the composed
+/// capabilities of the named parent.
+fn authored_item_carried_caps(
+    composer_config: &serde_json::Value,
+    resolution: &[ryeos_engine::resolution::decl::ResolutionStepDecl],
+    parsed: &serde_json::Value,
+    parent_caps: impl FnOnce(&str) -> Result<Vec<String>>,
+) -> Result<Vec<String>> {
+    let Some(path) = policy_fact_path(composer_config, "effective_caps") else {
+        return Ok(Vec::new());
+    };
+    if let Some(own) = value_at_path(parsed, &path).filter(|value| !value.is_null()) {
+        return string_seq(own, &path.join("."));
+    }
+    let Some(field) = extends_field(resolution) else {
+        return Ok(Vec::new());
+    };
+    match parsed.get(field).and_then(|value| value.as_str()) {
+        Some(parent) => parent_caps(parent),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The first of `carried` that none of the `held` capabilities covers.
+fn first_uncovered_cap<'a>(carried: &'a [String], held: &[String]) -> Option<&'a str> {
+    carried
+        .iter()
+        .find(|wanted| {
+            !held
+                .iter()
+                .any(|granted| ryeos_state::capability::pattern_covers(granted, wanted))
+        })
+        .map(String::as_str)
+}
+
+/// Refuse an authored body that declares more authority than the authoring run
+/// holds: every capability the item would carry, and every manifest runtime
+/// capability it requests, must be covered by the run's effective caps.
+fn enforce_authored_capability_ceiling(
+    engine: &ryeos_engine::engine::Engine,
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    parsed: &serde_json::Value,
+    cap: &CallbackCapability,
+    target: &CanonicalRef,
+    thread_id: &str,
+) -> Result<()> {
+    let mut carried = authored_item_carried_caps(
+        &kind_schema.composer_config,
+        &kind_schema.resolution,
+        parsed,
+        |parent| {
+            let parent_ref = authored_parent_ref(parent, &target.kind)?;
+            let subject = cap.provenance.subject_resolution_authority();
+            let project_root = match subject {
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless => None,
+                _ => Some(cap.provenance.effective_path().to_path_buf()),
+            };
+            let effective = engine
+                .effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                    item_ref: parent_ref,
+                    expected_kind: Some(target.kind.clone()),
+                    project_root,
+                    subject_resolution_authority: subject,
+                })
+                .with_context(|| format!("resolve extended parent `{parent}` of `{target}`"))?;
+            match effective.policy_facts.get("effective_caps") {
+                Some(value) => string_seq(value, "effective_caps"),
+                None => Ok(Vec::new()),
+            }
+        },
+    )?;
+
+    if let Some(requires) = parsed.get("requires").filter(|value| !value.is_null()) {
+        let requirements = ryeos_bundle::runtime_authority::parse_runtime_requires(requires)
+            .map_err(|e| anyhow!("authored item `{target}` has a malformed `requires`: {e}"))?;
+        let authority = &requirements.manifest.runtime_authority;
+        let bundle_id = cap.effective_bundle_id.as_deref();
+        if bundle_id.is_none()
+            && (!authority.bundle_events.is_empty() || !authority.runtime_vault.is_empty())
+        {
+            bail!(
+                "authored item `{target}` requests bundle-scoped runtime authority but the \
+                 authoring run has no effective bundle"
+            );
+        }
+        carried.extend(ryeos_bundle::runtime_authority::requested_runtime_caps(
+            &requirements,
+            bundle_id.unwrap_or_default(),
+        ));
+    }
+
+    match first_uncovered_cap(&carried, &cap.effective_caps) {
+        Some(uncovered) => Err(AuthorItemRefusal::AuthoredCapabilityNotCovered {
+            capability: uncovered.to_owned(),
+            item_ref: target.to_string(),
+            thread_id: thread_id.to_owned(),
+        }
+        .into()),
+        None => Ok(()),
+    }
+}
+
+/// The canonical ref of an `extends` parent, promoting a bare id to the
+/// child's kind the way the extends walk does.
+fn authored_parent_ref(parent: &str, kind: &str) -> Result<CanonicalRef> {
+    if parent.starts_with('@') {
+        bail!(
+            "authored item extends the aliased parent `{parent}`; author the canonical ref so \
+             its capabilities can be bounded"
+        );
+    }
+    let canonical = if parent.contains(':') {
+        parent.to_owned()
+    } else {
+        format!("{kind}:{parent}")
+    };
+    CanonicalRef::parse(&canonical).with_context(|| format!("invalid extends ref `{parent}`"))
 }
 
 fn validate_extension(
@@ -1074,5 +1270,169 @@ mod tests {
             err.contains("conflict") && err.contains("no readable authored provenance"),
             "{err}"
         );
+    }
+
+    fn directive_facts() -> serde_json::Value {
+        serde_json::json!({
+            "extends_field": "extends",
+            "policy_facts": [{
+                "name": "effective_caps",
+                "path": ["requires", "capabilities", "declared"],
+                "expect": "array_of_strings",
+            }],
+        })
+    }
+
+    fn extends_steps() -> Vec<ryeos_engine::resolution::decl::ResolutionStepDecl> {
+        vec![
+            ryeos_engine::resolution::decl::ResolutionStepDecl::ResolveExtendsChain {
+                field: "extends".to_string(),
+                max_depth: 16,
+            },
+        ]
+    }
+
+    fn held(caps: &[&str]) -> Vec<String> {
+        caps.iter().map(|c| c.to_string()).collect()
+    }
+
+    fn no_parent(_: &str) -> Result<Vec<String>> {
+        panic!("parent must not be resolved")
+    }
+
+    #[test]
+    fn authored_directive_declaring_uncovered_cap_is_refused() {
+        let body = serde_json::json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.shell/run"]}}
+        });
+        let carried =
+            authored_item_carried_caps(&directive_facts(), &extends_steps(), &body, no_parent)
+                .unwrap();
+        assert_eq!(
+            first_uncovered_cap(&carried, &held(&["ryeos.execute.tool.read/*"])),
+            Some("ryeos.execute.tool.shell/run")
+        );
+    }
+
+    #[test]
+    fn authored_directive_within_author_caps_is_signed() {
+        let body = serde_json::json!({
+            "requires": {"capabilities": {"declared": ["ryeos.execute.tool.read/file"]}}
+        });
+        let carried =
+            authored_item_carried_caps(&directive_facts(), &extends_steps(), &body, no_parent)
+                .unwrap();
+        assert_eq!(carried, vec!["ryeos.execute.tool.read/file"]);
+        assert_eq!(
+            first_uncovered_cap(&carried, &held(&["ryeos.execute.tool.read/*"])),
+            None
+        );
+    }
+
+    #[test]
+    fn authored_child_inheriting_broader_parent_caps_is_refused() {
+        let body = serde_json::json!({"extends": "directive:base/wide"});
+        let mut asked = Vec::new();
+        let carried =
+            authored_item_carried_caps(&directive_facts(), &extends_steps(), &body, |parent| {
+                asked.push(parent.to_string());
+                Ok(vec!["ryeos.execute.tool.shell/run".to_string()])
+            })
+            .unwrap();
+        assert_eq!(asked, vec!["directive:base/wide"]);
+        assert_eq!(
+            first_uncovered_cap(&carried, &held(&["ryeos.execute.tool.read/*"])),
+            Some("ryeos.execute.tool.shell/run")
+        );
+    }
+
+    #[test]
+    fn authored_child_with_own_declaration_does_not_resolve_its_parent() {
+        let body = serde_json::json!({
+            "extends": "directive:base/wide",
+            "requires": {"capabilities": {"declared": []}}
+        });
+        let carried =
+            authored_item_carried_caps(&directive_facts(), &extends_steps(), &body, no_parent)
+                .unwrap();
+        assert!(carried.is_empty());
+    }
+
+    #[test]
+    fn authored_item_requesting_uncovered_runtime_authority_is_refused() {
+        let requires = serde_json::json!({
+            "capabilities": {"manifest": {"runtime_authority": {
+                "item_authoring": [{"kind": "knowledge", "namespace": "notes/*"}]
+            }}}
+        });
+        let requirements =
+            ryeos_bundle::runtime_authority::parse_runtime_requires(&requires).unwrap();
+        let requested: Vec<String> =
+            ryeos_bundle::runtime_authority::requested_runtime_caps(&requirements, "b")
+                .into_iter()
+                .collect();
+        assert_eq!(requested, vec!["ryeos.author.knowledge.notes/*"]);
+        assert_eq!(
+            first_uncovered_cap(&requested, &held(&["ryeos.author.knowledge.other/*"])),
+            Some("ryeos.author.knowledge.notes/*")
+        );
+        assert_eq!(
+            first_uncovered_cap(&requested, &held(&["ryeos.author.knowledge.*"])),
+            None
+        );
+    }
+
+    #[test]
+    fn kind_without_effective_caps_fact_is_unaffected() {
+        let body = serde_json::json!({"extends": "knowledge:a/b", "name": "x"});
+        let carried = authored_item_carried_caps(
+            &serde_json::json!({"extends_field": "extends", "fields": []}),
+            &extends_steps(),
+            &body,
+            no_parent,
+        )
+        .unwrap();
+        assert!(carried.is_empty());
+    }
+
+    #[test]
+    fn malformed_declared_caps_are_an_error_not_empty() {
+        let body = serde_json::json!({
+            "requires": {"capabilities": {"declared": "ryeos.execute.tool.x"}}
+        });
+        assert!(
+            authored_item_carried_caps(&directive_facts(), &extends_steps(), &body, no_parent)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn aliased_extends_parent_is_refused() {
+        assert!(authored_parent_ref("@base", "directive").is_err());
+        assert_eq!(
+            authored_parent_ref("base/wide", "directive")
+                .unwrap()
+                .to_string(),
+            "directive:base/wide"
+        );
+    }
+
+    #[test]
+    fn uncovered_cap_refusal_names_cap_ref_thread_and_cure() {
+        let refusal = AuthorItemRefusal::AuthoredCapabilityNotCovered {
+            capability: "ryeos.execute.tool.x".to_string(),
+            item_ref: "directive:a/b".to_string(),
+            thread_id: "T-1".to_string(),
+        };
+        assert_eq!(refusal.code(), "authored_capability_not_covered");
+        let message = refusal.to_string();
+        for needle in [
+            "ryeos.execute.tool.x",
+            "directive:a/b",
+            "T-1",
+            "must hold `ryeos.execute.tool.x`, or remove it from the body",
+        ] {
+            assert!(message.contains(needle), "{message}");
+        }
     }
 }
