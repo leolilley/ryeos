@@ -84,8 +84,28 @@ impl RuntimeProbeInput {
     }
 }
 
+/// The binding facts a provider inventory lists under: the signed settings
+/// that name the owner scope, and the network inputs the adapter may use.
+pub(crate) struct ProviderInventorySource<'a> {
+    pub(crate) network_inputs:
+        &'a ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
+    pub(crate) settings: &'a serde_json::Value,
+    pub(crate) settings_digest: &'a str,
+}
+
 pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
     fn backend_id(&self) -> &str;
+    /// Read-only listing of the resources one provider owner scope holds.
+    fn list_provider_resources(
+        &self,
+        _source: &ProviderInventorySource<'_>,
+        _credential: &PlacementCredential,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterResponse,
+    > {
+        bail!("external placement backend has no provider inventory")
+    }
     /// Stage-one lease admission, offline and before any reservation or
     /// provider contact: the backend's lifecycle adapter judges one lease
     /// request against its signed provider spec while holding no credential,
@@ -1560,6 +1580,33 @@ impl ExternalPlacementBackendRegistry {
             request,
             deadline,
         )
+    }
+
+    /// List what the provider holds for the owner scope of a binding pinned to
+    /// the exact installed adapter generation `(backend, adapter_hash)`.
+    pub(crate) fn list_provider_resources(
+        &self,
+        backend: &str,
+        adapter_hash: &str,
+        source: &ProviderInventorySource<'_>,
+        credential: &PlacementCredential,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterResponse,
+    > {
+        let installed = self
+            .backends
+            .get(&(backend.to_owned(), adapter_hash.to_owned()))
+            .ok_or_else(|| {
+                self.binding_artifact_not_installed(
+                    "exact signed provider inventory adapter generation is not installed",
+                    serde_json::json!({ "backend": backend }),
+                    "adapter_artifact_hash",
+                    backend,
+                    adapter_hash,
+                )
+            })?;
+        installed.list_provider_resources(source, credential, deadline)
     }
 
     pub(crate) fn preflight_runtime_snapshot(

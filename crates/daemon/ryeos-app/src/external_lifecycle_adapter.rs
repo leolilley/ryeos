@@ -1063,6 +1063,53 @@ pub(crate) fn relay_file_adapter_request(
 }
 
 impl ExternalPlacementBackend for ExecutableExternalPlacementBackend {
+    fn list_provider_resources(
+        &self,
+        source: &crate::external_placement::ProviderInventorySource<'_>,
+        credential: &PlacementCredential,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<
+        ryeos_external_execution_contract::provider_inventory::ProviderInventoryAdapterResponse,
+    > {
+        use ryeos_external_execution_contract::provider_inventory::{
+            MAX_PROVIDER_INVENTORY_REQUEST_BYTES, PROVIDER_INVENTORY_PROTOCOL,
+            ProviderInventoryAdapterRequest, ProviderInventoryAdapterResponse,
+        };
+        let request = ProviderInventoryAdapterRequest {
+            protocol: PROVIDER_INVENTORY_PROTOCOL.into(),
+            provider_id: self.declaration.id.clone(),
+            adapter_artifact_hash: self.adapter_hash.clone(),
+            settings_digest: source.settings_digest.to_owned(),
+            provider_spec_digest: self.provider_spec.sha256.clone(),
+        };
+        request.validate()?;
+        let bytes = ryeos_external_execution_contract::canonical_json(&request)?;
+        ensure!(
+            bytes.len() <= MAX_PROVIDER_INVENTORY_REQUEST_BYTES,
+            "provider inventory request exceeds its bound"
+        );
+        let output = self.invoke_sealed_snapshot_operation(
+            source.network_inputs,
+            &self.provider_spec,
+            source.settings,
+            source.settings_digest,
+            credential,
+            &bytes,
+            LifecycleAdapterInvocation::ListProviderResources,
+            None,
+            deadline,
+        )?;
+        ensure!(
+            !output.deadline_exceeded,
+            "provider inventory listing exceeded its deadline"
+        );
+        let value: ProviderInventoryAdapterResponse =
+            from_json_slice_strict(&output.bytes, MAX_LIFECYCLE_RESPONSE_BYTES)
+                .map_err(|_| anyhow::anyhow!("invalid provider inventory adapter response"))?;
+        value.validate_for(&request)?;
+        Ok(value)
+    }
+
     fn relay_file_contact(
         &self,
         contract: &ExternalPlacementBackendContract,
