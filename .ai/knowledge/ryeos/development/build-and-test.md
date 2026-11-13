@@ -218,9 +218,10 @@ script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
 
 The isolation mode comes from the init profile passed as `--node-profile`.
-`install-local-direct.sh` passes its bundle set's profile (`full` by default,
-whose `local` lane selects disabled); `--node-profile development` selects
-enforce. `node doctor` uses the
+`install-local-direct.sh` passes its bundle set's profile (`full` by default)
+and a host class; the `local` lane of every packaged profile selects enforce,
+and `--host-class local_unconfined` selects the explicit disabled opt-out.
+`--node-profile development` also selects enforce. `node doctor` uses the
 production policy loader; after changing mode or policy contents, restart the
 node before judging execution behavior. See [Execution
 Isolation](../../../../bundles/ryeos-docs/.ai/knowledge/ryeos/core/node/execution-isolation.md).

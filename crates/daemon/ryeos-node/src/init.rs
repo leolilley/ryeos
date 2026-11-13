@@ -1105,7 +1105,17 @@ fn run_init_under_lock_on_storage(
         isolation_policy,
         prospective_policy.generation_digest(),
     )
-    .context("prospective init source set failed definition admission")?;
+    .map_err(|error| {
+        let declared = opts
+            .node_profile
+            .as_deref()
+            .and_then(|name| {
+                load_trusted_init_node_profile(&opts.source_dir, name, &seed_trust_store).ok()
+            })
+            .and_then(|profile| profile.host_classes().ok())
+            .unwrap_or_default();
+        enforced_admission_refusal(isolation_policy, &declared, error)
+    })?;
 
     // Re-init inherits the existing immutable node policy, but resolves its
     // selected backend and all supporting kinds through the prospective source
@@ -2176,6 +2186,43 @@ fn source_node_init_dir(source_dir: &Path) -> PathBuf {
         .join("init")
 }
 
+/// The host class a node names to run its jobs with no isolation backend. It
+/// is never selected implicitly; initialization must be given it by name.
+const UNCONFINED_HOST_CLASS: &str = "local_unconfined";
+
+/// The refusal for a prospective source set that fails definition admission.
+/// Under an enforced lane the cause is usually the host's sandbox probe: the
+/// message says so and, when the profile declares the explicit unconfined
+/// class, names it as the opt-out. Initialization never falls back to it.
+fn enforced_admission_refusal(
+    policy: &ryeos_engine::isolation::IsolationPolicy,
+    declared_host_classes: &[String],
+    cause: anyhow::Error,
+) -> anyhow::Error {
+    if policy.mode != ryeos_engine::isolation::IsolationMode::Enforce {
+        return cause.context("prospective init source set failed definition admission");
+    }
+    let host_class = &policy.host_class;
+    let opt_out = if host_class != UNCONFINED_HOST_CLASS
+        && declared_host_classes
+            .iter()
+            .any(|declared| declared == UNCONFINED_HOST_CLASS)
+    {
+        format!(
+            " To run jobs unconfined as the daemon user, re-run with `--host-class \
+             {UNCONFINED_HOST_CLASS}`; initialization does not select it for you."
+        )
+    } else {
+        String::new()
+    };
+    anyhow!(
+        "host class `{host_class}` enforces execution isolation, and this host's sandbox probe \
+         or the prospective source set did not pass admission: {cause:#}. Fix the host (the \
+         sandbox needs unprivileged user, mount and pid namespaces and the new mount API), or \
+         choose a different host class.{opt_out}"
+    )
+}
+
 /// Refuse, before any key or identity exists, when `profile`'s capability
 /// floor requires durable app-root storage and `app_root` is not on it.
 fn require_profile_storage(
@@ -2989,6 +3036,34 @@ mod tests {
         )
         .unwrap();
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).unwrap()
+    }
+
+    #[test]
+    fn an_enforced_lane_that_fails_admission_names_the_explicit_unconfined_opt_out() {
+        let mut policy = ryeos_engine::isolation::IsolationPolicy::disabled_for_authoring();
+        policy.host_class = "local".to_owned();
+        policy.mode = ryeos_engine::isolation::IsolationMode::Enforce;
+        let declared = ["local".to_owned(), "local_unconfined".to_owned()];
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(&policy, &declared, anyhow!("no user namespace"))
+        );
+        assert!(text.contains("no user namespace"), "{text}");
+        assert!(text.contains("--host-class local_unconfined"), "{text}");
+        // A profile that declares no unconfined class offers none.
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(&policy, &["local".to_owned()], anyhow!("probe failed"))
+        );
+        assert!(!text.contains("local_unconfined"), "{text}");
+        // A disabled lane keeps the plain admission failure.
+        policy.mode = ryeos_engine::isolation::IsolationMode::Disabled;
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(&policy, &declared, anyhow!("bad bundle"))
+        );
+        assert!(!text.contains("local_unconfined"), "{text}");
+        assert!(text.contains("bad bundle"), "{text}");
     }
 
     #[test]

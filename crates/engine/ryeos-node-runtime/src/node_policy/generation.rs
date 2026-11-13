@@ -1089,7 +1089,7 @@ mod tests {
             ("core", &["hosted", "local"]),
             ("core-scheduling", &["hosted", "local"]),
             ("f5r-controller", &["hosted", "hosted_enforced", "local"]),
-            ("standard", &["hosted", "local"]),
+            ("standard", &["hosted", "local", "local_unconfined"]),
         ];
         for (name, classes) in declared {
             let profile = authored_profile(name);

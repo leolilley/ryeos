@@ -19,8 +19,13 @@ escalation, secret leakage, and environment-dependent behavior.
 ## Node-owned OS isolation
 
 Tool and runtime item launches can additionally pass through the immutable strict
-node isolation snapshot. The mode comes from the node's init profile; most
-packaged profiles' lanes select disabled. In enforce mode, the node—not the
+node isolation snapshot. The mode comes from the node's init profile and host
+class: the `local` class of every packaged profile that declares one selects
+enforce, `hosted` classes select disabled, and each profile with a local lane
+also declares an explicit `local_unconfined` class (disabled) that an operator
+must name with `--host-class local_unconfined`. Init never falls back to it:
+when the host cannot prove the enforced lane, init refuses and names that
+opt-out. In enforce mode, the node—not the
 item—owns filesystem/network policy, environment filtering, and
 the Lillux open-file cap. Policy is resolved once at startup and shared across
 launch paths; edits require restart. Parser/composer handlers are trusted engine

@@ -405,7 +405,8 @@ fn the_core_compositions_follow_the_host_class_matrix() {
 #[test]
 fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let both = ["hosted", "local"];
-    let local_only = ["local"];
+    let standard = ["hosted", "local", "local_unconfined"];
+    let local_only = ["local", "local_unconfined"];
     let hosted_only = ["hosted"];
     let controller = ["hosted", "hosted_enforced", "local"];
     let development = ["local", "local_direct"];
@@ -414,14 +415,14 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         ("core-scheduling", &both),
         ("core-workflow", &both),
         ("core-knowledge", &both),
-        ("standard", &both),
+        ("standard", &standard),
         ("f5r-controller", &controller),
         ("standard-central-auth", &local_only),
         ("central-host", &local_only),
         ("bundle-source", &local_only),
         ("local-inference", &local_only),
-        ("contained-workflow", &local_only),
-        ("release-authority", &local_only),
+        ("contained-workflow", &["local"]),
+        ("release-authority", &["local"]),
         ("development", &development),
         ("full", &local_only),
         ("hosted-workflow", &hosted_only),
@@ -445,6 +446,72 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         let want: BTreeSet<String> = classes.iter().map(|class| (*class).to_owned()).collect();
         assert_eq!(declared, want, "{profile}");
     }
+}
+
+fn class_lane(profile: &serde_yaml::Value, class: &str) -> (String, bool) {
+    let entry = host_classes(profile)
+        .get(class)
+        .unwrap_or_else(|| panic!("profile does not declare host class {class}"));
+    (
+        entry["mode"].as_str().expect("a lane mode").to_owned(),
+        entry["backend"].is_mapping(),
+    )
+}
+
+#[test]
+fn standard_local_lane_is_enforce() {
+    let profile = load_profile("standard");
+    let (mode, has_backend) = class_lane(&profile, "local");
+    assert_eq!(mode, "enforce");
+    assert!(has_backend, "an enforced lane selects its backend");
+    let entry = &host_classes(&profile)["local"];
+    assert_eq!(entry["backend"]["bundle"].as_str(), Some("core"));
+    assert_eq!(
+        entry["backend"]["implementation"].as_str(),
+        Some("linux-lillux")
+    );
+    assert_eq!(
+        entry["process_scopes"]["mode"].as_str(),
+        Some("unconfigured")
+    );
+    assert_eq!(
+        host_classes(&load_profile("development"))["local_direct"]["requires_capabilities"],
+        entry["requires_capabilities"],
+        "the standard local floor is the development direct floor"
+    );
+}
+
+#[test]
+fn standard_local_unconfined_lane_is_disabled_and_named() {
+    let profile = load_profile("standard");
+    let (mode, has_backend) = class_lane(&profile, "local_unconfined");
+    assert_eq!(mode, "disabled");
+    assert!(!has_backend);
+    // Every profile whose local lane is enforced because of this rule offers
+    // the explicit opt-out; none selects it by default.
+    for name in [
+        "standard",
+        "standard-central-auth",
+        "central-host",
+        "bundle-source",
+        "local-inference",
+        "full",
+    ] {
+        let profile = load_profile(name);
+        assert_eq!(class_lane(&profile, "local").0, "enforce", "{name}");
+        assert_eq!(
+            class_lane(&profile, "local_unconfined").0,
+            "disabled",
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn standard_hosted_lane_unchanged() {
+    let (mode, has_backend) = class_lane(&load_profile("standard"), "hosted");
+    assert_eq!(mode, "disabled");
+    assert!(!has_backend);
 }
 
 #[test]

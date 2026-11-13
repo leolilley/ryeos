@@ -28,7 +28,9 @@ or `RYEOS_APP_ROOT`. Every fresh initialization requires
 `--node-profile full --host-class local`; each lean distribution uses its exact
 same-named profile. `--host-class <class>` names which of the profile's
 declared host classes the node runs under (`local` on a host the operator
-runs, `hosted` in a hosting provider's container); the node holds that class's
+runs, with enforced isolation; `local_unconfined` on that host with no
+sandbox, an explicit opt-out init never selects for you; `hosted` in a hosting
+provider's container); the node holds that class's
 signed capability floor and isolation lane, and keeps the class for life.
 Neither selection is inferred from the bundles present in the source or from
 what the host proves, and absence fails rather than manufacturing an implicit

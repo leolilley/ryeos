@@ -1030,7 +1030,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             ),
             (
                 "--host-class <NAME>",
-                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile",
+                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile. `local` enforces the sandbox and init refuses if the host cannot prove it; `local_unconfined` is the explicit opt-out that runs jobs as the daemon user",
             ),
             ("--app-root <DIR>", "Application root"),
         ],
