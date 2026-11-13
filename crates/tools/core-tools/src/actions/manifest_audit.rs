@@ -249,6 +249,22 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
         &mut findings,
     );
 
+    // ── operator_vault (handler-route bound) ──
+    match (
+        old.runtime_authority.operator_vault,
+        new.runtime_authority.operator_vault,
+    ) {
+        (false, true) => findings.push(AuditFinding {
+            risk: Risk::Added,
+            message: "operator_vault: +[handler routes]".to_string(),
+        }),
+        (true, false) => findings.push(AuditFinding {
+            risk: Risk::Removed,
+            message: "operator_vault: -[handler routes]".to_string(),
+        }),
+        _ => {}
+    }
+
     // ── provides / requires / uses kinds ──
     diff_kind_list(
         &old.provides_kinds,
@@ -606,6 +622,25 @@ mod tests {
             finding.risk == Risk::Removed
                 && finding.message == "project_snapshots: -[create, status]"
         }));
+    }
+
+    #[test]
+    fn operator_vault_bound_is_audited() {
+        let old = manifest("arc", RuntimeAuthorityDecls::default());
+        let new = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                operator_vault: true,
+                ..Default::default()
+            },
+        );
+        assert!(diff_authority(&old, &new).iter().any(|finding| {
+            finding.risk == Risk::Added && finding.message == "operator_vault: +[handler routes]"
+        }));
+        assert!(diff_authority(&new, &old).iter().any(|finding| {
+            finding.risk == Risk::Removed && finding.message == "operator_vault: -[handler routes]"
+        }));
+        assert!(diff_authority(&new, &new).is_empty());
     }
 
     #[test]

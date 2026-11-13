@@ -66,6 +66,8 @@ pub struct CompiledHandlerMode {
     request_body_mode: RawRequestBody,
     execution_principal_id: String,
     execution_scopes: Vec<String>,
+    /// The signed route's `source_config.authority.operator_vault`.
+    declares_operator_vault: bool,
     invoker: Arc<CompiledDispatchInvoker>,
 }
 
@@ -76,6 +78,20 @@ struct HandlerSourceConfig {
     request: HandlerRequestConfig,
     #[serde(default)]
     result: HandlerResultConfig,
+    #[serde(default)]
+    authority: HandlerAuthorityConfig,
+}
+
+/// Authority the signed route asks for its fixed handler principal. It is a
+/// request, not a grant: the route bundle's signed manifest is the upper
+/// bound (`runtime_authority.operator_vault`).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct HandlerAuthorityConfig {
+    /// Run the handler with the node operator's vault exposed, so its
+    /// declared `required_secrets` can be delivered from it.
+    #[serde(default)]
+    operator_vault: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -269,15 +285,14 @@ impl ResponseMode for HandlerMode {
         // process itself may be placed in a narrower daemon-owned scratch;
         // it is confined there only under enforced isolation.
         //
-        // That standard live profile also exposes the operator vault. A route
-        // handler runs the source item the operator installed in its own
-        // signed bundle, under a fixed daemon principal the caller cannot
-        // choose, so it carries the operator-vault capability explicitly.
-        let execution_scopes = vec![
+        // The principal holds the operator-vault capability only when the
+        // signed route declares `authority.operator_vault`; each request then
+        // also requires the route bundle's signed manifest to allow it.
+        let declares_operator_vault = config.authority.operator_vault;
+        let execution_scopes = handler_execution_scopes(
             handler_execute_scope(source_ref, &raw.id)?,
-            ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY.to_string(),
-            ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
-        ];
+            declares_operator_vault,
+        );
 
         Ok(Arc::new(CompiledHandlerMode {
             source_ref: source_ref.to_string(),
@@ -287,6 +302,7 @@ impl ResponseMode for HandlerMode {
             request_body_mode: raw.request.body.clone(),
             execution_principal_id: execution_principal_id.clone(),
             execution_scopes: execution_scopes.clone(),
+            declares_operator_vault,
             invoker: Arc::new(CompiledDispatchInvoker {
                 item_ref: source_ref.to_string(),
                 authority: DispatchAuthority::FixedPrincipal {
@@ -328,7 +344,7 @@ impl CompiledHandlerMode {
         compiled: &CompiledRoute,
         ctx: RouteDispatchContext,
     ) -> Result<Response, RouteDispatchError> {
-        let pinned_subject = assert_resolved_handler_source_anchored(
+        let anchored = assert_resolved_handler_source_anchored(
             &ctx,
             &self.source_ref,
             &self.project_root,
@@ -346,6 +362,36 @@ impl CompiledHandlerMode {
             );
             RouteDispatchError::Forbidden(FIXED_PRINCIPAL_REFUSAL.to_owned())
         })?;
+
+        // Decide the handler's project environment before any workspace or
+        // dispatch exists. Refusal is the typed operator-vault 403.
+        let environment = handler_route_environment(
+            self.declares_operator_vault,
+            anchored.declares_secrets,
+            || {
+                Ok(ryeos_bundle::manifest::load_verified_manifest(
+                    &anchored.bundle_ai_dir,
+                    &anchored.route_bundle,
+                    &ctx.state.engine.node_trust_store,
+                )?
+                .manifest
+                .runtime_authority
+                .allows_operator_vault_routes())
+            },
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                route = %compiled.id,
+                source = %self.source_ref,
+                error = %format!("{error:#}"),
+                "handler route refused operator-vault exposure"
+            );
+            crate::routes::response_modes::execute_mode::operator_vault_route_error(&error)
+                .unwrap_or_else(|| {
+                    RouteDispatchError::Forbidden(FIXED_PRINCIPAL_REFUSAL.to_owned())
+                })
+        })?;
+        let pinned_subject = anchored.subject;
 
         let envelope = build_route_envelope(
             compiled,
@@ -447,6 +493,7 @@ impl CompiledHandlerMode {
                 FixedPrincipalConfinement {
                     subject: pinned_subject,
                     workspace,
+                    environment,
                 },
             )
             .await?;
@@ -482,6 +529,73 @@ impl CompiledHandlerMode {
     }
 }
 
+/// The handler source a request admitted, with what the environment decision
+/// needs: the route bundle, its `.ai` root, and whether the handler declares
+/// required secrets.
+struct AnchoredHandlerSource {
+    subject: PinnedDispatchSubject,
+    route_bundle: String,
+    bundle_ai_dir: PathBuf,
+    declares_secrets: bool,
+}
+
+/// The fixed handler principal's scopes: execute on its own source, live
+/// write for its request workspace, and the operator-vault capability only
+/// when the signed route declares it.
+fn handler_execution_scopes(execute_scope: String, declares_operator_vault: bool) -> Vec<String> {
+    let mut scopes = vec![execute_scope];
+    if declares_operator_vault {
+        scopes.push(ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY.to_string());
+    }
+    scopes.push(ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string());
+    scopes
+}
+
+/// Select a handler route's project environment.
+///
+/// - A route that declares `authority.operator_vault` runs with the operator
+///   vault exposed only if its bundle's signed manifest allows it
+///   (`runtime_authority.operator_vault`); a route cannot self-grant beyond
+///   what the node admitted for its bundle.
+/// - An undeclared route whose handler declares required secrets would need
+///   the operator vault (its request workspace has no other source), so it is
+///   refused.
+/// - Any other undeclared route runs with the project overlay alone.
+///
+/// Refusals are the typed [`OperatorVaultCapabilityRequired`], with the
+/// reason as context for the daemon log.
+///
+/// [`OperatorVaultCapabilityRequired`]: ryeos_app::execution_policy::OperatorVaultCapabilityRequired
+fn handler_route_environment(
+    route_declares_operator_vault: bool,
+    handler_declares_secrets: bool,
+    manifest_allows_operator_vault: impl FnOnce() -> anyhow::Result<bool>,
+) -> anyhow::Result<ryeos_app::execution_policy::LocalLiveEnvironment> {
+    use ryeos_app::execution_policy::{LocalLiveEnvironment, OperatorVaultCapabilityRequired};
+    if route_declares_operator_vault {
+        return match manifest_allows_operator_vault() {
+            Ok(true) => Ok(LocalLiveEnvironment::OverlayWithOperatorVault),
+            Ok(false) => Err(anyhow::Error::new(OperatorVaultCapabilityRequired).context(
+                "the route declares authority.operator_vault but its bundle's signed manifest \
+                 does not allow runtime_authority.operator_vault",
+            )),
+            Err(error) => Err(anyhow::Error::new(OperatorVaultCapabilityRequired).context(
+                format!(
+                    "the route declares authority.operator_vault but its bundle's signed \
+                     manifest could not be verified: {error:#}"
+                ),
+            )),
+        };
+    }
+    if handler_declares_secrets {
+        return Err(anyhow::Error::new(OperatorVaultCapabilityRequired).context(
+            "the handler declares required secrets but its route does not declare \
+             authority.operator_vault",
+        ));
+    }
+    Ok(LocalLiveEnvironment::OverlayWithoutOperatorVault)
+}
+
 /// Resolve the handler source against exactly the route's own registered
 /// bundle and pin it; another bundle shipping the same ref is never
 /// consulted here.
@@ -491,7 +605,7 @@ fn assert_resolved_handler_source_anchored(
     project_root: &Path,
     execution_principal_id: &str,
     execution_scopes: &[String],
-) -> Result<PinnedDispatchSubject, RouteDispatchError> {
+) -> Result<AnchoredHandlerSource, RouteDispatchError> {
     let canonical_ref = CanonicalRef::parse(source_ref).map_err(|err| {
         RouteDispatchError::Internal(format!(
             "handler source '{source_ref}' is not a valid canonical ref: {err}"
@@ -552,10 +666,16 @@ fn assert_resolved_handler_source_anchored(
         })?;
 
     validate_resolved_handler_source_path(&resolved.source_path, project_root, source_ref)?;
-    PinnedDispatchSubject::from_resolved(&resolved).map_err(|error| {
+    let subject = PinnedDispatchSubject::from_resolved(&resolved).map_err(|error| {
         RouteDispatchError::Internal(format!(
             "handler source '{source_ref}' could not be pinned: {error}"
         ))
+    })?;
+    Ok(AnchoredHandlerSource {
+        subject,
+        bundle_ai_dir: canonical_bundle_root.join(ryeos_engine::AI_DIR),
+        route_bundle,
+        declares_secrets: !resolved.metadata.required_secrets.is_empty(),
     })
 }
 
@@ -1029,7 +1149,6 @@ mod tests {
             handler.execution_scopes,
             vec![
                 "ryeos.execute.tool.ryeos-email/webhook/track_click".to_string(),
-                ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY.to_string(),
                 ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
             ]
         );
@@ -1045,6 +1164,104 @@ mod tests {
                 panic!("handler mode must not use caller authority")
             }
         }
+    }
+
+    #[test]
+    fn route_declared_operator_vault_is_the_only_way_its_principal_holds_the_capability() {
+        let vault = ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY.to_string();
+        let compiled_scopes = |source_config: Value| {
+            let compiled = HandlerMode
+                .compile(&raw_handler_route(source_config))
+                .unwrap();
+            let handler = compiled
+                .as_any()
+                .downcast_ref::<CompiledHandlerMode>()
+                .unwrap();
+            (
+                handler.declares_operator_vault,
+                handler.execution_scopes.clone(),
+            )
+        };
+
+        for undeclared in [
+            Value::Null,
+            json!({"authority": {}}),
+            json!({"authority": {"operator_vault": false}}),
+        ] {
+            let (declared, scopes) = compiled_scopes(undeclared);
+            assert!(!declared);
+            assert!(!scopes.contains(&vault), "{scopes:?}");
+        }
+
+        let (declared, scopes) = compiled_scopes(json!({"authority": {"operator_vault": true}}));
+        assert!(declared);
+        assert_eq!(
+            scopes,
+            vec![
+                "ryeos.execute.tool.ryeos-email/webhook/track_click".to_string(),
+                vault,
+                ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+            ]
+        );
+
+        // The authority block is closed: no other self-asserted authority.
+        assert!(
+            HandlerMode
+                .compile(&raw_handler_route(json!({
+                    "authority": {"capabilities": ["ryeos.use.vault.operator"]}
+                })))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn handler_route_environment_requires_route_declaration_and_manifest_bound() {
+        use ryeos_app::execution_policy::{LocalLiveEnvironment, OperatorVaultCapabilityRequired};
+        let typed = |result: anyhow::Result<LocalLiveEnvironment>| {
+            let error = result.expect_err("the route must be refused");
+            assert_eq!(
+                error.downcast_ref::<OperatorVaultCapabilityRequired>(),
+                Some(&OperatorVaultCapabilityRequired),
+                "{error:#}"
+            );
+            assert!(
+                crate::routes::response_modes::execute_mode::operator_vault_route_error(&error)
+                    .is_some()
+            );
+            format!("{error:#}")
+        };
+
+        // Declared and allowed by the signed manifest.
+        assert_eq!(
+            handler_route_environment(true, true, || Ok(true)).unwrap(),
+            LocalLiveEnvironment::OverlayWithOperatorVault
+        );
+        // Declared but not allowed, or unverifiable: no self-grant.
+        assert!(typed(handler_route_environment(true, true, || Ok(false))).contains("manifest"));
+        assert!(
+            typed(handler_route_environment(true, false, || {
+                anyhow::bail!("required signed bundle manifest is missing")
+            }))
+            .contains("missing")
+        );
+        // Undeclared: a handler needing secrets would need the operator vault.
+        let mut consulted = false;
+        assert!(
+            typed(handler_route_environment(false, true, || {
+                consulted = true;
+                Ok(true)
+            }))
+            .contains("does not declare")
+        );
+        assert!(
+            !consulted,
+            "an undeclared route never consults the manifest"
+        );
+        // Undeclared and secret-free: the project overlay alone.
+        assert_eq!(
+            handler_route_environment(false, false, || Ok(true)).unwrap(),
+            LocalLiveEnvironment::OverlayWithoutOperatorVault
+        );
     }
 
     #[test]

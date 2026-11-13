@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:39:38Z:0ddb6af3c642b2ce573d6d4bc6f430f2c1ece5fec4888ecea830e18711d78bbe:1gHvDmtAQ3cqHDjLsxRMDAaJVnCvh9CQJhh1pYOZVXhSCQmjp9bFuwGt+G8TS6zSxyYALYV2Axm/gOobQerPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:53:50Z:0a92ced8ad3b9035d95a56120956b30a0a8afb1e606ce46661fb33d4670aa751:Rqg++rIERKEcYklGH1hDdxi4iw6PoTflVXevCBMfgemkAQyuR+ktZ8tZUFglodp3aaAvxWyOZ1mZsP78b772AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [secrets, vault, env, dotenv, providers, security]
@@ -62,8 +62,13 @@ Who holds it:
   node's provider environment, and keep `include_operator_vault: false`.
 - **Schedules** fire with their declared `capabilities`, so a schedule whose
   policy exposes the operator vault must list the capability.
-- **Route handlers** run the bundle source the operator installed, under a
-  fixed daemon principal; that principal carries the capability.
+- **Handler routes** never hold it implicitly. A route's fixed
+  `route-handler:<bundle>:<id>` principal gets it only when the signed route
+  declares `source_config.authority.operator_vault: true` **and** the bundle's
+  signed manifest allows it with `runtime_authority.operator_vault: true`.
+  An undeclared route runs with the project overlay alone, and is refused
+  with `operator_vault_capability_required` if its handler declares
+  `required_secrets`. See [Routes](../core/node/routes.md#operator-vault).
 - **Cross-site worker handoff** re-checks it on the target: the owner's
   current target grant must hold it before the target delivers from its own
   vault.

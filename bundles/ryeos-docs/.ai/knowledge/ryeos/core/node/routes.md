@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:32Z:29b0e4f8b04dc1ccb0cd40da0fd6d2321fc1e1d8eeea7f44f9847df73c804838:nFrXIUHXe8Dm7Xg4b7/eoIs3QVAE8OimgqcrMogD79gyaC+jlZH50g2KGXSEMdfgosu88GV4aCRiPL01JhDECA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:53:50Z:a80ddb8d9fefe1bb5bcff2ae1baaa375e75d395d81b99ff6fa60b7529fd47a83:QUQpnGxIZVX/6AbJBJZMgtSgWKmaEj3QtnjeAlrHk4tSfjmM2NM8vIZqnqvBHolPIE5h3h2XINaxyIFO2zqZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -160,6 +160,42 @@ resolves the tool through the engine and rejects the request unless the
 winning source file is physically under the same bundle's `.ai/tools`
 root. This prevents a same-named system/user/project tool from shadowing
 the verified bundle handler.
+
+#### Operator vault
+
+A handler runs under the fixed principal `route-handler:<bundle>:<route-id>`
+in a fresh request workspace, so the only place its `required_secrets` can
+come from is the node operator's vault. That is operator authority, and a
+route gets it only by asking in two signed places:
+
+1. the route declares it:
+
+   ```yaml
+   response:
+     mode: handler
+     source: tool:agent-kiwi/oauth/callback
+     source_config:
+       authority:
+         operator_vault: true
+   ```
+
+2. the bundle's signed manifest allows it, as the upper bound:
+
+   ```yaml
+   runtime_authority:
+     operator_vault: true
+   ```
+
+A declared route whose manifest allows it runs with the operator vault
+exposed, and its principal holds `ryeos.use.vault.operator`. Otherwise the
+handler runs with the project overlay only. A route is refused before
+dispatch with HTTP 403 and `error_code: operator_vault_capability_required`
+when it declares the vault but its manifest does not allow it (or cannot be
+verified), or when it is undeclared and its handler declares
+`required_secrets`. The manifest flag alone grants nothing, and no
+`permissions:` grant can self-assert the capability: `ryeos.use.vault.*` is
+reserved manifest runtime authority. See
+[Secrets & credentials](../../standard/secrets.md#who-may-read-the-operator-vault).
 
 The request envelope passed as tool parameters has this shape:
 
