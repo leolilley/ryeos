@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:02:48Z:abb9674e4eeb38450309329919d06cf18ee45b3925676b874dc89907aef433fd:eQFGRFXxTo/xz0ujVyBLLICxm4CdP+PW1PaGKklbAK337bRFYlrtZ6rcmsN1BSK9JEUewLO6uNKL+EiKIFXLDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:33:48Z:176af8cc36bf84d3b472006c877730437a1074c2eaae10a0ba01a16f520f5f26:uVhGAO8B7AvP5L+L+nblhaG9wa19kOC/508iaW2iUSL94YnD7w/6+GY4sb8ZrOp6qArKXe4muQnu5rRc4FHnBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -109,11 +109,20 @@ rotate command again instead of submitting the operation by hand), and
 `key_rotation_signer_not_old_operator` (an operator rotation must be signed by
 the key being rotated out).
 
-Native-capacity re-anchors, re-issuances and policy amendments are signed by
-the operator that issued the capacity account and chain to it. After an
-operator rotation they refuse with `capacity_operator_rotated`; run them before
-rotating the operator. Verification of the existing capacity account continues
-under the retired issuing operator.
+Native-capacity documents (the issuance, re-issuances, re-anchors and policy
+amendments) are signed by the operator and chain to the operator that issued the
+capacity account. After an operator rotation the account keeps working: a
+document signed by a successor operator verifies when the signer registry holds
+a `succeeded` key event, node-signed, that links the issuing operator to the
+signer, directly or through earlier rotations. The links are read from the
+registry's event log (each `succeeded` event records its `predecessor`), never
+from a capacity document, and re-issue, re-anchor and policy amendment are
+signed by the current operator. A revoked operator breaks the chain at its
+link: it and every operator after it are refused with
+`capacity_operator_chain_broken`, naming the revoked link. The same code covers
+an issuing operator missing from the registry, and a document signed by an
+operator the registry does not link to the issuer. Revocation is terminal; the
+cure is a fresh app root.
 
 `ryeos node doctor` reports each key's age in its `key_age` row: the node,
 operator, authoring and publisher keys, each with the time it entered service

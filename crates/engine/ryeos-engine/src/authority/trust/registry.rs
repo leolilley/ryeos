@@ -807,6 +807,10 @@ pub struct TrustEvent {
     pub request_digest: String,
     /// Fingerprint of the operator who signed the request.
     pub operator: String,
+    /// For a `succeeded` event, the fingerprint of the key whose succession
+    /// statement admitted `signer`. Absent on every other event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<String>,
 }
 
 impl TrustEvent {

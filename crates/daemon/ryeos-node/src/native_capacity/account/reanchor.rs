@@ -44,13 +44,15 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine as _;
-use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use lillux::crypto::{Signature, Signer, SigningKey, Verifier};
 use lillux::{PinnedDirectory, PinnedDirectoryIdentity, PinnedRegularFileIdentity};
 use ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy;
 use ryeos_node_runtime::state_lock::StateLock;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
+
+use super::OperatorLineage;
 
 use super::reissue::StoppedCapacityAccount;
 use super::{NativeCapacityAccountBinding, digest, hex_digest};
@@ -154,8 +156,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// must name. The boot check and the command share this.
 fn verify_document(
     bytes: &[u8],
-    operator: &VerifyingKey,
-    operator_fingerprint: &str,
+    lineage: &OperatorLineage,
     node_fingerprint: &str,
 ) -> Result<ReanchorBody> {
     ensure!(
@@ -168,10 +169,7 @@ fn verify_document(
         body.schema == REANCHOR_SCHEMA,
         "foreign capacity re-anchor schema"
     );
-    ensure!(
-        body.operator_fingerprint == operator_fingerprint,
-        "capacity re-anchor was signed for another operator"
-    );
+    let operator = lineage.resolve(&body.operator_fingerprint)?;
     ensure!(
         body.node_fingerprint == node_fingerprint,
         "capacity re-anchor belongs to another node"
@@ -249,8 +247,7 @@ fn onboarding(app_root: &Path) -> Result<PinnedDirectory> {
 /// The binding the operator-signed issuance recorded at the original place.
 fn issued_binding(
     onboarding: &PinnedDirectory,
-    operator: &VerifyingKey,
-    operator_fingerprint: &str,
+    lineage: &OperatorLineage,
 ) -> Result<NativeCapacityAccountBinding> {
     let file = onboarding
         .open_pinned_regular(OsStr::new("native-capacity-issuance.json"), false)?
@@ -261,9 +258,10 @@ fn issued_binding(
     let document: super::IssuanceDocument = serde_json::from_slice(&bytes)?;
     ensure!(
         document.body.schema == "ryeos/native-capacity-issuance/v3"
-            && document.body.operator_fingerprint == operator_fingerprint,
+            && document.body.operator_fingerprint == lineage.issuing().0,
         "capacity issuance is foreign"
     );
+    let operator = lineage.issuing().1;
     let encoded = document
         .signature
         .strip_prefix("ed25519:")
@@ -313,8 +311,7 @@ fn verify_chain(
     onboarding: &PinnedDirectory,
     original: &NativeCapacityAccountBinding,
     tip_digest: &str,
-    operator: &VerifyingKey,
-    operator_fingerprint: &str,
+    lineage: &OperatorLineage,
 ) -> Result<Chain> {
     let mut walk = Vec::new();
     let mut next = Some(tip_digest.to_owned());
@@ -325,12 +322,7 @@ fn verify_chain(
         );
         let bytes = read_named(onboarding, &current)?
             .with_context(|| format!("capacity re-anchor document {current} is absent"))?;
-        let body = verify_document(
-            &bytes,
-            operator,
-            operator_fingerprint,
-            &original.node_fingerprint,
-        )?;
+        let body = verify_document(&bytes, lineage, &original.node_fingerprint)?;
         next = body.prior_document_digest.clone();
         walk.push((current, body));
     }
@@ -378,18 +370,11 @@ fn verify_chain(
 fn best_chain(
     onboarding: &PinnedDirectory,
     original: &NativeCapacityAccountBinding,
-    operator: &VerifyingKey,
-    operator_fingerprint: &str,
+    lineage: &OperatorLineage,
 ) -> Result<Option<(String, Chain)>> {
     let mut best: Option<(String, Chain)> = None;
     for candidate in published_digests(onboarding)? {
-        let Ok(chain) = verify_chain(
-            onboarding,
-            original,
-            &candidate,
-            operator,
-            operator_fingerprint,
-        ) else {
+        let Ok(chain) = verify_chain(onboarding, original, &candidate, lineage) else {
             continue;
         };
         let better = best.as_ref().is_none_or(|(_, current)| {
@@ -410,16 +395,13 @@ impl NativeCapacityAccountBinding {
     pub(crate) fn with_current_reanchor(
         self,
         app_root: &Path,
-        operator: &VerifyingKey,
-        operator_fingerprint: &str,
+        lineage: &OperatorLineage,
     ) -> Result<Self> {
         let onboarding = onboarding(app_root)?;
-        Ok(
-            match best_chain(&onboarding, &self, operator, operator_fingerprint)? {
-                Some((_, chain)) => chain.effective,
-                None => self,
-            },
-        )
+        Ok(match best_chain(&onboarding, &self, lineage)? {
+            Some((_, chain)) => chain.effective,
+            None => self,
+        })
     }
 
     /// Boot's check of a re-anchored binding: the document it names and every
@@ -430,21 +412,14 @@ impl NativeCapacityAccountBinding {
     pub(crate) fn require_reanchor_document(
         &self,
         app_root: &Path,
-        operator: &VerifyingKey,
-        operator_fingerprint: &str,
+        lineage: &OperatorLineage,
     ) -> Result<()> {
         let Some(marker) = &self.reanchor else {
             return Ok(());
         };
         let onboarding = onboarding(app_root)?;
-        let original = issued_binding(&onboarding, operator, operator_fingerprint)?;
-        let chain = verify_chain(
-            &onboarding,
-            &original,
-            &marker.document_digest,
-            operator,
-            operator_fingerprint,
-        )?;
+        let original = issued_binding(&onboarding, lineage)?;
+        let chain = verify_chain(&onboarding, &original, &marker.document_digest, lineage)?;
         ensure!(
             chain.effective == *self,
             "capacity re-anchor chain disagrees with the binding it authorises"
@@ -552,7 +527,8 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
         operator_fingerprint == report.operator_fingerprint,
         "operator key differs from the one that initialized this node"
     );
-    super::require_issuing_operator_current(app_root, &operator_fingerprint)?;
+    let lineage = super::OperatorLineage::load(app_root)?;
+    lineage.require_member(&operator_fingerprint)?;
     let prior = report.capacity_account;
     let measured = prior.measured_at(app_root)?;
     let onboarding = onboarding(app_root)?;
@@ -561,18 +537,12 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
     if let Some(log) = state.open_pinned_regular(OsStr::new(REANCHOR_EVIDENCE_LOG), false)? {
         require_owned_log(&log, REANCHOR_EVIDENCE_LOG, "re-anchor")?;
     }
-    let operator = operator_key.verifying_key();
     if prior.same_places(&measured) {
         // A rerun after the seal but before the evidence line owes the line.
         if let Some(marker) = &prior.reanchor {
             let bytes = read_named(&onboarding, &marker.document_digest)?
                 .context("the document the binding names is absent")?;
-            let body = verify_document(
-                &bytes,
-                &operator,
-                &operator_fingerprint,
-                &report.node_fingerprint,
-            )?;
+            let body = verify_document(&bytes, &lineage, &report.node_fingerprint)?;
             append_evidence_once(
                 &state,
                 &CapacityReanchorEvidence {
@@ -619,12 +589,7 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
     if let Some(previous) = &prior_document_digest {
         let bytes = read_named(&onboarding, previous)?
             .context("the document the binding names is absent")?;
-        let previous = verify_document(
-            &bytes,
-            &operator,
-            &operator_fingerprint,
-            &report.node_fingerprint,
-        )?;
+        let previous = verify_document(&bytes, &lineage, &report.node_fingerprint)?;
         ensure!(
             position.epoch >= previous.epoch && position.sequence >= previous.sequence,
             "the account stands before the previous re-anchor; restoring an older volume is out of scope"
@@ -655,13 +620,7 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
         .into_iter()
         .filter_map(|candidate| {
             let bytes = read_named(&onboarding, &candidate).ok()??;
-            let existing = verify_document(
-                &bytes,
-                &operator,
-                &operator_fingerprint,
-                &report.node_fingerprint,
-            )
-            .ok()?;
+            let existing = verify_document(&bytes, &lineage, &report.node_fingerprint).ok()?;
             body.same_facts(&existing).then_some(candidate)
         })
         .next();
@@ -765,6 +724,8 @@ pub struct CapacityPolicyAmendmentEvidence {
 pub(super) struct AmendmentIdentity<'a> {
     pub(super) operator_key: &'a SigningKey,
     pub(super) operator_fingerprint: String,
+    /// The operators whose earlier documents the amendment chain may carry.
+    pub(super) lineage: OperatorLineage,
     pub(super) node_fingerprint: String,
 }
 
@@ -808,6 +769,7 @@ pub fn amend_capacity_policy(
     let AmendmentInputs {
         prior,
         places,
+        lineage,
         operator_fingerprint,
         node_fingerprint,
     } = amendment_inputs(app_root, operator_key)?;
@@ -819,6 +781,7 @@ pub fn amend_capacity_policy(
         &AmendmentIdentity {
             operator_key,
             operator_fingerprint,
+            lineage,
             node_fingerprint,
         },
         actor,
@@ -860,6 +823,7 @@ pub fn check_capacity_policy_amendment(
 struct AmendmentInputs {
     prior: NativeCapacityAccountBinding,
     places: AmendmentPlaces,
+    lineage: OperatorLineage,
     operator_fingerprint: String,
     node_fingerprint: String,
 }
@@ -867,7 +831,8 @@ struct AmendmentInputs {
 fn amendment_inputs(app_root: &Path, operator_key: &SigningKey) -> Result<AmendmentInputs> {
     let operator = operator_key.verifying_key();
     let operator_fingerprint = ryeos_engine::trust::compute_fingerprint(&operator);
-    super::require_issuing_operator_current(app_root, &operator_fingerprint)?;
+    let lineage = super::OperatorLineage::load(app_root)?;
+    lineage.require_member(&operator_fingerprint)?;
     let node_identity_path = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node/identity/public-identity.json");
@@ -876,9 +841,9 @@ fn amendment_inputs(app_root: &Path, operator_key: &SigningKey) -> Result<Amendm
             .context("load pinned public node identity for the capacity policy amendment")?
             .verified_fingerprint()?;
     let onboarding = onboarding(app_root)?;
-    let original = issued_binding(&onboarding, &operator, &operator_fingerprint)?;
+    let original = issued_binding(&onboarding, &lineage)?;
     original.require_node(&node_fingerprint)?;
-    let prior = match best_chain(&onboarding, &original, &operator, &operator_fingerprint)? {
+    let prior = match best_chain(&onboarding, &original, &lineage)? {
         Some((_, chain)) => chain.effective,
         None => original,
     };
@@ -895,6 +860,7 @@ fn amendment_inputs(app_root: &Path, operator_key: &SigningKey) -> Result<Amendm
     Ok(AmendmentInputs {
         prior,
         places,
+        lineage,
         operator_fingerprint,
         node_fingerprint,
     })
@@ -987,7 +953,6 @@ pub(super) fn amend_policy_at(
     // The log this run must end by extending is checked before the first
     // write, so a refused log never leaves an amendment without evidence.
     require_policy_amendment_log(&places.state)?;
-    let operator = identity.operator_key.verifying_key();
     if prior.policy == *policy {
         // Already in force. A rerun after the document but before the
         // evidence line owes the line, and only when the document in force
@@ -999,12 +964,7 @@ pub(super) fn amend_policy_at(
         if let Some(document_digest) = &document_digest {
             let bytes = read_named(&places.onboarding, document_digest)?
                 .context("the document the binding names is absent")?;
-            let body = verify_document(
-                &bytes,
-                &operator,
-                &identity.operator_fingerprint,
-                &identity.node_fingerprint,
-            )?;
+            let body = verify_document(&bytes, &identity.lineage, &identity.node_fingerprint)?;
             if body.policy.is_some() {
                 append_policy_evidence_once(
                     &places.state,
@@ -1080,18 +1040,12 @@ fn publish_or_adopt(
     body: ReanchorBody,
     identity: &AmendmentIdentity<'_>,
 ) -> Result<String> {
-    let operator = identity.operator_key.verifying_key();
     let adopted = published_digests(onboarding)?
         .into_iter()
         .filter_map(|candidate| {
             let bytes = read_named(onboarding, &candidate).ok()??;
-            let existing = verify_document(
-                &bytes,
-                &operator,
-                &identity.operator_fingerprint,
-                &identity.node_fingerprint,
-            )
-            .ok()?;
+            let existing =
+                verify_document(&bytes, &identity.lineage, &identity.node_fingerprint).ok()?;
             body.same_facts(&existing).then_some(candidate)
         })
         .next();
@@ -1448,8 +1402,10 @@ mod controls {
                 &self.onboarding,
                 &self.original,
                 tip,
-                &self.operator.verifying_key(),
-                &self.operator_fingerprint,
+                &OperatorLineage::single(
+                    &self.operator_fingerprint,
+                    &self.operator.verifying_key(),
+                ),
             )
         }
 
@@ -1457,8 +1413,10 @@ mod controls {
             best_chain(
                 &self.onboarding,
                 &self.original,
-                &self.operator.verifying_key(),
-                &self.operator_fingerprint,
+                &OperatorLineage::single(
+                    &self.operator_fingerprint,
+                    &self.operator.verifying_key(),
+                ),
             )
             .unwrap()
         }
@@ -1532,8 +1490,7 @@ mod controls {
         tampered["body"]["sequence"] = 99.into();
         let error = verify_document(
             &serde_json::to_vec(&tampered).unwrap(),
-            &f.operator.verifying_key(),
-            &f.operator_fingerprint,
+            &OperatorLineage::single(&f.operator_fingerprint, &f.operator.verifying_key()),
             &f.original.node_fingerprint,
         )
         .expect_err("tampered field");
@@ -1754,6 +1711,10 @@ mod controls {
                 &AmendmentIdentity {
                     operator_key: &self.operator,
                     operator_fingerprint: self.operator_fingerprint.clone(),
+                    lineage: OperatorLineage::single(
+                        &self.operator_fingerprint,
+                        &self.operator.verifying_key(),
+                    ),
                     node_fingerprint: self.binding.node_fingerprint.clone(),
                 },
                 lillux::process_control::ControllerAccount::current().unwrap(),
@@ -1766,8 +1727,10 @@ mod controls {
             best_chain(
                 &self.onboarding,
                 &self.binding,
-                &self.operator.verifying_key(),
-                &self.operator_fingerprint,
+                &OperatorLineage::single(
+                    &self.operator_fingerprint,
+                    &self.operator.verifying_key(),
+                ),
             )
             .unwrap()
             .map(|(_, chain)| chain.effective)

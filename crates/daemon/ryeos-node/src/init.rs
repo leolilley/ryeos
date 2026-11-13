@@ -2140,13 +2140,12 @@ fn verify_init_completion_checking_capacity(
     if snapshot.generation_digest() != document.body.policy_generation_digest {
         bail!("capacity policy generation changed during completion verification");
     }
-    let (capacity_operator_fingerprint, capacity_operator_key) =
-        crate::native_capacity::issuing_operator(app_root, &trust_store)?;
-    document.body.capacity_account.require_reanchor_document(
-        app_root,
-        &capacity_operator_key,
-        &capacity_operator_fingerprint,
-    )?;
+    let capacity_lineage = crate::native_capacity::OperatorLineage::load(app_root)?;
+    document
+        .body
+        .capacity_account
+        .require_reanchor_document(app_root, &capacity_lineage)?;
+
     if require_capacity_installed {
         document.body.capacity_account.require_installed(
             app_root,

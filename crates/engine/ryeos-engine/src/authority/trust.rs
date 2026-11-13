@@ -1506,6 +1506,7 @@ mod tests {
             record_digest: "b".repeat(64),
             request_digest: "c".repeat(64),
             operator: "d".repeat(64),
+            predecessor: None,
         };
         let second = TrustEvent {
             seq: 2,
