@@ -60,6 +60,8 @@ pub(crate) async fn export_artifact(
         let mut declared_total = None;
         let mut digest = Sha256::new();
         loop {
+            // The artifact export is the node operator reading their own
+            // node, so it uses the operator-only unscoped read.
             let body = json!({
                 "object_hashes": [],
                 "blob_hashes": [],
@@ -72,19 +74,19 @@ pub(crate) async fn export_artifact(
             let body_bytes = serde_json::to_vec(&body).expect("JSON value serialization");
             let headers = signer.sign(
                 "POST",
-                "/objects/get",
+                "/objects/get-any",
                 &body_bytes,
                 &discovered.principal_id,
             )?;
             let url = format!(
-                "{}/objects/get",
+                "{}/objects/get-any",
                 discovered.base_url.trim_end_matches('/')
             );
             let response = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
             let chunk = response
                 .get("blob_chunk")
                 .and_then(Value::as_object)
-                .ok_or_else(|| local("objects/get omitted the artifact blob chunk"))?;
+                .ok_or_else(|| local("objects/get-any omitted the artifact blob chunk"))?;
             let kind = chunk.get("kind").and_then(Value::as_str).unwrap_or("");
             if kind == "missing" {
                 return Err(local("artifact blob is not present on this node"));
@@ -93,12 +95,12 @@ pub(crate) async fn export_artifact(
                 || chunk.get("hash").and_then(Value::as_str) != Some(blob_hash)
                 || chunk.get("offset").and_then(Value::as_u64) != Some(offset)
             {
-                return Err(local("objects/get returned a contradictory artifact chunk"));
+                return Err(local("objects/get-any returned a contradictory artifact chunk"));
             }
             let total = chunk
                 .get("total_size")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| local("objects/get artifact chunk omitted total_size"))?;
+                .ok_or_else(|| local("objects/get-any artifact chunk omitted total_size"))?;
             if declared_total
                 .replace(total)
                 .is_some_and(|prior| prior != total)
@@ -108,13 +110,13 @@ pub(crate) async fn export_artifact(
             let encoded = chunk
                 .get("data")
                 .and_then(Value::as_str)
-                .ok_or_else(|| local("objects/get artifact chunk omitted data"))?;
+                .ok_or_else(|| local("objects/get-any artifact chunk omitted data"))?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|error| local(format!("decode artifact chunk: {error}")))?;
             if bytes.len() > ARTIFACT_EXPORT_CHUNK_BYTES {
                 return Err(local(
-                    "objects/get artifact chunk exceeded its requested bound",
+                    "objects/get-any artifact chunk exceeded its requested bound",
                 ));
             }
             let end = offset
@@ -122,7 +124,7 @@ pub(crate) async fn export_artifact(
                 .ok_or_else(|| local("artifact export byte count overflow"))?;
             let eof = chunk.get("eof").and_then(Value::as_bool) == Some(true);
             if end > total || eof != (end == total) || (bytes.is_empty() && !eof) {
-                return Err(local("objects/get returned an invalid artifact byte range"));
+                return Err(local("objects/get-any returned an invalid artifact byte range"));
             }
             staging.write_all(&bytes).map_err(local_error)?;
             digest.update(&bytes);

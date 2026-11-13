@@ -434,8 +434,12 @@ async fn run_attempt(
     )
     .map_err(AttemptFailure::permanent)?;
     let evidence = &operation.candidate_result.evidence;
+    let read_root = crate::objects_read_scope::ReadRoot::Placement {
+        placement_id: evidence.placement_thread_id.clone(),
+    };
     let pull = crate::remote::pull::pull_results(
         &client,
+        &read_root,
         &authority,
         &evidence.base_snapshot_hash,
         &evidence.candidate_snapshot_hash,

@@ -628,19 +628,20 @@ impl Pair {
             .context("origin does not list its own admission of the witness")
     }
 
-    /// Canonical objects of the product closure, read from ORIGIN.
+    /// Canonical objects of the product closure, read from ORIGIN by its
+    /// operator through the unscoped read.
     async fn origin_objects(&self, hashes: &[String]) -> Result<Vec<Value>> {
         let (status, body) = self
             .origin
             .harness
             .post_json(
-                "/objects/get",
+                "/objects/get-any",
                 json!({"object_hashes": hashes, "blob_hashes": []}),
             )
             .await?;
         ensure!(
             status.is_success(),
-            "origin objects/get returned {status}: {body}"
+            "origin objects/get-any returned {status}: {body}"
         );
         let entries = body["entries"]
             .as_array()
@@ -811,14 +812,14 @@ impl Pair {
     }
 }
 
-/// The product's file as a node serves it through `objects/get`, reassembled
-/// from wire chunks.
+/// The product's file as a node's operator reads it through the unscoped
+/// `objects/get-any`, reassembled from wire chunks.
 async fn read_resident_file(node: &DaemonHarness, product: &Published) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     loop {
         let (status, body) = node
             .post_json(
-                "/objects/get",
+                "/objects/get-any",
                 json!({
                     "object_hashes": [],
                     "blob_hashes": [],
@@ -1126,6 +1127,173 @@ async fn transport_refuses_forged_misowned_and_incomplete_offers() -> Result<()>
 /// Pull form. HOSTED's counterpart is a node whose local operator is ORIGIN's
 /// operator, since a pulled acceptance is owned by the local configured
 /// operator.
+/// POST to `origin` signed by the pulling node's key.
+async fn post_as_puller(
+    origin: &Origin,
+    key: &SigningKey,
+    path: &str,
+    body: Value,
+) -> Result<(reqwest::StatusCode, String)> {
+    let bytes = serde_json::to_vec(&body)?;
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{}{path}", origin.harness.bind))
+        .header("content-type", "application/json")
+        .body(bytes.clone());
+    for (name, value) in common::build_signed_headers_for_bytes(
+        key,
+        &common::fast_fixture::node_signing_key(),
+        "POST",
+        path,
+        &bytes,
+    ) {
+        request = request.header(name, value);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    Ok((status, response.text().await?))
+}
+
+/// The pulling node reads the product under its admission, and nothing else:
+/// the origin's other objects (here its own admission record, which exists on
+/// the node but is outside the witness closure) are refused exactly as a hash
+/// that does not exist is, and `has` reports them absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pulling_node_reads_an_admitted_product_and_nothing_else() -> Result<()> {
+    let puller_key = puller_node_key();
+    let origin = start_origin(Some(&puller_key)).await?;
+    let product = &origin.product;
+    let root = json!({"kind": "admitted_subject", "subject_hash": product.witness_hash});
+
+    // Under the admission the witness closure and the large object read.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/closure/get",
+        json!({
+            "root": root,
+            "roots": [product.witness_hash],
+            "allow_untransported_large_objects": true,
+        }),
+    )
+    .await?;
+    ensure!(
+        status.is_success(),
+        "closure get under the admission: {status} {text}"
+    );
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({
+            "root": root,
+            "object_hashes": [],
+            "blob_hashes": [],
+            "large_object_chunk": {"hash": product.file_sha256, "offset": 0, "length": 1024},
+        }),
+    )
+    .await?;
+    ensure!(
+        status.is_success(),
+        "large-object read under the admission: {status} {text}"
+    );
+    assert!(text.contains("large_object_chunk"), "{text}");
+
+    // A hash outside the witness closure is refused whether or not it exists.
+    let absent = "ef".repeat(32);
+    let (status_exists, text_exists) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({"root": root, "object_hashes": [product.admission_hash], "blob_hashes": []}),
+    )
+    .await?;
+    let (status_absent, text_absent) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({"root": root, "object_hashes": [absent], "blob_hashes": []}),
+    )
+    .await?;
+    assert_eq!(
+        status_exists,
+        reqwest::StatusCode::FORBIDDEN,
+        "{text_exists}"
+    );
+    assert_eq!(
+        status_absent,
+        reqwest::StatusCode::FORBIDDEN,
+        "{text_absent}"
+    );
+    assert!(text_exists.contains("object_not_in_scope"), "{text_exists}");
+    assert_eq!(
+        text_exists.replace(&product.admission_hash, "H"),
+        text_absent.replace(&absent, "H"),
+        "an existing out-of-scope hash must answer exactly like an absent one"
+    );
+
+    // A rootless read, and a closure rooted outside the admission, are refused.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({"object_hashes": [product.witness_hash], "blob_hashes": []}),
+    )
+    .await?;
+    assert!(
+        status == reqwest::StatusCode::FORBIDDEN && text.contains("object_not_in_scope"),
+        "rootless get: {status} {text}"
+    );
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/closure/get",
+        json!({"root": root, "roots": [product.admission_hash]}),
+    )
+    .await?;
+    assert!(
+        status == reqwest::StatusCode::FORBIDDEN && text.contains("object_not_in_scope"),
+        "closure rooted outside the admission: {status} {text}"
+    );
+
+    // Presence is answered only inside the root.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/has",
+        json!({
+            "root": root,
+            "object_hashes": [product.witness_hash, product.admission_hash],
+            "blob_hashes": [],
+        }),
+    )
+    .await?;
+    ensure!(
+        status.is_success(),
+        "has under the admission: {status} {text}"
+    );
+    let has: Value = serde_json::from_str(&text)?;
+    assert_eq!(has["found_object_hashes"], json!([product.witness_hash]));
+    assert_eq!(
+        has["missing_object_hashes"],
+        json!([product.admission_hash])
+    );
+
+    // The pulling node holds the object-read capabilities but not the
+    // operator: the unscoped read is refused.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get-any",
+        json!({"object_hashes": [product.witness_hash], "blob_hashes": []}),
+    )
+    .await?;
+    assert!(
+        !status.is_success(),
+        "get-any by a pulling node: {status} {text}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn receive_product_pulls_the_large_object() -> Result<()> {
     let puller_key = puller_node_key();

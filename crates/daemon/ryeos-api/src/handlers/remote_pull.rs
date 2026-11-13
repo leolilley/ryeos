@@ -25,6 +25,9 @@ pub struct Request {
     /// Remote config name.
     #[serde(default = "default_remote")]
     pub remote: String,
+    /// The root on the remote the requested hashes are read under. The remote
+    /// serves only hashes reachable from it.
+    pub root: crate::objects_read_scope::ReadRoot,
     /// Typed object hashes to fetch. Namespace is never inferred.
     #[serde(
         default,
@@ -48,7 +51,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let client = RemoteClient::from_named_remote(&state, &req.remote)?;
     let presence = client
-        .objects_has(&req.object_hashes, &req.blob_hashes)
+        .objects_has(&req.root, &req.object_hashes, &req.blob_hashes)
         .await?;
     let missing = presence
         .missing_object_hashes
@@ -65,7 +68,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             missing.join(", ")
         );
     }
-    let resp = client.objects_get(&req.object_hashes, &[]).await?;
+    let resp = client
+        .objects_get(&req.root, &req.object_hashes, &[])
+        .await?;
 
     let mut fetched = 0usize;
     let mut stored_hashes: Vec<String> = Vec::new();
@@ -118,7 +123,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             staging
                 .directory()
                 .open_regular_create(OsStr::new(&hash), true, true, 0o600)?;
-        client.stream_blob(&hash, &mut output).await?;
+        client.stream_blob(&req.root, &hash, &mut output).await?;
         output.sync_all()?;
         stored_hashes.push(hash);
         fetched += 1;

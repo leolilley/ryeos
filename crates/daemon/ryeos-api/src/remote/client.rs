@@ -12,6 +12,7 @@ use lillux::crypto::Verifier;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::objects_read_scope::ReadRoot;
 use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::remote_delegation::DelegationError;
@@ -661,6 +662,7 @@ impl RemoteClient {
     /// one namespace never satisfies a request for the other namespace.
     pub async fn objects_has(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
@@ -668,14 +670,16 @@ impl RemoteClient {
             && typed_hashes_request_body_size(object_hashes, blob_hashes)
                 <= HASH_REQUEST_BODY_BUDGET_BYTES
         {
-            return self.objects_has_once(object_hashes, blob_hashes).await;
+            return self
+                .objects_has_once(root, object_hashes, blob_hashes)
+                .await;
         }
 
         let mut response = ObjectsHasResponse::default();
         for chunk in
             chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
         {
-            let part = self.objects_has_once(&chunk, &[]).await?;
+            let part = self.objects_has_once(root, &chunk, &[]).await?;
             response
                 .found_object_hashes
                 .extend(part.found_object_hashes);
@@ -685,7 +689,7 @@ impl RemoteClient {
         }
         for chunk in chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
         {
-            let part = self.objects_has_once(&[], &chunk).await?;
+            let part = self.objects_has_once(root, &[], &chunk).await?;
             response.found_blob_hashes.extend(part.found_blob_hashes);
             response
                 .missing_blob_hashes
@@ -697,10 +701,12 @@ impl RemoteClient {
 
     async fn objects_has_once(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsHasResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": object_hashes,
             "blob_hashes": blob_hashes,
         });
@@ -889,10 +895,12 @@ impl RemoteClient {
     /// Server returns `{ "entries": [{ "hash": "...", "kind": "blob"|"object"|"missing", ... }] }`.
     pub async fn objects_get(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit(
+            root,
             object_hashes,
             blob_hashes,
             DEFAULT_JSON_RESPONSE_MAX_BYTES,
@@ -902,11 +910,13 @@ impl RemoteClient {
 
     pub async fn objects_get_blob_chunk(
         &self,
+        root: &ReadRoot,
         hash: &str,
         offset: u64,
         length: usize,
     ) -> Result<BlobChunkResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": [],
             "blob_hashes": [],
             "blob_chunk": {"hash": hash, "offset": offset, "length": length},
@@ -933,6 +943,7 @@ impl RemoteClient {
     /// JSON body or heap allocation. Returns the verified byte count.
     pub async fn stream_blob<W: std::io::Write>(
         &self,
+        root: &ReadRoot,
         hash: &str,
         destination: &mut W,
     ) -> Result<u64> {
@@ -947,6 +958,7 @@ impl RemoteClient {
         loop {
             let chunk = self
                 .objects_get_blob_chunk(
+                    root,
                     hash,
                     offset,
                     crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
@@ -989,11 +1001,13 @@ impl RemoteClient {
     /// requested range before it is returned.
     pub async fn objects_get_large_object_chunk(
         &self,
+        root: &ReadRoot,
         hash: &str,
         offset: u64,
         length: usize,
     ) -> Result<BlobChunkResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": [],
             "blob_hashes": [],
             "large_object_chunk": {"hash": hash, "offset": offset, "length": length},
@@ -1020,7 +1034,12 @@ impl RemoteClient {
     /// the whole-file digest is checked once the final chunk arrives, so a
     /// sink must treat its output as provisional until this returns `Ok`.
     /// Returns the byte count.
-    pub async fn stream_large_object<F>(&self, hash: &str, mut sink: F) -> Result<u64>
+    pub async fn stream_large_object<F>(
+        &self,
+        root: &ReadRoot,
+        hash: &str,
+        mut sink: F,
+    ) -> Result<u64>
     where
         F: FnMut(&[u8]) -> Result<()>,
     {
@@ -1035,6 +1054,7 @@ impl RemoteClient {
         loop {
             let chunk = self
                 .objects_get_large_object_chunk(
+                    root,
                     hash,
                     offset,
                     crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
@@ -1173,11 +1193,13 @@ impl RemoteClient {
     /// that includes base64/JSON overhead without allowing unbounded buffering.
     pub async fn objects_get_with_response_limit(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -1191,12 +1213,14 @@ impl RemoteClient {
     /// the deliberately unbounded generic CAS request behavior.
     pub async fn objects_get_with_response_limit_and_total_timeout(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -1212,11 +1236,13 @@ impl RemoteClient {
     /// smaller content limit for an already-admitted object type.
     pub async fn objects_get_with_total_timeout(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_and_total_timeout(
+            root,
             object_hashes,
             blob_hashes,
             DEFAULT_JSON_RESPONSE_MAX_BYTES,
@@ -1230,10 +1256,12 @@ impl RemoteClient {
     /// wall-clock timeout; generic CAS callers retain their existing behavior.
     pub async fn objects_get_bundle_batch_with_response_limit(
         &self,
+        root: &ReadRoot,
         blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
+            root,
             &[],
             blob_hashes,
             max_response_bytes,
@@ -1244,6 +1272,7 @@ impl RemoteClient {
 
     async fn objects_get_with_response_limit_inner(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
@@ -1257,7 +1286,7 @@ impl RemoteClient {
                 chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
             {
                 entries.extend(
-                    self.objects_get_once(&chunk, &[], max_response_bytes, total_timeout)
+                    self.objects_get_once(root, &chunk, &[], max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
@@ -1266,7 +1295,7 @@ impl RemoteClient {
                 chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
             {
                 entries.extend(
-                    self.objects_get_once(&[], &chunk, max_response_bytes, total_timeout)
+                    self.objects_get_once(root, &[], &chunk, max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
@@ -1274,6 +1303,7 @@ impl RemoteClient {
             return Ok(ObjectsGetResponse { entries });
         }
         self.objects_get_once(
+            root,
             object_hashes,
             blob_hashes,
             max_response_bytes,
@@ -1284,12 +1314,14 @@ impl RemoteClient {
 
     async fn objects_get_once(
         &self,
+        root: &ReadRoot,
         object_hashes: &[String],
         blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: Option<lillux::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
         let body = serde_json::json!({
+            "root": root,
             "object_hashes": object_hashes,
             "blob_hashes": blob_hashes,
         });
@@ -1330,12 +1362,13 @@ impl RemoteClient {
     /// POST /objects/closure/describe (authenticated).
     pub async fn objects_closure_describe(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureDescribeResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
+        let body = closure_request_body(root, roots, &options);
         let resp = self
             .signed_post_with_response_limit("/objects/closure/describe", &body, response_limit)
             .await?;
@@ -1348,12 +1381,13 @@ impl RemoteClient {
     /// POST /objects/closure/get (authenticated).
     pub async fn objects_closure_get(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
     ) -> Result<ObjectsClosureGetResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
+        let body = closure_request_body(root, roots, &options);
         let raw = self
             .signed_post_raw_with_response_limit("/objects/closure/get", &body, response_limit)
             .await?;
@@ -1366,13 +1400,14 @@ impl RemoteClient {
     /// This is opt-in so generic large transfers retain their existing API.
     pub async fn objects_closure_get_with_total_timeout(
         &self,
+        root: &ReadRoot,
         roots: &[String],
         options: NodeAdmittedObjectsClosureRequestOptions,
         total_timeout: lillux::time::Duration,
     ) -> Result<ObjectsClosureGetResponse> {
         options.validate_roots(roots)?;
         let response_limit = closure_response_limit(&options)?;
-        let body = closure_request_body(roots, &options);
+        let body = closure_request_body(root, roots, &options);
         let raw = self
             .signed_post_raw_with_response_limit_and_timeout(
                 "/objects/closure/get",
@@ -3754,11 +3789,13 @@ fn closure_response_limit(options: &NodeAdmittedObjectsClosureRequestOptions) ->
 }
 
 fn closure_request_body(
+    root: &ReadRoot,
     roots: &[String],
     options: &NodeAdmittedObjectsClosureRequestOptions,
 ) -> Value {
     let limits = options.limits();
     let mut body = serde_json::json!({
+        "root": root,
         "roots": roots,
         "max_objects": limits.max_objects,
         "max_blobs": limits.max_blobs,
@@ -4979,13 +5016,14 @@ mod tests {
         );
 
         let object_error = client
-            .objects_get_with_total_timeout(&["b".repeat(64)], &[], timeout)
+            .objects_get_with_total_timeout(&test_read_root(), &["b".repeat(64)], &[], timeout)
             .await
             .unwrap_err();
         assert!(object_error.to_string().contains("exceeded total timeout"));
 
         let closure_error = client
             .objects_closure_get_with_total_timeout(
+                &test_read_root(),
                 &["a".repeat(64)],
                 NodeAdmittedObjectsClosureRequestOptions::admit(
                     ObjectsClosureRequestOptions::default(),
@@ -4998,6 +5036,12 @@ mod tests {
             .unwrap_err();
         assert!(closure_error.to_string().contains("exceeded total timeout"));
         server.abort();
+    }
+
+    fn test_read_root() -> ReadRoot {
+        ReadRoot::ProjectHead {
+            project_path: "/project".to_owned(),
+        }
     }
 
     #[test]

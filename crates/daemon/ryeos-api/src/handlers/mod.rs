@@ -181,6 +181,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     objects_has::DESCRIPTOR,
     objects_put::DESCRIPTOR,
     objects_get::DESCRIPTOR,
+    objects_get::ANY_DESCRIPTOR,
     objects_stage_chunk::DESCRIPTOR,
     objects_closure_describe::DESCRIPTOR,
     objects_closure_get::DESCRIPTOR,

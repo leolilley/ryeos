@@ -172,7 +172,7 @@ async fn start_remote_server_with_incomplete_roots(
                     json_handler::<ryeos_api::handlers::objects_closure_describe::Request, _>(
                         state,
                         body,
-                        objects_closure_get::handle,
+                        objects_closure_get::handle_authorized,
                     )
                     .await
                 },

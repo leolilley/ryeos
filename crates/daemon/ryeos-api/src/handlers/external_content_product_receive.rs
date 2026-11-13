@@ -252,8 +252,13 @@ async fn fetch_large_objects(
         // a resumed transfer is verified rather than trusted.
         let mut offset = 0_u64;
         let mut complete = false;
+        // The large objects belong to the admitted witness's closure, so they
+        // are read under that witness's admission.
+        let read_root = crate::objects_read_scope::ReadRoot::AdmittedSubject {
+            subject_hash: witness_hash.to_owned(),
+        };
         let streamed = client
-            .stream_large_object(hash, |bytes| {
+            .stream_large_object(&read_root, hash, |bytes| {
                 let progress = plan.store.stage_chunk(hash, expectation, offset, bytes)?;
                 offset += u64::try_from(bytes.len())?;
                 complete = progress.complete;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:47:42Z:a544ce2a97a90858dbe0f67bdf261f7602152c20cdcb1f28d135cc3635b48de9:vSiVmWPEftF6H0RcspQ7kiqoEvfv5mQJ1hf1MEMmPr0SqjudoCwwFRkWcJt138Fj2uK4ONRwFVuxM+0csnnyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:49:48Z:c192ccc40e6b2977d0db020b1a34b15111f032e5d1c4dc5d152c1e50aee7d03f:6iF6QljIrf5bIO3sjQ6uevmxS7RpookP790z9Sykha7wtDNx+00woQwtyS6G5KuPNkp45gVNV31CiNbdm3DZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -29,12 +29,14 @@ See also:
 v1 remote execution is for **operator-trusted remotes**, not mutually
 untrusted tenants.
 
-- CAS is shared/global within a node; capability checks protect access,
-  not storage partitioning. `objects/get` serves any hash to any holder of
-  the grant: knowing a hash plus holding `ryeos.execute.service.objects/get`
-  fetches the object, whoever pushed it. Granting a caller node
-  `objects/get` gives it read access to every object on this node whose hash
-  it learns. See [Services: objects](../services/objects.md#authority-a-hash-plus-the-grant-fetches-the-object).
+- CAS is shared within a node, but reads are scoped by root: `objects/get`,
+  `objects/has` and the closure services serve only hashes reachable from a
+  typed root the caller is entitled to (`project_head`, `thread_result`,
+  `bundle_export`, `placement`, `admitted_subject`, `catalog_publication`),
+  and refuse anything else with `object_not_in_scope`. Holding
+  `ryeos.execute.service.objects/get` does not by itself reach another
+  principal's objects. The unscoped read, `objects/get-any`, is operator-only
+  and never part of a recommended grant. See [Services: objects](../services/objects.md#authority-reads-are-scoped-by-root).
 - Vault is a single shared store in v1; capability checks protect
   mutation/listing, not per-principal isolation.
 - Remote requests are signed with this node's Ed25519 key and carry the
@@ -602,12 +604,15 @@ one new explicit directory. Operator pulls do not create unrooted local CAS
 entries.
 
 ```bash
-ryeos remote pull --remote production --object-hashes abc123 --output-dir /tmp/objects
-ryeos remote pull --remote production --blob-hashes def456 --output-dir /tmp/blobs
+ryeos remote pull --remote production --root '{"kind":"thread_result","thread_id":"T-..."}' --object-hashes abc123 --output-dir /tmp/objects
+ryeos remote pull --remote production --root '{"kind":"thread_result","thread_id":"T-..."}' --blob-hashes def456 --output-dir /tmp/blobs
 ```
 
 **Fail-closed**: aborts if any requested hash is missing. No partial fetches.
 Local capability: `ryeos.execute.service.remote/pull`. Remote target scope: `ryeos.execute.service.objects/get`.
+`remote pull` names the remote read root with a `root` parameter (a JSON object
+such as `{"kind":"thread_result","thread_id":"T-..."}`); hashes outside that
+root are refused with `object_not_in_scope`.
 
 ### Remote Bundle Install
 

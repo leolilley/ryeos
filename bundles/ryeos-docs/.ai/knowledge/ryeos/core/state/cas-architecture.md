@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:49:46Z:3f9a5c8d269ae24afd623f5de6be1058b4ab996ec0d76366c2ba6c52b17bcedf:CsO4zufd0of+LCtO4/elDYuLs/k2CgNGym7lRQRBY6yqIsrfPOBm1bq3LdFcb0Zlv4YPSUBvGqQAKqrUHq3+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:05:09Z:f7a155df353769d6cc536ffaa2aa667bf127c5d89642f52649c2d020cad7378f:mgxE+wOeXpsR6sH/h/QDvPawVDn78rCpedmSET6d1H4qg3yE4eSu2VVtYrR+whdnm5SvlwRb2z8caIWEYva7Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -487,6 +487,9 @@ The CAS layer is exposed through three service endpoints:
 | `objects/put` | `POST /objects/put` | Write content to CAS |
 | `objects/get` | `POST /objects/get` | Fetch content by hash |
 
+Reads are scoped: `objects/has`, `objects/get` and the closure services take a
+required `root` and serve only hashes reachable from it, refusing the rest with
+`object_not_in_scope`; `objects/get-any` is the operator-only unscoped read.
 All three are fail-closed: `objects/get` aborts if any requested hash
 is missing rather than returning partial results. Remote push/pull,
 pushed-head execution, and remote bundle install all depend on these

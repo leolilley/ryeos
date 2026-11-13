@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:952adc8ff8be16a1d1254d0679c5f1797cdadc9f69682f5e50e90a5149a7bd40:irw3f7AYM5SNUaGm/8cym9fjCbDoc6YycPupA5fjk5lvBemBGjLvEx1Z2LWXXNRtp0PRcD5UnHm/TMlifo5uCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:05:09Z:617e06e7ec275b73d54f201364a9a2afd79a66f746a39e8c30a2a06c1ca1efbe:g2sRk5c7CFztNbsXKm7JsLAUSwv/qypztm/y3ImeGLcaCjlSoHGQ0e2Kj3MAr4k2SoXmcoRbrbXXVgUbMEzlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -117,9 +117,14 @@ ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}
 | `objects/has` | `objects.has` | `ryeos.execute.service.objects/has` |
 | `objects/put` | `objects.put` | `ryeos.execute.service.objects/put` |
 | `objects/get` | `objects.get` | `ryeos.execute.service.objects/get` |
+| `objects/get-any` | `objects.get_any` | `ryeos.execute.service.objects/get-any` (operator only) |
+| `objects/closure/get` | `objects.closure.get` | `ryeos.execute.service.objects/closure/get` |
+| `objects/closure/describe` | `objects.closure.describe` | `ryeos.execute.service.objects/closure/describe` |
 
-Object services read and write the node CAS. Remote push/pull, pushed
-HEAD execution, and remote bundle install all depend on these services.
+Object services read and write the node CAS. Reads (`has`, `get`, closure)
+name a typed root and serve only what that root reaches; `objects/get-any` is
+the operator-only unscoped read. Remote push/pull, pushed HEAD execution, and
+remote bundle install all depend on these services.
 Object fetch flows fail closed when requested hashes are missing.
 
 ## Vault Services
