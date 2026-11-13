@@ -2492,7 +2492,13 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // recovery pass; the rows stay the authority.
     if initialized {
         checks.push(process_quarantine_check(&config.app_root));
+        checks.push(stale_publication_check(&config.app_root));
     } else {
+        checks.push(check(
+            "stale_publication",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
         checks.push(check(
             "process_quarantine",
             NA,
@@ -2880,6 +2886,38 @@ fn process_quarantine_check(
             serde_json::json!({
                 "error": format!("{error:#}"),
                 "path": ryeos_app::process_quarantine_report::report_path(&state_dir),
+            }),
+        ),
+    }
+}
+
+fn stale_publication_check(
+    app_root: &std::path::Path,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    let state_dir = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).state();
+    match ryeos_app::stale_publication_report::read_report(&state_dir) {
+        Ok(None) => check("stale_publication", OK, serde_json::json!({})),
+        Ok(Some(report)) => check(
+            "stale_publication",
+            WARN,
+            serde_json::json!({
+                "message": format!(
+                    "{} publish_ready session(s) whose base HEAD has moved",
+                    report.sessions.len()
+                ),
+                "written_at": report.written_at,
+                "sessions": report.sessions,
+                "note": "each candidate was built on a base that is no longer the project HEAD, so it can never publish; it settles to `base_superseded` (candidate kept as evidence) on the owner's next publish",
+                "fix": "the owner runs the session's publish once to settle it, then starts a new session from the current HEAD to redo the work",
+            }),
+        ),
+        Err(error) => check(
+            "stale_publication",
+            WARN,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "path": ryeos_app::stale_publication_report::report_path(&state_dir),
             }),
         ),
     }

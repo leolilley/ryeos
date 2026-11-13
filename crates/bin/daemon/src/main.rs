@@ -6591,6 +6591,7 @@ async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
     let active = reconcile::reconcile_live_threads(state)
         .await
         .context("periodic active-thread reconcile")?;
+    ryeos_api::handlers::dedicated_sessions::mirror_stale_publication_report(state);
     let mut targets = active.active_thread_ids;
     dispatch_resume_intents(state, active.resume_intents)
         .await

@@ -6353,6 +6353,66 @@ fn classify_candidate_publication_recovery(
 /// admitted base proves that this operation did not publish. The candidate
 /// proves success; a missing or different HEAD is irreducibly ambiguous and is
 /// terminalized as unknown rather than reopening an unsafe retry.
+/// Mirror every `publish_ready` session whose admitted base HEAD has moved
+/// into the report `ryeos node doctor` reads offline. It settles nothing:
+/// each such session settles to `base_superseded` on its owner's next
+/// publish. Best effort; the session rows and the signed HEAD stay the
+/// authority, and a failed mirror only leaves the doctor's view stale.
+pub fn mirror_stale_publication_report(state: &AppState) {
+    if let Err(error) = write_stale_publication_report(state) {
+        tracing::warn!(
+            error = %format!("{error:#}"),
+            "failed to mirror the stale publication report for node doctor"
+        );
+    }
+}
+
+fn write_stale_publication_report(state: &AppState) -> anyhow::Result<()> {
+    let mut stale = Vec::new();
+    for session in state
+        .state_store
+        .dedicated_sessions_in_state("publish_ready")?
+    {
+        let authority = match candidate_publication_authority(state, &session) {
+            Ok(authority) => authority,
+            Err(error) => {
+                tracing::warn!(
+                    chain_root_id = %session.chain_root_id,
+                    error = %error,
+                    "publish_ready session has no readable publication authority"
+                );
+                continue;
+            }
+        };
+        let current = state.state_store.with_state_db(|db| {
+            db.read_project_head(&authority.principal_key, &authority.project_hash)
+        })?;
+        if ryeos_app::stale_publication_report::base_has_moved(
+            current.as_deref(),
+            &authority.base_snapshot_hash,
+            &authority.candidate_snapshot_hash,
+        ) {
+            tracing::warn!(
+                chain_root_id = %session.chain_root_id,
+                candidate = %authority.candidate_snapshot_hash,
+                base = %authority.base_snapshot_hash,
+                current_head = ?current,
+                "publish_ready candidate's base HEAD has moved; it settles to base_superseded on the owner's next publish"
+            );
+            stale.push(
+                ryeos_app::stale_publication_report::StalePublishReadySession {
+                    chain_root_id: session.chain_root_id.clone(),
+                    placement_thread_id: session.placement_thread_id.clone(),
+                    candidate_snapshot_hash: authority.candidate_snapshot_hash.clone(),
+                    base_snapshot_hash: authority.base_snapshot_hash.clone(),
+                    current_head: current,
+                },
+            );
+        }
+    }
+    ryeos_app::stale_publication_report::write_report(&state.config.runtime_root().state(), stale)
+}
+
 pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::Result<()> {
     // Qualification journals the exact evaluator adoption before contacting
     // its separate recorded-service root. Startup either observes that exact
@@ -6604,6 +6664,7 @@ pub async fn reconcile_candidate_publications(state: Arc<AppState>) -> anyhow::R
             &session.placement_thread_id,
         );
     }
+    mirror_stale_publication_report(&state);
     Ok(())
 }
 

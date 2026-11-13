@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:45:28Z:2857d38f041353a391e9d31dc25f86e1d04e4e7abf8c234cf775d9b3347ad145:vQq8hMY2HZsKoXu/FFNahxbj3mpxhRx9SH5Pq3XjDOUwe7EQROEkUg74ZZsO+bSyXjZdnCrZ208hoKu5L1FJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:02:16Z:2a17495d7d7b1edfa39bb56f451ce8b87855631bfdd2e8c69ce32632b25218d8:/3hhghK0a8p4pyt5ViAF0qZebx7T/BRxxFIZdxssYljeq7IDyEAKgbjcdlRQ+MViMbp2rKspygzyk5txEqXUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -172,7 +172,10 @@ and inspects the selected signed backend bundle and validates resource limits.
 Policy edits require a daemon restart; see
 [Execution Isolation](execution-isolation.md). Its `process_quarantine` row
 warns about threads whose attached process group recovery cannot prove gone,
-from the report the daemon writes after each recovery pass.
+from the report the daemon writes after each recovery pass. Its
+`stale_publication` row lists `publish_ready` hosted candidates whose base HEAD
+has moved (session, candidate, base and current HEAD); each settles to
+`base_superseded` on its owner's next publish.
 
 ### `ryeos node reset execution-history`
 
