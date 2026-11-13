@@ -143,7 +143,9 @@ fn admit_blocking(
     // own node key. A remote selection loads this node's acceptance of the
     // origin's testimony instead, owned by the attesting operator, and
     // yields the origin's evidence; it is never read as a local publication.
-    let (evidence, owner_principal, remote_testimony) = match &request.remote_testimony {
+    let (evidence, owner_principal, remote_testimony, receiver_source) = match &request
+        .remote_testimony
+    {
         None => {
             let published = load_current_qualified_content(
                 state,
@@ -158,7 +160,7 @@ fn admit_blocking(
                     && published.attestation_hash == request.attestation_hash,
                 "published content qualification differs from the requested coordinate"
             );
-            (published.evidence, owner_principal, None)
+            (published.evidence, owner_principal, None, None)
         }
         Some(remote) => {
             // The emitter runs the source preparation under the caller's own
@@ -187,23 +189,32 @@ fn admit_blocking(
                     &selection,
                     &request.runtime_manifest_hash,
                 )?;
+            // The check prepared this node's own activation; it is the source
+            // the program is derived from, not the origin's realization.
             (
                 verified.evidence,
                 remote.owner_principal.clone(),
                 Some(acceptance),
+                Some(verified.receiver_source),
             )
         }
     };
-    let QualificationSubject::ActivatedContent { content } = &evidence.purpose.subject else {
-        bail!("content qualification has no acquired subject");
+    let source = match receiver_source {
+        Some(source) => source,
+        None => {
+            let QualificationSubject::ActivatedContent { content } = &evidence.purpose.subject
+            else {
+                bail!("content qualification has no acquired subject");
+            };
+            prepare_source(
+                state,
+                context,
+                &request.activation_ref,
+                AcquisitionMode::Offline,
+                &content.realization,
+            )?
+        }
     };
-    let source = prepare_source(
-        state,
-        context,
-        &request.activation_ref,
-        AcquisitionMode::Offline,
-        &content.realization,
-    )?;
     // The staged inputs are dropped unpublished: node state is untouched.
     let inputs = prepare_activated_bundle_consumer_content_inputs(
         state,
