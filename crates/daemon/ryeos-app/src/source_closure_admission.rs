@@ -1520,6 +1520,7 @@ composer: handler:ryeos/core/identity
         let roots = ryeos_engine::item_resolution::ResolutionRoots::from_registered(
             None,
             &[ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "factory-fixture".into(),
                 canonical_root: bundle.path().canonicalize()?,
             }],

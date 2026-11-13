@@ -1496,6 +1496,7 @@ mod tests {
 
     fn project_roots(project_root: &Path) -> ResolutionRoots {
         ResolutionRoots {
+            owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,
                 identity: crate::contracts::ItemSourceRoot::Project,

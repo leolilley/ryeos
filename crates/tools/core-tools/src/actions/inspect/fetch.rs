@@ -37,6 +37,9 @@ pub struct FetchReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_status: Option<String>,
     pub shadowed_count: usize,
+    /// True when the project winner shadows an item a bundle also ships.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub shadows_bundle_item: bool,
     pub fetch_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -88,6 +91,7 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
                 content_hash: String::new(),
                 signature_status: None,
                 shadowed_count: 0,
+                shadows_bundle_item: false,
                 fetch_status: "FAILED".into(),
                 content: None,
                 error: Some(format!("{e}")),
@@ -131,6 +135,11 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
         content_hash: resolved.content_hash.clone(),
         signature_status,
         shadowed_count: resolved.shadowed.len(),
+        shadows_bundle_item: resolved.source_space == ryeos_engine::contracts::ItemSpace::Project
+            && resolved
+                .shadowed
+                .iter()
+                .any(|candidate| candidate.space == ryeos_engine::contracts::ItemSpace::Bundle),
         fetch_status: "SUCCESS".into(),
         content: if params.with_content {
             Some(content)

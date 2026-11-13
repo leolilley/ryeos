@@ -1468,6 +1468,7 @@ mod tests {
             .zip(["core", "knowledge", "directive", "graph"])
             .map(
                 |(root, name)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: name.to_owned(),
                     canonical_root: root.clone(),
                 },

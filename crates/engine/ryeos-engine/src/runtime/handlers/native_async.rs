@@ -373,7 +373,10 @@ mod tests {
         let parsers = dispatcher_with_canonical_bundle_descriptors();
         let kinds = KindRegistry::empty();
         let trust = TrustStore::empty();
-        let roots = ResolutionRoots { ordered: vec![] };
+        let roots = ResolutionRoots {
+            owned_namespaces: Vec::new(),
+            ordered: vec![],
+        };
         let mut ctx = CompileContext {
             template_ctx: TemplateContext::new(PathBuf::from("/dev/null")),
             env: HashMap::new(),

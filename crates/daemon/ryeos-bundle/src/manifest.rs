@@ -192,6 +192,11 @@ pub struct BundleManifestSource {
     /// most manifests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadows: Vec<String>,
+    /// Namespaces this bundle owns: bare-id prefixes a project may not
+    /// shadow. Item resolution refuses a project item inside one and only
+    /// bundle space supplies it. Signed data in the generated manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns_namespaces: Vec<String>,
     /// Privileged node isolation implementations shipped by this bundle.
     /// Presence never activates a backend; immutable node policy selects one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -230,6 +235,9 @@ pub struct BundleManifest {
     /// the generated (signed) manifest states the override intent too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shadows: Vec<String>,
+    /// Owned namespaces, carried verbatim from the source manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns_namespaces: Vec<String>,
     /// Signed privileged isolation declarations, carried verbatim from source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
@@ -360,6 +368,8 @@ pub fn materialize_manifest(
         .map_err(|e| anyhow::anyhow!("invalid `smoke` declaration: {e}"))?;
     validate_shadow_decls(&source.shadows)
         .map_err(|e| anyhow::anyhow!("invalid `shadows` declaration: {e}"))?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&source.owns_namespaces)
+        .map_err(|e| anyhow::anyhow!("invalid `owns_namespaces` declaration: {e}"))?;
     validate_isolation_backends(&source.isolation_backends)
         .map_err(|e| anyhow::anyhow!("invalid `isolation_backends` declaration: {e}"))?;
     validate_external_execution_declarations(
@@ -378,6 +388,7 @@ pub fn materialize_manifest(
         runtime_authority: source.runtime_authority,
         smoke: source.smoke,
         shadows: source.shadows,
+        owns_namespaces: source.owns_namespaces,
         isolation_backends: source.isolation_backends,
         external_providers: source.external_providers,
         external_lifecycle_adapters: source.external_lifecycle_adapters,
@@ -414,6 +425,8 @@ pub fn verify_retained_manifest_bytes(
     manifest
         .runtime_authority
         .validate()
+        .map_err(anyhow::Error::msg)?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces)
         .map_err(anyhow::Error::msg)?;
     validate_isolation_backends(&manifest.isolation_backends).map_err(anyhow::Error::msg)?;
     validate_external_execution_declarations(
@@ -487,6 +500,14 @@ pub fn load_verified_manifest(
             manifest_path.display()
         )
     })?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `owns_namespaces` declaration in {}: {error}",
+                manifest_path.display()
+            )
+        },
+    )?;
     validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
         anyhow::anyhow!(
             "invalid `isolation_backends` declaration in {}: {error}",
@@ -515,6 +536,30 @@ pub fn load_verified_manifest(
         body_digest: lillux::sha256_hex(body.as_bytes()),
         signer_fingerprint: sig_header.signer_fingerprint,
     })
+}
+
+/// The bundle name and owned namespaces of the signed manifest installed at
+/// `bundle_root`. The name is read from the manifest itself and then verified
+/// against its signature, so a root whose directory name differs from the
+/// bundle it holds still reports the right identity.
+pub fn verified_owned_namespaces(
+    bundle_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<(String, Vec<String>)> {
+    let ai_dir = bundle_root.join(".ai");
+    let manifest_path = ai_dir.join("manifest.yaml");
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let value: serde_yaml::Value = serde_yaml::from_str(&body)
+        .with_context(|| format!("parse manifest {}", manifest_path.display()))?;
+    let name = value
+        .get("name")
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("{} names no bundle", manifest_path.display()))?
+        .to_owned();
+    let verified = load_verified_manifest(&ai_dir, &name, trust_store)?;
+    Ok((name, verified.manifest.owns_namespaces))
 }
 
 fn yaml_signature_envelope() -> SignatureEnvelope {
@@ -563,6 +608,14 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
             manifest_path.display()
         )
     })?;
+    ryeos_engine::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "invalid `owns_namespaces` declaration in {}: {error}",
+                manifest_path.display()
+            )
+        },
+    )?;
     validate_isolation_backends(&manifest.isolation_backends).map_err(|error| {
         anyhow::anyhow!(
             "invalid `isolation_backends` declaration in {}: {error}",
@@ -1321,6 +1374,7 @@ typo_field: oops
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1328,6 +1382,65 @@ typo_field: oops
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
         assert_eq!(manifest.name, "test-bundle");
+    }
+
+    #[test]
+    fn overlapping_owned_namespaces_refuse_install() {
+        let claim = |bundle: &str, namespaces: &[&str]| {
+            (
+                bundle.to_owned(),
+                namespaces
+                    .iter()
+                    .map(|n| (*n).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // Disjoint claims, and one bundle seen twice, are fine.
+        ryeos_engine::item_resolution::check_owned_namespace_claims(&[
+            claim("core", &["ryeos/core"]),
+            claim("other", &["acme/tools"]),
+            claim("other", &["acme/tools"]),
+        ])
+        .unwrap();
+        // Equal claims and a claim inside another bundle's claim are refused.
+        for rival in [
+            &["ryeos/core"][..],
+            &["ryeos/core/runtimes"][..],
+            &["ryeos"][..],
+        ] {
+            let error = ryeos_engine::item_resolution::check_owned_namespace_claims(&[
+                claim("core", &["ryeos/core"]),
+                claim("rival", rival),
+            ])
+            .unwrap_err();
+            assert!(error.contains("core") && error.contains("rival"), "{error}");
+        }
+
+        // A manifest cannot declare wildcard or self-overlapping claims.
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("claimant/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        for bad in [
+            vec!["ryeos/*".to_string()],
+            vec!["a".to_string(), "a/b".to_string()],
+        ] {
+            let source = BundleManifestSource {
+                name: "claimant".to_string(),
+                version: "0.1.0".to_string(),
+                description: String::new(),
+                requires_kinds: vec![],
+                uses_kinds: vec![],
+                runtime_authority: RuntimeAuthorityDecls::default(),
+                smoke: vec![],
+                shadows: vec![],
+                owns_namespaces: bad,
+                isolation_backends: vec![],
+                external_providers: vec![],
+                external_lifecycle_adapters: vec![],
+            };
+            let error = materialize_manifest(source, &ai_dir, "claimant").unwrap_err();
+            assert!(error.to_string().contains("owns_namespaces"), "{error}");
+        }
     }
 
     #[test]
@@ -1352,6 +1465,7 @@ typo_field: oops
             },
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1522,6 +1636,7 @@ smoke:
                 timeout_secs: None,
             }],
             shadows: vec![],
+            owns_namespaces: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1596,6 +1711,7 @@ shadows:
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec!["no-colon".to_string()],
+            owns_namespaces: vec![],
             isolation_backends: vec![],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],
@@ -1673,6 +1789,7 @@ isolation_backends:
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
             shadows: vec![],
+            owns_namespaces: vec![],
             isolation_backends: vec![backend.clone()],
             external_providers: vec![],
             external_lifecycle_adapters: vec![],

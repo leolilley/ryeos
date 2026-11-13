@@ -52,6 +52,16 @@ pub enum EngineError {
         candidates: Vec<PathBuf>,
     },
 
+    #[error(
+        "project item `{canonical_ref}` at {project_path} is inside namespace `{namespace}` owned by bundle `{bundle}`; a project cannot shadow an owned namespace"
+    )]
+    ReservedNamespaceShadow {
+        canonical_ref: String,
+        namespace: String,
+        bundle: String,
+        project_path: PathBuf,
+    },
+
     #[error("pinned version not found for `{canonical_ref}`: {reason}")]
     PinnedVersionNotFound {
         canonical_ref: String,
