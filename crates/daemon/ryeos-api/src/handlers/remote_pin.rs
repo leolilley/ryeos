@@ -69,7 +69,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, ctx, state).await.map_err(Into::into)
+            handle(req, ctx, state).await
         })
     },
 };
