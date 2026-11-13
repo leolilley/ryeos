@@ -1098,15 +1098,15 @@ mod tests {
     }
 
     #[test]
-    fn f5r_controller_declares_products_root_admitted_at_init() {
+    fn hosted_controller_declares_products_root_admitted_at_init() {
         let table = NodePolicyTable::new();
         let app_root = tempfile::tempdir().unwrap();
-        let selected = authored_profile("f5r-controller")
+        let selected = authored_profile("hosted-controller")
             .for_host_class("hosted")
             .unwrap();
         let admitted = selected.admit_import_roots(app_root.path()).unwrap();
         let generation = admitted
-            .validated_generation(&table, Path::new("f5r-controller.yaml"))
+            .validated_generation(&table, Path::new("hosted-controller.yaml"))
             .unwrap();
         let roots = &generation.policies()["external_content"]["roots"];
         assert_eq!(
@@ -1128,7 +1128,7 @@ mod tests {
         let declared: [(&str, &[&str]); 4] = [
             ("core", &["hosted", "local"]),
             ("core-scheduling", &["hosted", "local"]),
-            ("f5r-controller", &["hosted", "hosted_enforced", "local"]),
+            ("hosted-controller", &["hosted", "hosted_enforced", "local"]),
             ("standard", &["hosted", "local"]),
         ];
         for (name, classes) in declared {

@@ -18,7 +18,7 @@ on:
         default: ""
         type: string
       targets:
-        description: "Bake targets to build: the whole `composition` group, or a comma-separated list such as `f5r-controller`"
+        description: "Bake targets to build: the whole `composition` group, or a comma-separated list such as `hosted-controller`"
         required: false
         default: "composition"
         type: string

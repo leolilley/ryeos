@@ -3067,7 +3067,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         names.sort();
-        assert!(names.contains(&"f5r-controller".to_owned()), "{names:?}");
+        assert!(names.contains(&"hosted-controller".to_owned()), "{names:?}");
         for name in names {
             let profile = authored_profile(&name);
             let path = directory.join(format!("{name}.yaml"));

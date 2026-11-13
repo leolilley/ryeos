@@ -81,7 +81,7 @@ printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 # The full profile is preflighted as a local host; the controller profile as
 # the hosting provider's container class.
 case "$node_profile" in
-    f5r-controller) [[ "$host_class" == hosted ]] ;;
+    hosted-controller) [[ "$host_class" == hosted ]] ;;
     *) [[ "$host_class" == local ]] ;;
 esac
 if [[ -n "$node_profile" ]]; then
@@ -123,7 +123,7 @@ for run in one two; do
         --output "$tmp/$run/ryeos-bundles-1.2.3-x86_64.tar.gz" \
         --source-date-epoch 1700000000 \
         --ryeos-bin "$fake_ryeos" >/dev/null
-    printf '%s\n' none full f5r-controller > "$tmp/$run/expected-init-calls"
+    printf '%s\n' none full hosted-controller > "$tmp/$run/expected-init-calls"
     cmp "$tmp/$run/expected-init-calls" "$tmp/$run/init-calls"
     (cd "$tmp/$run" && sha256sum -c ryeos-bundles-1.2.3-x86_64.tar.gz.sha256)
     "$root/scripts/release/verify-bundle-artifact.sh" \

@@ -388,7 +388,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     source scripts/pkg/composition-features.sh && \
     features=() && \
     for package in ryeosd ryeos-cli; do \
-      selected="$(ryeos_bundle_set_cargo_features f5r-controller "$package")" || exit 1; \
+      selected="$(ryeos_bundle_set_cargo_features hosted-controller "$package")" || exit 1; \
       if [ -n "$selected" ]; then features+=("$selected"); fi; \
     done && \
     case "$BUNDLE_BUILD_PROFILE" in \
@@ -396,11 +396,11 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    ryeos_build_daemon_pair f5r-controller-pair && \
-    mkdir -p /build/target/f5r-controller && \
-    cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
-    ryeos_assert_compiled_features f5r-controller-pair /build/target/f5r-controller/ryeosd && \
-    cp /build/target-cache/release/ryeos /build/target/f5r-controller/ryeos
+    ryeos_build_daemon_pair hosted-controller-pair && \
+    mkdir -p /build/target/hosted-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-controller/ryeosd && \
+    ryeos_assert_compiled_features hosted-controller-pair /build/target/hosted-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-controller/ryeos
 
 # Standard: the scheduler (scheduling) and provider setup (directive) its bundles select.
 FROM composition-publication AS standard-pair
@@ -933,9 +933,9 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 # The remote-authoring controller runs Codex workers, so it uses the workflow
 # runtime with Node.js beside Python.
-FROM workflow-runtime AS ryeos-f5r-controller
-COPY --from=controller-pair /build/target/f5r-controller/ryeosd /usr/local/bin/ryeosd
-COPY --from=controller-pair /build/target/f5r-controller/ryeos  /usr/local/bin/ryeos
+FROM workflow-runtime AS ryeos-hosted-controller
+COPY --from=controller-pair /build/target/hosted-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-pair /build/target/hosted-controller/ryeos  /usr/local/bin/ryeos
 COPY --from=composition-publication /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=composition-publication /build/bundles/.ai /opt/ryeos/.ai
 COPY --from=composition-publication /build/bundles/core /opt/ryeos/core
@@ -946,7 +946,7 @@ COPY --from=composition-publication /build/bundles/render-sandbox /opt/ryeos/ren
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV RYEOS_APP_ROOT=/data/app
-ENV RYEOS_INIT_NODE_PROFILE=f5r-controller
+ENV RYEOS_INIT_NODE_PROFILE=hosted-controller
 EXPOSE 8000
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
@@ -956,7 +956,7 @@ RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFIL
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
-LABEL io.ryeos.image="f5r-controller"
+LABEL io.ryeos.image="hosted-controller"
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
@@ -1002,7 +1002,7 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
     source scripts/pkg/composition-features.sh && \
     features=() && \
     for package in ryeosd ryeos-cli; do \
-      selected="$(ryeos_bundle_set_cargo_features f5r-controller "$package")" || exit 1; \
+      selected="$(ryeos_bundle_set_cargo_features hosted-controller "$package")" || exit 1; \
       if [ -n "$selected" ]; then features+=("$selected"); fi; \
     done && \
     case "$BUNDLE_BUILD_PROFILE" in \
@@ -1010,24 +1010,24 @@ RUN --mount=type=cache,id=ryeos-release-cargo-registry,target=/usr/local/cargo/r
       latency-profiling) features+=(ryeosd/latency-profiling) ;; \
       *) exit 2 ;; \
     esac && \
-    ryeos_build_daemon_pair f5r-controller-pair && \
+    ryeos_build_daemon_pair hosted-controller-pair && \
     RYEOS_EXACT_BUILD_PROVENANCE=1 CARGO_TARGET_DIR=/build/target-cache \
     cargo build --release --locked -p ryeos-core-tools && \
-    mkdir -p /build/target/f5r-controller && \
-    cp /build/target-cache/release/ryeosd /build/target/f5r-controller/ryeosd && \
-    ryeos_assert_compiled_features f5r-controller-pair /build/target/f5r-controller/ryeosd && \
-    cp /build/target-cache/release/ryeos /build/target/f5r-controller/ryeos && \
-    cp /build/target-cache/release/ryeos-core-tools /build/target/f5r-controller/ryeos-core-tools
+    mkdir -p /build/target/hosted-controller && \
+    cp /build/target-cache/release/ryeosd /build/target/hosted-controller/ryeosd && \
+    ryeos_assert_compiled_features hosted-controller-pair /build/target/hosted-controller/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/hosted-controller/ryeos && \
+    cp /build/target-cache/release/ryeos-core-tools /build/target/hosted-controller/ryeos-core-tools
 
-FROM workflow-runtime AS ryeos-f5r-controller-released
-COPY --from=controller-release-binaries /build/target/f5r-controller/ryeosd /usr/local/bin/ryeosd
-COPY --from=controller-release-binaries /build/target/f5r-controller/ryeos /usr/local/bin/ryeos
-COPY --from=controller-release-binaries /build/target/f5r-controller/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+FROM workflow-runtime AS ryeos-hosted-controller-released
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeosd /usr/local/bin/ryeosd
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeos /usr/local/bin/ryeos
+COPY --from=controller-release-binaries /build/target/hosted-controller/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 COPY --from=released-bundles / /opt/ryeos/
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV RYEOS_APP_ROOT=/data/app
-ENV RYEOS_INIT_NODE_PROFILE=f5r-controller
+ENV RYEOS_INIT_NODE_PROFILE=hosted-controller
 EXPOSE 8000
 ARG VERSION
 ARG VCS_REF=unknown
@@ -1058,7 +1058,7 @@ RUN test "$(/usr/local/bin/ryeosd build-info --profile)" = "$BUNDLE_BUILD_PROFIL
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
-LABEL io.ryeos.image="f5r-controller"
+LABEL io.ryeos.image="hosted-controller"
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
 LABEL io.ryeos.bundle-protocol="1.0"
