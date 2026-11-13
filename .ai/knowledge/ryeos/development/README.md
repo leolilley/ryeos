@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:fef1821f78076e38f35a1b0d3bfd269aa7b71f5e77e1548e7a69c76d48069136:+2kpuefUbJ5B1HDsv6mmxii+z18kRa25FQgIdAB6a/XLW9x5h3NP/l8hABuR8fyysGfLghYR4lfTH2N2DIvSDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:27:24Z:bd47578d52eb1175879876dc249ca36482ed464b3773e4e978bfb2630e9cb431:8oBOdmxBd5oH9B1UlGoV1cMwf5UiAtlvqKP1SwMWlnjd9cl71F5lgnur782Rc6zZCX0BwAvi7GOllcnKttmfAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "README"
 title: "RyeOS Repository Development Knowledge"
 description: "Scope and index for contributor-facing knowledge used to change, test, review, and release the RyeOS repository"
 entry_type: reference
-version: "1.0.3"
+version: "1.0.4"
 ```
 
 # RyeOS Repository Development Knowledge
@@ -41,6 +41,8 @@ contributor guide rather than duplicating the product documentation.
 - `dev-workflow`, `build-and-test`, `remote-development-and-qualification`,
   `ui-development`, `mcp-setup`, and `source-local-bundle-development`:
   contributor workflows.
+- `dev-host-tools`: externally invoked host tools for guarded cargo, daemon
+  feature checks, init smokes and dev-node drift.
 - `signing`, `release-process`, and `bundle-format-migrations`: publication and
   migration procedures for repository changes.
 - `persistence-schema-evolution` and `filesystem-durability`: implementation
