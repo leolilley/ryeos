@@ -179,7 +179,7 @@ fn sign_receipt(
     identity: &ryeos_node_runtime::identity::NodeIdentity,
     body: InventoryReceiptBody,
 ) -> Result<serde_json::Value> {
-    let bytes = lillux::canonical_json(&body)?;
+    let bytes = lillux::canonical_json(&serde_json::to_value(&body)?)?;
     let signature = identity.signing_key().sign(bytes.as_bytes());
     Ok(serde_json::to_value(SignedReceipt {
         kind: RECEIPT_KIND.into(),
@@ -214,7 +214,10 @@ pub fn verify_receipt(
         .context("receipt signature is malformed")?;
     identity
         .verifying_key()
-        .verify(lillux::canonical_json(&signed.body)?.as_bytes(), &signature)
+        .verify(
+            lillux::canonical_json(&serde_json::to_value(&signed.body)?)?.as_bytes(),
+            &signature,
+        )
         .context("provider inventory receipt signature does not verify")?;
     Ok(signed.body)
 }
