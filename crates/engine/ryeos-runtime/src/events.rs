@@ -7,11 +7,12 @@
 //! either side. Adding a new event variant is a single-edit change
 //! that both sides see at compile time.
 //!
-//! `RuntimeEventType::storage_class()` is the canonical mapping from
-//! event type to durable-store strategy. High-frequency progressive
-//! events (token deltas, reasoning chunks, foreach progress) are
-//! ephemeral live-stream events; everything else is an `indexed`
-//! milestone unless a caller deliberately requests `journal_only`.
+//! The daemon stores every runtime-appended event under the node's signed
+//! `event_storage` policy. `RuntimeEventType::is_progressive()` is the code
+//! floor: only progressive events may be stored as `ephemeral` or
+//! `journal_only`; every lifecycle, audit, launch and terminal event is
+//! always `indexed`. `RuntimeEventType::storage_class()` is the class the
+//! shipped init profiles assign, which runtimes send as their claim.
 
 use std::collections::BTreeMap;
 
@@ -728,7 +729,73 @@ impl RuntimeEventType {
         )
     }
 
-    /// Canonical storage class for this event type.
+    /// Whether the node's signed `event_storage` policy chooses this event's
+    /// storage class. Only these high-frequency progressive events may be
+    /// stored as `ephemeral` or `journal_only`; every other event (lifecycle,
+    /// audit, launch, terminal, transcript) is always `indexed`, whatever a
+    /// policy or a runtime says. Intentionally `match`-exhaustive.
+    pub fn is_progressive(self) -> bool {
+        match self {
+            Self::TokenDelta
+            | Self::StreamSnapshot
+            | Self::CognitionReasoning
+            | Self::Observation
+            | Self::GraphForeachIteration => true,
+            Self::ThreadCreated
+            | Self::ThreadStarted
+            | Self::ThreadCompleted
+            | Self::ThreadFailed
+            | Self::ThreadCancelled
+            | Self::ThreadKilled
+            | Self::ThreadTimedOut
+            | Self::ThreadContinued
+            | Self::EdgeRecorded
+            | Self::ChildThreadSpawned
+            | Self::ContinuationRequested
+            | Self::ContinuationAccepted
+            | Self::CommandSubmitted
+            | Self::CommandClaimed
+            | Self::CommandCompleted
+            | Self::StreamOpened
+            | Self::StreamClosed
+            | Self::HookObservationRecorded
+            | Self::HookFailed
+            | Self::ProjectObservationRecorded
+            | Self::ProviderCallObservationRecorded
+            | Self::ArtifactPublished
+            | Self::AsLaunchedResolution
+            | Self::AsLaunchedRefBindings
+            | Self::RuntimeLaunchFacts
+            | Self::LaunchAugmentationCacheHit
+            | Self::ThreadFacetSet
+            | Self::ThreadReconciled
+            | Self::OrphanProcessKilled
+            | Self::SystemPrompt
+            | Self::ContextInjected
+            | Self::CognitionIn
+            | Self::CognitionOut
+            | Self::ToolCallStart
+            | Self::ToolCallResult
+            | Self::GraphStarted
+            | Self::GraphCompleted
+            | Self::GraphStepStarted
+            | Self::GraphStepCompleted
+            | Self::GraphBranchTaken
+            | Self::GraphForeachStarted
+            | Self::GraphFollowSuspended
+            | Self::GraphNodeRetry
+            | Self::ProviderRetry
+            | Self::ProviderAttemptBudgetTransitionV1
+            | Self::CostUntracked
+            | Self::Milestone
+            | Self::ThreadUsage => false,
+        }
+    }
+
+    /// The storage class every shipped init profile assigns, which a
+    /// runtime sends as its claim. The daemon does not store under the
+    /// claim: it applies the node's signed `event_storage` policy within the
+    /// floor of [`Self::is_progressive`].
     ///
     /// Token, stream-snapshot and reasoning deltas are live-only
     /// `ephemeral`: the turn-complete `cognition_out` keeps their text, so
@@ -796,6 +863,19 @@ impl RuntimeEventType {
             | Self::ThreadUsage => StorageClass::Indexed,
         }
     }
+}
+
+/// Whether a `cognition_out` payload is a progressive streaming fragment
+/// (a text `delta`, a `tool_use_partial`, or a mid-stream complete
+/// `tool_use`) rather than the turn-complete record. Fragments are live-only:
+/// the durable record of a turn, its tool calls included, is the
+/// turn-complete `cognition_out{tool_calls}`, and persisting the mid-stream
+/// `tool_use` too would fold a spurious extra assistant turn on resume.
+/// Runtime emitters and the daemon's storage decision share this rule.
+pub fn cognition_out_is_progressive(payload: &Value) -> bool {
+    payload.get("delta").is_some()
+        || payload.get("tool_use_partial").is_some()
+        || payload.get("tool_use").is_some()
 }
 
 #[cfg(test)]
@@ -1063,6 +1143,53 @@ mod tests {
             event_types_of_class(StorageClass::JournalOnly),
             vec!["observation", "graph_foreach_iteration"]
         );
+    }
+
+    #[test]
+    fn only_progressive_events_leave_the_indexed_floor() {
+        let progressive: Vec<&'static str> = every_event_type()
+            .into_iter()
+            .filter(|event_type| event_type.is_progressive())
+            .map(RuntimeEventType::as_str)
+            .collect();
+        assert_eq!(
+            progressive,
+            vec![
+                "token_delta",
+                "stream_snapshot",
+                "observation",
+                "cognition_reasoning",
+                "graph_foreach_iteration"
+            ]
+        );
+        for event_type in every_event_type() {
+            if !event_type.is_progressive() {
+                assert_eq!(
+                    event_type.storage_class(),
+                    StorageClass::Indexed,
+                    "{} is below the indexed floor",
+                    event_type.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cognition_out_fragments_are_progressive() {
+        for payload in [
+            json!({"turn": 1, "delta": "hi"}),
+            json!({"turn": 1, "tool_use_partial": {"id": "c", "delta": "{}"}}),
+            json!({"turn": 1, "tool_use": {"id": "c", "name": "f", "arguments": {}}}),
+        ] {
+            assert!(cognition_out_is_progressive(&payload), "{payload}");
+        }
+        for payload in [
+            json!({"turn": 1}),
+            json!({"content": "done", "tool_calls": []}),
+            json!({"content": "partial", "interrupted": true}),
+        ] {
+            assert!(!cognition_out_is_progressive(&payload), "{payload}");
+        }
     }
 
     #[test]

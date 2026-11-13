@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:33:50Z:74be6649e5eb8a738f256a9af50877bac6a190a34508fc4b6e5f252b03ab7b6e:1iHFLu+CHsYCbmcrqTY5gPFpYN1k2SIrGojlVk6kpZg1O/O61uXZhWqqNeYzwx/DHaxrJ8adLFFwRLIvuMwfCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:40:46Z:b23ba854fc5875827ff7765bec77e2a354779ef9b81543da615064f6a8c62036:2GtOxtTUmQC3OGvWIXBSooUPDxKDnK4Iy+2XYEmC3Bjn2JQ92KU44DHKzLu9FL5BQEXHb/S++yvgGTd2WFOEAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -413,11 +413,13 @@ Journal events are in CAS (recoverable on rebuild) but not queryable
 through the projection. Ephemeral events are transient — lost on process
 crash.
 
-Token, stream-snapshot and reasoning deltas (`token_delta`,
-`stream_snapshot`, `cognition_reasoning`) are ephemeral: the turn-complete
-`cognition_out` keeps their content. `observation` and
-`graph_foreach_iteration` are journal-only. All lifecycle and audit events
-are durable. See [Event Braid](event-braid.md#durability-tiers).
+The daemon assigns tiers from the node's signed `event_storage` policy, not
+from the runtime's claim. In every shipped profile, token, stream-snapshot and
+reasoning deltas (`token_delta`, `stream_snapshot`, `cognition_reasoning`) are
+ephemeral, because the turn-complete `cognition_out` keeps their content, and
+`observation` and `graph_foreach_iteration` are journal-only. Only these
+progressive events can leave the durable tier; all lifecycle and audit events
+are always durable. See [Event Braid](event-braid.md#durability-tiers).
 
 ## CAS-First Write Contract
 

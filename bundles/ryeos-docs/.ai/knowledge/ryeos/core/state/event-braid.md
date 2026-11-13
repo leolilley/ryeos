@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:33:50Z:4116093cd4d9aeaa6498f53a419eb504ff04d2f894825b47f6a6b241379e2663:p7gNMMzCVCetSO9ns1eOm1u/43jmg3ToNcmkr8UG00Z9xLT9jKWLyj/XXi2I5Qx/hJB1omE++weYqOm/fwbzBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:40:46Z:88db8dd07cc57d43316bd63548bd7e381d6996ff9dc440f29da246851d99e5f3:rQXvdNsS0pDmVoLFYYDlPZp127QuSj3p9tAAafWP2EwkUk8eLay7TB+VWVsrHSe6SUoPi9y9nmh/e+CKUaPcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -80,7 +80,32 @@ signed into the chain in CAS and survive a projection rebuild, but are not
 queryable through the projection. Ephemeral events are transient — they
 exist only in the broadcast stream and are not persisted.
 
-The progressive events are split by what they would lose:
+### Storage class is node policy
+
+The daemon stores each runtime-appended event under the node's signed
+`event_storage` policy section (`.ai/node/policies/event_storage.yaml`), not
+under the class the runtime claims. The section is mandatory and has no code
+fallback. Its floor is in code: only the progressive events take a class from
+policy, and the policy must name each of them exactly once. Every lifecycle,
+audit, launch, terminal and transcript event is always durable; a policy that
+names one is refused. A `cognition_out` streaming fragment (`delta`,
+`tool_use_partial`, mid-stream `tool_use`) is always ephemeral, because the
+turn-complete `cognition_out` is its durable record.
+
+Every shipped init profile carries this mapping:
+
+```yaml
+event_storage:
+  schema: 1
+  classes:
+    cognition_reasoning: ephemeral
+    graph_foreach_iteration: journal_only
+    observation: journal_only
+    stream_snapshot: ephemeral
+    token_delta: ephemeral
+```
+
+The split follows what each event would lose:
 
 - `token_delta`, `stream_snapshot` and `cognition_reasoning` are ephemeral.
   The turn-complete `cognition_out` keeps the text and the reasoning, so
@@ -89,7 +114,12 @@ The progressive events are split by what they would lose:
   class `journal_only`, durability `journal`). Nothing else keeps what they
   carry, so they are stored in CAS without being indexed.
 
-All other events are durable.
+An operator may choose `ephemeral`, `journal_only` or `indexed` for each
+progressive event with `ryeos node policy-apply event_storage`. A node whose
+generation predates the section does not start; the daemon names the section
+and the cure, the stopped-node `ryeos node reset policy-generation`, which
+takes it from the release's profile (see
+[Operator Init](../node/operator-init.md)).
 
 ## Replay
 

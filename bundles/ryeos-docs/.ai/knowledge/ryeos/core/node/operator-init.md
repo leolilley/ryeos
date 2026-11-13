@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T07:09:43Z:9cca1b98cd1e3bfcc47c0813b5286f6e6b70b4ab654f1f17339ef1ba2069dcda:GSqe6mlvCbOdyCKMjDtn8a67RMUUl9ML4TPp6qfP/+3peZ0YlXtZPxIHxhVSpLXvgquIQjedGOhaXD6mZtKfAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:40:52Z:cdd0ef6eb326dad29a5176107cf9c4c128781e952f82fe215c404fc936f91ef1:lmi99hljys+2fMHq1fgqs3VkNfTDDIyFW0xKPluRzKXaytiLWXcJElE1ubsYzrSKhsTW1mxz6NGO80Vb4aWuCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -172,7 +172,23 @@ or named with `--reset-section`. On a node whose generation predates the
 operator record, the cutover lists every section that differs from the
 profile and needs each named with `--keep-section` or `--reset-section`.
 
-The `ingest_ignore` schema-1 to schema-2 change is one such clean cut. Schema 1
+A node whose generation lacks a mandatory section does not start, and
+`ryeos node doctor` reports `node_policy_section_missing` with the section's
+name. The `event_storage` section is one such addition. Its replacement needs
+no other choice on a node with the operator record, because a section the
+installed generation lacks always comes from the profile:
+
+```bash
+ryeos node reset policy-generation --node-profile <name> --host-class <class> \
+  --source <source> --reset-section event_storage --confirm
+```
+
+`--reset-section event_storage` states that choice explicitly; the cut takes
+the profile's body without it too. `--keep-section event_storage` is refused,
+because there is no installed section to keep. On a node without the record,
+any other section that differs from the profile still needs its own choice.
+
+The `ingest_ignore` schema-1 to schema-2 change is another such clean cut. Schema 1
 only carried `additional_patterns`; schema 2 carries the complete canonical
 `patterns` policy. During a package-source installation of this cut, use:
 

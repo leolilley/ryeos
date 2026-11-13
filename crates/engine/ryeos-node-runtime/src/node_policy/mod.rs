@@ -67,6 +67,7 @@ impl NodePolicyTable {
             Box::new(sections::accounting::NodeAccountingPolicySection),
             Box::new(sections::bundle_publication::BundlePublicationPolicySection),
             Box::new(sections::command_registration::CommandRegistrationPolicySection),
+            Box::new(sections::event_storage::EventStoragePolicySection),
             Box::new(sections::execution::NodeExecutionPolicySection),
             Box::new(sections::external_content::ExternalContentImportPolicySection),
             Box::new(sections::hosted::HostedNodePolicySection),
@@ -178,6 +179,13 @@ impl NodePolicySnapshot {
 /// kind's default. Exact test snapshots include it wherever a launch is judged.
 pub fn default_launch_trust_record() -> Arc<dyn ErasedNodePolicy> {
     Arc::new(sections::launch_trust::NodeLaunchTrustPolicy::admitting_nothing())
+}
+
+/// The shipped `event_storage` policy record. Exact test snapshots include
+/// it wherever runtime events are appended.
+#[cfg(any(test, feature = "test-support"))]
+pub fn shipped_event_storage_record() -> Arc<dyn ErasedNodePolicy> {
+    Arc::new(sections::event_storage::EventStoragePolicy::as_shipped())
 }
 
 /// Compile one already validated raw generation through every registered

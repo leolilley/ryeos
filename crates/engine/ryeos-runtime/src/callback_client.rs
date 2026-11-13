@@ -15,17 +15,10 @@ pub fn storage_class_for(event_type: RuntimeEventType) -> &'static str {
 }
 
 fn storage_class_for_payload(event_type: RuntimeEventType, payload: &Value) -> &'static str {
-    // Progressive streamed cognition_out is live-only (ephemeral): deltas, partial
-    // tool args, AND complete `tool_use` blocks. The DURABLE record of a turn's
-    // tool calls is `emit_turn_complete`'s `cognition_out{tool_calls}` — persisting
-    // the mid-stream `tool_use` too would fold a spurious extra assistant turn on
-    // resume (reconstruct_messages reads `tool_calls`, not `tool_use`). Must stay
-    // in lock-step with the daemon's `is_ephemeral_allowed`. (The payload keys are
-    // JSON field names, not event types, so they stay string-keyed.)
+    // Progressive streamed cognition_out is live-only (ephemeral). The daemon
+    // applies the same shared rule when it decides the stored class.
     if event_type == RuntimeEventType::CognitionOut
-        && (payload.get("delta").is_some()
-            || payload.get("tool_use_partial").is_some()
-            || payload.get("tool_use").is_some())
+        && crate::events::cognition_out_is_progressive(payload)
     {
         return StorageClass::Ephemeral.as_str();
     }

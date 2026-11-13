@@ -48,22 +48,30 @@ pub async fn handle(
         ));
     }
 
-    // Enum is the producer-side source of truth for the wire type + storage
-    // class; the append path validates it against the closed vocabulary and the
+    // Enum is the producer-side source of truth for the wire type; the append
+    // path validates it against the closed vocabulary, stores it under the
+    // node's event_storage policy (a facet is always indexed), and the
     // projection derives the facet row (survives rebuild).
+    let storage = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy>()
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
     let record = state
         .events
-        .append(&EventAppendParams {
-            thread_id: req.thread_id.clone(),
-            event: EventAppendItem {
-                event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
-                storage_class: RuntimeEventType::ThreadFacetSet
-                    .storage_class()
-                    .as_str()
-                    .to_string(),
-                payload: json!({ "key": req.key, "value": req.value }),
+        .append(
+            &EventAppendParams {
+                thread_id: req.thread_id.clone(),
+                event: EventAppendItem {
+                    event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
+                    storage_class: RuntimeEventType::ThreadFacetSet
+                        .storage_class()
+                        .as_str()
+                        .to_string(),
+                    payload: json!({ "key": req.key, "value": req.value }),
+                },
             },
-        })
+            storage,
+        )
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
 
     serde_json::to_value(record).map_err(|e| HandlerError::Internal(e.to_string()))
