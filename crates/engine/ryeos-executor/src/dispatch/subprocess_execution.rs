@@ -966,9 +966,13 @@ async fn dispatch_tool_subprocess(
             .and_then(|admission| admission.admitted_request_snapshot())
             .map(AsRef::as_ref),
     )
-    .map_err(|e| DispatchError::SchemaMisconfigured {
-        kind: current_ref.kind.clone(),
-        detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
+    .map_err(|e| {
+        super::reserved_namespace_shadow_error(&e).unwrap_or_else(|| {
+            DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
+            }
+        })
     })?;
     // The launch root and every executor hop must be admitted for their kind
     // before anything is finalized, any secret is read or any process starts.
@@ -1290,7 +1294,10 @@ fn validate_direct_source_closure(
             &engine.node_trust_store,
             project,
         )
-        .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?
+        .map_err(|error| {
+            super::reserved_namespace_shadow_error(&error)
+                .unwrap_or_else(|| DispatchError::Internal(anyhow::anyhow!(error)))
+        })?
     } else {
         None
     };

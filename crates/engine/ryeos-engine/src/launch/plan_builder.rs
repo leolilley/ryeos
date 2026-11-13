@@ -54,6 +54,8 @@ struct RuntimeSourceBundleManifest {
     #[serde(default, rename = "shadows")]
     _shadows: Vec<String>,
     #[serde(default)]
+    owns_namespaces: Vec<String>,
+    #[serde(default)]
     isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
     #[serde(default)]
     external_providers: Vec<ryeos_external_execution_contract::ExternalProviderDeclaration>,
@@ -226,6 +228,8 @@ pub struct SignedBundleManifestIdentity {
     pub provides_kinds: Vec<String>,
     pub requires_kinds: Vec<String>,
     pub uses_kinds: Vec<String>,
+    /// Namespaces the signed manifest declares the bundle owns.
+    pub owns_namespaces: Vec<String>,
 }
 
 /// Exact signed installed Bundle manifest captured for historical source
@@ -421,6 +425,14 @@ fn validate_runtime_source_bundle_manifest_body(
             source_description
         ))
     })?;
+    crate::item_resolution::validate_owned_namespaces(&manifest.owns_namespaces).map_err(
+        |error| {
+            EngineError::Internal(format!(
+                "runtime source-bundle manifest has invalid owns_namespaces at {}: {error}",
+                source_description
+            ))
+        },
+    )?;
     let mut backend_ids = std::collections::BTreeSet::new();
     for backend in &manifest.isolation_backends {
         backend.validate().map_err(|error| {
@@ -473,6 +485,7 @@ fn validate_runtime_source_bundle_manifest_body(
         provides_kinds: manifest.provides_kinds,
         requires_kinds: manifest.requires_kinds,
         uses_kinds: manifest.uses_kinds,
+        owns_namespaces: manifest.owns_namespaces,
     })
 }
 
@@ -2141,6 +2154,7 @@ config:
         let roots = ResolutionRoots::from_registered(
             Some(project.path().to_path_buf()),
             &[crate::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "bundle-release".into(),
                 canonical_root: installed.path().to_path_buf(),
             }],

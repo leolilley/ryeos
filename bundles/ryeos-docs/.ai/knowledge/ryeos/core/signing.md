@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T10:13:58Z:97d123b07e0d0e24c3d1c8b03dfc940e815b0161f43ebb0115199e1c25b4741f:yVkd5MpzqC5q578ajqmau7PPIhvvDJ8uNcrI/rnQF5IuzLXyopQZfSvdEP9S3a4s2YmeXbKIqkeH/FIXU8F8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:36:59Z:3ee0c604970476a337949f9c9673ebb21dc2d382dcf9062d74ce705647ab8328:DSoc1w+33pNs4X3hTleClLNYiF0ZFwlTDw42qMQET/fTjVZHpSbHCc/cmiTUCsZktkUUVzPAPL/uCJX9RCV0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -165,9 +165,18 @@ that directory is still enough to make an item `trusted_project`. Live
 runs may write `.ai/tools/` and `.ai/services/`: an item planted there is
 inert unless it is signed by a pinned key.
 
+**Bundle-owned namespaces cannot be shadowed.** A bundle's signed manifest
+can declare `owns_namespaces` (core owns `ryeos/core`). A project file inside
+an owned namespace, such as a copy of a core runtime at
+`.ai/tools/ryeos/core/runtimes/python/function.yaml`, is refused with a 409
+`reserved_namespace_shadow` instead of winning resolution, even when a pinned
+key signed it. See [Spaces](spaces.md).
+
 **One name, one item.** Two files with the same name and different
 formats in one folder (for example `x.py` and `x.yaml`) are refused as
-ambiguous rather than one silently winning.
+ambiguous rather than one silently winning. A launch refuses with 409
+`ambiguous_item_formats`, naming the item, the space and both candidate
+files; the cure is to keep exactly one of them.
 
 ## Trust Store
 

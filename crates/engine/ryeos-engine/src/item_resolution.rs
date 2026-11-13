@@ -43,6 +43,90 @@ pub fn read_item_source_no_follow(path: &std::path::Path) -> Result<String, Engi
 pub struct RegisteredBundleRoot {
     pub name: String,
     pub canonical_root: PathBuf,
+    /// Namespaces this bundle's signed manifest declares it owns. Empty for a
+    /// bundle that owns none. A project item inside an owned namespace is
+    /// refused at resolution rather than shadowing the bundle.
+    pub owned_namespaces: Vec<String>,
+}
+
+/// One namespace claimed by one installed bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedNamespace {
+    pub bundle: String,
+    pub namespace: String,
+}
+
+/// Validate a manifest's `owns_namespaces` list: each entry is a canonical
+/// slash-separated run of segments (alphanumerics, `-`, `_`, `.`), with no
+/// wildcards, no empty or dot segments, and no entry equal to or inside
+/// another entry of the same list.
+pub fn validate_owned_namespaces(namespaces: &[String]) -> Result<(), String> {
+    for namespace in namespaces {
+        if namespace.is_empty() {
+            return Err("owned namespace is empty".to_owned());
+        }
+        for segment in namespace.split('/') {
+            if segment.is_empty() || segment == "." || segment == ".." {
+                return Err(format!(
+                    "owned namespace `{namespace}` has an empty or relative segment"
+                ));
+            }
+            if !segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                return Err(format!(
+                    "owned namespace `{namespace}` must be literal segments of letters, digits, `-`, `_` and `.`; wildcards are not allowed"
+                ));
+            }
+        }
+    }
+    for (index, left) in namespaces.iter().enumerate() {
+        for right in &namespaces[index + 1..] {
+            if owned_namespaces_overlap(left, right) {
+                return Err(format!(
+                    "owned namespaces `{left}` and `{right}` overlap; declare each namespace once"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse two different bundles claiming overlapping namespaces. Each entry
+/// is one bundle's name and its declared claims. Two entries with the same
+/// bundle name are one bundle seen twice (a replacement) and never conflict.
+pub fn check_owned_namespace_claims(claims: &[(String, Vec<String>)]) -> Result<(), String> {
+    for (index, (left_bundle, left_namespaces)) in claims.iter().enumerate() {
+        for (right_bundle, right_namespaces) in &claims[index + 1..] {
+            if left_bundle == right_bundle {
+                continue;
+            }
+            for left in left_namespaces {
+                for right in right_namespaces {
+                    if owned_namespaces_overlap(left, right) {
+                        return Err(format!(
+                            "bundle `{left_bundle}` claims namespace `{left}` and bundle `{right_bundle}` claims `{right}`; two bundles cannot own overlapping namespaces"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `bare_id` is the namespace itself or sits inside it.
+pub fn namespace_contains(namespace: &str, bare_id: &str) -> bool {
+    bare_id == namespace
+        || bare_id
+            .strip_prefix(namespace)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether two namespaces are equal or one sits inside the other.
+pub fn owned_namespaces_overlap(left: &str, right: &str) -> bool {
+    namespace_contains(left, right) || namespace_contains(right, left)
 }
 
 /// How a derived resolution generation uses one named registered bundle.
@@ -129,6 +213,9 @@ pub struct ResolutionRoot {
 pub struct ResolutionRoots {
     /// Search roots in resolution priority order (first match wins)
     pub ordered: Vec<ResolutionRoot>,
+    /// Namespaces installed bundles own. A project candidate inside one is
+    /// refused; only bundle space can supply it.
+    pub owned_namespaces: Vec<OwnedNamespace>,
 }
 
 impl ResolutionRoots {
@@ -161,7 +248,17 @@ impl ResolutionRoots {
             });
         }
 
-        Self { ordered }
+        Self {
+            ordered,
+            owned_namespaces: Vec::new(),
+        }
+    }
+
+    /// The installed bundle owning the namespace that contains `bare_id`.
+    pub fn owner_of(&self, bare_id: &str) -> Option<&OwnedNamespace> {
+        self.owned_namespaces
+            .iter()
+            .find(|owned| namespace_contains(&owned.namespace, bare_id))
     }
 
     /// Build from canonical source roots. Unlike [`Self::from_flat`], these
@@ -190,7 +287,22 @@ impl ResolutionRoots {
             ai_root: bundle.canonical_root.join(crate::AI_DIR),
             content_root: Some(bundle.canonical_root.clone()),
         }));
-        Self { ordered }
+        let owned_namespaces = bundles
+            .iter()
+            .flat_map(|bundle| {
+                bundle
+                    .owned_namespaces
+                    .iter()
+                    .map(|namespace| OwnedNamespace {
+                        bundle: bundle.name.clone(),
+                        namespace: namespace.clone(),
+                    })
+            })
+            .collect();
+        Self {
+            ordered,
+            owned_namespaces,
+        }
     }
 
     /// Resolve one authority-bearing source identity to its exact registered
@@ -457,6 +569,17 @@ fn resolve_item_full_inner(
                 // Nothing in this space can change the winner, so its
                 // absences are not dependencies of the resolution.
                 continue;
+            }
+            if is_file
+                && root.space == ItemSpace::Project
+                && let Some(owned) = roots.owner_of(&ref_.bare_id)
+            {
+                return Err(EngineError::ReservedNamespaceShadow {
+                    canonical_ref: ref_.to_string(),
+                    namespace: owned.namespace.clone(),
+                    bundle: owned.bundle.clone(),
+                    project_path: path,
+                });
             }
             if is_file {
                 if winner.is_none() {
@@ -861,10 +984,12 @@ mod tests {
             Some(PathBuf::from("/projects/demo")),
             &[
                 RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: "outer".to_owned(),
                     canonical_root: PathBuf::from("/bundles/root"),
                 },
                 RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
                     name: "inner".to_owned(),
                     canonical_root: PathBuf::from("/bundles/root/nested"),
                 },
@@ -902,6 +1027,7 @@ mod tests {
         assert!(loose.authoritative_bundle_roots().is_err());
 
         let duplicate = ResolutionRoots {
+            owned_namespaces: Vec::new(),
             ordered: vec![
                 ResolutionRoot {
                     space: ItemSpace::Bundle,
@@ -1127,6 +1253,150 @@ mod tests {
         fs::remove_dir_all(bundle).unwrap();
     }
 
+    fn owning_roots(project: &Path, bundle: &Path) -> ResolutionRoots {
+        let mut roots =
+            ResolutionRoots::from_flat(Some(project.to_path_buf()), vec![bundle.to_path_buf()]);
+        roots.owned_namespaces = vec![OwnedNamespace {
+            bundle: "core".to_owned(),
+            namespace: "ryeos/core".to_owned(),
+        }];
+        roots
+    }
+
+    #[test]
+    fn project_candidate_in_owned_namespace_is_refused() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        write_item(
+            &project,
+            "tools",
+            "ryeos/core/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        write_item(
+            &bundle,
+            "tools",
+            "ryeos/core/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        let roots = owning_roots(&project, &bundle);
+        let item = CanonicalRef::parse("tool:ryeos/core/runtimes/python/function").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::ReservedNamespaceShadow {
+                namespace,
+                bundle,
+                project_path,
+                ..
+            }) => {
+                assert_eq!(namespace, "ryeos/core");
+                assert_eq!(bundle, "core");
+                assert!(project_path.ends_with("tools/ryeos/core/runtimes/python/function.yaml"));
+            }
+            other => panic!("expected reserved_namespace_shadow, got {other:?}"),
+        }
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn project_candidate_outside_owned_namespace_still_wins_and_is_reported() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        write_item(
+            &project,
+            "tools",
+            "ryeos/other/x",
+            ".yaml",
+            "executor_id: run",
+        );
+        write_item(
+            &bundle,
+            "tools",
+            "ryeos/other/x",
+            ".yaml",
+            "executor_id: run",
+        );
+        // A namespace that merely shares a name prefix owns nothing here.
+        write_item(
+            &project,
+            "tools",
+            "ryeos/corex/y",
+            ".yaml",
+            "executor_id: run",
+        );
+        let roots = owning_roots(&project, &bundle);
+
+        let item = CanonicalRef::parse("tool:ryeos/other/x").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Bundle);
+
+        let item = CanonicalRef::parse("tool:ryeos/corex/y").unwrap();
+        let result = resolve_item_full(&roots, &schema, &item).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn executor_hop_into_owned_namespace_resolves_bundle_only() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        write_item(
+            &bundle,
+            "tools",
+            "ryeos/core/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        // The project owns other names; none of them are in the namespace.
+        write_item(
+            &project,
+            "tools",
+            "mine/runtimes/python/function",
+            ".yaml",
+            "executor_id: run",
+        );
+        let roots = owning_roots(&project, &bundle);
+        let hop = CanonicalRef::parse("tool:ryeos/core/runtimes/python/function").unwrap();
+        let result = resolve_item_full(&roots, &schema, &hop).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Bundle);
+        assert!(result.shadowed.is_empty());
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
+    }
+
+    #[test]
+    fn owned_namespaces_validate_as_canonical_non_overlapping_segments() {
+        assert!(
+            validate_owned_namespaces(&["ryeos/core".to_owned(), "ryeos/coreutils".to_owned()])
+                .is_ok()
+        );
+        for bad in [
+            "",
+            "ryeos/*",
+            "/ryeos",
+            "ryeos//core",
+            "ryeos/../core",
+            "ryeos/core/",
+        ] {
+            assert!(
+                validate_owned_namespaces(&[bad.to_owned()]).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(validate_owned_namespaces(&["ryeos".to_owned(), "ryeos/core".to_owned()]).is_err());
+        assert!(
+            validate_owned_namespaces(&["ryeos/core".to_owned(), "ryeos/core".to_owned()]).is_err()
+        );
+    }
+
     fn bundle_only_schema() -> KindSchema {
         let mut schema = make_kind_schema("services", vec![(".yaml", "yaml")]);
         schema.launch_trust = Some(crate::kind_registry::launch_trust::LaunchTrustPolicy {
@@ -1207,10 +1477,12 @@ mod tests {
         fs::create_dir_all(chosen.join(crate::AI_DIR)).unwrap();
         let registered = vec![
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "early".to_owned(),
                 canonical_root: early.clone(),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "chosen".to_owned(),
                 canonical_root: chosen.clone(),
             },
@@ -1276,6 +1548,7 @@ mod tests {
         let registered = ["a", "b", "c"]
             .into_iter()
             .map(|name| RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: name.to_owned(),
                 canonical_root: PathBuf::from(format!("/bundles/{name}")),
             })
@@ -1289,10 +1562,12 @@ mod tests {
     fn named_bundle_item_resolution_refuses_an_unregistered_or_duplicated_name() {
         let registered = vec![
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "twice".to_owned(),
                 canonical_root: PathBuf::from("/bundles/one"),
             },
             RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: "twice".to_owned(),
                 canonical_root: PathBuf::from("/bundles/two"),
             },

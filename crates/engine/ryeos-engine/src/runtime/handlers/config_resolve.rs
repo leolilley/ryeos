@@ -427,6 +427,7 @@ metadata:
         let parsers = dispatcher_with_canonical_bundle_descriptors();
 
         let roots = ResolutionRoots {
+            owned_namespaces: Vec::new(),
             ordered: vec![
                 ResolutionRoot {
                     space: crate::contracts::ItemSpace::Project,

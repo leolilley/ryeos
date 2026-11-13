@@ -133,6 +133,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
         .zip(&roots)
         .map(
             |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                owned_namespaces: Vec::new(),
                 name: name.into(),
                 canonical_root: root.clone(),
             },
