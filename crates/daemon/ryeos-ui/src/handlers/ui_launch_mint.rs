@@ -16,7 +16,7 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-use crate::browser_session::LaunchContext;
+use crate::browser_session::{LaunchContext, SessionTiming};
 use crate::compiled_binding::{
     BindingCompileContext, CompiledUiDispatchClass, CompiledUiTarget, SessionCompiledUiBinding,
 };
@@ -63,6 +63,10 @@ pub struct Request {
     pub project_path: Option<String>,
     #[serde(default)]
     pub user_principal_id: Option<String>,
+    /// Capability patterns that narrow the session below the node's session
+    /// ceiling. A minter can only ask for less authority, never more.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +76,9 @@ pub struct Response {
     pub token: String,
     pub launch_url: String,
     pub session_id: String,
+    /// The authority the session actually holds: the minter's scopes, the
+    /// node's session ceiling and the requested narrowing, intersected.
+    pub granted_caps: Vec<String>,
     pub attachment: ryeos_client_base::ui::UiBindingAttachment,
 }
 
@@ -132,8 +139,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
     };
 
+    let session_policy = state.node_policy.require::<
+        ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
+    >()?;
+    let granted_caps = effective_session_caps(&ctx.scopes, session_policy, req.scopes.as_deref())?;
+    // Every compile and admission after this point sees the session's
+    // grant, never the minter's own scopes.
+    let mut session_ctx = ctx.clone();
+    session_ctx.scopes = granted_caps.clone();
+
     let (compiled_binding, presentation) =
-        compile_session_binding(&req, &ctx, &state, project_authority.as_deref())?;
+        compile_session_binding(&req, &session_ctx, &state, project_authority.as_deref())?;
     let _project_registry_gate = match (
         registered_project_id.as_deref(),
         project_authority.as_deref(),
@@ -158,15 +174,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let launch_ctx = LaunchContext {
         compiled_binding: std::sync::Arc::new(compiled_binding),
         presentation,
-        granted_caps: ctx.scopes.clone(),
+        granted_caps: granted_caps.clone(),
+        timing: SessionTiming::from_policy(session_policy),
         user_principal_id,
         project_authority,
         registered_project_id,
     };
 
-    let session_policy = state.node_policy.require::<
-        ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
-    >()?;
     let (session_id, token, attachment) = get_ui_state(&state)
         .expect("UiState not set")
         .browser_sessions
@@ -185,10 +199,44 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         token,
         launch_url,
         session_id,
+        granted_caps,
         attachment: attachment.public_descriptor(binding_request_bounds(&state)?),
     };
 
     serde_json::to_value(response).map_err(Into::into)
+}
+
+/// The grant a new browser session holds: the minter's scopes intersected
+/// with the node's signed session ceiling, then with the minter's own
+/// requested narrowing when it supplied one. A result with no capability is
+/// refused, since such a session could do nothing.
+pub(crate) fn effective_session_caps(
+    minter_scopes: &[String],
+    policy: &ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy,
+    requested: Option<&[String]>,
+) -> Result<Vec<String>> {
+    use crate::session_authority::intersect_capabilities;
+
+    let mut granted = intersect_capabilities(minter_scopes, &policy.session_scopes);
+    if let Some(requested) = requested {
+        for scope in requested {
+            ryeos_runtime::authorizer::validate_scope_pattern(scope).map_err(|reason| {
+                HandlerError::BadRequest(format!("invalid scopes entry: {reason}"))
+            })?;
+        }
+        granted = intersect_capabilities(&granted, requested);
+    }
+    if granted.is_empty() {
+        return Err(HandlerError::Forbidden(
+            "no capability remains after intersecting the caller's scopes with the node's \
+             browser-session ceiling (ui_browser_sessions.session_scopes) and the requested \
+             scopes; widen the request within the ceiling, or have the node operator add the \
+             capability to session_scopes"
+                .into(),
+        )
+        .into());
+    }
+    Ok(granted)
 }
 
 pub(crate) fn compile_session_binding(
@@ -735,6 +783,115 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<Request>(forbidden).is_err());
         }
+    }
+
+    fn ceiling_policy(
+        session_scopes: &[&str],
+    ) -> ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy
+    {
+        use ryeos_node_runtime::node_policy::sections::ui_browser_sessions::{
+            SeatPolicy, SharedPresentationPolicyLimits, UiBrowserSessionPolicy,
+        };
+        UiBrowserSessionPolicy {
+            schema: 5,
+            session_ttl_secs: 28800,
+            session_idle_secs: 3600,
+            launch_token_ttl_secs: 60,
+            session_scopes: session_scopes.iter().map(|s| (*s).to_owned()).collect(),
+            max_session_bootstrap_bytes: 4194304,
+            max_live_binding_attachments_per_session: 16,
+            max_presentations_per_session: 16,
+            max_surface_instances_per_presentation: 16,
+            shared_presentation: SharedPresentationPolicyLimits {
+                max_declaration_bytes: 65536,
+                max_dialogs: 16,
+                max_initial_surfaces: 16,
+                max_label_bytes: 128,
+                max_mount_id_bytes: 64,
+            },
+            seat: SeatPolicy {
+                kind: "seat_session".into(),
+                max_replay_frame_events: 64,
+                max_replay_frame_bytes: 4194304,
+            },
+        }
+    }
+
+    fn scopes(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn minted_session_caps_are_narrowed() {
+        let policy = ceiling_policy(&["ryeos.execute.service.ui/*"]);
+        // The local operator holds `*`; the session gets the ceiling.
+        assert_eq!(
+            effective_session_caps(&scopes(&["*"]), &policy, None).unwrap(),
+            scopes(&["ryeos.execute.service.ui/*"])
+        );
+        // Authority outside the ceiling never reaches the session.
+        assert_eq!(
+            effective_session_caps(
+                &scopes(&[
+                    "ryeos.execute.service.ui/seat/open",
+                    "ryeos.execute.service.identity/authorize-key",
+                ]),
+                &policy,
+                None,
+            )
+            .unwrap(),
+            scopes(&["ryeos.execute.service.ui/seat/open"])
+        );
+    }
+
+    #[test]
+    fn mint_request_can_only_narrow_below_the_ceiling() {
+        let policy = ceiling_policy(&["ryeos.execute.service.ui/*"]);
+        let narrowed = effective_session_caps(
+            &scopes(&["*"]),
+            &policy,
+            Some(&scopes(&["ryeos.execute.service.ui/seat/*"])),
+        )
+        .unwrap();
+        assert_eq!(narrowed, scopes(&["ryeos.execute.service.ui/seat/*"]));
+        // Asking for more than the ceiling yields only what the ceiling allows.
+        let widened =
+            effective_session_caps(&scopes(&["*"]), &policy, Some(&scopes(&["*"]))).unwrap();
+        assert_eq!(widened, scopes(&["ryeos.execute.service.ui/*"]));
+    }
+
+    #[test]
+    fn mint_refuses_an_empty_effective_grant_and_bad_requested_scopes() {
+        let policy = ceiling_policy(&["ryeos.execute.service.ui/*"]);
+        let error = effective_session_caps(
+            &scopes(&["ryeos.execute.service.identity/authorize-key"]),
+            &policy,
+            None,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("session_scopes"), "{error:#}");
+        let error = effective_session_caps(&scopes(&["*"]), &policy, Some(&scopes(&["ui.read"])))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("invalid scopes"), "{error:#}");
+    }
+
+    #[test]
+    fn mint_request_scopes_field_is_optional_and_typed() {
+        let req: Request = serde_json::from_value(serde_json::json!({
+            "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
+            "root_ref": "surface:ryeos/ui/base",
+            "scopes": ["ryeos.execute.service.ui/*"]
+        }))
+        .unwrap();
+        assert_eq!(req.scopes, Some(scopes(&["ryeos.execute.service.ui/*"])));
+        assert!(
+            serde_json::from_value::<Request>(serde_json::json!({
+                "ui_binding_contract_revision": crate::UI_BINDING_CONTRACT_REVISION,
+                "root_ref": "surface:ryeos/ui/base",
+                "scopes": "ryeos.execute.service.ui/*"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

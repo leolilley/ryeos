@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-13T04:25:00Z:e0b2b0929d2eba3940b51b706de76d7be4c27031c1abfb0858e8d16ae8009166:YNBaMrXyzjd8AJ0KKEsuxg+ltZtaW2yJK53nUtu/iU8oiv8YJhqXkND3jbMi7uOyFzOAFyCwbm70n463fjtoDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: sessions-list
+version: "1.0.0"
+description: Lists live browser sessions for the configured local operator. Never returns cookie values or launch tokens.
+endpoint: ui.sessions.list
+availability: daemon_only
+required_caps:
+  - ryeos.execute.service.ui/sessions/list

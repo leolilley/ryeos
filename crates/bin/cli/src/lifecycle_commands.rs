@@ -2661,6 +2661,11 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // unsatisfied reading into a failure.
     checks.push(wall_clock_check(&config.app_root, initialized));
 
+    // The browser-session policy: lifetimes and the capability ceiling every
+    // browser session is bounded by. Live sessions exist only in a running
+    // node, so their count is not available here.
+    checks.push(ui_browser_sessions_check(&config.app_root, initialized));
+
     if initialized {
         match ryeos_app::bundle_transaction::inspect_bundle_transactions(&config.app_root) {
             Ok(diagnostics) if !diagnostics.invalid.is_empty() => checks.push(check(
@@ -3996,6 +4001,56 @@ fn floor_entry_text(entry: &lillux::process_control::CapabilityRequirement) -> S
     text
 }
 
+/// Doctor row for the browser-session policy: present, signed, valid. The
+/// live session count needs the running node and is reported as not
+/// available offline.
+fn ui_browser_sessions_check(
+    app_root: &std::path::Path,
+    initialized: bool,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA, OK};
+    use ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy;
+    if !initialized {
+        return check(
+            "ui_browser_sessions",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        );
+    }
+    let loaded = (|| -> Result<UiBrowserSessionPolicy> {
+        let isolation =
+            ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(app_root)?;
+        let node_trust = isolation
+            .registered_generation_node_trust()
+            .context("retained isolation generation omitted node trust")?;
+        let policy = crate::node_descriptors::load_verified_policy_snapshot_with_trust(
+            app_root, node_trust,
+        )?;
+        Ok(policy.require::<UiBrowserSessionPolicy>()?.clone())
+    })();
+    match loaded {
+        Ok(policy) => check(
+            "ui_browser_sessions",
+            OK,
+            serde_json::json!({
+                "session_ttl_secs": policy.session_ttl_secs,
+                "session_idle_secs": policy.session_idle_secs,
+                "launch_token_ttl_secs": policy.launch_token_ttl_secs,
+                "session_scopes": policy.session_scopes,
+                "live_sessions": "n/a offline: needs the running node",
+            }),
+        ),
+        Err(error) => check(
+            "ui_browser_sessions",
+            FAIL,
+            serde_json::json!({
+                "error": format!("{error:#}"),
+                "fix": "publish a complete valid `.ai/node/policies/` generation whose ui_browser_sessions section is schema 5 (session_ttl_secs, session_idle_secs, launch_token_ttl_secs, session_scopes); then run `ryeos node doctor` again",
+            }),
+        ),
+    }
+}
+
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
 /// The `host_services` row: WARN when a RyeOS node service records an app
@@ -5094,6 +5149,14 @@ mod tests {
                 .unwrap()
                 .contains("signature mismatch")
         );
+    }
+
+    #[test]
+    fn doctor_reports_browser_session_policy_as_not_applicable_before_init() {
+        let directory = tempfile::tempdir().unwrap();
+        let row = ui_browser_sessions_check(directory.path(), false);
+        assert_eq!(row.name, "ui_browser_sessions");
+        assert_eq!(row.status, ryeos_core_tools::actions::doctor::NA);
     }
 
     #[test]

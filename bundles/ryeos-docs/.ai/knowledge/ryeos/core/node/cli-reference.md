@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:11:14Z:88235cdca3c7266606dc6a07d214670d4e689f9a645be2696e1a8c8da8b8c560:KmoTqwH+APNL/yOI+ChCItar/7MTtoMDyPXXA9KITNtCaVQJbCXF+rTM/GlzgGQyZtUM8rxgtieW4U61kbQUDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T12:24:05Z:12bd64f3b14c9316db67e8eab56baa3a32e666e87179f65cc7d5e8a30682c493:k6Vxg0WG6dAjAynUWW8uyDN+y7eDaGyJF4EsM1/YrVoVlPSOveeIgof6e47tBc7bR6VKV2ELg9LUyr6oV+CTCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -284,6 +284,11 @@ records without root. It warns when a RyeOS node service records an app root
 that no longer exists, and names the fix,
 `ryeos node host retire --orphaned --confirm`. It reports `n/a` where no native
 service directory is readable without root.
+
+Its `ui_browser_sessions` row checks that the signed browser-session policy is
+present and valid (schema 5: session lifetime, idle timeout, launch-token
+lifetime and the `session_scopes` ceiling). The live session count needs the
+running node, so the row reports it as not available offline.
 
 ### `ryeos node reset execution-history`
 

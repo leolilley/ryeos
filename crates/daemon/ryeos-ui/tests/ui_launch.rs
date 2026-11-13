@@ -84,13 +84,16 @@ async fn committed_activation_replays_the_same_session() {
 
 #[tokio::test]
 async fn expired_token_rejected() {
-    let short_store = ryeos_ui::BrowserSessionStore::new_with_short_ttl(
+    let short_store = ryeos_ui::BrowserSessionStore::new();
+    let mut context = test_context();
+    context.timing = ryeos_ui::SessionTiming::new(
+        Duration::from_millis(1),
         Duration::from_millis(1),
         Duration::from_millis(1),
     );
 
     let (_, token, _) = short_store
-        .mint_token(test_context(), 16, &"22".repeat(32))
+        .mint_token(context, 16, &"22".repeat(32))
         .expect("mint short-lived session");
 
     std::thread::sleep(Duration::from_millis(5));

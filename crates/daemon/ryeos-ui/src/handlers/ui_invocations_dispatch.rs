@@ -2005,6 +2005,8 @@ mod tests {
             session_id: "session-1".to_string(),
             created_at: now,
             expires_at: now + Duration::from_secs(60),
+            absolute_expires_at: now + Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(60),
             principal_id: "fp:test".to_string(),
             granted_caps: vec!["ui.read".to_string()],
             user_principal_id,

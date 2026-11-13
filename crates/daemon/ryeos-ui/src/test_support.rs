@@ -84,6 +84,7 @@ async fn live_presentation_in_project(
             root_ref: "config:test/presentation".into(),
             project_path: Some(spelling.display().to_string()),
             user_principal_id: Some(principal.clone()),
+            scopes: None,
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
         Arc::new(state.clone()),
@@ -145,6 +146,7 @@ pub async fn live_shipped_presentation_in_project(
             root_ref: "config:ryeos/ui/presentation".into(),
             project_path: Some(project_root.display().to_string()),
             user_principal_id: Some(principal.clone()),
+            scopes: None,
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
         Arc::new(state.clone()),
@@ -172,6 +174,7 @@ pub async fn live_shipped_presentation(
             root_ref: "config:ryeos/ui/presentation".into(),
             project_path: None,
             user_principal_id: Some(principal.clone()),
+            scopes: None,
         },
         ryeos_app::handler_context::HandlerContext::new(principal, vec!["*".into()], true),
         Arc::new(state.clone()),
@@ -374,6 +377,11 @@ pub fn launch_context(
             )
             .expect("fixture presentation"),
         granted_caps: vec!["ui.read".into()],
+        timing: crate::browser_session::SessionTiming::new(
+            std::time::Duration::from_secs(8 * 3600),
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(60),
+        ),
         user_principal_id,
         project_authority: project_root.map(|project_root| {
             Arc::new(
@@ -668,7 +676,11 @@ fn build_app_state(
                 ),
                 Arc::new(
                     ryeos_node_runtime::node_policy::sections::ui_browser_sessions::UiBrowserSessionPolicy {
-                        schema: 4,
+                        schema: 5,
+                        session_ttl_secs: 28800,
+                        session_idle_secs: 3600,
+                        launch_token_ttl_secs: 60,
+                        session_scopes: vec!["*".to_owned()],
                         max_session_bootstrap_bytes: 4194304,
                         max_live_binding_attachments_per_session: 16,
                         max_presentations_per_session: 16,

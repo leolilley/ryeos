@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:53:50Z:a80ddb8d9fefe1bb5bcff2ae1baaa375e75d395d81b99ff6fa60b7529fd47a83:QUQpnGxIZVX/6AbJBJZMgtSgWKmaEj3QtnjeAlrHk4tSfjmM2NM8vIZqnqvBHolPIE5h3h2XINaxyIFO2zqZDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T12:24:06Z:96e1e4d39745fcf630735e79852d8cc2fcaf994d0f7a8da44098fd1c8359cd6c:1AzUTxw8wu0R/Vn/KQdXtJMsSvyLxDVI5l1Ioly89HuVZICTxTft2IWOynRtMAcpoK4FGZ/YXypEP8tTi4DAAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -82,7 +82,7 @@ Built-in modes, each a trait implementation:
 | `event_stream` | SSE stream (gateway or subscription) | `dispatch_launch` or `thread_events` |
 | `launch` | Fire-and-forget dispatch, returns 202 | `response.source_config` |
 | `handler` | Calls a fixed route handler with a request envelope; the handler returns an HTTP response envelope | `tool:<bundle>/<path>` |
-| `browser_launch` | UI-specific session-cookie + redirect adapter | `service:ui/launch` |
+| `browser_launch` | UI-specific session-cookie + redirect adapter; a `max_age` of 0 in the cookie envelope clears the cookie | `service:ui/launch`, `service:ui/session/end` |
 
 The `accepted` key is a legacy alias for `launch`; new route descriptors
 should use `launch`.
