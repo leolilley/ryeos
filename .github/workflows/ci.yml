@@ -238,6 +238,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check test-support features stay out of shipped builds
+        run: ./scripts/ci/check-test-support-feature-leak.sh
+
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 

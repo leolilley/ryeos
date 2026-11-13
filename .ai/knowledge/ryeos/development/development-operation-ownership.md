@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:11:20Z:240d819a486e8ba0c685689727ddb4f95e5387e5b45fabf6f52519e93fb02262:mAVEB8W7S0xtvObSP+g1t86scuMR30mRXYPBG8OCahkQCFrl4pMsz5TjNx7qWvorn/4CS60kZN21SnQz4H/AAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:35:31Z:572250043e67c950fe0921c7f118b7c238e7c6803d0e3b3de54cdc1722f53de2:g9EaclgrXFZa4gHuUUr11XA6saYYQrh4w2x68J0njU0+GURjG5EXyF7wD1DaNq6sAP/VYOSVcDm0mo/Tk4eMDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
@@ -139,7 +139,7 @@ the row says otherwise.
 | `ci/check-custody-tokens.sh`, `ci/strip-rust-comments.py` | `ci.yml`, `gate.sh` | The Python file is the check's helper. |
 | `ci/prepare-runner.sh`, `ci/pack-bundle-state.sh`, `ci/unpack-bundle-state.sh` | `ci.yml` | Runner and bundle-state hand-off between jobs. |
 | `ci/test-daemon-image-init-policy.sh`, `ci/test-image-build-cache.sh`, `ci/test-publisher-trust-policy.sh` | `ci.yml` | Tests of Docker, init and publisher boundaries. |
-| `ci/check-test-support-feature-leak.sh` | ShellCheck list only | Nothing executes it. Decision pending: run it in CI or remove it. |
+| `ci/check-test-support-feature-leak.sh` | `ci.yml` `rust-policy` job | Runs `cargo tree --locked` (no compile) so shipped `ryeosd`/`ryeos-cli` feature sets never resolve a test-support feature. |
 | `pkg/install-local-direct.sh`, `pkg/bundle-sets.sh`, `pkg/bundle-features.py`, `pkg/composition-features.sh`, `pkg/fixtures/payload-ownership.parsed.json` | `Dockerfile.release`, `ci.yml`, `gate.sh` | Host install entry and its bundle-set data helpers. |
 | `pkg/test-bundle-sets.sh`, `pkg/test-bundle-features.py`, `pkg/test-bundle-features-signature.py`, `pkg/test-install-lifecycle.sh` | `ci.yml` | `test-bundle-sets.sh` runs the two bundle-features tests. |
 | `pkg/install-contained-docker-runtime.py`, `pkg/setup-contained-docker-node.py`, `pkg/test-contained-docker-node.py`, `pkg/test-contained-docker-runtime.py` | operator (documented `sudo` commands) | Host installers for a contained Docker node. |
