@@ -9349,10 +9349,12 @@ mod shutdown_mapping_tests {
     }
 
     #[test]
-    fn no_mode_falls_back_to_three_second_default() {
+    fn no_mode_uses_named_node_fallback() {
         assert_eq!(
             resolve_shutdown_action(None),
-            ShutdownAction::Graceful(Duration::from_secs(3))
+            ShutdownAction::Graceful(Duration::from_secs(
+                ryeos_app::process::UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
         );
     }
 

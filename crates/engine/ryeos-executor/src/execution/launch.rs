@@ -7213,6 +7213,17 @@ async fn run_claimed_thread_row_inner(
     let callback_owned = envelope.callback.clone();
     let thread_id_owned = thread_id.to_string();
     let duration = hard_limits.duration_seconds;
+    // A stop policy already recorded on the row (a continuation seed or a
+    // same-thread relaunch) is authoritative; otherwise this launch records
+    // the policy its signed execution config resolves.
+    let stop_policy = match state
+        .state_store
+        .get_launch_metadata(&thread_id)?
+        .and_then(|metadata| metadata.cancellation_mode)
+    {
+        Some(recorded) => recorded,
+        None => execution_policy.stop_policy(),
+    };
     let descriptor_clone = verified_protocol.descriptor.clone();
     let runtime_item_ref = selected_runtime.canonical_ref.clone();
     let observation_declarations = selected_runtime.yaml.observability.child_records.clone();
@@ -7378,6 +7389,7 @@ async fn run_claimed_thread_row_inner(
             is_resume,
             rearm_native_resume_budget_after_attach,
             selected_resources,
+            stop_policy,
         });
         drop(spawn_work_timer);
         drop(spawn_worker_total_timer);

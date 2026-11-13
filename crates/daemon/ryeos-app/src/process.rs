@@ -20,6 +20,12 @@ const POST_SIGKILL_WAIT_MS: u64 = 200;
 /// escalating the exact process group.
 pub const MAX_GRACEFUL_SHUTDOWN_GRACE_SECS: u64 = 5;
 
+/// Grace for stopping a launch whose metadata records no stop policy. Every
+/// managed subprocess launch records one, resolved from the signed execution
+/// config; this applies only where none was recorded (in-process handlers and
+/// metadata-free attaches).
+pub const UNRECORDED_STOP_POLICY_GRACE_SECS: u64 = 3;
+
 /// Bound on waiting for the accounting outbox publisher's in-flight blocking
 /// work when the daemon stops.
 pub const ACCOUNTING_PUBLISHER_STOP_BOUND: Duration = Duration::from_secs(30);
@@ -734,12 +740,13 @@ pub enum ShutdownAction {
     Graceful(std::time::Duration),
 }
 
-/// Map a tool-declared `CancellationMode` to a `ShutdownAction`.
+/// Map a launch's recorded stop policy to a `ShutdownAction`.
 ///
 /// - `Some(Hard)` → SIGKILL only.
 /// - `Some(Graceful { grace_secs })` → SIGTERM, wait up to the node-owned cap,
 ///   then SIGKILL.
-/// - `None` → default 3-second graceful.
+/// - `None` (no recorded policy) → graceful with
+///   [`UNRECORDED_STOP_POLICY_GRACE_SECS`].
 pub fn resolve_shutdown_action(
     mode: Option<ryeos_engine::contracts::CancellationMode>,
 ) -> ShutdownAction {
@@ -749,7 +756,15 @@ pub fn resolve_shutdown_action(
         Some(CancellationMode::Graceful { grace_secs }) => ShutdownAction::Graceful(
             std::time::Duration::from_secs(grace_secs.min(MAX_GRACEFUL_SHUTDOWN_GRACE_SECS)),
         ),
-        None => ShutdownAction::Graceful(std::time::Duration::from_secs(3)),
+        None => {
+            tracing::warn!(
+                grace_secs = UNRECORDED_STOP_POLICY_GRACE_SECS,
+                "launch recorded no stop policy; using the node fallback grace"
+            );
+            ShutdownAction::Graceful(std::time::Duration::from_secs(
+                UNRECORDED_STOP_POLICY_GRACE_SECS,
+            ))
+        }
     }
 }
 

@@ -2930,12 +2930,10 @@ async fn handoff_preflight(
         .get_launch_metadata(&source_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("preflight source has no launch metadata"))?;
+    // The source's recorded stop policy is node-local and never transferred:
+    // every launch resolves its own from the signed execution config, so the
+    // target records the policy its own config grants when it attaches.
     source_metadata.validate().map_err(internal)?;
-    if source_metadata.cancellation_mode.is_some() {
-        return Err(HandlerError::BadRequest(
-            "portable worker handoff v1 has no rooted cancellation-policy transfer".into(),
-        ));
-    }
     let source_capsule = source_metadata
         .admitted_launch_capsule()
         .map_err(internal)?
@@ -3374,12 +3372,10 @@ async fn handoff(
         .get_launch_metadata(&source_thread_id)
         .map_err(internal)?
         .ok_or_else(|| internal("handoff source has no launch metadata"))?;
+    // The source's recorded stop policy is node-local and never transferred:
+    // every launch resolves its own from the signed execution config, so the
+    // target records the policy its own config grants when it attaches.
     source_metadata.validate().map_err(internal)?;
-    if source_metadata.cancellation_mode.is_some() {
-        return Err(HandlerError::BadRequest(
-            "portable worker handoff v1 has no rooted cancellation-policy transfer".into(),
-        ));
-    }
     let source_capsule = source_metadata
         .admitted_launch_capsule()
         .map_err(internal)?
