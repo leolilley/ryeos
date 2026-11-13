@@ -36,7 +36,7 @@ struct HostAccessGrantArgs {
     #[arg(long)]
     project: PathBuf,
 
-    /// Grant id (policy-name grammar). Defaults to the item's last path segment.
+    /// Grant id (policy-name grammar). Defaults to the item's bare id with `/` as `-`.
     #[arg(long)]
     id: Option<String>,
 
@@ -260,16 +260,17 @@ fn install(app_root: &Path, policy: &NodeHostAccessPolicy) -> Result<String> {
 
 fn default_grant_id(item: &str) -> Result<String> {
     let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(item)?;
-    let last = canonical
+    let id = canonical
         .bare_id
-        .rsplit('/')
-        .next()
-        .unwrap_or(&canonical.bare_id)
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
         .to_ascii_lowercase()
-        .replace('.', "-");
-    ryeos_node_runtime::node_policy::generation::validate_policy_name("host_access grant", &last)
+        .replace(['.', '_'], "-");
+    ryeos_node_runtime::node_policy::generation::validate_policy_name("host_access grant", &id)
         .with_context(|| format!("derive a grant id from `{item}`; pass --id"))?;
-    Ok(last)
+    Ok(id)
 }
 
 pub fn run_grant(argv: &[String], console: &crate::tty::Console) -> Result<()> {
@@ -515,8 +516,8 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            default_grant_id("tool:ryeos/development/guarded-cargo").unwrap(),
-            "guarded-cargo"
+            default_grant_id("tool:ryeos/development/guarded-cargo/run").unwrap(),
+            "ryeos-development-guarded-cargo-run"
         );
     }
 }

@@ -883,7 +883,7 @@ fn local_detail(tokens: &str, description: &str) -> String {
         ),
         "node host-access grant" => (
             "ryeos node host-access grant <item_ref> --project <DIR> [--id <ID>] [--origin <ORIGIN>]... [--env <NAME>]... [--containment <MODE>] [--app-root <DIR>]",
-            "--project <DIR>      project the item resolves in\n--id <ID>            grant id (default: last segment of the item)\n--origin <ORIGIN>    direct, graph_child or schedule; repeatable (default direct)\n--env <NAME>         daemon boot-environment name to deliver; repeatable\n--containment <MODE> scope_required (default) or group_allowed\n--app-root <DIR>     application root",
+            "--project <DIR>      project the item resolves in\n--id <ID>            grant id (default: the bare id with / as -)\n--origin <ORIGIN>    direct, graph_child or schedule; repeatable (default direct)\n--env <NAME>         daemon boot-environment name to deliver; repeatable\n--containment <MODE> scope_required (default) or group_allowed\n--app-root <DIR>     application root",
         ),
         "node host-access revoke" => (
             "ryeos node host-access revoke <id> [--app-root <DIR>]",
