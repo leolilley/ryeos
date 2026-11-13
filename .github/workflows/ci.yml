@@ -136,6 +136,21 @@ jobs:
       - name: Check development registry bootstrap entry
         run: python3 -B scripts/release/test-development-registry.py
 
+      - name: Check bundle-release sources
+        run: |
+          for test in bundles/bundle-release/tests/test-*.py; do
+            echo "::group::$test"
+            python3 -B "$test"
+            echo "::endgroup::"
+          done
+
+      - name: Check release-candidate inspection tooling
+        run: |
+          python3 -B scripts/release/test-audit-bundle-generation.py
+          python3 -B scripts/release/test-inspect-core-native-set.py
+          python3 -B scripts/release/test-inspect-native-bundle-input.py
+          python3 -B scripts/release/test-release-candidate.py
+
       - name: Check Codex authored contract
         run: python3 bundles/codex/test_contract.py
 

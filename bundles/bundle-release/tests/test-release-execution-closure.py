@@ -15,7 +15,7 @@ import unittest
 import yaml
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 ASSET = ROOT / "bundles/bundle-release/.ai"
 TOOLS = ASSET / "tools/ryeos/bundle-release"
 GRAPHS = ASSET / "graphs/ryeos/bundle-release"

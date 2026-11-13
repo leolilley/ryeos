@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 sys.dont_write_bytecode = True
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location(
     "release_elf", ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/release-elf.py")
 ELF = importlib.util.module_from_spec(SPEC)

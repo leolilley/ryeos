@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 SERVER = (ROOT / "crates/daemon/ryeos-api/src/publisher_server.rs").read_text()
 CLIENT = (ROOT / "crates/daemon/ryeos-app/src/bundle_publication/producer.rs").read_text()
 DOC = (ROOT / "deploy/constrained-bundle-publisher.md").read_text()

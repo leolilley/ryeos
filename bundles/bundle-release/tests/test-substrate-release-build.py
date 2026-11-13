@@ -7,7 +7,7 @@ import tempfile
 import unittest
 import yaml
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = pathlib.Path(__file__).resolve().parents[3]
 TOOL = ROOT / "bundles/bundle-release/.ai/tools/ryeos/bundle-release/lib/substrate-build.py"
 
 
