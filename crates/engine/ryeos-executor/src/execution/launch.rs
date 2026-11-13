@@ -6428,6 +6428,7 @@ async fn run_claimed_thread_row_inner(
         source: bound_source_closure,
     } = super::runner::prepare_process_inputs(
         state,
+        state.isolation.as_ref(),
         provenance,
         &thread_id,
         resolution,
@@ -8537,6 +8538,7 @@ async fn prepare_follow_child_launch_inner(
         parent_thread_id: None,
         effect_authority: None,
         finalized_direct: None,
+        host_access: None,
     };
 
     let project_path = execution.provenance.effective_path().to_path_buf();

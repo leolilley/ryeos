@@ -446,6 +446,9 @@ fn plan_policy_apply(
     let root = RuntimeRoot::new(app_root.to_path_buf());
     let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
         .context("load trust store for current node policies")?;
+    if section == ryeos_node_runtime::node_policy::sections::host_access::SECTION_NAME {
+        check_host_access_signers(app_root, &trust_store, &body)?;
+    }
     // The replacement generation must stay the isolation policy of the host
     // class the node's signed substrate identity binds.
     let substrate = crate::load_verified_substrate_identity(app_root)
@@ -460,6 +463,36 @@ fn plan_policy_apply(
         Path::new("offline-operation-input/policy"),
     )?;
     Ok((trust_store, update))
+}
+
+/// A host-access grant hands its item operator-equivalent authority, so its
+/// signer must be pinned in the node trust store and must not be the node's
+/// own key: runtime-authored items are node-signed and never gain host access.
+fn check_host_access_signers(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    body: &Value,
+) -> Result<()> {
+    let policy: ryeos_node_runtime::node_policy::sections::host_access::NodeHostAccessPolicy =
+        serde_json::from_value(body.clone()).context("parse node host_access policy input")?;
+    let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
+    for grant in &policy.grants {
+        ensure!(
+            grant.signer != node_key,
+            "{}: host_access grant `{}` names this node's own key {} as signer; runtime-authored items never gain host access",
+            ryeos_node_runtime::node_policy::sections::host_access::HostAccessRefusal::SIGNER_REFUSED,
+            grant.id,
+            grant.signer
+        );
+        ensure!(
+            trust_store.is_trusted(&grant.signer),
+            "{}: host_access grant `{}` names signer {}, which is not pinned in this node's trust store",
+            ryeos_node_runtime::node_policy::sections::host_access::HostAccessRefusal::SIGNER_REFUSED,
+            grant.id,
+            grant.signer
+        );
+    }
+    Ok(())
 }
 
 /// The digest of the policy generation that replacing `section` with

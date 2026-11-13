@@ -509,10 +509,13 @@ mod tests {
 
     fn subject(grant: &HostAccessGrant) -> HostAccessSubject<'_> {
         HostAccessSubject {
-            item: &grant.item,
-            signer: Some(&grant.signer),
+            item: grant.item.as_str(),
+            signer: Some(grant.signer.as_str()),
             source_closure: grant.source_closure.as_deref(),
-            runtime: Some((&grant.runtime.runtime_ref, &grant.runtime.content_hash)),
+            runtime: Some((
+                grant.runtime.runtime_ref.as_str(),
+                grant.runtime.content_hash.as_str(),
+            )),
         }
     }
 
@@ -620,7 +623,7 @@ mod tests {
         );
         let edited = "e".repeat(64);
         let mut seen = subject(&granted);
-        seen.source_closure = Some(&edited);
+        seen.source_closure = Some(edited.as_str());
         let refusal = policy.admit(&seen, HostAccessOrigin::Direct).unwrap_err();
         assert_eq!(refusal.code, HostAccessRefusal::GRANT_STALE);
         assert!(refusal.message.contains(&edited));

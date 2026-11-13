@@ -557,6 +557,26 @@ fn exec_tool(
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<Option<Value>, CliError> {
+    // A host-authority tool runs only through the daemon, under the node
+    // lane, the operator's exact grant and the configured operator. The
+    // offline path admits none of that, so it refuses rather than running the
+    // item confined or on the host.
+    let posture = engine
+        .kinds
+        .get(&item.kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .map(|execution| execution.project_execution_posture(&item.composed_value))
+        .transpose()
+        .map_err(|error| CliError::Local {
+            detail: format!("offline tool `{tool_ref_str}`: {error}"),
+        })?;
+    if posture.is_some_and(|posture| posture.is_host_direct()) {
+        return Err(CliError::Local {
+            detail: format!(
+                "offline tool `{tool_ref_str}` declares host_authority: required; start the node and run it as the configured operator under a host_access grant"
+            ),
+        });
+    }
     // Check executor_id
     let executor_id = item
         .composed_value

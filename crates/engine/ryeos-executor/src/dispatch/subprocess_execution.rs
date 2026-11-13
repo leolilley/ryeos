@@ -988,6 +988,19 @@ async fn dispatch_tool_subprocess(
         &terminal.chain_authorities,
     )?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
+        // A method-dispatch wrapper spawns nothing itself, so it cannot be
+        // the subject of a host-access grant.
+        if resolved.root_admission.is_some()
+            && crate::execution::host_access_gate::admitted_posture(&ctx.engine, &resolved)?
+                .is_host_direct()
+        {
+            return Err(DispatchError::SchemaMisconfigured {
+                kind: current_ref.kind.clone(),
+                detail: format!(
+                    "`{item_ref}` declares host authority, but a method-dispatch wrapper spawns no process of its own"
+                ),
+            });
+        }
         if protocol.descriptor.stdout.mode
             == ryeos_engine::protocol_vocabulary::StdoutMode::Streaming
         {
@@ -1034,6 +1047,18 @@ async fn dispatch_tool_subprocess(
     if let Some(target) = request.target_site_id {
         resolved.target_site_id = Some(target.to_string());
     }
+
+    // Host access is judged right after launch trust, before finalization,
+    // secret reads or any process start: the node lane, the operator's exact
+    // grant (now with the resolved runtime) and the configured operator.
+    let host_access = crate::execution::host_access_gate::enforce_host_access(
+        state,
+        &ctx.engine,
+        &resolved,
+        &terminal,
+        request,
+        handler_context.as_ref(),
+    )?;
 
     if request.validate_only {
         let engine = ctx.engine.clone();
@@ -1137,6 +1162,7 @@ async fn dispatch_tool_subprocess(
         parent_thread_id,
         effect_authority: request.effect_authority.clone(),
         finalized_direct: Some(finalized_direct),
+        host_access,
     };
 
     if request.launch_mode == "detached" {
