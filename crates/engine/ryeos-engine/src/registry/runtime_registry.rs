@@ -303,13 +303,17 @@ pub struct RefBindingDecl {
 
 /// Signed owner of a managed runtime's ref-binding coordinate.
 ///
-/// `caller` preserves explicit invocation input. `primary_field` projects one
-/// exact string from the already verified composed primary, avoiding a second
-/// caller-authored copy while leaving resolution and authorization unchanged.
+/// `caller` preserves explicit invocation input. `caller_or_primary_ref` takes
+/// explicit invocation input when given and otherwise binds the verified
+/// primary's own canonical ref. `primary_field` projects one exact string from
+/// the already verified composed primary, avoiding a second caller-authored
+/// copy. No source grants authority: every resulting coordinate is still
+/// parsed, authorized, resolved and trust-checked as a binding.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RefBindingSource {
     Caller,
+    CallerOrPrimaryRef,
     PrimaryField { path: Vec<String> },
 }
 

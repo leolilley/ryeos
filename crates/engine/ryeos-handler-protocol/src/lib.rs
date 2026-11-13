@@ -954,6 +954,7 @@ pub enum ProjectResultRequirement {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RefBindingSourceWire {
     Caller,
+    CallerOrPrimaryRef,
     PrimaryField { path: Vec<String> },
 }
 

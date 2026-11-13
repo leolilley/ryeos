@@ -4595,6 +4595,7 @@ async fn prepare_managed_launch_authority(
                     .contains_key(&outputs.partition.recipe_binding),
                 None => super::launch_preparation::project_effective_ref_bindings(
                     &selected_runtime.yaml.launch_contract.ref_bindings,
+                    &resolution.root.resolved_ref,
                     &resolution.composed.composed,
                     &params.resolved.ref_bindings,
                 )?
@@ -5759,6 +5760,7 @@ async fn condition_workspace_output_authority(
     let declarations = &runtime.yaml.launch_contract.ref_bindings;
     let bindings = super::launch_preparation::project_effective_ref_bindings(
         declarations,
+        &admission.resolution_output().root.resolved_ref,
         &admission.resolution_output().composed.composed,
         &params.resolved.ref_bindings,
     )?;
