@@ -758,6 +758,12 @@ pub fn resolve_shutdown_action(
 /// Graceful shutdown signals only the reported target. This leaves the retained
 /// launcher group leader alive while the target uses its declared grace. If the
 /// target/group survives the deadline, the already-pinned group is killed.
+///
+/// This is the graceful-stop contract for runtime authors: the target owns
+/// cooperative cancellation of its own children (forwarding SIGTERM, or
+/// stopping them at its own boundary). The node never SIGTERMs descendants;
+/// it guarantees only the SIGKILL of the whole pinned group or scope at the
+/// grace deadline.
 pub fn kill_by_action(identity: &ExecutionProcessIdentity, action: ShutdownAction) -> KillResult {
     if let Some(scope) = &identity.process_scope {
         if validate_execution_process_identity_shape(identity).is_err() {
@@ -2497,6 +2503,95 @@ mod tests {
             "expected SIGKILL fallback, got {:?}",
             status.signal()
         );
+    }
+
+    /// The graceful-stop contract: SIGTERM goes to the exact target only, and
+    /// the runtime owns cooperative cancellation of its own children. The node
+    /// guarantees the pinned group SIGKILL at the grace deadline, which is what
+    /// reaches a descendant the target never forwarded SIGTERM to.
+    #[test]
+    fn graceful_stop_terms_target_and_kills_unresponsive_descendant_at_deadline() {
+        use std::os::unix::process::ExitStatusExt;
+        let tmp = TempDir::new().unwrap();
+        let target_marker = tmp.path().join("target_got_term");
+        let child_marker = tmp.path().join("child_got_term");
+        let child_pid_path = tmp.path().join("child_pid");
+        let child_ready = tmp.path().join("child_ready");
+        let ready = tmp.path().join("target_ready");
+        // The target traps SIGTERM without exiting and does not forward it.
+        // Its child, in the same process group, would record any SIGTERM it
+        // received. Neither exits on SIGTERM, so only the deadline SIGKILL to
+        // the whole pinned group can end them.
+        let script = format!(
+            r#"trap 'echo term > "{tm}"' TERM; ( trap 'echo term > "{cm}"' TERM; : > "{cr}"; while true; do sleep 0.05; done ) & printf %s $! > "{cp}"; while [ ! -e "{cr}" ]; do sleep 0.01; done; : > "{r}"; while true; do sleep 0.05; done"#,
+            tm = target_marker.display(),
+            cm = child_marker.display(),
+            cr = child_ready.display(),
+            cp = child_pid_path.display(),
+            r = ready.display(),
+        );
+        let mut child = unsafe {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn target with descendant")
+        };
+        let pgid = child.id() as i64;
+        wait_for_signal_target_ready(&mut child, &ready);
+        let descendant_pid: i32 = std::fs::read_to_string(&child_pid_path)
+            .expect("read descendant PID")
+            .parse()
+            .expect("parse descendant PID");
+        assert_eq!(unsafe { libc::getpgid(descendant_pid) }, pgid as i32);
+        let identity =
+            capture_execution_process_identity(pgid, Some(pgid)).expect("capture identity");
+
+        let (result, status) = run_kill_with_reaper(
+            move || kill_by_action(&identity, ShutdownAction::Graceful(Duration::from_secs(1))),
+            &mut child,
+        );
+
+        assert!(
+            result.success,
+            "group kill was not proved: {}",
+            result.method
+        );
+        assert_eq!(result.method, "killed");
+        assert_eq!(read_marker(&target_marker).as_deref(), Some("term\n"));
+        assert!(
+            !child_marker.exists(),
+            "the descendant received SIGTERM; graceful stop must signal only the target"
+        );
+        assert_eq!(status.signal(), Some(lillux::signal::SIGKILL));
+        // The descendant was reparented when the target died and its new
+        // parent reaps it. Dead means gone or a zombie, never still running.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(") ")
+                        .and_then(|(_, rest)| rest.chars().next())
+                });
+            match state {
+                None | Some('Z') | Some('X') => break,
+                Some(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Some(state) => panic!("descendant survived the group SIGKILL in state {state}"),
+            }
+        }
     }
 
     #[test]

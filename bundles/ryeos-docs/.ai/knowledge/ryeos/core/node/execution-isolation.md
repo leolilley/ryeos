@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:36e51b6a186c1bcdae22ccee3870b5e01e4fc4d2bb4236b90c1594ada345f0ab:0yVEreO7Rjn7m7XJtBxaDMw6okI5v2IdFbvTzwVskgN21IqKLoXHX44Qs3a+L+6pAaTxIzr50YAx6NFMoGgEDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:32:51Z:bf2cff905c4590985559c0738e9057a884836d47f4afc590f9b845b9cd328d7d:BhHyKu6wIPprWujOFNAjgvcCsy0dNbf8UdSFSLLAMpA3KN5EY//arzZcgvtme3Se510IaiP45awgzx6nqOtPBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -721,6 +721,14 @@ matched attachment belongs to the previous daemon; startup kills that group
 before recovery launches a replacement. A same-boot attachment whose leader
 birth identity can no longer be proven is quarantined rather than cleared or
 signalled.
+
+A graceful stop sends SIGTERM to the exact target only, never to its process
+group or scope. The retained launcher stays alive to publish the real exit, and
+the target owns cooperative cancellation of its own children: it forwards
+SIGTERM or stops them at its own boundary. The node's guarantee is the SIGKILL
+of the whole pinned group (or the kernel kill of the scope) at the grace
+deadline, which reaches every descendant the target did not stop. A hard stop
+skips SIGTERM and kills the group at once.
 
 The native pre-exec hold removes the former local spawn-to-attachment crash
 window. Parent death before durable attachment kills the still-held direct
