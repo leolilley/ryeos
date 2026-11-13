@@ -172,6 +172,7 @@ pub(crate) fn resolve_subject_digests(
     );
     let (effective, output) = engine
         .effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: Some(project.clone()),
             item_ref: canonical,
             expected_kind: None,
             project_root: Some(project.clone()),
@@ -208,6 +209,7 @@ pub(crate) fn resolve_subject_digests(
         &output.root.source_path,
         executor_id,
         &effective.kind,
+        Some(project.clone()),
         Some(project.clone()),
         &authority,
     )?;

@@ -196,8 +196,7 @@ mod tests {
         )
         .unwrap();
         let file = lillux::open_pinned_regular_file_no_follow(&path).unwrap();
-        let verified = verify_node_signed_document_file(&file, node.verifying_key())
-        .unwrap();
+        let verified = verify_node_signed_document_file(&file, node.verifying_key()).unwrap();
         assert_eq!(verified.signer_fingerprint, node.fingerprint());
     }
 

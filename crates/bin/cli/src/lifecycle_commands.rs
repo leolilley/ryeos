@@ -4217,6 +4217,7 @@ fn host_services_check(
             "fix": "run: ryeos node host retire --orphaned --confirm",
         }),
     )
+}
 
 /// The `remote_pins` doctor row.
 fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::CheckResult {

@@ -69,7 +69,9 @@ pub async fn handle(
     req.product_selections = ryeos_state::external_content::products::composition::canonicalize_product_selection_inputs(req.product_selections)
         .map_err(|error| HandlerError::BadRequest(format!("invalid destination-local product_selections: {error:#}")))?;
     let report = config::load_remotes_report(&state.config.app_root).map_err(|e| {
-        config::typed_load_error_or(e, |e| HandlerError::Internal(format!("load remotes: {e:#}")))
+        config::typed_load_error_or(e, |e| {
+            HandlerError::Internal(format!("load remotes: {e:#}"))
+        })
     })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;

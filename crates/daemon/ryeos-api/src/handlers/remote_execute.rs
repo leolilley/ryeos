@@ -123,7 +123,9 @@ pub async fn handle(
 
     // Load remote config for project binding and ignore rules.
     let report = config::load_remotes_report(&state.config.app_root).map_err(|e| {
-        config::typed_load_error_or(e, |e| HandlerError::Internal(format!("load remotes: {e:#}")))
+        config::typed_load_error_or(e, |e| {
+            HandlerError::Internal(format!("load remotes: {e:#}"))
+        })
     })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());

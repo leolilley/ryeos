@@ -767,6 +767,7 @@ pub(crate) fn admit_host_direct_execution(
     // refused by the launch-time gate or the disabled-shape compile.
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: provenance.logical_project_root(),
             item_ref: root.clone(),
             expected_kind: Some(root.kind.clone()),
             project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
@@ -2150,25 +2151,25 @@ async fn admit_execution_with_publication(
     let remotes = if remote_target_requested && request_can_need_remote_config {
         Some(
             crate::remote::config::load_remotes_report(&state.config.app_root)
-            .map(|report| report.remotes)
-            .map_err(|e| {
-                match crate::remote::config::typed_load_error_or(e, |e| {
-                    crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
-                }) {
-                    crate::handler_error::HandlerError::Structured { code, status, body } => {
-                        RouteDispatchError::Structured {
-                            code,
-                            status,
-                            body,
-                            thread_id: None,
+                .map(|report| report.remotes)
+                .map_err(|e| {
+                    match crate::remote::config::typed_load_error_or(e, |e| {
+                        crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                    }) {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
                         }
+                        crate::handler_error::HandlerError::Internal(message) => {
+                            RouteDispatchError::Internal(message)
+                        }
+                        other => RouteDispatchError::Internal(other.to_string()),
                     }
-                    crate::handler_error::HandlerError::Internal(message) => {
-                        RouteDispatchError::Internal(message)
-                    }
-                    other => RouteDispatchError::Internal(other.to_string()),
-                }
-            })?,
+                })?,
         )
     } else {
         None

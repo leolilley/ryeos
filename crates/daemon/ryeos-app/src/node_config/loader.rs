@@ -322,7 +322,12 @@ impl<'a> NodeConfigLoader<'a> {
                             section_name
                         )
                     })?;
-                    verify_section_signer(section, &verified, &node_fingerprint, &scan_root.source)?;
+                    verify_section_signer(
+                        section,
+                        &verified,
+                        &node_fingerprint,
+                        &scan_root.source,
+                    )?;
                     let record = section
                         .parse(verified.context(), verified.body())
                         .with_context(|| {

@@ -515,7 +515,7 @@ pub fn prepare_policy_member_replacement(
     let SignedPolicyBodies {
         mut policies,
         operator_sections,
-    } = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    } = read_signed_policy_bodies(&directory, trust_store)?;
     if !policies.contains_key(section) {
         bail!("node policy generation has no `{section}` member to replace");
     }
@@ -581,8 +581,8 @@ pub fn prepare_schema_cut_carrying_operator_policy(
 ) -> Result<NodePolicyUpdate> {
     let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
         .context("node has no existing policy generation to replace")?;
-    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)?;
-    let installed = read_signed_policy_bodies(app_root, &directory, trust_store)?;
+    validate_schema_cut_directory_occupant(&directory, trust_store)?;
+    let installed = read_signed_policy_bodies(&directory, trust_store)?;
     for name in choices.keep.iter().chain(&choices.reset) {
         validate_policy_name("policy carry section", name)?;
     }
@@ -692,15 +692,13 @@ pub fn validate_schema_cut_policy_occupant(
 ) -> Result<()> {
     let directory = lillux::PinnedDirectory::open(&policy_directory(app_root))?
         .context("node has no existing policy generation to replace")?;
-    validate_schema_cut_directory_occupant(app_root, &directory, trust_store)
+    validate_schema_cut_directory_occupant(&directory, trust_store)
 }
 
 fn validate_schema_cut_directory_occupant(
-    app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<()> {
-    let node_fingerprint = crate::identity::node_identity_fingerprint(app_root)?;
     let node_key = trust_store
         .node_verifying_key()
         .context("node trust registry has no node key")?;
@@ -736,7 +734,7 @@ fn validate_schema_cut_directory_occupant(
 }
 
 fn load_policy_generation_from_directory(
-    app_root: &Path,
+    _app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
     policy_table: &NodePolicyTable,
@@ -744,7 +742,7 @@ fn load_policy_generation_from_directory(
     let SignedPolicyBodies {
         policies,
         operator_sections,
-    } = read_signed_policy_bodies(app_root, directory, trust_store)?;
+    } = read_signed_policy_bodies(directory, trust_store)?;
     let missing = policy_table
         .sections()
         .map(|section| section.name())
@@ -770,11 +768,9 @@ struct SignedPolicyBodies {
 /// Signature/shape verification shared by strict loading and explicit cuts.
 /// Raw bodies never grant launch authority without full section compilation.
 fn read_signed_policy_bodies(
-    app_root: &Path,
     directory: &lillux::PinnedDirectory,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<SignedPolicyBodies> {
-    let node_fingerprint = crate::identity::node_identity_fingerprint(app_root)?;
     let node_key = trust_store
         .node_verifying_key()
         .context("node trust registry has no node key")?;
@@ -863,7 +859,7 @@ pub fn publish_policy_update(
             let current = current
                 .as_ref()
                 .context("node policy generation disappeared before replacement")?;
-            let observed = read_signed_policy_bodies(app_root, current, trust_store)?;
+            let observed = read_signed_policy_bodies(current, trust_store)?;
             let found = generation_digest(&observed.policies, observed.operator_sections.as_ref())?;
             if &found != expected {
                 bail!(
@@ -876,7 +872,6 @@ pub fn publish_policy_update(
         }
         ExpectedPolicyGeneration::PresentSchemaCut => {
             validate_schema_cut_directory_occupant(
-                app_root,
                 current.as_ref().expect("presence checked above"),
                 trust_store,
             )?;

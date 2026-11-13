@@ -4715,7 +4715,6 @@ mod tests {
         SigningKey::from_bytes(&[42u8; 32])
     }
 
-
     fn test_trust_store() -> TrustStore {
         let sk = test_signing_key();
         let vk = sk.verifying_key();
