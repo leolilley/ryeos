@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T09:44:35Z:36769f38abff67b623a4625bb664949e47c94469b2792b4ebdce8415d21d1e6d:7LxHjbmKOws77k28FSdzlF3B1GMGGLjkdBgqU5hUOEEvKV3GzTMfjmdb9bUkW9798v5cSAeJD/LklrzDBllQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:59:18Z:199b0a438c1f90315db20f33fd3308f5e249924fb9793303c105bd9f208904dd:AsFGXnX9unbRRSxuNZCBvX6UTAcMq6COWOrb666Tnu5Z6Yxp40akQAMu7WutSfanitqULOLRcs66dQxert49Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -224,6 +224,11 @@ Every listed row carries an `attention` and a `fix`:
 | `operator` | nothing on the node releases it without the operator: an unknown provider outcome, a Q start whose cleanup is unproved, a session whose outcome is unknown after a restart, a lock no owner names | fail |
 
 `ryeos external-execution status` prints the same view as JSON.
+
+Its `ui_browser_sessions` row checks that the signed browser-session policy is
+present and valid (schema 5: session lifetime, idle timeout, launch-token
+lifetime and the `session_scopes` ceiling). The live session count needs the
+running node, so the row reports it as not available offline.
 
 ### `ryeos node reset execution-history`
 

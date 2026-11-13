@@ -22,8 +22,10 @@ pub mod ui_remotes;
 #[cfg(feature = "scheduling")]
 pub mod ui_schedules;
 pub mod ui_seat;
+pub mod ui_sessions_admin;
 pub mod ui_session_attachments;
 pub mod ui_session_current;
+pub mod ui_session_end;
 pub mod ui_thread_tree;
 pub mod ui_threads;
 pub mod ui_work;
@@ -32,6 +34,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_launch::DESCRIPTOR,
     ui_launch_mint::DESCRIPTOR,
     ui_session_current::DESCRIPTOR,
+    ui_session_end::DESCRIPTOR,
+    ui_sessions_admin::LIST_DESCRIPTOR,
+    ui_sessions_admin::REVOKE_DESCRIPTOR,
     ui_session_attachments::OPEN_SURFACE_DESCRIPTOR,
     ui_session_attachments::DETACH_DESCRIPTOR,
     ui_invocations_dispatch::DESCRIPTOR,

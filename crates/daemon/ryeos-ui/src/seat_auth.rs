@@ -489,6 +489,11 @@ mod tests {
             compiled_binding: seed.compiled_binding.clone(),
             presentation: seed.presentation.clone(),
             granted_caps: vec!["ui.read".into()],
+            timing: crate::browser_session::SessionTiming::new(
+                std::time::Duration::from_secs(8 * 3600),
+                std::time::Duration::from_secs(3600),
+                std::time::Duration::from_secs(60),
+            ),
             user_principal_id: None,
             project_authority: None,
             registered_project_id: None,

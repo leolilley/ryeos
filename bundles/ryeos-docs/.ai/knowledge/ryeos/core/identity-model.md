@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T02:15:34Z:9ff9c0aabc434de9850407a04b6b8f154bf806ed4fceaa8f3e45e32eae6db723:4Txon6+01vq/p8k4PWYMSMzPyyxjHpfmmYT83zS9eOZ9KMCmXvU3d9iJFFqWuOiBnPH2WZyCNw1biPpP1pftCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:25:00Z:b5d2c7ca828a796b8a0b7c1aa07115b987fed579b9f601cd60acd2b34dd838e1:iGpblH9vQP7Hqwmbsmwa9LhcTLZJW0F5KxAEIFIhninosSGUxhD7gwEyiZzXQbFhRtEn46QjbPvFF/9IZmo3Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -108,3 +108,39 @@ that operator key and co-signed by the source node key. The target requires an
 exact `remote_operator` allowed-site grant and an exact `remote_node`
 forwarding-attestation grant. In both cases, authenticated origin comes from
 verified key/grant evidence, never an unsigned caller claim.
+
+## Browser sessions
+
+A browser has no key. It holds a session cookie that a key-holding principal
+minted through a signed `ui.launch.mint` request (the web launcher does this
+from the operator's machine). The session is always minted by a principal that
+holds a key; a human without a key on the node machine has no other login.
+
+What a session may do is bounded by the node's signed `ui_browser_sessions`
+policy (schema 5), never by the cookie flags alone:
+
+- **Authority ceiling.** `session_scopes` is the most any browser session on
+  this node may hold. The session's grant is the minter's scopes intersected
+  with that list, and the mint request may narrow it further with an optional
+  `scopes` list. A minter holding `*` gets exactly the ceiling. The intersection
+  is capability-aware (grant patterns, not string prefixes) and fails closed
+  where overlap cannot be proven. The mint response returns the effective
+  `granted_caps`. Every later admission, event stream, project operation and
+  binding compile reads that grant; binding entries the grant cannot reach are
+  listed as attenuated at mint.
+- **Timing.** `session_ttl_secs` (at most 24 hours) ends a session regardless of
+  use, `session_idle_secs` ends one that is not used, and `launch_token_ttl_secs`
+  (at most 300) bounds the single-use activation link. None has a code default;
+  a policy without them is refused.
+- **End.** A session ends itself with `POST /ui/api/session/end`
+  (`ui.session.end`); the response clears the cookie.
+- **List and revoke.** The configured local operator lists live sessions with
+  `GET /ui/api/sessions/list` (`ui.sessions.list`) and revokes one with
+  `POST /ui/api/sessions/revoke {session_id}` (`ui.sessions.revoke`). A revoked
+  session's next request answers `401` with `error_code: browser_session_revoked`.
+  Listings carry session ids, principals, grants and ages, never cookie values
+  or launch tokens.
+
+Sessions live in daemon memory; a restart ends them all. A node whose policy
+generation still carries `ui_browser_sessions` at schema 4 refuses to start
+until the section is re-issued at schema 5.

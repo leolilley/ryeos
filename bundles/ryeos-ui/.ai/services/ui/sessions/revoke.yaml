@@ -1,0 +1,9 @@
+# ryeos:signed:2026-11-13T04:25:00Z:da09988c13da2cc62aa64630624038bc254ce49267964f507ebf564639beea0b:fj0Dy3t0r24F/VphNtAppO+QnokcNslNSvF+qGblufG/mXKfemIdrPgVUz95KTVJu4db5bQkQ6yBEagBVk26CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: sessions-revoke
+version: "1.0.0"
+description: Revokes one live browser session for the configured local operator. The session's next request answers 401 browser_session_revoked.
+endpoint: ui.sessions.revoke
+availability: daemon_only
+required_caps:
+  - ryeos.execute.service.ui/sessions/revoke

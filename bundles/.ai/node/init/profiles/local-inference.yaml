@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T04:16:48Z:bf789ddbbdad0ce49e21c93800bf6a400a2fd78a7fabfc13fa8baf8806514877:53TRGjpETIL9mrd/RLGPV2iGSTiKlk2gBvY09bimpgepL5LHpnOL9AOHnml9Gkog8OO/BjU3Z0s787zAfea4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T04:25:00Z:b647bdd81538bbc354a95b2bce5e17a6aee52b6127dbeb885a5e1a51fe0809c2:rNwGTwboag70QY0cfPfuoZausgh00uVnbiGvXfBYJ9sYVMP/FR9YTTGU8fU8+LDG3rDTCdGD3Ziq8S2P0MDMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -386,7 +386,22 @@ policies:
     schema: 2
     names: []
   ui_browser_sessions:
-    schema: 4
+    schema: 5
+    session_ttl_secs: 28800
+    session_idle_secs: 3600
+    launch_token_ttl_secs: 60
+    session_scopes:
+      - ryeos.execute.service.ui/ryeos-ui/*
+      - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.projects/add
+      - ryeos.execute.service.projects/open
+      - ryeos.execute.service.threads/input
+      - ryeos.execute.service.commands/dispatch
+      - ryeos.execute.service.commands/submit
+      - ryeos.execute.service.worker-executions/approvals
+      - ryeos.execute.service.worker-executions/resolve-approval
+      - ryeos.execute.directive.*
+      - ryeos.execute.graph.*
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16

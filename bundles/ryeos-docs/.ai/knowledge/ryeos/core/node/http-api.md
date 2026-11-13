@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:31Z:5579875b4a42e4f24a6336e4464ecaa7a1fec3d695f8cb2064cf73a880324178:sDHhcOv+oMoBt4EJs+7Ugz7+VtB2jfH5eTr460OnOKcoN/1pazjllgF+lp949HuWRFwzmGGEv1OUgZk4SjPPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:25:00Z:0372aea7172c6c702b76df22fadd9f347cb189b28bf3b8f24e803db5d61938ac:0IOWpLO/u2ki25Cfpmt2MFohnVZYDchwzVG0q7aWyR4W+LXWH0KHy6/wouIrzO+Oo2gzQA4rOpfF2BIhgpkqCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -23,6 +23,37 @@ Unauthenticated discovery endpoints:
 
 All other routes require signed auth and then enforce the capabilities
 listed by the target service descriptor.
+
+## Route authentication modes
+
+A route declares exactly one `auth` mode:
+
+- **`ryeos_signed`**: the request is signed by a key in the authorized-key
+  store. The route's service then enforces its required capabilities against
+  that key's grant.
+- **`browser_session`**: the request carries the `ryeos_session` cookie of a
+  live browser session. The session holds only the authority its mint granted
+  (the minter's scopes intersected with the node's `ui_browser_sessions`
+  `session_scopes` ceiling). An expired, ended or unknown session answers
+  `401`; a session an operator revoked answers `401` with
+  `error_code: browser_session_revoked`. See
+  [Identity Model](../identity-model.md).
+- **`none`**: no caller identity (discovery routes and the one-time launch
+  link). Such a route can grant nothing by itself.
+
+### Browser session routes
+
+- `POST /ui/api/launch/mint` (`ryeos_signed`, `service:ui/launch/mint`):
+  mints a launch token. Optional `scopes` narrows the session below the
+  ceiling; the response carries the effective `granted_caps`.
+- `POST /ui/api/session/end` (`browser_session`, `service:ui/session/end`):
+  ends the calling session and clears its cookie.
+- `GET /ui/api/sessions/list` (`ryeos_signed`, `service:ui/sessions/list`):
+  configured local operator only. Required cap
+  `ryeos.execute.service.ui/sessions/list`.
+- `POST /ui/api/sessions/revoke` (`ryeos_signed`,
+  `service:ui/sessions/revoke`): configured local operator only, body
+  `{session_id}`. Required cap `ryeos.execute.service.ui/sessions/revoke`.
 
 ## Execution Routes
 

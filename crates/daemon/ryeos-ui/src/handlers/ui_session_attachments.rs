@@ -95,6 +95,7 @@ pub async fn handle_open_surface(
         root_ref: surface_ref.clone(),
         project_path: root.compiled_binding.binding.project_root.clone(),
         user_principal_id: None,
+        scopes: None,
     };
     let (binding, presentation) = super::ui_launch_mint::compile_session_binding(
         &selection,

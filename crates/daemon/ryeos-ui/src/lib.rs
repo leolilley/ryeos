@@ -15,10 +15,13 @@ pub mod session_bus;
 pub mod state;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+pub mod session_authority;
 mod thread_authorization;
 pub mod transfer_store;
 
-pub use browser_session::{BrowserSession, BrowserSessionStore, LaunchContext};
+pub use browser_session::{
+    BrowserSession, BrowserSessionStore, LaunchContext, SessionSummary, SessionTiming,
+};
 pub use session_bus::SessionBus;
 pub use state::UiState;
 

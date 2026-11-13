@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-13T04:25:00Z:022341da8522444142f91f0d218925c41334db23e97dd06958fd3de7fee0aada:dKhH/NI3AwEf57nU1WagzEZrnrijVK4nLRKnVFeJoK1ypw7sosPKKzQtrRuTRF0cxtUKemzVTeypszUpxlBhCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/sessions/revoke
+path: /ui/api/sessions/revoke
+methods:
+  - POST
+auth: ryeos_signed
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 16
+request:
+  body: json
+response:
+  mode: json
+  source: "service:ui/sessions/revoke"

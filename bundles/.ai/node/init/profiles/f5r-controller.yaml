@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-11T04:16:48Z:5d90ea86d0026cf0c3000da88b971555b5dfd5ac9a1c4b1d7ee3242c5fe1ab51:jl/aG5XIMtvrM4GwsfF24oeynnD3wAWW/yZyZbQqXxQo/3hDIs90ANySI2bmn29iWQ7ApVSZmQVcl53RNCaMDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T04:25:00Z:baf4d230d50e568bb3ef4bb2bdd30a972fe6871e487a1ffc320377776f53744d:a6hYZ/LE8eH/LBw/lza4K4gu8c8gGaZADfe89nb87lG0K9da9ICm67ueovC+DJr2toQ/KdM/qtiXdksKVxFoDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -452,7 +452,22 @@ policies:
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
   ui_browser_sessions:
-    schema: 4
+    schema: 5
+    session_ttl_secs: 28800
+    session_idle_secs: 3600
+    launch_token_ttl_secs: 60
+    session_scopes:
+      - ryeos.execute.service.ui/ryeos-ui/*
+      - ryeos.execute.service.ui/session/surfaces/open
+      - ryeos.execute.service.projects/add
+      - ryeos.execute.service.projects/open
+      - ryeos.execute.service.threads/input
+      - ryeos.execute.service.commands/dispatch
+      - ryeos.execute.service.commands/submit
+      - ryeos.execute.service.worker-executions/approvals
+      - ryeos.execute.service.worker-executions/resolve-approval
+      - ryeos.execute.directive.*
+      - ryeos.execute.graph.*
     max_session_bootstrap_bytes: 4194304
     max_live_binding_attachments_per_session: 16
     max_presentations_per_session: 16
