@@ -118,6 +118,24 @@ jobs:
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
 
+      - name: Check native bundle publication inventories
+        run: python3 -B scripts/release/test-native-bundle-wp0.py
+
+      - name: Check installer lifecycle boundaries
+        run: bash scripts/pkg/test-install-lifecycle.sh
+
+      - name: Check contained Docker host setup
+        run: |
+          python3 -B scripts/pkg/test-contained-docker-node.py
+          python3 -B scripts/pkg/test-contained-docker-runtime.py
+          python3 -B scripts/release/test-contained-oci-hook-artifact.py
+
+      - name: Check workspace version gate
+        run: python3 -B scripts/release/test-check-workspace-versions.py
+
+      - name: Check development registry bootstrap entry
+        run: python3 -B scripts/release/test-development-registry.py
+
       - name: Check Codex authored contract
         run: python3 bundles/codex/test_contract.py
 

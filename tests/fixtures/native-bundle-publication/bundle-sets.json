@@ -29,6 +29,22 @@
       "core",
       "graph"
     ],
+    "development": [
+      "core",
+      "central-auth",
+      "scheduling",
+      "knowledge",
+      "directive",
+      "graph",
+      "ryeos-docs",
+      "environment-qualification",
+      "web",
+      "browser",
+      "ryeos-ui",
+      "codex",
+      "opencode",
+      "render-sandbox"
+    ],
     "f5r-controller": [
       "core",
       "graph",
@@ -102,7 +118,7 @@
     "core-knowledge": "core-knowledge",
     "core-scheduling": "core-scheduling",
     "core-workflow": "core-workflow",
-    "development": "full",
+    "development": "development",
     "f5r-controller": "f5r-controller",
     "full": "full",
     "hosted-node": "core",
