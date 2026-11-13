@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:32:28Z:b0d3751c87ceb2ee1a6ecfa46f06f704b89a56aceb4ff401412fc6cb814447c1:K1GUHMi/repEtqYkDuk9lzFBvHMkpEeKcqLMHHw53Y6gbi7h4pl/Gh5HjqCHVk0ZWgPfRBXieT8FxMuQeuBjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T23:11:47Z:f0468e6eb81ce71fa001a915aeb099d86a57d89e9ce6a12a37d314cca6562de4:vV5jjFSMaJPiNIZUCJ+AIncoH3xigLcRqQ0fx/GQuFoIt5VyQU8Xxnw2ul9hacj5IfOJ3/UtLK/PvftaVbWYAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -672,6 +672,16 @@ install, and vault proxying.
   `ryeos.execute.service.offline-operations/facts`, `/submit` and `/status`
   (`ryeos remote delegate --remote <name> --scopes ...`); an inbound-only
   remote is refused with `remote_inbound_only`.
+- `ryeos node offline-operation sign --facts <file>` signs under the authority
+  the facts name for the signing key (`signer`): the local operator signs
+  without a grant, and a remote operator's request takes its grant digest and
+  origin site from the facts. `facts --json` reports the signer for
+  `--signing-key` (default the operator key), `facts --remote` for you as the
+  delegated principal. Facts without a signer, read for another key, or for a
+  key the node holds no usable grant for are refused with
+  `offline_operation_facts_without_signer`,
+  `offline_operation_facts_for_another_signer` and
+  `offline_operation_signer_ungranted`.
 See [Remote Command Reference](../remote/remote-command-reference.md).
 
 ## Aliases Quick Reference

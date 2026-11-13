@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:32:28Z:2fb79c505287d9a5e3f0e202d8e3738d849cb50eca81fd4d2181bc2d57ee0417:2ZN+Qsej/BnMGYr+zr1LcQbA7wBYZDooWNPE2yqN2AgG2rG2Y3vzyJG/cBe4irykBO4ylPq/ADNVMPIzxrIoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T23:11:47Z:115ded114eca3571b0ae47b320ecfb3d01dbbab9078978ebcc8702ad81673a39:i5XG9iDdSax8wM1nk479SymmbV8BktKDtYaBKON/gzQEBrv3ImCSadgWfTilv5EP70Z0Jx3iSP4KKY+d0WngAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -443,11 +443,21 @@ ryeos remote delegate --remote controller \
 ryeos node offline-operation facts --remote controller --json > controller-facts.json
 ryeos node offline-operation sign --operation node.remote.pin \
   --arguments pin.json --input descriptor=./origin.remote.yaml \
-  --facts controller-facts.json --grant-digest <sha256> --origin-site site:<origin> \
-  --out pin-delivery.json
+  --facts controller-facts.json --out pin-delivery.json
 ryeos node offline-operation submit --remote controller --file pin-delivery.json --stop
 ryeos node offline-operation list --remote controller
 ```
+
+The controller's facts name the caller's own authority on it (`signer`): read
+through the origin, that is the operator's current `remote_principal` grant
+(its digest and origin site), not the origin node's grant. `sign` takes the
+grant digest and origin site from there, so the request is always signed
+under the grant as it now stands; after a `node.authorize-client` that changes
+the operator's own grant, read the facts again. `sign` refuses facts that name
+no signer (`offline_operation_facts_without_signer`), facts read for another
+key (`offline_operation_facts_for_another_signer`), and a key the controller
+holds no usable grant for (`offline_operation_signer_ungranted`, with the
+reason when the grant exists but cannot be verified, such as an expired one).
 
 The controller's effective scopes for the operator are its grant intersected
 with the delegation, so both must name a route's scope. The refusals name

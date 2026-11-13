@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:32:28Z:7d09bbef92a73b7f367f56b2ff789e6b9d3e2ebeb9f3d49c0e544c1308dbbc9a:wOJpvamcqeVlv2og3g4fPelh2McMOkIQWSbS9WAETtOSUjY2K+XY2vacXx2U7fqbXSN2gdWl9W7RJSjrigITAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T23:11:47Z:4ae555b1073d912e7974ed7eb8fcc68aa9d5812615acf40f909bf46aa268ca3e:Rxa8OtCJeAO5OvfwsXdqwxyKgoq3VQWFVV1T2cOqOjspKAmx1MyITBkhY9WmtGiCE0nZfXaKbSSQ6BMUNumyDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signed-offline-operations"
@@ -88,6 +88,15 @@ signed against.
   a separate path from the online `require_admitted_operator`, which needs a
   forwarding proof an offline document cannot carry.
 - Never a `remote_node` grant.
+
+A facts report read for a key (`facts --json` for its `--signing-key`, the
+facts route for its authenticated caller, `facts --remote` for the delegated
+operator) names that key's authority under `signer`: `local_operator`, or the
+grant's current `grant_digest`, `origin_site_id` and `principal_class`. `sign`
+takes the grant digest and origin site from there and has no flag for them; it
+refuses facts with no signer, facts read for another key, and a key with no
+usable grant (`grant_error` says why). A facts document assembled by hand from
+a startup log must carry the `signer` object itself.
 
 Each operation has an exact scope, `ryeos.offline.<operation>`. Wildcard
 grants never satisfy it, so a broad grant made for product pushes carries no

@@ -229,8 +229,13 @@ fn local_node(app_root: &Path) -> Result<NodeIdentity> {
 }
 
 /// [`facts_report`] for a node read from its volume, running or not.
-pub fn local_facts_report(app_root: &Path) -> Result<Value> {
-    facts_report(app_root, &local_node(app_root)?)
+pub fn local_facts_report(app_root: &Path, signer: Option<&str>) -> Result<Value> {
+    facts_report(app_root, &local_node(app_root)?, signer)
+}
+
+/// [`signer_report`] for a node read from its volume, running or not.
+pub fn local_signer_report(app_root: &Path, fingerprint: &str) -> Result<Value> {
+    Ok(signer_report(app_root, &local_node(app_root)?, fingerprint))
 }
 
 /// [`status_report`] for a node read from its volume, running or not.
@@ -278,18 +283,65 @@ fn queue_with_cleanup(
 }
 
 /// The node's offline-operation facts and ledger tip, for the operator who
-/// signs against them.
-pub fn facts_report(app_root: &Path, node: &NodeIdentity) -> Result<Value> {
+/// signs against them. With `signer`, the report also says under what
+/// authority that key signs on this node ([`signer_report`]).
+pub fn facts_report(app_root: &Path, node: &NodeIdentity, signer: Option<&str>) -> Result<Value> {
     let store = Store::for_app_root(app_root);
     let state = Ledger::new(&store, node)
         .load()
         .context("verify the offline-operation ledger")?;
-    Ok(json!({
+    let mut report = json!({
         "node_fingerprint": node.fingerprint(),
         "facts": measure(app_root, &state.head),
         "ledger_head": state.head,
         "ledger_sequence": state.last_sequence,
-    }))
+    });
+    if let Some(fingerprint) = signer {
+        report["signer"] = signer_report(app_root, node, fingerprint);
+    }
+    Ok(report)
+}
+
+/// Under what authority the key `fingerprint` signs a request for this node,
+/// as the startup applier will judge it: the local operator, whose authority
+/// is the key on the volume and who names no grant, or a grant, whose current
+/// digest and origin site a request must name. A key with neither, or whose
+/// grant cannot be verified, gets a null `grant_digest` and, when there is
+/// one, the reason in `grant_error`. Read afresh for every report, so a grant
+/// replaced since is reported as it now stands.
+pub fn signer_report(app_root: &Path, node: &NodeIdentity, fingerprint: &str) -> Value {
+    let ungranted = |error: Option<String>| {
+        json!({
+            "fingerprint": fingerprint,
+            "local_operator": false,
+            "grant_digest": Value::Null,
+            "grant_error": error,
+        })
+    };
+    match super::envelope::local_operator(app_root) {
+        Ok(Some((local, _))) if local == fingerprint => {
+            return json!({ "fingerprint": fingerprint, "local_operator": true });
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return ungranted(Some(format!(
+                "the local operator key cannot be read: {error:#}"
+            )));
+        }
+    }
+    let directory = super::envelope::authorized_keys_dir(app_root);
+    match ryeos_node_runtime::identity::load_verified_authorized_key(fingerprint, &directory, node)
+    {
+        Ok(Some(grant)) => json!({
+            "fingerprint": fingerprint,
+            "local_operator": false,
+            "principal_class": grant.principal_class.as_str(),
+            "grant_digest": grant.source_file_hash,
+            "origin_site_id": grant.configured_origin_site_id,
+        }),
+        Ok(None) => ungranted(None),
+        Err(error) => ungranted(Some(format!("{error:#}"))),
+    }
 }
 
 /// The ledger tip, what waits in the inbox, the newest receipts and the

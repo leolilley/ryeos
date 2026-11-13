@@ -62,7 +62,10 @@ itself before any other startup check can refuse. No shell is involved.
 - Sign against the node's facts: `ryeos node offline-operation facts --json`
   (stopped node on this machine), the running node's `GET
   /offline-operations/facts`, or the facts every startup prints to the
-  platform log. `ryeos node offline-operation sign` builds the request; it is
+  platform log (a document assembled from the log adds the `signer` object
+  `sign` reads: `{"fingerprint": <key>, "local_operator": true}`, or a
+  remote operator's `grant_digest` and `origin_site_id`). `ryeos node
+  offline-operation sign` builds the request; it is
   valid for one hour unless `--lifetime-minutes` says otherwise, up to 24
   hours. A remote operator signs with a `remote_principal` grant that names the
   exact scope `ryeos.offline.<operation>`; wildcard grants never satisfy an

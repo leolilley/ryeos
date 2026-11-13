@@ -256,6 +256,22 @@ impl Pair {
             &node_identity(&self.hosted.state_path)?,
         )?
         .context("HOSTED holds no grant for U1")?;
+        // The facts read through ORIGIN name U1's own grant on HOSTED, the
+        // delegated principal's, not ORIGIN's node grant; `sign` takes the
+        // grant digest and origin site from them.
+        let signer = &facts["signer"];
+        ensure!(
+            signer["fingerprint"] == fingerprint(&u1).as_str(),
+            "facts name another signer: {signer}"
+        );
+        ensure!(
+            signer["grant_digest"] == grant.source_file_hash.as_str(),
+            "facts name another grant: {signer}"
+        );
+        ensure!(
+            signer["origin_site_id"] == self.origin_fixture.site_id().as_str(),
+            "facts name another origin: {signer}"
+        );
         let measured = facts["facts"].as_object().context("facts object")?;
         let spec = ryeos_node::offline_operation::table::lookup(OPERATION).context("operation")?;
         let pins = ryeos_node::offline_operation::facts::MANDATORY_FACTS
@@ -284,8 +300,14 @@ impl Pair {
                 pins,
                 lifetime_minutes: None,
                 remote: Some(RemoteSigner {
-                    grant_digest: grant.source_file_hash,
-                    origin_site_id: self.origin_fixture.site_id(),
+                    grant_digest: signer["grant_digest"]
+                        .as_str()
+                        .context("grant digest")?
+                        .to_owned(),
+                    origin_site_id: signer["origin_site_id"]
+                        .as_str()
+                        .context("origin site")?
+                        .to_owned(),
                 }),
             },
             &u1,

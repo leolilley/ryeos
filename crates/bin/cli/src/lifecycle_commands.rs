@@ -2077,9 +2077,11 @@ struct NodeOfflineFactsArgs {
     #[arg(long)]
     remote: Option<String>,
 
-    /// The key authenticating the call to this operator's node (PKCS#8 PEM)
-    /// with --remote. Defaults to the operator key under the app root.
-    #[arg(long, requires = "remote")]
+    /// The key that will sign requests (PKCS#8 PEM): the facts name the
+    /// authority it holds on the node, and with --remote it also
+    /// authenticates the call to this operator's node. Defaults to the
+    /// operator key under the app root.
+    #[arg(long)]
     signing_key: Option<PathBuf>,
 
     /// Emit structured JSON.
@@ -2107,12 +2109,31 @@ async fn run_node_offline_operation_facts_command(
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root)?.app_root;
     let facts = ryeos_node::offline_operation::read_facts(&app_root)
         .context("measure the node's offline-operation facts")?;
+    // The authority the signing key holds here, so `sign --facts` signs under
+    // it. Without a key to name, the facts name no signer and `sign` refuses
+    // them rather than guess.
+    let key_path = args
+        .signing_key
+        .clone()
+        .unwrap_or_else(|| crate::transport::signing::operator_signing_key_path(&app_root));
+    let signer = match lillux::crypto::load_signing_key(&key_path) {
+        Ok(key) => Some(ryeos_node::offline_operation::deliver::local_signer_report(
+            &app_root,
+            &lillux::signature::compute_fingerprint(&key.verifying_key()),
+        )?),
+        Err(error) if args.signing_key.is_some() => {
+            return Err(error)
+                .with_context(|| format!("load the signing key {}", key_path.display()));
+        }
+        Err(_) => None,
+    };
     let operations = ryeos_node::offline_operation::table::operations();
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "app_root": app_root,
             "node_fingerprint": ryeos_node::offline_operation::read_node_fingerprint(&app_root)?,
             "facts": facts,
+            "signer": signer,
             "operations": operations.iter().map(|spec| serde_json::json!({
                 "operation": spec.id,
                 "scope": spec.scope(),

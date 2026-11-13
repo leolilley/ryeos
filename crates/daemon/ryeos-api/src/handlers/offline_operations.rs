@@ -192,9 +192,13 @@ pub async fn facts(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
+    // The facts name the caller's own authority here, so the caller signs
+    // under its current grant. A delegated caller is the operator the origin
+    // forwarded for, so this is the operator's grant, not the origin node's.
+    let signer = submitting_fingerprint(&ctx.fingerprint)?.to_owned();
     let app_root = state.config.app_root.clone();
     let identity = Arc::clone(&state.identity);
-    tokio::task::spawn_blocking(move || facts_report(&app_root, &identity))
+    tokio::task::spawn_blocking(move || facts_report(&app_root, &identity, Some(&signer)))
         .await
         .map_err(blocking_failure)?
         .map_err(|error| HandlerError::Internal(format!("{error:#}")))

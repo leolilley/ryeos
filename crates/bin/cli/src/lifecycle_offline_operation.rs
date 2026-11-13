@@ -63,7 +63,7 @@ fn operator_key_path(app_root: Option<PathBuf>, signing_key: Option<PathBuf>) ->
 #[command(
     name = "ryeos node offline-operation sign",
     about = "Sign an offline-operation request against a node's facts, without the node",
-    long_about = "Builds and signs one request. The facts it is signed against come from the node: a file holding the output of `ryeos node offline-operation facts --json` (or of the daemon's facts route), or the volume of a node on this machine. The request is valid for one hour unless --lifetime-minutes says otherwise, up to 24 hours. A remote operator also names the grant it signs under and the origin site the grant is bound to. The output is a delivery document for `submit`; --stage-dir also writes the files a platform delivers to a node that cannot start.",
+    long_about = "Builds and signs one request. The facts it is signed against come from the node: a file holding the output of `ryeos node offline-operation facts --json` (local, or of a remote with --remote), or the volume of a node on this machine. The facts name the authority the signing key holds on that node, read for that key: the node's local operator signs without a grant, and a remote operator's request names its current grant digest and origin site from them. Facts read for another key, or for a key the node holds no grant for, are refused. The request is valid for one hour unless --lifetime-minutes says otherwise, up to 24 hours. The output is a delivery document for `submit`; --stage-dir also writes the files a platform delivers to a node that cannot start.",
     no_binary_name = true
 )]
 struct SignArgs {
@@ -83,7 +83,8 @@ struct SignArgs {
     #[arg(long = "expect")]
     expected: Vec<String>,
 
-    /// JSON file with the node's facts, as printed by `facts --json`.
+    /// JSON file with the node's facts, as printed by `facts --json` for the
+    /// signing key.
     #[arg(long, conflicts_with = "from_node")]
     facts: Option<PathBuf>,
 
@@ -103,14 +104,6 @@ struct SignArgs {
     /// App root holding the default operator key.
     #[arg(long)]
     app_root: Option<PathBuf>,
-
-    /// Digest of the signer's grant file on the node (a remote operator).
-    #[arg(long, requires = "origin_site")]
-    grant_digest: Option<String>,
-
-    /// The origin site the signer's grant is bound to (a remote operator).
-    #[arg(long, requires = "grant_digest")]
-    origin_site: Option<String>,
 
     /// How long the request stays valid, in minutes. Defaults to 60; at most
     /// 1440.
@@ -145,14 +138,22 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     };
     let spec = lookup(&args.operation)
         .with_context(|| format!("this build has no offline operation `{}`", args.operation))?;
+    let key_path = operator_key_path(args.app_root, args.signing_key)?;
+    let key = lillux::crypto::load_signing_key(&key_path)
+        .with_context(|| format!("load the signing key {}", key_path.display()))?;
+    let signer_fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
     let report = match (&args.facts, &args.from_node) {
         (Some(path), None) => read_json(path, "facts")?,
         (None, Some(app_root)) => {
             let app_root = ryeos_node::NodeConfig::load_local(Some(app_root.clone()))?.app_root;
-            ryeos_node::offline_operation::deliver::local_facts_report(&app_root)?
+            ryeos_node::offline_operation::deliver::local_facts_report(
+                &app_root,
+                Some(&signer_fingerprint),
+            )?
         }
         _ => bail!("give exactly one of --facts and --from-node"),
     };
+    let remote = signer_authority(&report, &signer_fingerprint)?;
     let facts = report
         .get("facts")
         .and_then(Value::as_object)
@@ -189,16 +190,6 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
         Some(path) => read_json(path, "arguments")?,
         None => json!({}),
     };
-    let remote = match (args.grant_digest, args.origin_site) {
-        (Some(grant_digest), Some(origin_site_id)) => Some(RemoteSigner {
-            grant_digest,
-            origin_site_id,
-        }),
-        _ => None,
-    };
-    let key_path = operator_key_path(args.app_root, args.signing_key)?;
-    let key = lillux::crypto::load_signing_key(&key_path)
-        .with_context(|| format!("load the signing key {}", key_path.display()))?;
     let delivery = sign_request_now(
         SignDraft {
             node_fingerprint,
@@ -249,6 +240,57 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     }
     console.status(&banner)?;
     Ok(())
+}
+
+/// Facts that name no signer: read before signers were reported, or taken
+/// from a startup log.
+pub const FACTS_WITHOUT_SIGNER: &str = "offline_operation_facts_without_signer";
+/// Facts read for another key than the one signing.
+pub const FACTS_FOR_ANOTHER_SIGNER: &str = "offline_operation_facts_for_another_signer";
+/// The node holds no usable grant for the signing key.
+pub const SIGNER_UNGRANTED: &str = "offline_operation_signer_ungranted";
+
+/// The authority the signing key holds on the node, from the facts read for
+/// it: `None` for the node's local operator, who names no grant, or the grant
+/// digest and origin site a remote operator's request names. Every other case
+/// is refused with its code and cure; nothing is assumed.
+fn signer_authority(report: &Value, fingerprint: &str) -> Result<Option<RemoteSigner>> {
+    let read_again = "read them again for this key: `ryeos node offline-operation facts --json \
+                      [--signing-key <key>]` on the node's machine, or `ryeos node \
+                      offline-operation facts --remote <name> --json` through your own node";
+    let Some(signer) = report.get("signer").filter(|value| value.is_object()) else {
+        bail!(
+            "{FACTS_WITHOUT_SIGNER}: the facts do not say what authority the signing key holds on the node; {read_again}"
+        );
+    };
+    let text = |field: &str| signer.get(field).and_then(Value::as_str);
+    if text("fingerprint") != Some(fingerprint) {
+        bail!(
+            "{FACTS_FOR_ANOTHER_SIGNER}: the facts were read for {}, but the signing key is {fingerprint}; {read_again}",
+            text("fingerprint").unwrap_or("no key")
+        );
+    }
+    if signer.get("local_operator") == Some(&Value::Bool(true)) {
+        return Ok(None);
+    }
+    let Some(grant_digest) = text("grant_digest") else {
+        let reason = text("grant_error")
+            .map(|error| format!(" ({error})"))
+            .unwrap_or_default();
+        bail!(
+            "{SIGNER_UNGRANTED}: the node holds no usable grant for {fingerprint}{reason}; its local operator grants it a remote_principal grant bound to your origin site with the exact `ryeos.offline.<operation>` scope"
+        );
+    };
+    let Some(origin_site_id) = text("origin_site_id") else {
+        bail!(
+            "{SIGNER_UNGRANTED}: the node's grant for {fingerprint} is a `{}` grant bound to no origin site; only a remote_principal grant may sign offline operations from outside the node",
+            text("principal_class").unwrap_or("unknown")
+        );
+    };
+    Ok(Some(RemoteSigner {
+        grant_digest: grant_digest.to_owned(),
+        origin_site_id: origin_site_id.to_owned(),
+    }))
 }
 
 /// Write the request and its inputs as a platform delivers them to a node
@@ -681,28 +723,59 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_digest_needs_its_origin_site() {
-        let error = SignArgs::try_parse_from(argv(&[
-            "--operation",
-            "node.allow-restart",
-            "--facts",
-            "facts.json",
-            "--grant-digest",
-            "abc",
-        ]))
-        .unwrap_err();
-        assert!(error.to_string().contains("origin-site"), "{error}");
-        SignArgs::try_parse_from(argv(&[
-            "--operation",
-            "node.allow-restart",
-            "--facts",
-            "facts.json",
-            "--grant-digest",
-            "abc",
-            "--origin-site",
-            "site:origin-a",
-        ]))
-        .unwrap();
+    fn the_signer_authority_comes_from_facts_read_for_this_key() {
+        let key = "a".repeat(64);
+        let local = json!({ "signer": { "fingerprint": key, "local_operator": true } });
+        assert!(signer_authority(&local, &key).unwrap().is_none());
+
+        let remote = json!({ "signer": {
+            "fingerprint": key,
+            "local_operator": false,
+            "principal_class": "remote_principal",
+            "grant_digest": "b".repeat(64),
+            "origin_site_id": "site:origin-a",
+        }});
+        let signer = signer_authority(&remote, &key).unwrap().unwrap();
+        assert_eq!(signer.grant_digest, "b".repeat(64));
+        assert_eq!(signer.origin_site_id, "site:origin-a");
+
+        let refused = |report: Value| signer_authority(&report, &key).unwrap_err().to_string();
+        assert!(refused(json!({ "facts": {} })).starts_with(FACTS_WITHOUT_SIGNER));
+        assert!(
+            refused(json!({ "signer": { "fingerprint": "c".repeat(64), "local_operator": true } }))
+                .starts_with(FACTS_FOR_ANOTHER_SIGNER)
+        );
+        let ungranted = refused(json!({ "signer": {
+            "fingerprint": key,
+            "local_operator": false,
+            "grant_digest": null,
+            "grant_error": "the grant expired",
+        }}));
+        assert!(ungranted.starts_with(SIGNER_UNGRANTED), "{ungranted}");
+        assert!(ungranted.contains("the grant expired"), "{ungranted}");
+        let unbound = refused(json!({ "signer": {
+            "fingerprint": key,
+            "local_operator": false,
+            "principal_class": "local_client",
+            "grant_digest": "b".repeat(64),
+            "origin_site_id": null,
+        }}));
+        assert!(unbound.starts_with(SIGNER_UNGRANTED), "{unbound}");
+    }
+
+    #[test]
+    fn a_grant_digest_is_not_an_argument() {
+        assert!(
+            SignArgs::try_parse_from(argv(&[
+                "--operation",
+                "node.allow-restart",
+                "--facts",
+                "facts.json",
+                "--grant-digest",
+                "abc",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
