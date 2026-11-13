@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:a23215f0eb5848eed81aacca934b6b496d0c177402f0ae76c854c39a47dfcfda:CjGUaAOdqDRKoV0sYb1K2yFPheerGiS4mj4XMW9snU+qwZfBD9MYxAD/unk0ETZ/H3yAy23QncJQlwVRK5o0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:39:38Z:42cde49a35e6529d1d036183b1bb30d94d4accfc6b6f1473f1319250b2e8ba8b:mme+MhlkvznqvpTuJebTzNmEX06not9+yGf+ofIoulIwrpVQ2QKitIOGthhawxouW1DwrL0Khtr7erZsSxe/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -68,6 +68,12 @@ Notes:
   intentionally unauthenticated discovery endpoints.
 - `remote execute` must also satisfy the capabilities required by the
   executed item once the remote daemon dispatches `/execute`.
+- `remote execute` and `remote run` default to
+  `include_operator_vault: false`. A policy that exposes the target's operator
+  vault needs `ryeos.use.vault.operator` locally for the caller and in the
+  target grant of the principal that signs the request; the target refuses it
+  otherwise with `operator_vault_capability_required`. Do not add it to remote
+  caller node grants by default.
 - An accepted remote launch is not safely retryable from transport failure
   unless its exact owner can query the caller-retained `launch_id`. Include
   `service:launch/status` and `service:launch/cancel` in an exact remote grant

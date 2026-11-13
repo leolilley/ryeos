@@ -2074,7 +2074,10 @@ mod tests {
         let live_dir = tempfile::tempdir().unwrap();
         let live_authority = crate::execution_policy::resolve_standard_local_live_authority(
             live_dir.path(),
-            vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            vec![
+                crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+                crate::execution_policy::OPERATOR_VAULT_CAPABILITY.to_string(),
+            ],
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap()

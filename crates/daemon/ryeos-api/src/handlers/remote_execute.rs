@@ -186,6 +186,15 @@ pub async fn handle(
 
     // Delegate to the shared unary forward helper.
     let execution_policy = destination_execution_policy(&req.execution_policy)?;
+    // The destination admits this request under this node's identity, not the
+    // local caller's. A caller may ask a remote to expose its operator vault
+    // only if it holds that authority itself.
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        state.authorizer.as_ref(),
+        &ctx.scopes,
+        &execution_policy.environment,
+    )
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let forward_result = forward::execute_unary_forward(
         &state,
         &client,

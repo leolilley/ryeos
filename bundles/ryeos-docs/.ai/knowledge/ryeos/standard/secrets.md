@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:40Z:ac962dd22e59b958ca9f6d71f159aec383bb856fa22c47a788c8b144ae3449fa:neqSfmaEh9yQzbA94bu1Tq//BPz1ZfFpXDELBvBvHLwJzPoiFk6smmwg9cfS1UMhZFSjvhCuGNwwMQ+KtugPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:39:38Z:0ddb6af3c642b2ce573d6d4bc6f430f2c1ece5fec4888ecea830e18711d78bbe:1gHvDmtAQ3cqHDjLsxRMDAaJVnCvh9CQJhh1pYOZVXhSCQmjp9bFuwGt+G8TS6zSxyYALYV2Axm/gOobQerPAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [secrets, vault, env, dotenv, providers, security]
@@ -33,6 +33,43 @@ secret, no `.env` file is read at all.
 - Tool/item `required_secrets`: `read_required_secrets` (`vault.rs`).
 - Provider `auth.env_var`: `preflight_inject_provider_secret` →
   `read_explicit_secret` (`launch.rs`, `vault.rs`) — same stack.
+
+## Who may read the operator vault
+
+The sealed vault is the node operator's. Holding execute rights on an item
+does not let a caller have the operator's secrets injected into it. Every
+execution policy whose environment exposes the operator vault requires the
+fixed capability **`ryeos.use.vault.operator`**:
+
+- `environment: {kind: project_overlay, include_operator_vault: true}`;
+- `environment: {kind: vault, namespace: operator}`.
+
+The daemon checks it when it preauthorizes the policy, before any project
+capture, launch reservation or secret read. A caller without it is refused
+with HTTP 403 and the typed error code `operator_vault_capability_required`,
+which names the capability. A policy with `include_operator_vault: false`
+(the CLI's exclude-operator-vault control) still reads the project `.env`
+overlay and needs no extra capability.
+
+Who holds it:
+
+- **The configured local operator** holds it through its bootstrap `*`
+  grant. Its own runs are unaffected.
+- **Remote caller nodes and every narrower principal** need it granted
+  explicitly on the node whose vault would be read. Do not grant it to
+  remote caller nodes by default: it hands that node every secret of
+  yours its items declare. Prefer a project `.env` on the target, or the
+  node's provider environment, and keep `include_operator_vault: false`.
+- **Schedules** fire with their declared `capabilities`, so a schedule whose
+  policy exposes the operator vault must list the capability.
+- **Route handlers** run the bundle source the operator installed, under a
+  fixed daemon principal; that principal carries the capability.
+- **Cross-site worker handoff** re-checks it on the target: the owner's
+  current target grant must hold it before the target delivers from its own
+  vault.
+- `remote execute` and `remote run` send `include_operator_vault: false` by
+  default. Asking a remote to expose its operator vault needs the capability
+  both locally (the source checks its caller) and in the target's grant.
 
 ## The `.env` overlay only reads what was declared
 
@@ -69,7 +106,9 @@ are ignored by the overlay regardless, since no tool declares them).
 
 Use `ryeos tool env-check <ref>` to see, per declared `required_secret`, which
 source would satisfy it (vault / host env / which `.env`) — without running the
-item. Values are never printed, only presence and source.
+item. Values are never printed, only presence and source. For a caller without
+`ryeos.use.vault.operator` it reports the project overlay alone and does not
+consult the operator vault.
 
 v1 reports an item's declared `required_secrets`. A directive's provider
 `auth.env_var` is resolved separately at launch and is not yet enumerated by

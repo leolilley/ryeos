@@ -268,8 +268,14 @@ impl ResponseMode for HandlerMode {
         // and dispatch requires it for every live execution. The tool's
         // process itself may be placed in a narrower daemon-owned scratch;
         // it is confined there only under enforced isolation.
+        //
+        // That standard live profile also exposes the operator vault. A route
+        // handler runs the source item the operator installed in its own
+        // signed bundle, under a fixed daemon principal the caller cannot
+        // choose, so it carries the operator-vault capability explicitly.
         let execution_scopes = vec![
             handler_execute_scope(source_ref, &raw.id)?,
+            ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY.to_string(),
             ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
         ];
 
@@ -1023,6 +1029,7 @@ mod tests {
             handler.execution_scopes,
             vec![
                 "ryeos.execute.tool.ryeos-email/webhook/track_click".to_string(),
+                ryeos_engine::execution_contract::OPERATOR_VAULT_CAPABILITY.to_string(),
                 ryeos_engine::execution_contract::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
             ]
         );

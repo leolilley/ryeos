@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-06T00:23:47Z:6c86a40440df8ef28b1de8267cc272c262c7fb774b4664a3c49384631d8853d9:EibIvT1sUtTWj0ca7R74jIUoAb+OnUuwRTAENeqeZS8hRnW52k8RPIL24Smx0HwO5GThwwQI2OAB1ApHeNiuCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:39:38Z:0f24f3b895395494bfdfdb4b4c9322af46e50deed4e1807959186d04e6c831f4:Qnjob2WWGCXT2xWPiATEWNRRWYT3g2GX3E8iOgssOyXsN/EB+tL2qdGbqoJzksVHRSS19ZExVHpZ+5d0YGMsBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -122,6 +122,12 @@ Vault services mutate or read the node vault. In v1, vault storage is a
 single node-level store protected by capabilities, not a per-principal
 namespace.
 
+Delivering vault secrets into an execution is separate from these services.
+An execution policy whose environment exposes the operator vault (a project
+overlay with `include_operator_vault: true`, or the `operator` vault
+namespace) requires the fixed capability `ryeos.use.vault.operator`; see
+[Secrets & credentials](../../standard/secrets.md#who-may-read-the-operator-vault).
+
 ## Remote Services
 
 Remote services are daemon-only local orchestrators. They may call
@@ -212,6 +218,7 @@ execution:
     effective_origin_site_id: site:<site-id>
   capabilities:
     - ryeos.execute.tool.ryeos-email/system/process_send_queue
+    - ryeos.use.vault.operator
   policy:
     schema_version: 2
     ownership: daemon_owned
@@ -231,6 +238,10 @@ execution:
         kind: inherit
 managed_by: null
 ```
+
+A schedule fires with exactly its declared `capabilities`. A policy that
+exposes the operator vault, as both examples here do, must list
+`ryeos.use.vault.operator`, or every fire is refused before launch.
 
 Project-managed declarations use the deploy/reconcile path rather than
 hand-editing node-owned schedule files. A declaration file lists desired
@@ -254,6 +265,7 @@ schedules:
     enabled: true
     capabilities:
       - ryeos.execute.tool.ryeos-email/system/process_send_queue
+      - ryeos.use.vault.operator
     execution_policy:
       schema_version: 2
       ownership: daemon_owned

@@ -718,3 +718,130 @@ async fn vault_blocked_name_fails_request_loud() {
     drop(project);
     drop(mock);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_vault_is_refused_without_capability_and_still_reaches_the_operator() {
+    // A caller holding execute rights on every item and live project write,
+    // but not the operator-vault capability, asks for the standard local-live
+    // policy, whose project overlay includes the operator vault. The daemon
+    // refuses it with the typed error before any launch, so no thread exists
+    // and the provider is never contacted with the vault secret. The
+    // configured operator (bootstrap `*`) then runs the same directive and the
+    // secret reaches the provider.
+    use ryeos_app::execution_policy::{
+        ExecutionPolicy, ExecutionResponse, LIVE_PROJECT_WRITE_CAPABILITY,
+        OPERATOR_VAULT_CAPABILITY,
+    };
+
+    let env_var = "ZEN_API_KEY";
+    let secret = "sk-operator-vault-gate-0ddba11c0ffee";
+    let item_ref = "directive:test/operator_vault_gate";
+    let caller = SigningKey::from_bytes(&[0x5a_u8; 32]);
+    let caller_for_plant = caller.clone();
+
+    let mock = MockProvider::start(vec![MockResponse::Text("ok".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_workflow_bundles(state_path, fixture)?;
+            register_mock_provider_bundle(state_path, &mock_url, env_var, None, None, fixture)?;
+            let mut secrets = std::collections::HashMap::new();
+            secrets.insert(env_var.to_owned(), secret.to_owned());
+            plant_sealed_vault_secrets(state_path, &secrets)?;
+            common::fast_fixture::write_authorized_key_with_scopes(
+                state_path,
+                &caller_for_plant,
+                &fixture.node,
+                &["ryeos.execute.*", LIVE_PROJECT_WRITE_CAPABILITY],
+            )
+        };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with a vault secret and a caller without operator-vault authority");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive_with_secrets(
+        project.path(),
+        "test/operator_vault_gate",
+        "Hello {{ name }}.",
+        &[env_var],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
+
+    let body = serde_json::json!({
+        "item_ref": item_ref,
+        "ref_bindings": {"model": item_ref},
+        "project_path": project.path().to_str().unwrap(),
+        "parameters": {"name": "World"},
+        "execution_policy": ExecutionPolicy::local_live(ExecutionResponse::Wait),
+    });
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let node_key = h.node_key.as_ref().expect("fast fixture node key");
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{}/execute", h.bind))
+        .header("content-type", "application/json")
+        .body(body_bytes.clone());
+    for (name, value) in
+        common::build_signed_headers_for_bytes(&caller, node_key, "POST", "/execute", &body_bytes)
+    {
+        request = request.header(name, value);
+    }
+    let response = tokio::time::timeout(Duration::from_secs(30), request.send())
+        .await
+        .expect("refused /execute timed out")
+        .expect("refused /execute send failed");
+    let status = response.status();
+    let recorded_thread = response.headers().get("x-ryeos-thread-id").cloned();
+    let refused: serde_json::Value = response.json().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "a caller without the operator-vault capability must be refused: {refused:#}"
+    );
+    assert_eq!(
+        refused["error_code"], "operator_vault_capability_required",
+        "the refusal must be the typed operator-vault error: {refused:#}"
+    );
+    assert_eq!(refused["required_capability"], OPERATOR_VAULT_CAPABILITY);
+    assert!(
+        refused.get("thread_id").is_none() && recorded_thread.is_none(),
+        "the refusal precedes any launch: {refused:#}"
+    );
+    assert!(
+        mock.captured_headers().await.is_empty(),
+        "a refused caller must never reach the provider with the operator's secret"
+    );
+
+    // The configured operator still receives its own vault secret.
+    let (status, body) = tokio::time::timeout(
+        Duration::from_secs(30),
+        h.post_execute(
+            item_ref,
+            project.path().to_str().unwrap(),
+            serde_json::json!({"name": "World"}),
+        ),
+    )
+    .await
+    .expect("operator /execute timed out")
+    .expect("operator /execute send failed");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "the configured operator's run must be unaffected: {body:#}"
+    );
+    let captured = mock.captured_headers().await;
+    let headers = captured
+        .first()
+        .expect("the operator's run must reach the provider");
+    assert_eq!(
+        headers.get("authorization"),
+        Some(&format!("Bearer {secret}")),
+        "the operator vault secret must reach the provider for the operator: {headers:#?}"
+    );
+
+    drop(project);
+    drop(mock);
+}
