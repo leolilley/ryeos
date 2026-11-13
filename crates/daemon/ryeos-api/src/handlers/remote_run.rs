@@ -93,6 +93,15 @@ pub async fn handle(
             "remote run receives a destination-local policy; target must be `here`".to_string(),
         ));
     }
+    // The destination admits this request under the node or configured
+    // operator identity, not the local caller's. A caller may ask a remote to
+    // expose its operator vault only if it holds that authority itself.
+    ryeos_app::execution_policy::authorize_operator_vault_exposure(
+        state.authorizer.as_ref(),
+        &ctx.scopes,
+        &req.execution_policy.environment,
+    )
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let live_direct = matches!(
         &req.execution_policy.project,
         ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:21Z:ff73d7cc7ff1a155650f1bf09ca733982a1d166becb8e7d15338752797c2c08c:zsFday2YflGm8ylqEcn57o2plHhvOpVBAyT1Qs0jvyZh4nwsLpBJsc+SPbKdYhROK55N97sWtiHwXS8mixWdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T01:39:38Z:3e930da714fb237ad6ea868d1edb7802617304ba61ff73e658a13f280afbbbaa:82h/ZsSQCGeMU/QEb2Lr3WzVGGetdPoP+ZKiyByV4NmfcpH8aTZfevhVBSrUgWFSB2iscs+VIiBzCy43QO1+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -514,7 +514,13 @@ node-signed `remote_operator` grant for the owner and immutable origin site.
 That authority binds the principal class, owner principal, configured origin,
 grant digest, and sorted canonical scopes. It must cover both the target
 capsule's retained effective capabilities and its required-nullable parent
-delegation ceiling. The target seals it into the target launch capsule and
+delegation ceiling. When the retained project environment exposes the
+operator vault (`include_operator_vault: true`, which the target rebind keeps),
+the target then delivers from its own vault, so this grant must also hold
+`ryeos.use.vault.operator`; otherwise the handoff is refused with
+`operator_vault_capability_required`. A remote-hosted worker workflow sends its
+target launch with the same exposure, so the target's grant for the forwarded
+operator needs the capability there too. The target seals it into the target launch capsule and
 placement evidence, then revalidates the identical current grant during
 preflight replay, preparation, immediately before placement publication, and
 again before private-state installation or runnable recovery. Revocation or
