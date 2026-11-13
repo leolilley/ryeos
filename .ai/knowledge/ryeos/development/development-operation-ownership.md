@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T01:27:48Z:1347fcddda69e314898c65a8914313edcc8fa285744114c4debd54a96c17f59b:aFyBU3DXD/jFA2KiTfq4byrtn7WqjlJ4QNbwAS1NYDk7U8/hgfFyUAC24MaukwGE7exmqXmJfs/B5E7EHVjrDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:27:19Z:7a8d6797dc09590b66315efa6d73b862cb2918b378ca1317c0df1388c980ec7f:TWHkLzYCEBFGZCyTEuvEQxF/5quHwslCanEfrH9I+7caFXZPZfgX/rBOMSH03XKLZR/3czKKXBfyIvikAk8lDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
-version: "1.7.0"
+version: "1.8.0"
 description: Canonical owners, external entry boundaries and completion gates for repository operations.
 ---
 
@@ -118,8 +118,12 @@ their tests. The rule:
   in the tracked tree.
 - Reusable development tooling goes in the repository-root `.ai` development
   bundle under `.ai/tools/ryeos/development/`: an admitted operation as a
-  Tool with its `ryeos-tool` header, a host-run helper as signed source in a
-  `lib/` directory (which Tool resolution excludes).
+  Tool with its `ryeos-tool` header. A helper that needs the host itself is
+  signed source in a `lib/` directory (which Tool resolution excludes) with a
+  thin Tool entry beside it that declares `host_authority: required` and runs
+  only under an operator `host_access` grant. Interactive and pre-node entries
+  (`sign-dev.sh`, `dev-tui.sh`, `dev-ui-assets.sh`) stay external `lib/`
+  scripts.
 - Tests live beside their subject: `bundles/<bundle>/tests/`,
   `tests/development/`, or the matching `tests/e2e/` family.
 

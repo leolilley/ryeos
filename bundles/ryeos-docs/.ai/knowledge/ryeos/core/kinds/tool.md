@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-08-18T22:04:49Z:3de8593f896fe0a3ac0777a3ac149239261e441965602689cd187ac4f7e5aec7:SiSaPufwEwrv9p0vtpFEH1/6BVuauJPTbPRchBy+u30s/Q8gabSejvIHp5Btmva5QvFrJvZMkJNennkyQQROBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:27:19Z:73b5fadc32bb8ded8012d4ed33c66498c72ce7d1870261b76b287c2e3da18141:mO4uscuv6v9AJ/dagJHJNXpcmWvRiseG4ZIXwag/puWzEw5RGuQ3tpNSiEydHD/tZc1P1mUqTnJSHbyj2/ZjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
-version: "1.1.0"
+version: "1.2.0"
 description: Tool kind reference.
 ---
 
@@ -47,6 +47,18 @@ resource operations. Exact-thread and chain-local lifecycle methods still use
 their documented token/access class. A schema that deliberately selects the
 separate `opaque` protocol gets the same terminal I/O shape without callback
 credentials or daemon-socket access.
+
+## Host authority
+
+A tool may declare `host_authority: required`: it asks to run on the host,
+unconfined, as the daemon user. The kind projects it like `network_authority`
+and freezes it into the plan as `execution_posture`. Declaring it grants
+nothing: the node lane, an exact operator grant and the configured local
+operator decide. Such a tool must use `protocol:ryeos/core/opaque`, run
+`live`, and author none of `network_authority`, `filesystem_authority`,
+`workspace_access`, `execution_endpoint`, `supported_target`,
+`resource_authority`, `project_lane` or external content. See
+`ryeos/core/node/host-access`.
 
 ## Runtime secrets and config
 

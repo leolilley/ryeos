@@ -1,21 +1,48 @@
-<!-- ryeos:signed:2026-11-12T23:59:42Z:392a5bee98107fdf07d3e2ad688869ad25d6b367fc363986a62e815138341021:+t2K03yocJSmVPppUU5DPiZFZWAifvV4HosUoXV9ab/8MqwhI6n+lW9ciMv+Zgh7pk768wEyWsGosiUvWAw0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:27:19Z:2b4a67e2482b4be85ff26d380c9dec62bf954532bf1214cce035545345497b27:I1R5xShC5ASh6k0FX1z175mbpRR6Vpav9RxNqGH1wp1EVaSyiKN1BTgUGiKiI1rwLwVIBcHd3GT7y/UMF8jRDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "dev-host-tools"
 title: "Development Host Tools"
-description: "Externally invoked host tools for guarded builds, daemon feature checks, init smokes and dev-node drift"
+description: "Host tools for guarded builds, daemon feature checks, init smokes and dev-node drift: external helpers and their host-access Tool entries"
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Development Host Tools
 
-These tools run on a developer's machine, outside RyeOS. They read host
-processes, disks, installed binaries and app roots, so they are externally
-invoked auxiliary implementations (like `stage0-platform-production/lib/bootstrap.py`),
-not admitted Tools: no `# ryeos-tool:` header, no worker grant, no RyeOS
-authority. Source lives under `.ai/tools/ryeos/development/<tool>/lib/`, the
-shared helper under `dev-host/lib/`, tests in `tests/development/dev_host_tools.py`.
+These tools read host processes, disks, installed binaries and app roots. Each
+helper's implementation is signed source under
+`.ai/tools/ryeos/development/<tool>/lib/` (which Tool resolution excludes),
+with the shared helper under `dev-host/lib/` and tests in
+`tests/development/dev_host_tools.py`. A helper runs two ways:
+
+- **Externally**, before a node exists or on any machine: `python3 <lib file>`
+  as below. That is external evidence, not admitted execution, and grants no
+  RyeOS authority.
+- **As a Tool under the node.** A thin entry beside each helper
+  (`<tool>/run.py`, or `build-support-inputs/execute.py` and
+  `contained-oci-provider/container.py`) declares `host_authority: required`.
+  It runs on the host, unconfined, only under an exact operator grant (`ryeos
+  node host-access grant`), on a lane that offers host access (the
+  `development` profile's local lanes), when the configured local operator
+  runs it. The entry maps a schema-validated request and the Tool's resolved
+  Config onto the helper's arguments through `dev-host/lib/node_entry.py`; it
+  passes an absolute `worktree` parameter, because the node runs the entry from
+  its retained source closure, not the checkout. See
+  `ryeos/core/node/host-access` in the ryeos-docs bundle.
+
+Three checks need no host access and are ordinary sandboxed Tools:
+`build-support-inputs/plan` (the dry run), `contained-oci-provider/report`
+and `render-provider-shape-check/run` (its key through `required_secrets`).
+They read the project at the runtime's project path, so run them under a
+pinned project policy. `maintainer/lib/sign-dev.sh`,
+`interactive-host/lib/dev-tui.sh` and `interactive-host/lib/dev-ui-assets.sh`
+stay external: the first would hand a node child the publisher key, and the
+interactive pair needs the operator's terminal or display.
+
+A grant pins the exact bytes of the entry's source closure, which for these
+Python Tools is the whole `.ai/tools/ryeos/` tree: any edit there needs a
+re-grant (`ryeos node host-access list --project <worktree>` shows which).
 
 Site values come from signed Configs under `.ai/config/development/ryeos/`.
 The committed ones hold portable defaults. Keep a site copy outside the repo

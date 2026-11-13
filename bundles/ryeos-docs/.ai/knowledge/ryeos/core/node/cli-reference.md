@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T01:27:14Z:d1abb2d2244de7dd963a0d92d218bb6ec96b437f7246f0161101ab0450ba4516:vnIZa5StHQTV99nXi81v33aJYCLBuisc7eqOZLidYVvTb2QTtnbp63rTWfjvLuzILv9GTQxHlIDnIkJtZWVlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:27:19Z:1f6c23b4fd051d77eec075d48f585078a3eb878eb8533ca8e390529bda2ee7f6:7UAS+ppeBw7Y0Xck15jsgYEV7QrKkQYxKnDIXtF/iWxGLxbU3jAGLjK2dksCLKUAxgxUwCTeuTYk7iYKY14IDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.5.3"
+version: "3.6.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -285,6 +285,25 @@ incarnation debit is outstanding, or the account's image does not fit the new
 policy, the cut refuses with nothing changed; settle the account with
 `ryeos node capacity reissue --reason "..."` and rerun it. A rerun after a
 crash converges on the same amendment.
+
+### `ryeos node host-access grant|revoke|list`
+
+```bash
+ryeos node host-access grant <item_ref> --project <dir> [--id <id>] \
+  [--origin direct|graph_child|schedule]... [--env <NAME>]... \
+  [--containment scope_required|group_allowed] [--app-root <dir>] [--json]
+ryeos node host-access revoke <id> [--app-root <dir>] [--json]
+ryeos node host-access list [--project <dir>] [--app-root <dir>] [--json]
+```
+
+The operator's grants of host-direct execution, in the `host_access`
+node-policy section. `grant` resolves the item in the project, computes its
+signer, source-closure and runtime digests, and installs the edited section
+through the operator-signed `node.policy-apply`; re-running it replaces the
+grant for that item. `revoke` removes one grant. `list --project` reports each
+grant as `current` or `stale` against the item's bytes there. The node must be
+stopped; grants take effect at the next start. A granted item runs on the host
+with the operator's authority: see `ryeos/core/node/host-access`.
 
 ### `ryeos node external-execution compose`
 
