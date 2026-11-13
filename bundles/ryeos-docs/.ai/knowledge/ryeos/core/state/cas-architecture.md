@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:19:00Z:61c768e8f7034fbbeeb48cbde63c94d31894d16592a582f87a642647662cdf7b:z12Qoi6JsCQZ0JWfFH89X5SKi/PpXjuK3jRzncFKaQQW6DrVbscpNgf3TSaMkxkIFKvf6y2x4Rnz9zAc9PN2BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:48:41Z:dea90e2c53c5aa062a5c685c92a9ebbfd4c16d57b1cc2c884e110cee73c3c50f:qrOg+nKD6+Q4b52uLO5pGOmDMkYlC+ztJgXzXQyu7ZBJUXYxUuds7B7vC/AEaM0Gc8toiry6+uzGSEb0SDfABw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -246,6 +246,28 @@ ordinary content manifest; files above the small-content ceiling use the existin
 verified large-store ingest and chunk commitments. Producer/snapshot provenance
 changes acquisition identity, not the resulting payload manifest. Current node
 capture exclusions and all selected-tier limits still apply.
+
+### Large-object scrub and quarantine
+
+Launch verifies a large object's manifest commitment, residency and identity,
+never its bytes; `ryeos external-content scrub` is where bytes are re-hashed.
+An object whose bytes no longer hash to the name it was published under is
+moved, with its sidecar, from the served namespace into the store's
+`quarantine/` directory, and the scrub response lists it under
+`objects_quarantined`. Executions that already hold it keep their descriptors;
+every later launch that needs it is refused with `large_object_quarantined`,
+naming the cure. Re-importing the original bytes (or pushing the product
+again) publishes a clean copy under the same hash; materialized generations
+built on the damaged inode are rebuilt on next use. A chunk or size mismatch
+beside a matching whole-file hash is sidecar damage, and an unreadable object
+may be a transient fault: both are reported and left in place. Quarantined
+copies are evidence. They count against the large-object budget but are never
+eviction candidates, and nothing removes them except an operator purge on the
+stopped node:
+
+```
+ryeos node large-objects purge-quarantine [--dry-run | --confirm]
+```
 
 ### Named producer products
 

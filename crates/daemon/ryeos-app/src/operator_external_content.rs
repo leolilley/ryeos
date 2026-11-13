@@ -254,6 +254,10 @@ pub struct ScrubResponse {
     pub objects_verified: usize,
     pub bytes_verified: u64,
     pub object_findings: Vec<ryeos_state::LargeObjectIntegrityFinding>,
+    /// Byte-damaged objects this scrub moved into quarantine. Each active
+    /// binding that needs one now appears in `binding_findings` as refused
+    /// for quarantine until its bytes are re-imported.
+    pub objects_quarantined: Vec<String>,
     pub bindings_verified: usize,
     pub binding_findings: Vec<BindingIntegrityFinding>,
     pub abandoned_staging_removed: usize,
@@ -1247,10 +1251,36 @@ pub async fn scrub(state: Arc<AppState>, context: HandlerContext) -> anyhow::Res
         objects_verified: report.objects_verified,
         bytes_verified: report.bytes_verified,
         object_findings: report.findings,
+        objects_quarantined: report.quarantined,
         bindings_verified,
         binding_findings,
         abandoned_staging_removed,
     })
+}
+
+/// Explicit stopped-node discard of the large-object quarantine scrub fills.
+/// The caller holds the node StateLock; this pins and locks the runtime
+/// namespace for the whole purge, so no daemon or other maintainer can
+/// lease, scrub or ingest meanwhile. `dry_run` only counts. A node that has
+/// never created the store purges nothing.
+pub fn purge_quarantined_large_objects(
+    config: &ryeos_node_runtime::config::Config,
+    _state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    dry_run: bool,
+) -> anyhow::Result<ryeos_state::LargeObjectQuarantinePurgeReport> {
+    let runtime_dir = config.runtime_state_dir();
+    let runtime = lillux::PinnedDirectory::open(&runtime_dir)?
+        .with_context(|| format!("runtime state is absent: {}", runtime_dir.display()))?;
+    let _namespace = runtime
+        .lock_exclusive()
+        .context("lock runtime state namespace for large-object quarantine purge")?;
+    match ryeos_state::LargeObjectStore::open_under(&runtime)? {
+        Some(store) => store.purge_quarantine(dry_run),
+        None => Ok(ryeos_state::LargeObjectQuarantinePurgeReport {
+            dry_run,
+            ..Default::default()
+        }),
+    }
 }
 
 pub async fn release(

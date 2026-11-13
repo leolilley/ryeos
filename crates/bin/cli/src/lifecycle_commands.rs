@@ -19,6 +19,7 @@
 //!   - `ryeos node reset execution-history-scratch` — clear stranded reset scratch
 //!   - `ryeos node reset replay-indexes` — explicit clean-cut replay activation
 //!   - `ryeos node reset external-content-bindings` — retire realization bindings
+//!   - `ryeos node large-objects purge-quarantine` — discard large objects scrub quarantined
 //!   - `ryeos node reset authorization` — retire grants and restore the operator
 //!   - `ryeos node reset policy-generation` — explicit node-policy schema cut
 //!   - `ryeos node policy-apply` — replace one member of the complete signed policy generation
@@ -196,6 +197,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "reset", "external-content-bindings"],
         summary: "Discard predecessor external-content bindings",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "large-objects", "purge-quarantine"],
+        summary: "Discard the damaged large objects scrub quarantined",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -386,6 +392,13 @@ pub async fn try_dispatch(
             if argv.get(2).map(String::as_str) == Some("external-content-bindings") =>
         {
             run_node_external_content_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("large-objects"))
+            if argv.get(2).map(String::as_str) == Some("purge-quarantine") =>
+        {
+            run_node_large_object_quarantine_purge_command(&argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
@@ -918,6 +931,93 @@ fn run_node_external_content_reset_command(
     } else {
         console.text(&format!(
             "External-content binding cutover complete: retired {bindings} binding head(s).\nAll required realizations must be imported and rebound before launch.\n"
+        ))?;
+    }
+    Ok(())
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node large-objects purge-quarantine",
+    about = "Discard the damaged large objects scrub quarantined",
+    long_about = "Remove every large object, and its sidecar, that `external-content scrub` moved into quarantine because its bytes no longer matched their hash. The daemon must be stopped. Quarantined copies are kept as evidence and count against the large-object budget until this is run; nothing else removes them. Served objects, bindings and staging are untouched. --dry-run only counts.",
+    no_binary_name = true
+)]
+struct NodeLargeObjectQuarantinePurgeArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Count the quarantined objects without removing them.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Required acknowledgement that the quarantined evidence is discarded.
+    #[arg(long)]
+    confirm: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_large_object_quarantine_purge_command(
+    argv: &[String],
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeLargeObjectQuarantinePurgeArgs>(argv, console)?
+    else {
+        return Ok(());
+    };
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("purging the large-object quarantine requires --confirm");
+    }
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let report = if args.dry_run {
+        // A preview changes nothing, so it is not an operation: it only needs
+        // the existing lock held read-only to prove the daemon is stopped.
+        let config =
+            ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
+                app_root: Some(app_root.clone()),
+                ..Default::default()
+            })
+            .context("load local node configuration for large-object quarantine purge")?;
+        let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire_existing_read_only(
+            &ryeos_node_runtime::state_lock::default_lock_path(&config.app_root),
+        )
+        .context("large-object quarantine purge requires the daemon to be stopped")?;
+        serde_json::to_value(
+            ryeos_app::operator_external_content::purge_quarantined_large_objects(
+                &config,
+                &state_lock,
+                true,
+            )
+            .context("inspect the large-object quarantine")?,
+        )?
+    } else {
+        let host = crate::offline_apply::CliHost::new();
+        host.apply(
+            &app_root,
+            "node.large-objects.purge-quarantine",
+            serde_json::json!({}),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )?
+        .result
+    };
+    if args.json {
+        crate::tty::write_json(&report)?;
+        return Ok(());
+    }
+    let objects = report["objects"].as_u64().unwrap_or_default();
+    let bytes = report["bytes"].as_u64().unwrap_or_default();
+    if args.dry_run {
+        console.text(&format!(
+            "Large-object quarantine preview: {objects} damaged object(s), {bytes} byte(s) would be removed.\n"
+        ))?;
+    } else {
+        console.text(&format!(
+            "Large-object quarantine purged: removed {objects} damaged object(s), {bytes} byte(s).\n"
         ))?;
     }
     Ok(())

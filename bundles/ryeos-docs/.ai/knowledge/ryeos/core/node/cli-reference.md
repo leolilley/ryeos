@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:27:14Z:d1abb2d2244de7dd963a0d92d218bb6ec96b437f7246f0161101ab0450ba4516:vnIZa5StHQTV99nXi81v33aJYCLBuisc7eqOZLidYVvTb2QTtnbp63rTWfjvLuzILv9GTQxHlIDnIkJtZWVlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:48:41Z:d5017d50043bbb8f72e630729bbd62b96c663b9058f57036c4013a9820088db8:Ls/xmglDYCQq2FqAFsREZZANXG2jZ+t1cgDvWyBZgNPn6Jw/5QxinsvkbOY6FkIPbfXskDI9uc23HPogL45xDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -250,6 +250,14 @@ ryeos node reset policy-generation --node-profile <name> --host-class <class> --
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
 shortcut, and none broadens into another reset scope implicitly.
+
+Large objects that `ryeos external-content scrub` quarantined for byte damage
+stay on disk as evidence, counted against the large-object budget, until an
+operator discards them with the daemon stopped:
+
+```bash
+ryeos node large-objects purge-quarantine [--dry-run | --confirm]
+```
 
 `policy-generation` is the clean-cut path for a node whose complete signed
 policy generation predates the current registered section set. It verifies a

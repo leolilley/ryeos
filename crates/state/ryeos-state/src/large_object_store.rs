@@ -10,7 +10,11 @@
 //! objects are untouchable, everything else leaves oldest-recency first
 //! when the budget says so. Verification is an ingest/scrub fact, not a
 //! per-read fact — an mmap has no read-through hook, which is exactly why
-//! scrub exists.
+//! scrub exists. Scrub takes an object whose bytes no longer hash to its
+//! name out of service by moving it into `quarantine/`: launches then
+//! refuse it by name, a re-ingest of the right bytes publishes a clean copy,
+//! and the damaged copy stays as evidence (counted against the budget, never
+//! evicted) until an operator purges it with the node stopped.
 //!
 //! This store is policy-blind: it does not know what a manifest is. Callers
 //! hand it the reachable root set; the manifest objects that define
@@ -22,7 +26,7 @@ use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
-use anyhow::bail;
+use anyhow::{Context as _, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -40,6 +44,10 @@ const SIDECARS_DIR: &str = "sidecars";
 const STAGING_DIR: &str = ".staging";
 const LOCKS_DIR: &str = ".locks";
 const LEASES_DIR: &str = ".leases";
+const QUARANTINE_DIR: &str = "quarantine";
+/// Damaged copies of one hash the quarantine keeps before scrub refuses to
+/// quarantine it again; an operator purge empties it.
+const MAX_QUARANTINED_COPIES: u32 = 64;
 const INGEST_IO_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 /// Chunk trail published beside each large object so a scrub can verify
@@ -152,11 +160,14 @@ impl LeasedLargeObject {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LargeObjectSweepReport {
     pub inspected_objects: usize,
+    /// Includes `quarantined_bytes`: quarantined evidence counts against the
+    /// budget but is never an eviction candidate.
     pub total_bytes_before: u64,
     pub total_bytes_after: u64,
     pub evicted: Vec<(String, u64)>,
     pub retained_roots: usize,
     pub retained_leased: usize,
+    pub quarantined_bytes: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -204,14 +215,60 @@ pub enum LargeObjectIntegrityFinding {
     },
 }
 
+impl LargeObjectIntegrityFinding {
+    /// The object's bytes no longer hash to the name they were published
+    /// under. Only this is proof of byte damage: a chunk or size mismatch
+    /// beside a matching whole-file hash means the sidecar is what is wrong,
+    /// and an unreadable object may be a transient I/O fault.
+    pub fn is_byte_damage(&self) -> bool {
+        matches!(self, Self::FileHashMismatch { .. })
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LargeObjectScrubReport {
     pub objects_verified: usize,
     pub bytes_verified: u64,
     pub findings: Vec<LargeObjectIntegrityFinding>,
+    /// Hashes whose byte-damaged object (and sidecar) this scrub moved into
+    /// quarantine.
+    pub quarantined: Vec<String>,
 }
 
+/// What an operator purge of the quarantine removed, or would remove.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct LargeObjectQuarantinePurgeReport {
+    pub dry_run: bool,
+    pub objects: usize,
+    pub bytes: u64,
+    pub sidecars: usize,
+}
+
+/// A launch, lease or residency check named a large object that scrub took
+/// out of service. The cure is an operator act, so the refusal is typed and
+/// names it rather than failing as an internal error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LargeObjectQuarantined {
+    pub file_sha256: String,
+}
+
+impl std::fmt::Display for LargeObjectQuarantined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "large object {} is quarantined: scrub found its bytes no longer match their hash. \
+             Re-import the realization's original bytes (`ryeos external-content import`, or push \
+             the product again) to publish a clean copy; the damaged copy is kept as evidence until \
+             `ryeos node large-objects purge-quarantine --confirm` on the stopped node",
+            self.file_sha256
+        )
+    }
+}
+
+impl std::error::Error for LargeObjectQuarantined {}
+
 pub struct LargeObjectStore {
+    root: lillux::PinnedDirectory,
     objects: lillux::PinnedDirectory,
     sidecars: lillux::PinnedDirectory,
     staging: lillux::PinnedDirectory,
@@ -239,6 +296,7 @@ impl LargeObjectStore {
             locks: open(LOCKS_DIR)?,
             leases: open(LEASES_DIR)?,
             chunk_bytes: LARGE_CONTENT_CHUNK_BYTES,
+            root,
         }))
     }
 
@@ -268,6 +326,7 @@ impl LargeObjectStore {
             locks: root.open_or_create_child(OsStr::new(LOCKS_DIR), 0o700)?,
             leases: root.open_or_create_child(OsStr::new(LEASES_DIR), 0o700)?,
             chunk_bytes,
+            root,
         })
     }
 
@@ -293,7 +352,65 @@ impl LargeObjectStore {
                 .checked_add(file.metadata()?.len())
                 .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))?;
         }
+        total
+            .checked_add(self.quarantined_bytes()?)
+            .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))
+    }
+
+    /// Bytes held as quarantined evidence. They are part of
+    /// `total_stored_bytes` and of a sweep's total, but never a candidate.
+    pub fn quarantined_bytes(&self) -> anyhow::Result<u64> {
+        let Some(quarantine) = self.quarantine_child(OBJECTS_DIR)? else {
+            return Ok(0);
+        };
+        let mut total = 0_u64;
+        for entry in quarantine.entries_no_follow()? {
+            if entry.entry_type != lillux::PinnedEntryType::Regular {
+                bail!("large-object quarantine contains a non-regular entry");
+            }
+            let Some(file) = quarantine.open_regular(&entry.name, false)? else {
+                continue;
+            };
+            total = total
+                .checked_add(file.metadata()?.len())
+                .ok_or_else(|| anyhow::anyhow!("large-object quarantine byte count overflow"))?;
+        }
         Ok(total)
+    }
+
+    /// Whether scrub has quarantined a damaged copy of this hash. The clean
+    /// copy a re-ingest publishes is served regardless; this only names why
+    /// an absent object is absent.
+    pub fn is_quarantined(&self, file_sha256: &str) -> anyhow::Result<bool> {
+        require_store_hash(file_sha256)?;
+        let Some(quarantine) = self.quarantine_child(OBJECTS_DIR)? else {
+            return Ok(false);
+        };
+        Ok(quarantine
+            .entry_no_follow(OsStr::new(file_sha256))?
+            .is_some())
+    }
+
+    /// The refusal for an object that is not in the store: typed when scrub
+    /// quarantined it, so the caller can name the cure.
+    fn absent_object_error(&self, file_sha256: &str) -> anyhow::Error {
+        match self.is_quarantined(file_sha256) {
+            Ok(true) => LargeObjectQuarantined {
+                file_sha256: file_sha256.to_owned(),
+            }
+            .into(),
+            Ok(false) => anyhow::anyhow!("large object {file_sha256} is absent"),
+            Err(error) => error.context(format!(
+                "large object {file_sha256} is absent and its quarantine is unreadable"
+            )),
+        }
+    }
+
+    fn quarantine_child(&self, name: &str) -> anyhow::Result<Option<lillux::PinnedDirectory>> {
+        let Some(quarantine) = self.root.open_child_directory(OsStr::new(QUARANTINE_DIR))? else {
+            return Ok(None);
+        };
+        quarantine.open_child_directory(OsStr::new(name))
     }
 
     /// Bytes held by in-flight upload staging files. Budget admission counts
@@ -353,9 +470,9 @@ impl LargeObjectStore {
         file_sha256: &str,
         expected_size: u64,
     ) -> anyhow::Result<LargeObjectSidecar> {
-        let size = self
-            .object_size(file_sha256)?
-            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} is absent"))?;
+        let Some(size) = self.object_size(file_sha256)? else {
+            return Err(self.absent_object_error(file_sha256));
+        };
         if size != expected_size {
             bail!("large object {file_sha256} is {size} bytes; expected {expected_size}");
         }
@@ -885,8 +1002,10 @@ impl LargeObjectStore {
         file_sha256: &str,
         expected_size: u64,
     ) -> anyhow::Result<LeasedLargeObject> {
-        self.try_lease_object(file_sha256, expected_size)?
-            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} is not in the store"))
+        match self.try_lease_object(file_sha256, expected_size)? {
+            Some(leased) => Ok(leased),
+            None => Err(self.absent_object_error(file_sha256)),
+        }
     }
 
     /// Like `lease_object`, but an object that is absent, or evicted while the
@@ -1005,6 +1124,10 @@ impl LargeObjectStore {
                 .and_then(|metadata| metadata.modified().ok());
             candidates.push((name, bytes, recency));
         }
+        report.quarantined_bytes = self.quarantined_bytes()?;
+        report.total_bytes_before = report
+            .total_bytes_before
+            .saturating_add(report.quarantined_bytes);
         report.total_bytes_after = report.total_bytes_before;
         if report.total_bytes_before <= budget_bytes {
             return Ok(report);
@@ -1117,7 +1240,11 @@ impl LargeObjectStore {
 
     /// Re-derive every stored object's chunk trail and whole-file hash,
     /// streaming, one chunk in memory. Holds each object's shared lease for
-    /// the duration of its scrub so eviction cannot yank bytes mid-read.
+    /// the duration of its scrub so eviction cannot yank bytes mid-read. An
+    /// object whose bytes no longer hash to its name is moved, with its
+    /// sidecar, into quarantine while that lease is still held: holders keep
+    /// their descriptors, and every later lease or residency check finds it
+    /// absent and refuses it as quarantined.
     pub fn scrub_all(&self) -> anyhow::Result<LargeObjectScrubReport> {
         let mut report = LargeObjectScrubReport::default();
         for entry in self.objects.entries_no_follow()? {
@@ -1135,23 +1262,32 @@ impl LargeObjectStore {
                     });
                 continue;
             };
-            let findings = self.scrub_object(&name)?;
-            if findings.is_empty() {
+            let scrubbed = self.scrub_leased(&name, true)?;
+            if scrubbed.quarantined {
+                report.quarantined.push(name.clone());
+            }
+            if scrubbed.findings.is_empty() {
                 report.objects_verified += 1;
                 if let Ok(Some(size)) = self.object_size(&name) {
                     report.bytes_verified = report.bytes_verified.saturating_add(size);
                 }
             } else {
-                report.findings.extend(findings);
+                report.findings.extend(scrubbed.findings);
             }
         }
         Ok(report)
     }
 
+    /// Verify one object and report what is wrong with it. This never moves
+    /// anything: import-time payload checks use it as a pure inspection.
     pub fn scrub_object(
         &self,
         file_sha256: &str,
     ) -> anyhow::Result<Vec<LargeObjectIntegrityFinding>> {
+        Ok(self.scrub_leased(file_sha256, false)?.findings)
+    }
+
+    fn scrub_leased(&self, file_sha256: &str, quarantine: bool) -> anyhow::Result<ScrubbedObject> {
         require_store_hash(file_sha256)?;
         let mut findings = Vec::new();
         let lease = open_registered_lock(|| {
@@ -1160,10 +1296,13 @@ impl LargeObjectStore {
         })?;
         flock_shared_blocking(&lease)?;
         let Some(mut object) = self.objects.open_regular(OsStr::new(file_sha256), false)? else {
-            return Ok(vec![LargeObjectIntegrityFinding::UnreadableObject {
-                file_sha256: file_sha256.to_string(),
-                error: "absent while leased for scrub".to_string(),
-            }]);
+            return Ok(ScrubbedObject {
+                findings: vec![LargeObjectIntegrityFinding::UnreadableObject {
+                    file_sha256: file_sha256.to_string(),
+                    error: "absent while leased for scrub".to_string(),
+                }],
+                quarantined: false,
+            });
         };
         let sidecar = match self.sidecar(file_sha256) {
             Ok(Some(sidecar)) => Some(sidecar),
@@ -1208,7 +1347,10 @@ impl LargeObjectStore {
                         file_sha256: file_sha256.to_string(),
                         error: error.to_string(),
                     });
-                    return Ok(findings);
+                    return Ok(ScrubbedObject {
+                        findings,
+                        quarantined: false,
+                    });
                 }
             };
             if read == 0 {
@@ -1245,7 +1387,145 @@ impl LargeObjectStore {
                 });
             }
         }
-        Ok(findings)
+        let quarantined = quarantine
+            && findings
+                .iter()
+                .any(LargeObjectIntegrityFinding::is_byte_damage)
+            && self.quarantine_object(file_sha256, &object)?;
+        drop(lease);
+        Ok(ScrubbedObject {
+            findings,
+            quarantined,
+        })
+    }
+
+    /// Move a byte-damaged object, then its sidecar, out of the served
+    /// namespaces into quarantine under the first free copy name. The object
+    /// moves first: from that instant no lease can bind it. Returns false
+    /// when the name no longer holds the scrubbed inode.
+    fn quarantine_object(&self, file_sha256: &str, object: &fs::File) -> anyhow::Result<bool> {
+        let name = OsStr::new(file_sha256);
+        match self.objects.open_regular(name, false)? {
+            Some(current) if same_inode(&current, object)? => {}
+            _ => return Ok(false),
+        }
+        let quarantine = self
+            .root
+            .open_or_create_child(OsStr::new(QUARANTINE_DIR), 0o700)?;
+        let quarantined_objects =
+            quarantine.open_or_create_child(OsStr::new(OBJECTS_DIR), 0o700)?;
+        let quarantined_sidecars =
+            quarantine.open_or_create_child(OsStr::new(SIDECARS_DIR), 0o700)?;
+        let copy = free_quarantine_name(&quarantined_objects, file_sha256)?;
+        quarantined_objects
+            .rename_regular_from_atomic(OsStr::new(&copy), &self.objects, name, object)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("quarantining large object {file_sha256}"))?;
+        self.objects.sync()?;
+        quarantined_objects.sync()?;
+        if let Some(sidecar) = self.sidecars.open_regular(name, false)? {
+            quarantined_sidecars
+                .rename_regular_from_atomic(OsStr::new(&copy), &self.sidecars, name, &sidecar)
+                .map_err(anyhow::Error::from)
+                .with_context(|| {
+                    format!("quarantining the sidecar of large object {file_sha256}")
+                })?;
+            self.sidecars.sync()?;
+            quarantined_sidecars.sync()?;
+        }
+        quarantine.sync()?;
+        Ok(true)
+    }
+
+    /// Remove (or, for `dry_run`, count) every quarantined copy and sidecar.
+    /// This is the operator's explicit discard of scrub evidence, run with
+    /// the node stopped; nothing else ever deletes from quarantine. An entry
+    /// the store did not write refuses the purge rather than being removed.
+    pub fn purge_quarantine(
+        &self,
+        dry_run: bool,
+    ) -> anyhow::Result<LargeObjectQuarantinePurgeReport> {
+        let mut report = LargeObjectQuarantinePurgeReport {
+            dry_run,
+            ..LargeObjectQuarantinePurgeReport::default()
+        };
+        for (child, is_objects) in [(OBJECTS_DIR, true), (SIDECARS_DIR, false)] {
+            let Some(directory) = self.quarantine_child(child)? else {
+                continue;
+            };
+            for entry in directory.entries_no_follow()? {
+                if entry.entry_type != lillux::PinnedEntryType::Regular {
+                    bail!(
+                        "large-object quarantine {child} holds a non-regular entry {}; remove it by hand",
+                        escaped_entry_name(&entry.name)
+                    );
+                }
+                let Some(file) = directory.open_regular(&entry.name, false)? else {
+                    continue;
+                };
+                let bytes = file.metadata()?.len();
+                if !dry_run {
+                    directory.remove_if_same(&entry.name, &file)?;
+                }
+                if is_objects {
+                    report.objects = report.objects.saturating_add(1);
+                    report.bytes = report.bytes.saturating_add(bytes);
+                } else {
+                    report.sidecars = report.sidecars.saturating_add(1);
+                }
+            }
+            if !dry_run {
+                directory.sync()?;
+            }
+        }
+        Ok(report)
+    }
+}
+
+struct ScrubbedObject {
+    findings: Vec<LargeObjectIntegrityFinding>,
+    quarantined: bool,
+}
+
+/// The first copy name under which `file_sha256` is not yet quarantined: the
+/// bare hash, then `<hash>.<n>`. Evidence is never overwritten.
+fn free_quarantine_name(
+    quarantined_objects: &lillux::PinnedDirectory,
+    file_sha256: &str,
+) -> anyhow::Result<String> {
+    if quarantined_objects
+        .entry_no_follow(OsStr::new(file_sha256))?
+        .is_none()
+    {
+        return Ok(file_sha256.to_owned());
+    }
+    for copy in 1..=MAX_QUARANTINED_COPIES {
+        let name = format!("{file_sha256}.{copy}");
+        if quarantined_objects
+            .entry_no_follow(OsStr::new(&name))?
+            .is_none()
+        {
+            return Ok(name);
+        }
+    }
+    bail!(
+        "large-object quarantine already holds {MAX_QUARANTINED_COPIES} damaged copies of \
+         {file_sha256}; run `ryeos node large-objects purge-quarantine --confirm` on the stopped node"
+    )
+}
+
+fn same_inode(left: &fs::File, right: &fs::File) -> anyhow::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let left = left.metadata()?;
+        let right = right.metadata()?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (left, right);
+        bail!("large-object inode identity is unavailable on this platform")
     }
 }
 
@@ -1711,6 +1991,293 @@ mod tests {
                 ("sub", "directory"),
             ]
         );
+    }
+
+    /// Flip one byte of a published object in place, as disk rot or a
+    /// root-owned writer would; the published mode is 0444.
+    fn corrupt_object(dir: &tempfile::TempDir, file_sha256: &str, at: usize) {
+        use std::io::{Read as _, Seek as _, Write as _};
+        use std::os::unix::fs::PermissionsExt as _;
+        let object_path = dir.path().join("large-objects/objects").join(file_sha256);
+        let mut permissions = fs::metadata(&object_path).unwrap().permissions();
+        permissions.set_mode(0o644);
+        fs::set_permissions(&object_path, permissions).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&object_path)
+            .unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        bytes[at] ^= 0xff;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    #[test]
+    fn scrub_quarantines_a_byte_damaged_object_and_its_sidecar() {
+        let (dir, store) = store(8);
+        let bytes = vec![7u8; 24];
+        let ingested = ingest(&store, &write_source(&dir, "payload.bin", &bytes), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        corrupt_object(&dir, &hash, 9);
+
+        let report = store.scrub_all().unwrap();
+        assert_eq!(report.quarantined, vec![hash.clone()]);
+        assert_eq!(report.objects_verified, 0);
+        assert!(
+            report.findings.iter().any(|finding| matches!(
+                finding,
+                LargeObjectIntegrityFinding::FileHashMismatch { .. }
+            )),
+            "got: {:?}",
+            report.findings
+        );
+        let root = dir.path().join("large-objects");
+        assert!(!root.join("objects").join(&hash).exists());
+        assert!(!root.join("sidecars").join(&hash).exists());
+        let kept = fs::read(root.join("quarantine/objects").join(&hash)).unwrap();
+        assert_ne!(kept, bytes, "the damaged bytes are kept as evidence");
+        assert!(root.join("quarantine/sidecars").join(&hash).exists());
+        assert_eq!(store.object_size(&hash).unwrap(), None);
+        assert!(store.is_quarantined(&hash).unwrap());
+
+        // A second scrub finds nothing left to verify or move.
+        let again = store.scrub_all().unwrap();
+        assert!(again.quarantined.is_empty());
+        assert!(again.findings.is_empty());
+    }
+
+    #[test]
+    fn a_quarantined_object_refuses_typed_and_reingest_publishes_clean_bytes() {
+        let (dir, store) = store(8);
+        let bytes = pseudo_bytes(40);
+        let source = write_source(&dir, "payload.bin", &bytes);
+        let ingested = ingest(&store, &source, None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        corrupt_object(&dir, &hash, 3);
+        assert_eq!(store.scrub_all().unwrap().quarantined, vec![hash.clone()]);
+
+        for error in [
+            store.lease_object(&hash, 40).err().unwrap(),
+            store.verify_resident_object(&hash, 40).unwrap_err(),
+        ] {
+            let quarantined = error
+                .downcast_ref::<LargeObjectQuarantined>()
+                .unwrap_or_else(|| panic!("untyped refusal: {error:#}"));
+            assert_eq!(quarantined.file_sha256, hash);
+            let message = error.to_string();
+            assert!(message.contains("Re-import"), "{message}");
+            assert!(message.contains("purge-quarantine"), "{message}");
+        }
+        assert!(store.try_lease_object(&hash, 40).unwrap().is_none());
+
+        // The name is free, so the right bytes publish as new rather than
+        // deduplicating against the damaged copy.
+        let source = write_source(&dir, "payload-again.bin", &bytes);
+        let reingested = ingest(&store, &source, Some(hash.as_str())).unwrap();
+        assert!(!reingested.deduplicated);
+        assert!(store.scrub_object(&hash).unwrap().is_empty());
+        store.verify_resident_object(&hash, 40).unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("large-objects/objects").join(&hash)).unwrap(),
+            bytes
+        );
+        // The evidence stays until an operator purges it.
+        assert!(store.is_quarantined(&hash).unwrap());
+    }
+
+    #[test]
+    fn an_upload_of_a_quarantined_hash_publishes_clean_bytes() {
+        let (dir, store) = store(8);
+        let bytes = pseudo_bytes(24);
+        let (hash, expect) = expectation_for(&bytes, 8);
+        let first = feed(&store, &hash, &expect, &bytes, 8).unwrap();
+        assert!(first.complete);
+        corrupt_object(&dir, &hash, 0);
+        assert_eq!(store.scrub_all().unwrap().quarantined, vec![hash.clone()]);
+        assert_eq!(store.staged_bytes(&hash).unwrap(), 0);
+
+        let again = feed(&store, &hash, &expect, &bytes, 8).unwrap();
+        assert!(again.complete);
+        assert!(!again.deduplicated);
+        assert!(store.scrub_object(&hash).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_lease_held_across_quarantine_keeps_reading_its_inode() {
+        let (dir, store) = store(8);
+        let ingested =
+            ingest(&store, &write_source(&dir, "payload.bin", &[8u8; 24]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        use std::io::{Read as _, Seek as _};
+        let held = store.lease_object(&hash, 24).unwrap();
+        corrupt_object(&dir, &hash, 1);
+        assert_eq!(store.scrub_all().unwrap().quarantined, vec![hash.clone()]);
+        let mut file = held.file().try_clone().unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut read = Vec::new();
+        file.read_to_end(&mut read).unwrap();
+        assert_eq!(read.len(), 24);
+        assert_eq!(store.object_size(&hash).unwrap(), None);
+    }
+
+    #[test]
+    fn sidecar_damage_is_reported_not_quarantined() {
+        let (dir, store) = store(8);
+        let ingested =
+            ingest(&store, &write_source(&dir, "payload.bin", &[9u8; 24]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        fs::remove_file(dir.path().join("large-objects/sidecars").join(&hash)).unwrap();
+        let report = store.scrub_all().unwrap();
+        assert!(report.quarantined.is_empty());
+        assert!(
+            report.findings.iter().any(|finding| matches!(
+                finding,
+                LargeObjectIntegrityFinding::MissingSidecar { .. }
+            )),
+            "got: {:?}",
+            report.findings
+        );
+        assert_eq!(store.object_size(&hash).unwrap(), Some(24));
+        assert!(!store.is_quarantined(&hash).unwrap());
+        assert!(!dir.path().join("large-objects/quarantine").exists());
+    }
+
+    #[test]
+    fn scrub_object_inspects_without_quarantining() {
+        let (dir, store) = store(8);
+        let ingested = ingest(
+            &store,
+            &write_source(&dir, "payload.bin", &[10u8; 24]),
+            None,
+        )
+        .unwrap();
+        let hash = ingested.file_sha256.clone();
+        corrupt_object(&dir, &hash, 2);
+        let findings = store.scrub_object(&hash).unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(LargeObjectIntegrityFinding::is_byte_damage)
+        );
+        assert_eq!(store.object_size(&hash).unwrap(), Some(24));
+        assert!(!store.is_quarantined(&hash).unwrap());
+    }
+
+    #[test]
+    fn quarantined_bytes_count_toward_the_budget_but_are_never_evicted() {
+        let (dir, store) = store(8);
+        let damaged = ingest(
+            &store,
+            &write_source(&dir, "damaged.bin", &[11u8; 32]),
+            None,
+        )
+        .unwrap();
+        let healthy = ingest(
+            &store,
+            &write_source(&dir, "healthy.bin", &[12u8; 16]),
+            None,
+        )
+        .unwrap();
+        corrupt_object(&dir, &damaged.file_sha256, 0);
+        store.scrub_all().unwrap();
+        assert_eq!(store.quarantined_bytes().unwrap(), 32);
+        assert_eq!(store.total_stored_bytes().unwrap(), 48);
+
+        let report = store.sweep_to_budget(0, &BTreeSet::new()).unwrap();
+        assert_eq!(report.quarantined_bytes, 32);
+        assert_eq!(report.total_bytes_before, 48);
+        assert_eq!(
+            report.evicted,
+            vec![(healthy.file_sha256.clone(), 16)],
+            "only the served object is a candidate"
+        );
+        assert_eq!(report.total_bytes_after, 32);
+        assert!(store.is_quarantined(&damaged.file_sha256).unwrap());
+        assert_eq!(store.total_stored_bytes().unwrap(), 32);
+    }
+
+    #[test]
+    fn a_second_quarantine_of_the_same_hash_keeps_the_first_copy() {
+        let (dir, store) = store(8);
+        let bytes = vec![13u8; 24];
+        let hash = ingest(&store, &write_source(&dir, "one.bin", &bytes), None)
+            .unwrap()
+            .file_sha256;
+        corrupt_object(&dir, &hash, 0);
+        store.scrub_all().unwrap();
+        ingest(
+            &store,
+            &write_source(&dir, "two.bin", &bytes),
+            Some(hash.as_str()),
+        )
+        .unwrap();
+        corrupt_object(&dir, &hash, 5);
+        assert_eq!(store.scrub_all().unwrap().quarantined, vec![hash.clone()]);
+        let quarantine = dir.path().join("large-objects/quarantine/objects");
+        let first = fs::read(quarantine.join(&hash)).unwrap();
+        let second = fs::read(quarantine.join(format!("{hash}.1"))).unwrap();
+        assert_ne!(first, second);
+        assert!(
+            dir.path()
+                .join("large-objects/quarantine/sidecars")
+                .join(format!("{hash}.1"))
+                .exists()
+        );
+        assert_eq!(store.quarantined_bytes().unwrap(), 48);
+    }
+
+    #[test]
+    fn purge_quarantine_previews_then_removes_only_the_evidence() {
+        let (dir, store) = store(8);
+        let damaged = ingest(
+            &store,
+            &write_source(&dir, "damaged.bin", &[14u8; 24]),
+            None,
+        )
+        .unwrap();
+        let healthy = ingest(
+            &store,
+            &write_source(&dir, "healthy.bin", &[15u8; 16]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            store.purge_quarantine(false).unwrap(),
+            LargeObjectQuarantinePurgeReport::default()
+        );
+        corrupt_object(&dir, &damaged.file_sha256, 0);
+        store.scrub_all().unwrap();
+
+        let preview = store.purge_quarantine(true).unwrap();
+        assert_eq!(
+            preview,
+            LargeObjectQuarantinePurgeReport {
+                dry_run: true,
+                objects: 1,
+                bytes: 24,
+                sidecars: 1,
+            }
+        );
+        assert!(store.is_quarantined(&damaged.file_sha256).unwrap());
+
+        let purged = store.purge_quarantine(false).unwrap();
+        assert_eq!(purged.objects, 1);
+        assert_eq!(purged.bytes, 24);
+        assert!(!purged.dry_run);
+        assert!(!store.is_quarantined(&damaged.file_sha256).unwrap());
+        assert_eq!(store.quarantined_bytes().unwrap(), 0);
+        assert_eq!(store.object_size(&healthy.file_sha256).unwrap(), Some(16));
+        // Absent and no longer quarantined: an ordinary absence.
+        let error = store
+            .verify_resident_object(&damaged.file_sha256, 24)
+            .unwrap_err();
+        assert!(error.downcast_ref::<LargeObjectQuarantined>().is_none());
+
+        fs::create_dir(dir.path().join("large-objects/quarantine/objects/stray")).unwrap();
+        assert!(store.purge_quarantine(true).is_err());
     }
 
     #[test]
