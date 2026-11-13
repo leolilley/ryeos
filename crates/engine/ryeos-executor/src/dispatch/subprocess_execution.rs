@@ -27,7 +27,7 @@ pub(crate) fn direct_protocol_route(
         && protocol.descriptor.stdin.shape == StdinShape::Opaque
         && protocol.descriptor.stdout.shape == StdoutShape::OpaqueBytes
         && protocol.descriptor.stdout.mode == StdoutMode::Terminal
-        && protocol.descriptor.callback_channel == CallbackChannel::Http
+        && protocol.descriptor.callback_channel == CallbackChannel::RuntimeSocket
         && !protocol.descriptor.capabilities.allows_detached
         && protocol.descriptor.qualification_callback
             == Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer)

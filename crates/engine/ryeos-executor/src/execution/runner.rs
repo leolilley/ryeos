@@ -3203,7 +3203,7 @@ fn build_protocol_launch_env(
     };
     if protocol.descriptor.qualification_callback != callback_authority
         || (callback_authority.is_some()
-            && protocol.descriptor.callback_channel != CallbackChannel::Http)
+            && protocol.descriptor.callback_channel != CallbackChannel::RuntimeSocket)
     {
         bail!(
             "qualification verifier requires its signed scoped-only callback protocol and exact launch purpose"
