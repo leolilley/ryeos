@@ -1,7 +1,9 @@
 //! Thread-kind profile registry — built from kind schema declarations.
 //!
-//! Each kind schema's `execution.thread_profile` declares the thread kind
-//! name AND its lifecycle flags (interrupt, continuation, root-executable).
+//! Each kind schema's thread profile (`execution.thread_profile` on an
+//! executable kind, top-level `thread_profile` on a non-executable one whose
+//! items root daemon-owned threads) declares the thread kind name AND its
+//! lifecycle flags (interrupt, continuation, root-executable).
 //! This registry is built by scanning those declarations at boot — no
 //! hardcoded Rust profile map.
 
@@ -49,7 +51,7 @@ pub struct KindProfileRegistry {
 impl KindProfileRegistry {
     /// Build the profile registry from the loaded `KindRegistry`.
     ///
-    /// Scans every kind schema for an `execution.thread_profile` declaration
+    /// Scans every kind schema for its thread profile declaration
     /// and registers its lifecycle flags.
     ///
     /// If `kind_registry` is `None` (test fixtures, minimal boot), returns
@@ -63,10 +65,7 @@ impl KindProfileRegistry {
                 let Some(schema) = kinds.get(kind_name) else {
                     continue;
                 };
-                let Some(exec) = schema.execution() else {
-                    continue;
-                };
-                if let Some(tp) = &exec.thread_profile {
+                if let Some(tp) = schema.thread_profile() {
                     profiles.insert(tp.name.clone(), ThreadKindProfile::from(tp));
                 }
             }

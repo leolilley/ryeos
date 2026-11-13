@@ -26,6 +26,11 @@ on:
         required: true
         default: false
         type: boolean
+      browser_smoke:
+        description: "Run the installed browser client smoke in headless Chromium (expensive)"
+        required: true
+        default: false
+        type: boolean
       rust_2024_audit:
         description: "Inventory Rust 2024 compatibility diagnostics"
         required: true
@@ -147,23 +152,6 @@ jobs:
       - name: Check workspace dependency direction
         run: python3 .ai/tools/ryeos/development/repository-validation/dependency-layers.py --project-path "$PWD" --config-file .ai/config/development/ryeos/repository-validation.yaml
 
-      - name: Use the browser adapter's pinned Node
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: crates/clients/web/package.json
-          cache: npm
-          cache-dependency-path: crates/clients/web/package-lock.json
-
-      - name: Install browser adapter test dependencies
-        working-directory: crates/clients/web
-        run: |
-          npm install --global "npm@$(node -p "require('./package.json').engines.npm")"
-          npm ci
-
-      - name: Check browser key adapter
-        working-directory: crates/clients/web
-        run: npm test
-
   rust-policy:
     name: Rust formatting, lint, and dependency policy
     runs-on: ubuntu-latest
@@ -175,13 +163,14 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
@@ -203,6 +192,10 @@ jobs:
 
       - name: Check Clippy policy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # The browser renderer's page entry and the runtime's web platform compile only for wasm32.
+      - name: Check browser renderer Clippy policy
+        run: cargo clippy --locked -p ryeos-client-rune --target wasm32-unknown-unknown -- -D warnings
 
       - name: Check dependency advisories, licenses, and sources
         run: cargo deny check
@@ -271,7 +264,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -318,7 +311,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -386,7 +379,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -447,7 +440,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Show the coreutils under test
         run: |
@@ -502,7 +495,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -604,7 +597,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -680,7 +673,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -759,7 +752,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3 python3-yaml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -795,7 +788,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -821,6 +814,57 @@ jobs:
           RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
         run: ./tests/e2e/installed-resume/smoke.sh
 
+  browser-smoke:
+    name: Installed browser client smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_smoke }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl python3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build and install full distribution
+        run: |
+          CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
+            --populate --all --bundle-set full --no-init --no-daemon-restart
+
+      - name: Install headless Chromium for the smoke driver
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/playwright" @playwright/test@1.58.2
+          "$RUNNER_TEMP/playwright/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Exercise the browser client
+        env:
+          RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
+          RYEOS_SMOKE_SHOTS: ${{ runner.temp }}/browser-smoke
+          PLAYWRIGHT_ROOT: ${{ runner.temp }}/playwright
+        run: ./tests/e2e/browser-smoke/smoke.sh
+
+      - name: Keep the smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: browser-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/browser-smoke
+          if-no-files-found: ignore
+          retention-days: 14
+
   rust-2024-audit:
     name: Rust 2024 compatibility audit
     runs-on: ubuntu-latest
@@ -833,7 +877,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+          sudo apt-get install -y --no-install-recommends libcap-dev libxkbcommon-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
@@ -874,7 +918,7 @@ jobs:
           set +e
           CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
           RUSTFLAGS="-W rust-2024-compatibility" \
-            cargo check --locked -p ryeos-client-web \
+            cargo check --locked -p ryeos-client-rune -p ryeos-client-runtime \
               --target wasm32-unknown-unknown --lib --message-format=json \
               >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
               2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"

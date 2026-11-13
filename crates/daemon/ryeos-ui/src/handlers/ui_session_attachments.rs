@@ -92,7 +92,7 @@ pub async fn handle_open_surface(
     );
     let selection = super::ui_launch_mint::Request {
         ui_binding_contract_revision: crate::UI_BINDING_CONTRACT_REVISION.into(),
-        surface_ref: surface_ref.clone(),
+        root_ref: surface_ref.clone(),
         project_path: root.compiled_binding.binding.project_root.clone(),
         user_principal_id: None,
     };

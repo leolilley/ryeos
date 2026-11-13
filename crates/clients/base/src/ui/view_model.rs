@@ -9,18 +9,18 @@ use super::model::{RyeOsCore, RyeOsDockEdge};
 use super::seat::InvokeTemplate;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
-use crate::view_set::{TileState, ViewLocalState, ViewSpec};
+use crate::view_set::{TileState, ViewLocalState};
 
 mod dialogs;
 mod execution;
-mod navigation;
+mod session;
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 #[cfg(test)]
 use execution::status_tone;
 pub(crate) use execution::timeline_summary_entry;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
-pub use navigation::{RyeOsNavigationItemVm, RyeOsNavigationVm, RyeOsSessionVm};
+pub use session::RyeOsSessionVm;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsViewModel {
@@ -35,7 +35,6 @@ pub struct RyeOsViewModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_url: Option<String>,
     pub session: RyeOsSessionVm,
-    pub navigation: RyeOsNavigationVm,
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
     pub view_set: Option<RyeOsViewSetVm>,
@@ -296,6 +295,11 @@ pub enum RyeOsLayoutNodeVm {
         tabs: Vec<RyeOsViewTabVm>,
         instance_key: RyeOsViewInstanceKey,
         tile_id: String,
+        /// The set's current tile: the one a narrow page shows. It stays
+        /// current while a dock or dialog holds focus.
+        #[serde(default)]
+        current: bool,
+        /// Whether this tile holds the shared focus (at most one mount does).
         focused: bool,
         maximized: bool,
         title: String,
@@ -794,7 +798,6 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         tail_url,
         presentation: presentation_vm(core, &chrome, view_set.as_ref()),
         session,
-        navigation: navigation_vm(core),
         chrome,
         view_set,
         docks: dock_plane_vm(core),
@@ -803,36 +806,6 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         transport: transport_vm(core),
         effect_failures: effect_failures_vm(core),
     }
-}
-
-fn navigation_vm(core: &RyeOsCore) -> RyeOsNavigationVm {
-    let destination = core
-        .seat
-        .fold()
-        .get(super::seat::KEY_NAVIGATION_DESTINATION)
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let focused = core
-        .active_view_set()
-        .and_then(|set| set.tiles.get(&set.focused_tile))
-        .map(|tile| tile.view.view_ref.as_str());
-    let items = core
-        .surface_navigation()
-        .into_iter()
-        .map(|entry| {
-            let selected = destination.as_deref() == Some(entry.id.as_str())
-                || (destination.is_none() && focused == Some(entry.view.as_str()));
-            RyeOsNavigationItemVm {
-                id: entry.id,
-                label: entry.label,
-                selected,
-                intent: RyeOsUiIntent::OpenView {
-                    view: ViewSpec::bound(entry.view),
-                },
-            }
-        })
-        .collect();
-    RyeOsNavigationVm { items }
 }
 
 fn transport_vm(core: &RyeOsCore) -> RyeOsTransportVm {
@@ -2594,7 +2567,17 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                     .map(|tile| tile.instance_key.clone())
                     .expect("validated presentation layout names a mounted tile"),
                 tile_id: tile_id_text(*tile_id),
-                focused: *tile_id == view_set.focused_tile,
+                current: *tile_id == view_set.focused_tile,
+                focused: match core.focus_target() {
+                    Some(super::model::RyeOsFocusTarget::ViewSetTile { tile_id: target }) => {
+                        target == tile_id.0.to_string()
+                    }
+                    Some(super::model::RyeOsFocusTarget::MountedView { instance_key }) => view_set
+                        .tiles
+                        .get(tile_id)
+                        .is_some_and(|tile| tile.instance_key == instance_key),
+                    _ => false,
+                },
                 maximized: view_set.maximized_tile == Some(*tile_id),
                 title,
                 attachment_label: view_set
@@ -2715,7 +2698,7 @@ fn session_vm(core: &RyeOsCore) -> RyeOsSessionVm {
             .presentation
             .iter()
             .flat_map(|p| p.ordered_surfaces())
-            .map(|surface| navigation::RyeOsSurfaceChoiceVm {
+            .map(|surface| session::RyeOsSurfaceChoiceVm {
                 surface_instance_id: surface.id().clone(),
                 ordinal: surface.ordinal(),
                 title: surface.title().to_owned(),
@@ -5864,6 +5847,65 @@ mod tests {
                 core.presentation_operations.producer.is_none(),
                 "Start must actually replace the producer-bearing Core"
             );
+        }
+    }
+
+    #[test]
+    fn replace_session_result_preserves_document_host_implementation_fact() {
+        for supported in [false, true] {
+            let mut core = test_support_core(shared_session());
+            core.supports_independent_documents = supported;
+            let session = core.data.session.clone().unwrap();
+            let presentation_id = core.presentation.as_ref().unwrap().id().as_str().to_owned();
+            let membership = session
+                .presentations
+                .iter()
+                .find(|membership| membership.presentation_id == presentation_id)
+                .unwrap();
+            let thread_id = membership.thread_id.clone().unwrap();
+            let chain_root_id = membership.chain_root_id.clone().unwrap();
+            // The successor replays exactly the initialization the predecessor
+            // already holds at chain position zero.
+            let initialization = core.seat.events()[0].clone();
+            let replayed = crate::ui::seat::RetainedSeatEvent {
+                evidence: ryeos_ui_presentation_contract::transfer::TransferEvidence {
+                    event_hash: "ab".repeat(32),
+                    chain_seq: initialization.seq,
+                },
+                event: initialization,
+                thread_id,
+                chain_root_id,
+            };
+            let effect_id = 41;
+            core.pending_effects.insert(
+                effect_id,
+                crate::ui::effect::RyeOsEffectKind::ReplaceSession {
+                    session_id: session.session_id.clone(),
+                    launch_url: "/ui".into(),
+                },
+            );
+            assert!(core.seat.evidence_at_sequence(0).is_none());
+            let next_effect_id = core.next_effect_id;
+            core.dispatch(crate::ui::event::RyeOsEvent::EffectResult {
+                result: crate::ui::effect::RyeOsEffectResult {
+                    id: effect_id,
+                    ok: true,
+                    kind: crate::ui::effect::RyeOsEffectResultKind::BrowserOnly,
+                    data: Some(json!({
+                        "session": session,
+                        "presentation_id": presentation_id,
+                        "replayed": [replayed],
+                    })),
+                    error: None,
+                },
+            });
+            assert!(!core.pending_effects.contains_key(&effect_id));
+            assert!(
+                core.seat.evidence_at_sequence(0).is_some(),
+                "the successor Core must actually have been adopted"
+            );
+            assert!(core.next_effect_id >= next_effect_id);
+            assert_eq!(core.supports_independent_documents, supported);
         }
     }
 }

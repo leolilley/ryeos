@@ -2,7 +2,7 @@
 # Serve RyeOS browser UI assets directly from this checkout.
 #
 # Default mode starts a small local HTTP proxy: /ui and /ui/assets/* come from
-# crates/clients/web/pkg, while /ui/api/* and launch/session routes proxy to the
+# crates/clients/rune/pkg, while /ui/api/* and launch/session routes proxy to the
 # already-running daemon. This avoids stopping or rebuilding the active daemon.
 
 set -euo pipefail
@@ -11,7 +11,7 @@ usage() {
     cat <<'EOF'
 Usage: scripts/dev-ui-assets.sh [options]
 
-Serve RyeOS browser UI assets from crates/clients/web/pkg without touching the
+Serve RyeOS browser UI assets from crates/clients/rune/pkg without touching the
 active daemon.
 
 Options:
@@ -38,7 +38,7 @@ Examples:
   scripts/dev-ui-assets.sh --print-env
 
 After startup, open http://127.0.0.1:7411/ui, edit files under
-crates/clients/web/pkg, and refresh the browser.
+crates/clients/rune/pkg (scripts/build-rune-web.sh rebuilds it), and refresh the browser.
 EOF
 }
 
@@ -47,7 +47,7 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 # shellcheck source=scripts/lib/ryeos-terminal.sh
 source "$repo_root/scripts/lib/ryeos-terminal.sh"
 ryeos_term_init
-asset_dir="$repo_root/crates/clients/web/pkg"
+asset_dir="$repo_root/crates/clients/rune/pkg"
 port=7411
 upstream="http://127.0.0.1:7400"
 pid_file="$repo_root/.tmp/ryeos-ui-assets.pid"
@@ -286,13 +286,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 for key, value in resp.headers.items():
                     if key.lower() not in excluded:
                         self.send_header(key, value)
+                # A response without a length is a stream (the seat history):
+                # frame it as chunked and forward each piece as it arrives.
+                streamed = resp.headers.get("Content-Length") is None
+                if streamed:
+                    self.send_header("Transfer-Encoding", "chunked")
                 self.end_headers()
                 if not head_only:
                     while True:
-                        chunk = resp.read(65536)
+                        chunk = resp.read1(65536)
                         if not chunk:
                             break
-                        self.wfile.write(chunk)
+                        if streamed:
+                            self.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+                        else:
+                            self.wfile.write(chunk)
+                        self.wfile.flush()
+                    if streamed:
+                        self.wfile.write(b"0\r\n\r\n")
         except urllib.error.HTTPError as err:
             data = err.read()
             self.send_response(err.code)

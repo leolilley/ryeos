@@ -1,0 +1,724 @@
+[
+  {
+    "name": "scope changes keep cached restore candidates; only deliberate accepted edits write",
+    "input": {
+      "initial_storage": {
+        "surface-b": "b-saved"
+      },
+      "steps": [
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_key",
+          "value": "surface-a"
+        },
+        {
+          "op": "set_current",
+          "value": "a-initial"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_current",
+          "value": "a-edited"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_key",
+          "value": "surface-b"
+        },
+        {
+          "op": "set_current",
+          "value": "b-initial"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "flush"
+        },
+        {
+          "op": "fire_timers"
+        },
+        {
+          "op": "set_current",
+          "value": "b-edited"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_key",
+          "value": null
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_key",
+          "value": "surface-a"
+        },
+        {
+          "op": "set_current",
+          "value": "a-new-seed"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "flush"
+        }
+      ]
+    },
+    "expected": {
+      "steps": [
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_key",
+          "value": "surface-a",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "a-initial",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "a-edited",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": true,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "set_key",
+          "value": "surface-b",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "set_current",
+          "value": "b-initial",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 1,
+          "pending_timers": 0
+        },
+        {
+          "op": "flush",
+          "returns": false,
+          "writes_so_far": 1,
+          "pending_timers": 0
+        },
+        {
+          "op": "fire_timers",
+          "returns": null,
+          "writes_so_far": 1,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "b-edited",
+          "returns": null,
+          "writes_so_far": 1,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": true,
+          "writes_so_far": 1,
+          "pending_timers": 1
+        },
+        {
+          "op": "set_key",
+          "value": null,
+          "returns": null,
+          "writes_so_far": 1,
+          "pending_timers": 1
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 2,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_key",
+          "value": "surface-a",
+          "returns": null,
+          "writes_so_far": 2,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "a-new-seed",
+          "returns": null,
+          "writes_so_far": 2,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 2,
+          "pending_timers": 0
+        },
+        {
+          "op": "flush",
+          "returns": false,
+          "writes_so_far": 2,
+          "pending_timers": 0
+        }
+      ],
+      "final_storage": {
+        "surface-b": "b-edited",
+        "surface-a": "a-edited"
+      },
+      "writes": [
+        [
+          "surface-a",
+          "a-edited"
+        ],
+        [
+          "surface-b",
+          "b-edited"
+        ]
+      ],
+      "errors": [],
+      "timer_delays_ms": [
+        400,
+        400
+      ]
+    },
+    "provenance": "test-verbatim step order (assertions listed in test_expect); outputs computed",
+    "note": "test_expect: first observe (no key) returns false; observe after 'a-edited' returns true; after switching to surface-b the writes == [['surface-a','a-edited']] (predecessor flushed on scope change) and surface-b stays 'b-saved'; flush+timers write nothing and leave 0 timers; after 'b-edited' observe, then key cleared, writes == [['surface-a','a-edited'],['surface-b','b-edited']] and 0 timers; remount of surface-a with seed 'a-new-seed' leaves storage['surface-a']=='a-edited' even after flush"
+  },
+  {
+    "name": "accepted edit is debounced 400ms and flush writes immediately",
+    "input": {
+      "initial_storage": {},
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s"
+        },
+        {
+          "op": "set_current",
+          "value": "one"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_current",
+          "value": "two"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "flush"
+        }
+      ]
+    },
+    "expected": {
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "one",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "two",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": true,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "flush",
+          "returns": true,
+          "writes_so_far": 1,
+          "pending_timers": 0
+        }
+      ],
+      "final_storage": {
+        "s": "two"
+      },
+      "writes": [
+        [
+          "s",
+          "two"
+        ]
+      ],
+      "errors": [],
+      "timer_delays_ms": [
+        400
+      ]
+    },
+    "provenance": "derived",
+    "note": "delay default 400 ms"
+  },
+  {
+    "name": "debounce timer fires write",
+    "input": {
+      "initial_storage": {},
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s"
+        },
+        {
+          "op": "set_current",
+          "value": "one"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_current",
+          "value": "two"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "fire_timers"
+        }
+      ]
+    },
+    "expected": {
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "one",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "two",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": true,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "fire_timers",
+          "returns": null,
+          "writes_so_far": 1,
+          "pending_timers": 1
+        }
+      ],
+      "final_storage": {
+        "s": "two"
+      },
+      "writes": [
+        [
+          "s",
+          "two"
+        ]
+      ],
+      "errors": [],
+      "timer_delays_ms": [
+        400
+      ]
+    },
+    "provenance": "derived"
+  },
+  {
+    "name": "edit then revert to persisted value cancels pending write",
+    "input": {
+      "initial_storage": {
+        "s": "one"
+      },
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s"
+        },
+        {
+          "op": "set_current",
+          "value": "one"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_current",
+          "value": "two"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_current",
+          "value": "one"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "flush"
+        },
+        {
+          "op": "fire_timers"
+        }
+      ]
+    },
+    "expected": {
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "one",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "two",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": true,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "set_current",
+          "value": "one",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "flush",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "fire_timers",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        }
+      ],
+      "final_storage": {
+        "s": "one"
+      },
+      "writes": [],
+      "errors": [],
+      "timer_delays_ms": [
+        400
+      ]
+    },
+    "provenance": "derived",
+    "note": "note the initial baseline equals persisted 'one'"
+  },
+  {
+    "name": "storage failure reports error and keeps pending; later flush retries",
+    "input": {
+      "initial_storage": {},
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s"
+        },
+        {
+          "op": "set_current",
+          "value": "one"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_current",
+          "value": "two"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "flush"
+        }
+      ],
+      "options": {
+        "set_throws": true
+      }
+    },
+    "expected": {
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "one",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "two",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": true,
+          "writes_so_far": 0,
+          "pending_timers": 1
+        },
+        {
+          "op": "flush",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        }
+      ],
+      "final_storage": {},
+      "writes": [],
+      "errors": [
+        "quota"
+      ],
+      "timer_delays_ms": [
+        400
+      ]
+    },
+    "provenance": "derived"
+  },
+  {
+    "name": "readCurrent failure reports error and returns false",
+    "input": {
+      "initial_storage": {},
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s"
+        },
+        {
+          "op": "set_current",
+          "value": "one"
+        },
+        {
+          "op": "observe"
+        }
+      ],
+      "options": {
+        "current_throws": true
+      }
+    },
+    "expected": {
+      "steps": [
+        {
+          "op": "set_key",
+          "value": "s",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "one",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        }
+      ],
+      "final_storage": {},
+      "writes": [],
+      "errors": [
+        "boom"
+      ],
+      "timer_delays_ms": []
+    },
+    "provenance": "derived"
+  },
+  {
+    "name": "no key never writes",
+    "input": {
+      "initial_storage": {},
+      "steps": [
+        {
+          "op": "set_current",
+          "value": "x"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "set_current",
+          "value": "y"
+        },
+        {
+          "op": "observe"
+        },
+        {
+          "op": "flush"
+        },
+        {
+          "op": "fire_timers"
+        }
+      ]
+    },
+    "expected": {
+      "steps": [
+        {
+          "op": "set_current",
+          "value": "x",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "set_current",
+          "value": "y",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "observe",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "flush",
+          "returns": false,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        },
+        {
+          "op": "fire_timers",
+          "returns": null,
+          "writes_so_far": 0,
+          "pending_timers": 0
+        }
+      ],
+      "final_storage": {},
+      "writes": [],
+      "errors": [],
+      "timer_delays_ms": []
+    },
+    "provenance": "derived"
+  }
+]

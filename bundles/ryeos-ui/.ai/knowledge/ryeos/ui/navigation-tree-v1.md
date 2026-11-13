@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-08T06:41:16Z:4f790999ef36e09092fd2e03b79e38b1b4ab2f709ed8f35e44b16fefcc22908a:IRNBPl2QohIfb+2XK2tUHtzDDKeVhJuUnQTnBBfaRT1uGToEAm8Y7dTv6AgehqffynVpMmc46caLr0L6Iq68AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:57:28Z:774f8bafedaec6a6d938eae2aa35904431faa7ef52fbd499eca965e40d2e04e6:DoBPt2YkbDInLcBkWFbTt2+IovjGkPv68QdrbKayQOPJ9D2Fv+FBhAbgayw0QrG3nB/m3LeMgL9kRfz6G+5fBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"
@@ -67,7 +67,7 @@ partial closure as complete. Execution evidence reports whether durable launch
 posture is retained, missing, unreadable, or corrupt; an empty posture section
 is not evidence of complete coverage.
 The explorer, conversation, changes and execution regions are ordinary view
-groups in the signed nested layout tree. They are not fixed Svelte product
+groups in the signed nested layout tree. They are not fixed renderer product
 panes, and the four supporting slots remain free for independently authored
 persistent views. Their short group labels are signed arrangement metadata:
 they identify a stable region above its selectable member tabs, survive saved
@@ -232,7 +232,7 @@ RyeOS UI
 |       `-- Fire History
 |-- Layouts / Surfaces
 |   |-- Assistant
-|   |   |-- Signed navigation: Home / Work / Review / Sites / Programs
+|   |   |-- Explorer group: Home / Work / Review / Sites / Programs views
 |   |   |-- Center: One selected lens
 |   |   |-- Bottom: Routed Input
 |   |   `-- Optional context through signed views
@@ -431,8 +431,8 @@ surface:ryeos/ui/assistant
 `-- operator surface
     |-- view-set strip: independently retained compositions
     |-- active view set: one authored layout of mounted views
-    |-- optional top/left/right/bottom slots: ordinary supporting views
-    `-- navigation: signed destination-to-view bindings
+    |-- optional top/left/right/bottom slots: one ordinary view each
+    `-- destinations: ordinary views in the layout or a slot (no navigation chrome)
 
 surface:ryeos/ui/thread
 `-- focused thread surface
@@ -518,4 +518,4 @@ view. It should report RyeOS UI decisions, not renderer wrapper nodes.
 - `bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml`
 - `crates/clients/base/src/ui/model.rs`
 - `crates/clients/base/src/ui/view_model.rs`
-- `crates/clients/web/docs/web-parity.md`
+- `crates/clients/base/docs/adapter-parity.md`

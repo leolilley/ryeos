@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-08T06:40:08Z:64e720284d458ba4321ad274c30aeb9e4655faf77bab21e76fbb47669b71b918:3Rf50/ovcVV3mW1d6EWg0U6mYrpKGr2He4Kab4ZGXqI2XNkMq86LNA5j+9NEl5wf9hlMm9z/2G7b+KYLPapUDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T12:57:28Z:dcae30536c76625785a21eaef7582da0d1c37c6075b289d4bc57f689b53b1928:fLXClAgSdSlg2BCLdKxcpWcwl4bXRXhc3DXX3Iu04QjEM4QDVN8zHS1LPiqSwMBDXbXH8GX4CCbORKrmcwZQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
@@ -17,7 +17,7 @@ corrected design agreed on 2026-09-16. Read it with `ui-development.md`,
 `signing.md` and `dependency-constitution.md`.
 
 The approved visual study is in
-`crates/clients/web/tests/browser/design/`. It is standalone HTML/CSS with
+`crates/clients/rune/design/`. It is standalone HTML/CSS with
 synthetic content, not the production renderer. Its appearance was approved;
 its controls, named view sets, grouped tabs and operational claims are not
 implementation evidence. Reproduce the treatment through real shared UI

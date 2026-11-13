@@ -16,7 +16,7 @@ use base64::Engine;
 use clap::Parser;
 use ryeos_client_transport::discovery::discover_audience;
 use ryeos_client_transport::signing::operator_signing_key_path;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Parser)]
 #[command(name = "web", about = "Launch RyeOS in the browser")]
@@ -54,16 +54,14 @@ struct Cli {
     hosted_principal: bool,
 }
 
-/// Request body for `ui.launch.mint`.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-struct MintRequest {
-    ui_binding_contract_revision: &'static str,
-    composition: ryeos_client_base::presentation::UiCompositionSelection,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    project_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    user_principal_id: Option<String>,
+/// The one canonical root the launch selects: a shared presentation Config or a
+/// Surface. The daemon chooses the composition by the ref's kind.
+fn selected_root_ref(presentation: Option<String>, surface: Option<String>) -> Result<String> {
+    match (presentation, surface) {
+        (Some(config_ref), None) => Ok(config_ref),
+        (None, Some(surface_ref)) => Ok(surface_ref),
+        _ => bail!("select exactly one of --presentation or --surface"),
+    }
 }
 
 /// Response from `ui.launch.mint`.
@@ -125,27 +123,17 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("project path is not valid UTF-8"))
         })
         .transpose()?;
-    let composition = match (cli.presentation, cli.surface) {
-        (Some(config_ref), None) => {
-            ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
-                config_ref,
-            }
-        }
-        (None, Some(surface_ref)) => {
-            ryeos_client_base::presentation::UiCompositionSelection::Surface { surface_ref }
-        }
-        _ => bail!("select exactly one of --presentation or --surface"),
-    };
-    let mint_req = MintRequest {
-        ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-        composition,
-        project_path,
-        user_principal_id: cli
-            .hosted_principal
-            .then(|| format!("fp:{}", signer.fingerprint)),
-    };
+    let root_ref = selected_root_ref(cli.presentation, cli.surface)?;
+    let user_principal_id = cli
+        .hosted_principal
+        .then(|| format!("fp:{}", signer.fingerprint));
+    let mint_body = ryeos_client_base::presentation::launch_mint_body(
+        &root_ref,
+        project_path.as_deref(),
+        user_principal_id.as_deref(),
+    );
 
-    let body = serde_json::to_vec(&mint_req).context("serialize mint request")?;
+    let body = serde_json::to_vec(&mint_body).context("serialize mint request")?;
 
     // Sign the request. `MINT_PATH` drives BOTH the signed canonical path and
     // the URL below, so the path the signature is bound to can never drift.
@@ -389,45 +377,14 @@ mod tests {
     }
 
     #[test]
-    fn mint_request_serializes_shared_presentation() {
-        let req = MintRequest {
-            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            composition:
-                ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
-                    config_ref: "config:ryeos/ui/presentation".into(),
-                },
-            project_path: Some("/tmp/proj".to_string()),
-            user_principal_id: None,
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(
-            json["composition"]["config_ref"],
-            "config:ryeos/ui/presentation"
-        );
-        assert_eq!(json["composition"]["kind"], "shared_presentation");
-        assert_eq!(json["project_path"], "/tmp/proj");
-        assert!(json.get("mode").is_none());
-        assert!(json.get("read_only").is_none());
-        assert_eq!(
-            json["ui_binding_contract_revision"],
-            ryeos_client_base::UI_BINDING_CONTRACT_REVISION
-        );
-    }
-
-    #[test]
     fn launcher_selects_surface_root_without_inventing_a_config() {
         let cli = Cli::try_parse_from(["web", "--surface", "surface:ryeos/ui/assistant-observe"])
             .unwrap();
         assert!(cli.presentation.is_none());
-        let json = serde_json::to_value(
-            ryeos_client_base::presentation::UiCompositionSelection::Surface {
-                surface_ref: cli.surface.unwrap(),
-            },
-        )
-        .unwrap();
-        assert_eq!(json["kind"], "surface");
-        assert_eq!(json["surface_ref"], "surface:ryeos/ui/assistant-observe");
-        assert!(json.get("config_ref").is_none());
+        assert_eq!(
+            selected_root_ref(cli.presentation, cli.surface).unwrap(),
+            "surface:ryeos/ui/assistant-observe"
+        );
     }
 
     #[test]
@@ -446,41 +403,6 @@ mod tests {
         assert!(
             Cli::try_parse_from(["web", "--presentation", "config:ryeos/ui/presentation",]).is_ok()
         );
-    }
-
-    #[test]
-    fn mint_request_omits_none_project_path() {
-        let req = MintRequest {
-            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            composition:
-                ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
-                    config_ref: "config:ryeos/ui/presentation".into(),
-                },
-            project_path: None,
-            user_principal_id: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(
-            !json.contains("project_path"),
-            "should skip_serializing_if None"
-        );
-        assert!(!json.contains("mode"));
-        assert!(!json.contains("read_only"));
-    }
-
-    #[test]
-    fn mint_request_includes_user_principal_when_bound() {
-        let req = MintRequest {
-            ui_binding_contract_revision: ryeos_client_base::UI_BINDING_CONTRACT_REVISION,
-            composition:
-                ryeos_client_base::presentation::UiCompositionSelection::SharedPresentation {
-                    config_ref: "config:ryeos/ui/presentation".into(),
-                },
-            project_path: None,
-            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["user_principal_id"], format!("fp:{}", "ab".repeat(32)));
     }
 
     #[test]

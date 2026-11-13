@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-08T06:40:08Z:baa410f009fbe20ffece98f6246d9a0d88f02d5f900903bc95ed7628cbb38ef9:jYZzHybIiBMv3hukVBH05mHckzGQ+o64fO9STBE2zfkk05AF5aLoC5GklVBxGPzWgUUgbsf/gYHXBLXpKl1bBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-12T19:53:22Z:62c2c179e28bfb9d1f0067719b83f1b11f32c01c0a6179d83b78137f99310414:CNerJDZ0huJrZKIOwKOkYVl7w2t7mJb0CKb+bwT76TUpYR+BoynfS9lEvBFujFJxjhwBmxGQ3BkzryRxKwiIBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
-description: "How to develop and qualify the typed Svelte RyeOS browser renderer"
+description: "How to develop and qualify the RyeOS Rune renderer in the browser"
 entry_type: reference
-version: "3.0.0"
+version: "4.0.0"
 ```
 
 # Browser UI Development Workflow
@@ -468,22 +468,25 @@ to its originating mount, never whichever control has keyboard focus.
 The browser is a renderer, not a second application model:
 
 - `crates/clients/base/src/ui/` owns semantic state, layout, events and effects.
-- `crates/clients/web/src/wasm.rs` is the typed Rust/WASM boundary.
-- `crates/clients/web/browser/generated/` is generated from the Rust contract.
-- `crates/clients/web/browser/` owns Svelte rendering and browser adapters.
-- `crates/clients/web/pkg/` is generated, reviewed installed output. Never edit
-  it directly.
+- `crates/clients/runtime/` owns the seat, transport, timers and storage; its
+  `platform/web.rs` is the only place browser APIs appear.
+- `crates/clients/rune/` (`ryeos-client-rune`) is the renderer: it projects the
+  view model to Rune elements and turns presses and keys back into core events.
+- `crates/clients/rune/pkg/` is generated, reviewed installed output. Never edit
+  it directly; `scripts/build-rune-web.sh` writes it.
 - `crates/daemon/ryeos-ui/web-assets.json` is the closed asset manifest.
 - `crates/daemon/ryeos-ui/src/assets.rs` serves only that registered closure.
 
-The installed closure is exactly `index.html`, `ryeos_ui.js`, `ryeos_ui.css`,
-`ryeos_web.js` and `ryeos_web_bg.wasm`. There is no alternate
-browser renderer, compatibility bootstrap or runtime fallback.
+The installed closure is exactly `index.html`, `ryeos_boot.js`, `ryeos_rune.js`,
+`ryeos_rune_bg.wasm`, `rune_bridge.js` and `rune_platform.js`. There is no
+alternate browser renderer, compatibility bootstrap or runtime fallback.
+`crates/clients/web/` is only the `web` launcher binary: it mints a launch URL
+and opens the browser.
 
-Svelte owns component lifecycle and presentation. Rust remains the sole owner
-of work, authority, navigation, layout and effect semantics. Browser-local
-state is limited to mechanical focus, selection, scroll restoration, pending
-transport handles and opaque Rust-issued layout preference bytes.
+The renderer owns only drawing and input mechanics. Rust remains the sole owner
+of work, authority, navigation, layout and effect semantics. Renderer-local
+state is limited to text-field buffers, open menus and drawers, unfinished
+renames, split-drag previews, measured sizes and pending transport handles.
 
 System chrome shows the authenticated principal and signed surface/session
 context, not the launch project's path as if every mounted view shared it.
@@ -496,17 +499,16 @@ Pointer layout controls consume exact guarded Rust intents. Master promotion is
 available only for a non-master tile in an authored master-and-stack set and
 names that mounted tile; it is not maximise/restore or a misleading swap action
 on the current master. Group-tab ordering uses the same canonical layout tree
-and cannot be inferred from DOM order. Keyboard focus has a non-colour
+and cannot be inferred from drawing order. Keyboard focus has a non-colour
 structural cue even when tile chrome is hidden or the mount occupies an edge
 slot, and remains distinct from selected content or running state.
 
-At narrow widths the authored navigation remains reachable through a
-renderer-local drawer. Open/closed state, focus trapping and Escape dismissal
-are browser mechanics only; destinations and activation intents remain the
-Rust projection. Dismissal restores the opener only while the drawer still owns
-focus; an activated destination that took focus keeps it. Never hide an authored
-navigation region with no accessible replacement or introduce a browser route
-model to solve responsive layout.
+At narrow widths (760 points or less) only the focused tile's branch of the
+split tree is shown; the authored tree is never rewritten, and the other tiles
+stay reachable by cycling the set's tiles (`CycleViewTab`). The renderer
+measures itself and sends the core `Resize`. Destinations are ordinary views
+mounted in slots, so there is no separate navigation region to collapse. Never
+introduce a browser route model to solve responsive layout.
 
 Execution views must project coverage as data. Bounded child trees declare
 complete versus truncated closure, candidate views distinguish not applicable,
@@ -518,77 +520,55 @@ and signature verification; parsing an envelope-stripped body is not evidence.
 
 ## Focused source loop
 
-For interactive renderer work, keep the installed node running. In one terminal:
+Keep the installed node running and iterate against it without rebuilding the
+daemon:
 
 ```bash
-cd crates/clients/web
-npm run dev
+scripts/build-rune-web.sh            # WASM_BINDGEN must be the CLI the lock names
+scripts/dev-ui-assets.sh --background --port 7411 \
+  --upstream http://127.0.0.1:PORT --asset-dir crates/clients/rune/pkg
 ```
 
-In a second terminal, from the same directory:
+Mint a launch URL through the CLI (`web --presentation config:ryeos/ui/presentation
+--print-url --no-open`), point its host at `127.0.0.1:7411` and open it. **Port
+7411 serves the checkout's package; the node's own port serves the package its
+daemon embeds and cannot show source edits.** Rebuild and reload after each
+change; there is no hot reload. Stop the proxy with
+`scripts/dev-ui-assets.sh --stop`. Keep launch tokens private.
+
+For drawing work no node is needed. The native fixture run draws the real
+renderer over an in-memory presentation built from the bundle's own view
+definitions, with their sources answered from fixed records:
 
 ```bash
-npm run dev:launch
+cargo run -p ryeos-client-rune --example fixture -- --snap shell.png --size 1280x800 --at 1
 ```
 
-Open the printed one-time URL. **Port 7411 is the live development UI; port
-7400 is the installed UI and cannot show source edits.** Do not open `/ui`
-directly for a fresh session. The launch helper checks that Vite is running,
-mints through the existing CLI, and prints the URL without opening the desktop
-browser. Keep launch tokens private. Stop Vite with Ctrl-C when finished.
+`RYEOS_FIXTURE_SCENE` selects `launcher` or `field`. Native Rune bundles Inter
+but not IBM Plex Mono; set `RYEOS_FIXTURE_FONTS` to colon-separated font files
+(Rune's own Inter and Plex Mono assets) so the data face matches the browser.
+`--at 1` lets size-dependent layout settle before the frame is taken.
 
-Svelte and CSS edits hot-reload; other TypeScript edits can cause a full page
-reload. No Cargo, sudo, install, signing or daemon restart is needed for this
-presentation loop. Confirmed locally with a visible Svelte label change.
-
-The development server binds only HTTP 127.0.0.1:7411. APIs and launch routes
-proxy to the existing daemon. Its WASM wrapper and binary are also proxied from
-that daemon, including Vite's `?import` requests; never substitute checkout WASM
-from a different generation. Source code must match the daemon's generated
-contracts and WASM exports. HMR is not a workaround for contract mismatches.
-
-For another local node, set `RYEOS_UI_DEV_UPSTREAM=http://127.0.0.1:PORT` for both
-commands and select the same node through the CLI's existing `RYEOS_APP_ROOT`.
-The helper refuses a minted URL from another origin. The supported development
-port remains 7411; stop the old manual-refresh asset proxy if it occupies it.
-
-This is an explicitly local, unsigned development renderer, not release or
-execution qualification. Its development-only CSP permits injected styles and
-the local HMR WebSocket. Production CSP, signing, bindings, reducer/effect
-ownership and admission remain unchanged. Never expose the proxy externally
-or broaden worker grants for it. No mock execution state is introduced.
-
-Before production publication, run the focused renderer checks:
-
-```bash
-cd crates/clients/web
-npm run check:renderer
-npm run build:renderer
-```
-
-The build writes a private generation to `target/ui-browser-stage`; it does not
-publish `pkg/`. The stage validator rejects extra chunks, source maps, bare
-imports, external URLs and any lazy chunk.
-
-`scripts/dev-ui-assets.sh` serves an already assembled generation with manual
-refresh; it is not the source hot-reload workflow above. Use staged/installed
-generation checks separately when qualifying production assets.
+This is a local, unsigned development loop, not release or execution
+qualification. Production CSP, signing, bindings, reducer/effect ownership and
+admission remain unchanged. Never expose the proxy externally.
 
 ## Required boundary checks
 
 ```bash
-cargo run -q -p ryeos-ui-contract-exporter -- --check
-cd crates/clients/web
-npm run check:renderer
-npm run build:renderer
-npm test
-npm run test:wasm-contract
+cargo clippy -p ryeos-client-rune --all-targets -- -D warnings
+cargo clippy -p ryeos-client-rune --target wasm32-unknown-unknown -- -D warnings
+cargo test -p ryeos-client-rune
+.ai/tools/ryeos/development/browser-assets-production/publish.sh --check
 ```
 
-The WASM test is not replaceable by a JSON fixture: it proves actual serde /
-wasm-bindgen enum, optional and `u64`/BigInt behavior. The mounted-root browser
-test additionally requires the exact Playwright browser revision from the
-declared development environment; never substitute a host browser silently.
+The wasm32 pass is required: the page entry and the runtime's web platform
+compile only for that target. `publish.sh --check` rebuilds the package and
+fails unless it reproduces `pkg/` and the registry byte for byte.
+
+Every interface symbol must exist in an embedded face: on the web Rune has only
+Inter and IBM Plex Mono and no system fallback. Symbols neither face carries
+are drawn as vector icons (`crates/clients/rune/src/icons.rs`).
 
 ## Operational projections
 
@@ -611,17 +591,19 @@ lifecycle, rather than being cancelled by presentation revocation.
 ## Field views
 
 Field is a normal typed view placed by the shared Rust-owned layout tree.
-Placement is authored arrangement, not a fixed browser position. Svelte owns its toolbar, event rail,
-details, accessibility tree and preview composition. The retained canvas
-controller owns only bounded drawing, hit testing and pointer mechanics. Never
-restore a hidden DOM renderer, compatibility mount function or browser-side
-application model behind the Svelte component.
+Placement is authored arrangement, not a fixed browser position. The renderer's
+field layout is deterministic (semantic rank, lane and group; stable ids break
+ties) and a test holds it to the reference geometry. The stage fills the view;
+toolbar, selected-entity panel, Evidence and event rail float over it.
+Relations and group frames are vector strokes; each entity is a positioned
+element, so press, focus and its accessible name need no hit testing. Never add
+a renderer-side application model behind the field.
 
 Rows, tables, sections, timelines and field selections must render the bounded
 detail records already projected by Rust. Pointer disclosure names the exact
 mounted instance and stable item id; it must not synthesize a select-then-expand
-sequence against whichever row later has focus. Detail rendering is semantic
-text (`dl`/`dt`/`dd`) and never interprets evidence into browser-owned status.
+sequence against whichever row later has focus. Detail rendering is plain
+field/value text and never interprets evidence into renderer-owned status.
 Dock mounts use the same exact disclosure event and Rust-owned expansion state
 as center mounts. Tables retain native button semantics inside explicit ARIA
 rows and cells rather than assigning row semantics to a button.
@@ -637,7 +619,7 @@ Retained artifact coordinates are evidence: exact thread ID, numeric artifact
 ID and an optional recorded content hash. A missing hash is explicitly not
 recorded, not a browser-derived value. Displaying a coordinate does not admit
 fetching or opening it. Such actions require an ordinary signed affordance and
-the existing artifact/content authority owner. Accessibility DOM identities
+the existing artifact/content authority owner. Accessibility identities
 must include the exact mounted instance as well as the entity ID, since several
 Views may simultaneously present the same retained entity.
 
@@ -702,19 +684,21 @@ or local absence cannot release that reservation.
 
 ## Rebuild boundaries
 
-- Svelte/CSS changes hot-reload locally. Shipping them requires browser stage
-  rebuild and complete asset publication, then updating the daemon that embeds
-  the assets.
-- Rust UI/WASM changes also require contract export and WASM regeneration.
+- Renderer changes are seen through the 7411 proxy after `build-rune-web.sh`.
+  Shipping them requires `publish.sh --publish` (package and registry), then
+  updating the daemon that embeds the assets.
+- Core and runtime changes reach the browser through the same package rebuild.
 - Asset registry or route changes require the focused `ryeos-ui` rebuild/tests.
 - Bundle definition changes require the normal signed bundle publication path.
 
-Do not invoke Node, npm, Vite or contract generation from Cargo `build.rs`.
+Do not invoke wasm-bindgen or package assembly from Cargo `build.rs`.
 Ordinary Cargo builds only embed and validate the checked-in asset generation.
 
 ## Common mistakes
 
-- editing `pkg/` instead of authored browser source;
+- editing `pkg/` instead of the renderer source;
+- using a glyph neither embedded face carries (it draws as a missing glyph in
+  the browser even when the native fixture shows it);
 - adding browser-side semantic stores, routing or authority decisions;
 - bypassing the single FIFO reducer/effect commit path;
 - importing daemon endpoints from visual components;

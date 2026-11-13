@@ -8,7 +8,7 @@ use super::effect::{RyeOsEffect, RyeOsEffectKind, RyeOsUiError};
 use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
 use super::view_model::{RyeOsMotionEventVm, RyeOsNoticeVm, RyeOsTone, RyeOsViewModel};
 use crate::ids::RyeOsViewInstanceKey;
-use crate::surface::{SurfaceSpec, SurfaceStyleSpec};
+use crate::surface::SurfaceStyleSpec;
 use crate::view_set::{FieldCursorScopeState, ViewLocalState, ViewSet};
 use std::collections::HashMap;
 
@@ -1305,34 +1305,6 @@ impl RyeOsCore {
         self.binding_attachment_for_instance(instance)
             .and_then(|attachment| attachment.project_path.as_deref())
             .is_some_and(|path| !path.is_empty())
-    }
-
-    pub(crate) fn surface_navigation(&self) -> Vec<crate::surface::SurfaceNavigationSpec> {
-        self.data
-            .session
-            .as_ref()
-            .and_then(|_| self.active_surface_attachment())
-            .and_then(|attachment| attachment.presentation.surface_value().ok().flatten())
-            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
-            .map(|surface| {
-                surface
-                    .navigation
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.view.starts_with("view:")
-                            && self
-                                .active_surface_attachment()
-                                .and_then(|descriptor| {
-                                    self.binding_attachments
-                                        .get(&descriptor.binding_attachment_id)
-                                })
-                                .is_some_and(|attachment| {
-                                    attachment.views.contains_key(&entry.view)
-                                })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     pub fn initial_effects(&mut self) -> Vec<RyeOsEffect> {

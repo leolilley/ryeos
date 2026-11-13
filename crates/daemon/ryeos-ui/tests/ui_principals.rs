@@ -138,7 +138,7 @@ async fn launch_mint_rejects_invalid_user_principal_as_bad_request() {
     let (_tmp, _state_owner, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {
         ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
-        surface_ref: "surface:ryeos/ui/base".into(),
+        root_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         user_principal_id: Some("session:not-a-principal".into()),
     };
@@ -160,7 +160,7 @@ async fn launch_mint_rejects_mismatched_user_principal() {
     let (_tmp, _state_owner, state) = build_test_state();
     let req = ryeos_ui::handlers::ui_launch_mint::Request {
         ui_binding_contract_revision: ryeos_ui::UI_BINDING_CONTRACT_REVISION.to_string(),
-        surface_ref: "surface:ryeos/ui/base".into(),
+        root_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         user_principal_id: Some(format!("fp:{}", "aa".repeat(32))),
     };

@@ -3,21 +3,13 @@ name = "ryeos-client-web"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
-description = "Web renderer for Rye OS"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
+description = "Browser launcher for RyeOS: mints a launch URL and opens the browser"
 
 [[bin]]
 name = "web"
 path = "src/bin/web.rs"
 
 [dependencies]
-ryeos-client-base = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }
@@ -26,22 +18,12 @@ hex = { workspace = true }
 lillux = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+ryeos-client-base = { workspace = true }
 ryeos-client-transport = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-js-sys = "0.3"
-web-sys = { version = "0.3", features = [
-    "Window", "Document", "Element", "HtmlElement",
-    "HtmlCanvasElement", "CanvasRenderingContext2d",
-    "HtmlTextAreaElement", "KeyboardEvent", "MouseEvent",
-    "Performance", "console",
-] }
-serde-wasm-bindgen = "0.6"
-getrandom = { version = "0.2", features = ["js"] }
 
 [lints]
 workspace = true

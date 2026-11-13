@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-11T02:56:41Z:3a97c1ac5dc992f1e7a2bf8be3ca79b9d3ffb786f3ec66e7a073099a8ffb1048:LnOOCNERz3CqdNBNZQUKB8J8k9ZWAWcnWKF1YdbkO+qbt52MXjF6TCv94bAT0YnoKFxOYqpkJrK6jb8szybnBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-12T13:52:53Z:23fe26e974ef79cb8d198c68e3563444f32689bd26452fa451439e8114bd690f:EdTbH/tq4rCzIN8htf+DExOHLON4ClDu2bkfh+p4zyoY8Vzc8794z79pru1tTi4dBilqTa1jZNeZvrItD8LTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -9,45 +9,23 @@ if [[ "$mode" != "--check" && "$mode" != "--publish" ]]; then
 fi
 
 root="$(git rev-parse --show-toplevel)"
-web="$root/crates/clients/web"
-package="$web/pkg"
+renderer="$root/crates/clients/rune"
+package="$renderer/pkg"
 registry="$root/crates/daemon/ryeos-ui/generate_asset_registry.py"
-stage="$(mktemp -d "$web/.asset-stage.XXXXXX")"
+stage="$(mktemp -d "$renderer/.asset-stage.XXXXXX")"
 trap 'rm -rf -- "$stage"' EXIT
 
-if [[ "$mode" == "--check" ]]; then
-  cargo run -q -p ryeos-ui-contract-exporter -- --check
-else
-  cargo run -q -p ryeos-ui-contract-exporter
-fi
-
-cargo build -q -p ryeos-client-web --target wasm32-unknown-unknown --release --lib
-mkdir -p "$stage/wasm" "$stage/renderer" "$stage/final"
-wasm-bindgen \
-  "$root/target/wasm32-unknown-unknown/release/ryeos_client_web.wasm" \
-  --target web \
-  --out-dir "$stage/wasm" \
-  --out-name ryeos_web
-
-(cd "$web" && RYEOS_UI_ASSET_STAGE="$stage/renderer" npm run check:renderer)
-(cd "$web" && RYEOS_UI_ASSET_STAGE="$stage/renderer" npm run build:renderer)
-# Vite preserves a small amount of dependency-authored line-end whitespace.
-# Normalize generated text before hashing so repository checks and builds from
-# different checkout paths compare the same canonical bytes.
-sed -i 's/[[:space:]]\+$//' "$stage/renderer"/*.js "$stage/renderer"/*.css
-
-cp "$web/browser/index.html" "$stage/final/index.html"
-cp "$stage/renderer/ryeos_ui.js" "$stage/final/ryeos_ui.js"
-cp "$stage/renderer/ryeos_ui.css" "$stage/final/ryeos_ui.css"
-cp "$stage/wasm/ryeos_web.js" "$stage/final/ryeos_web.js"
-cp "$stage/wasm/ryeos_web_bg.wasm" "$stage/final/ryeos_web_bg.wasm"
+# The Rune renderer's closed set: built with remapped paths and the exact
+# wasm-bindgen CLI the lock names (the build refuses any other version).
+"$root/scripts/build-rune-web.sh" --out "$stage/final"
 
 expected=(
   index.html
-  ryeos_ui.css
-  ryeos_ui.js
-  ryeos_web.js
-  ryeos_web_bg.wasm
+  rune_bridge.js
+  rune_platform.js
+  ryeos_boot.js
+  ryeos_rune.js
+  ryeos_rune_bg.wasm
 )
 mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
 if [[ "${actual[*]}" != "${expected[*]}" ]]; then
@@ -63,7 +41,7 @@ if [[ "$mode" == "--check" ]]; then
   exit 0
 fi
 
-backup="$web/.pkg.backup.$$"
+backup="$renderer/.pkg.backup.$$"
 manifest="$root/crates/daemon/ryeos-ui/web-assets.json"
 generated="$root/crates/daemon/ryeos-ui/src/generated_web_assets.rs"
 cp "$manifest" "$stage/web-assets.json"

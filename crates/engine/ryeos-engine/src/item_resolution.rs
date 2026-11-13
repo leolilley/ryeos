@@ -973,6 +973,7 @@ mod tests {
                     },
                 })
                 .collect(),
+            thread_profile: None,
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),
             composer: "handler:ryeos/core/identity".to_owned(),
             composer_config: serde_json::Value::Null,

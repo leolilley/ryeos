@@ -906,6 +906,92 @@ mod tests {
     use crate::ui::reducer::test_support;
     use serde_json::json;
 
+    /// The shipped opening declarations say where each opening lands:
+    /// a new Surface, the recorded placement for tab imports and documents,
+    /// and the recorded selection for a composition. No declaration uses a
+    /// retired operation alias.
+    #[test]
+    fn shipped_openings_declare_their_placement() {
+        let read = |yaml: &str| -> serde_json::Value { serde_yaml::from_str(yaml).unwrap() };
+        let surfaces = read(include_str!(
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/surfaces/list.yaml"
+        ));
+        let library = read(include_str!(
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/view-sets/library.yaml"
+        ));
+        let projects = read(include_str!(
+            "../../../../../../bundles/ryeos-ui/.ai/views/ryeos/projects/list.yaml"
+        ));
+        let placement = serde_json::json!({ "kind": "new_surface" });
+        for (view, id, expected_placement, expected_selection) in [
+            (&surfaces, "open", Some(placement.clone()), None),
+            (
+                &surfaces,
+                "open-composed-surface",
+                Some(placement.clone()),
+                Some("{record.opening_selection}"),
+            ),
+            (
+                &surfaces,
+                "import-tabs",
+                Some(serde_json::json!("{record.opening_placement}")),
+                None,
+            ),
+            (
+                &surfaces,
+                "open-composed-document",
+                Some(serde_json::json!("{record.document_placement}")),
+                Some("{record.opening_selection}"),
+            ),
+            (
+                &library,
+                "open-reusable-surface",
+                Some(placement.clone()),
+                None,
+            ),
+            (
+                &library,
+                "import-reusable-surface-tabs",
+                Some(serde_json::json!("{record.opening_placement}")),
+                None,
+            ),
+            (&projects, "open-project", Some(placement.clone()), None),
+            (
+                &projects,
+                "open-project-surface",
+                Some(placement.clone()),
+                None,
+            ),
+        ] {
+            let affordance = view["affordances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|affordance| affordance["id"] == id)
+                .unwrap_or_else(|| panic!("no shipped affordance {id}"));
+            assert_eq!(
+                affordance["presentation_operation"], "surface_opening",
+                "{id}"
+            );
+            let args = &affordance["invoke"]["args"];
+            if let Some(expected) = expected_placement {
+                assert_eq!(args["placement"], expected, "{id} placement");
+            }
+            if let Some(expected) = expected_selection {
+                assert_eq!(args["selection"], expected, "{id} selection");
+            }
+        }
+        for view in [&surfaces, &library, &projects] {
+            let text = serde_json::to_string(view).unwrap();
+            for retired in ["\"open_surface\"", "import_surface_tabs"] {
+                assert!(
+                    !text.contains(retired),
+                    "a shipped view still names {retired}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn shipped_admission_openers_bind_the_prepared_creation_id() {
         let projects: serde_json::Value = serde_yaml::from_str(include_str!(

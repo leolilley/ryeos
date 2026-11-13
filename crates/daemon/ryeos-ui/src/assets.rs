@@ -1,6 +1,6 @@
 //! Web UI static asset provider.
 //!
-//! Embeds files from `crates/clients/web/pkg/` at compile time via
+//! Embeds files from `crates/clients/rune/pkg/` at compile time via
 //! `include_bytes!`. Implements the `StaticAssetProvider` trait defined
 //! in `ryeos-api` so that generic static mode can resolve web assets
 //! without the API crate knowing about web-specific paths.
@@ -73,7 +73,7 @@ impl StaticAssetProvider for WebAssetProvider {
 
 /// Optional local development override for browser UI assets.
 ///
-/// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/web/pkg` before starting
+/// Set `RYEOS_UI_ASSET_DIR=/path/to/crates/clients/rune/pkg` before starting
 /// `ryeosd`, then `/ui` and `/ui/assets/*` are served from that directory
 /// instead of the compile-time embedded bytes. Only filenames admitted by the
 /// compiled manifest can be served. Selecting an override is generation-wide:
@@ -173,28 +173,28 @@ mod tests {
     #[test]
     fn get_compiled_browser_assets() {
         let provider = WebAssetProvider;
-        let css = provider
-            .get("ryeos_ui.css")
-            .expect("ryeos_ui.css must be embedded");
-        assert!(!css.bytes.is_empty());
-        assert!(css.content_type.contains("css"));
+        let boot = provider
+            .get("ui/assets/ryeos_boot.js")
+            .expect("ryeos_boot.js must be embedded");
+        assert!(!boot.bytes.is_empty());
+        assert!(boot.content_type.contains("javascript"));
 
-        let ryeos_ui = provider
-            .get("ui/assets/ryeos_ui.js")
-            .expect("ryeos_ui.js must be embedded");
-        assert!(!ryeos_ui.bytes.is_empty());
-        assert!(ryeos_ui.content_type.contains("javascript"));
+        let glue = provider
+            .get("ui/assets/ryeos_rune.js")
+            .expect("ryeos_rune.js must be embedded");
+        assert!(!glue.bytes.is_empty());
+        assert!(glue.content_type.contains("javascript"));
 
         let wasm = provider
-            .get("ui/assets/ryeos_web_bg.wasm")
-            .expect("ryeos_web_bg.wasm must be embedded");
+            .get("ui/assets/ryeos_rune_bg.wasm")
+            .expect("ryeos_rune_bg.wasm must be embedded");
         assert!(!wasm.bytes.is_empty());
         assert!(wasm.content_type.contains("wasm"));
     }
 
     #[test]
     fn packaged_asset_inventory_equals_the_closed_registry() {
-        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/web/pkg");
+        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/rune/pkg");
         let mut packaged = std::fs::read_dir(package)
             .expect("read authored web package")
             .map(|entry| entry.expect("read authored web package entry").path())
@@ -285,19 +285,18 @@ mod tests {
 
     #[test]
     fn generated_wasm_glue_exports_the_compiled_runtime_surface() {
-        // wasm.rs and the checked-in wasm-bindgen outputs are one compiled
-        // browser contract. If Rust gains an export without regenerating the
-        // JS/WASM pair, the compiled runtime fails before entering the app.
-        // The runtime performs the complete export-inventory check; keep this
-        // provider test focused on representative generated entry points.
-        let generated = std::str::from_utf8(embedded("ryeos_web.js"))
+        // The boot module initialises the wasm-bindgen glue, whose start
+        // export runs the renderer. If the glue and the boot module drift
+        // apart, the page fails before drawing anything.
+        let glue = std::str::from_utf8(embedded("ryeos_rune.js"))
             .expect("generated wasm glue must be UTF-8");
-        for imported in ["ryeos_start", "ryeos_dispatch", "ryeos_key"] {
-            assert!(
-                generated.contains(&format!("export function {imported}(")),
-                "generated wasm glue does not export `{imported}`"
-            );
-        }
+        assert!(
+            glue.contains("export function start("),
+            "generated wasm glue does not export `start`"
+        );
+        assert!(glue.contains("__wbg_init as default"));
+        let boot = std::str::from_utf8(embedded("ryeos_boot.js")).expect("boot module is UTF-8");
+        assert!(boot.contains(r#"import init from "./ryeos_rune.js";"#));
     }
 
     #[test]

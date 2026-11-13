@@ -55,20 +55,7 @@ impl RyeOsCore {
         let first_effect_id = self.next_effect_id;
         let changed_subjects = self.reconcile_acknowledged_composition()?;
         let facets = self.seat.fold().snapshot();
-        if let Some(destination) = facets
-            .get(super::seat::KEY_NAVIGATION_DESTINATION)
-            .and_then(serde_json::Value::as_str)
-            && let Some(entry) = self
-                .surface_navigation()
-                .into_iter()
-                .find(|entry| entry.id == destination)
-        {
-            let _ = self.open_view(ViewSpec::bound(entry.view));
-        }
         for key in facets.keys() {
-            if key == super::seat::KEY_NAVIGATION_DESTINATION {
-                continue;
-            }
             if let Some((view_set_id, logical_facet)) =
                 super::seat::parse_selection_storage_key(key)
                 && self.view_set(view_set_id).is_some()
@@ -797,16 +784,6 @@ impl RyeOsCore {
             RyeOsUiIntent::OpenDialog { dialog_id } => self.open_dialog(&dialog_id),
             RyeOsUiIntent::CloseDialog { instance_key } => self.close_dialog(&instance_key),
             RyeOsUiIntent::OpenView { view } => {
-                if let Some(destination) = self
-                    .surface_navigation()
-                    .into_iter()
-                    .find(|entry| entry.view == view.view_ref)
-                {
-                    self.seat.append_facet(
-                        super::seat::KEY_NAVIGATION_DESTINATION,
-                        serde_json::Value::String(destination.id),
-                    );
-                }
                 let mut effects = self.open_view(view.clone());
                 if let Some(hash) = route_for_view(&view) {
                     effects.push(self.emit(RyeOsEffectKind::SetLocationHash {
@@ -1575,7 +1552,7 @@ impl RyeOsCore {
     }
 
     /// Fold durable seat history and restore only state named by the current
-    /// signed surface. Unknown or stale navigation destinations remain inert.
+    /// signed surface.
     pub fn replay_seat_events(
         &mut self,
         events: impl IntoIterator<Item = super::seat::SeatEvent>,
@@ -1742,29 +1719,14 @@ impl RyeOsCore {
             .collect::<Vec<_>>();
 
         let mut effects = Vec::new();
-        if changed
-            .iter()
-            .any(|key| key == super::seat::KEY_NAVIGATION_DESTINATION)
-            && let Some(destination) = after
-                .get(super::seat::KEY_NAVIGATION_DESTINATION)
-                .and_then(serde_json::Value::as_str)
-            && let Some(entry) = self
-                .surface_navigation()
-                .into_iter()
-                .find(|entry| entry.id == destination)
-        {
-            effects.extend(self.open_view(ViewSpec::bound(entry.view)));
-        }
         for key in changed {
-            if key != super::seat::KEY_NAVIGATION_DESTINATION {
-                if let Some((view_set_id, logical_facet)) =
-                    super::seat::parse_selection_storage_key(&key)
-                    && self.view_set(view_set_id).is_some()
-                {
-                    effects.extend(self.effects_for_facet_in_view_set(&logical_facet, view_set_id));
-                } else {
-                    effects.extend(self.effects_for_facet(&key));
-                }
+            if let Some((view_set_id, logical_facet)) =
+                super::seat::parse_selection_storage_key(&key)
+                && self.view_set(view_set_id).is_some()
+            {
+                effects.extend(self.effects_for_facet_in_view_set(&logical_facet, view_set_id));
+            } else {
+                effects.extend(self.effects_for_facet(&key));
             }
         }
         effects.extend(self.drive_presentation_operations_with_subjects(changed_subjects));
