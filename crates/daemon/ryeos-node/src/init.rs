@@ -4016,7 +4016,7 @@ mod tests {
         let operator_body = operator_capacity_body(&issued);
         operator_applies_native_capacity(state, lock, operator_body.clone());
         let (operator, _, _) = load_or_create_operator_key(
-            &state.join(".ai/config/keys/signing/private_key.pem"),
+            &state.join(".ai/node/operator/signing/private_key.pem"),
             None,
         )
         .expect("operator key");
