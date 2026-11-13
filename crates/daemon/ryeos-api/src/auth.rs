@@ -381,7 +381,7 @@ pub(crate) fn verify_request(
             }
             (auth_key.configured_origin_site_id.clone(), None)
         }
-        AuthorizedKeyPrincipalClass::RemoteOperator => {
+        AuthorizedKeyPrincipalClass::RemotePrincipal => {
             let (forwarding_key_id, forwarding_site_id, forwarding_signature) =
                 match (forwarding_key_id, forwarding_site_id, forwarding_signature) {
                     (Some(key_id), Some(site_id), Some(signature))
@@ -391,7 +391,7 @@ pub(crate) fn verify_request(
                     }
                     _ => {
                         return Err(
-                        "remote_operator request requires a complete source-node forwarding proof"
+                        "remote_principal request requires a complete source-node forwarding proof"
                             .to_string(),
                     );
                     }
@@ -400,7 +400,7 @@ pub(crate) fn verify_request(
                 .map_err(|error| format!("{error:#}"))?;
             if auth_key.configured_origin_site_id.as_deref() != Some(forwarding_site_id) {
                 return Err(
-                    "source-node forwarding site does not match the remote_operator grant"
+                    "source-node forwarding site does not match the remote_principal grant"
                         .to_string(),
                 );
             }
@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_operator_grant_rejects_missing_or_noncanonical_origin() {
+    fn remote_principal_grant_rejects_missing_or_noncanonical_origin() {
         let client_key = SigningKey::from_bytes(&[44u8; 32]);
         let node_signer = SigningKey::from_bytes(&[99u8; 32]);
         let tmp = TempDir::new().unwrap();
@@ -691,7 +691,7 @@ mod tests {
 
         for origin_line in ["", "origin_site_id = \"source\"\n"] {
             let body = format!(
-                "schema_version = 2\nprincipal_class = \"remote_operator\"\n{origin_line}fingerprint = \"{client_fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.remote/run\"]\nlabel = \"remote operator\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
+                "schema_version = 2\nprincipal_class = \"remote_principal\"\n{origin_line}fingerprint = \"{client_fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.remote/run\"]\nlabel = \"remote operator\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
             );
             let signed = lillux::signature::sign_content_at(
                 &body,
@@ -1065,7 +1065,7 @@ mod tests {
         fp
     }
 
-    fn register_remote_operator_key(
+    fn register_remote_principal_key(
         state: &ryeos_app::state::AppState,
         operator_key: &SigningKey,
         site_id: &str,
@@ -1078,7 +1078,7 @@ mod tests {
             &fp,
             &key_b64,
             &["ryeos.execute.service.vault/list".to_string()],
-            "test-remote-operator",
+            "test-remote-principal",
             "test-granter",
             "2026-01-01T00:00:00Z",
             &state.identity,
@@ -1350,12 +1350,12 @@ mod tests {
     }
 
     #[test]
-    fn remote_operator_requires_and_verifies_source_node_cosignature() {
+    fn remote_principal_requires_and_verifies_source_node_cosignature() {
         let (_tmp, _store_owner, state) = build_test_state();
         let operator_key = SigningKey::from_bytes(&[23u8; 32]);
         let forwarding_key = SigningKey::from_bytes(&[24u8; 32]);
         let site_id = "site:source";
-        let operator_fp = register_remote_operator_key(&state, &operator_key, site_id);
+        let operator_fp = register_remote_principal_key(&state, &operator_key, site_id);
         let forwarding_fp = register_remote_node_key(&state, &forwarding_key, site_id);
         let audience = state.identity.principal_id();
         let uri: axum::http::Uri = "/execute".parse().unwrap();
@@ -1368,7 +1368,7 @@ mod tests {
             &uri,
             body,
             unix_now(),
-            "nonce-remote-operator-missing-proof",
+            "nonce-remote-principal-missing-proof",
             &audience,
         );
         let error = verify_request(&state, "POST", &uri, &headers, body)
@@ -1382,7 +1382,7 @@ mod tests {
             &uri,
             body,
             unix_now(),
-            "nonce-remote-operator-valid-proof",
+            "nonce-remote-principal-valid-proof",
             &audience,
         );
         add_forwarding_proof(
@@ -1399,18 +1399,18 @@ mod tests {
             .expect("co-signed remote operator request must verify");
         assert_eq!(
             principal.principal_class,
-            AuthorizedKeyPrincipalClass::RemoteOperator
+            AuthorizedKeyPrincipalClass::RemotePrincipal
         );
         assert_eq!(principal.authenticated_site_id.as_deref(), Some(site_id));
     }
 
     #[test]
-    fn remote_operator_rejects_forwarding_proof_from_wrong_site() {
+    fn remote_principal_rejects_forwarding_proof_from_wrong_site() {
         let (_tmp, _store_owner, state) = build_test_state();
         let operator_key = SigningKey::from_bytes(&[25u8; 32]);
         let forwarding_key = SigningKey::from_bytes(&[26u8; 32]);
         let operator_fp =
-            register_remote_operator_key(&state, &operator_key, "site:expected-source");
+            register_remote_principal_key(&state, &operator_key, "site:expected-source");
         let forwarding_fp =
             register_remote_node_key(&state, &forwarding_key, "site:different-source");
         let audience = state.identity.principal_id();
@@ -1423,7 +1423,7 @@ mod tests {
             &uri,
             body,
             unix_now(),
-            "nonce-remote-operator-wrong-site",
+            "nonce-remote-principal-wrong-site",
             &audience,
         );
         add_forwarding_proof(
@@ -1438,7 +1438,7 @@ mod tests {
         );
         let error = verify_request(&state, "POST", &uri, &headers, body)
             .expect_err("a different admitted site must not satisfy the operator grant");
-        assert!(error.contains("does not match the remote_operator grant"));
+        assert!(error.contains("does not match the remote_principal grant"));
     }
 
     #[test]

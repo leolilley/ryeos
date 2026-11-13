@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-30T04:44:55Z:945aba132617ea53d47bbe06385ead5017f953c8b455c4a80b8da3f4690fc053:/RP0U2meQomG4DNqBKJ7NO0dd3R3MTDLF1OSLMcL34dNDEFLIxqoso0mPq0VhTBk/G8XM8FoT+rtCi+f4uWaAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:13Z:e1bdabac82685dfc206da4b2bfedd6db8b2e17b6727d85b8cc15422508fc1fcf:iWzTA7ZyoSESxky6BGFmUxgyATf4uZWHfCuVXPcPVDPN88fyN1ijcGZw79GSTr1AKt2EDM6kKaVQw7Sb59VoDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -64,7 +64,7 @@ scheduler, migration layer, or workload-specific app root is needed.
 |---|---|
 | Select and pin a target | `ryeos remote configure`; stored named remote pins URL, node principal/key, canonical site ID, vault fingerprint, and ingest-ignore policy |
 | Bootstrap trust | target-local `admission-token` plus source `remote admit`, or target-local exact `authorize-key`/`authorize-client` |
-| Preserve a durable operator principal and origin | explicit configured-operator forwarding for `service:remote/push` and retained-current-HEAD `service:remote/run`, with target `remote_operator` grant and source-node co-signature |
+| Preserve a durable operator principal and origin | explicit configured-operator forwarding for `service:remote/push` and retained-current-HEAD `service:remote/run`, with target `remote_principal` grant and source-node co-signature |
 | Transfer a complete project | a `full_project` binding and the typed snapshot/CAS closure used by `remote execute` |
 | Execute on target compute | target-local admitted item execution through the configured remote |
 | Return project changes | clean-base guarded pull/apply from the result snapshot |

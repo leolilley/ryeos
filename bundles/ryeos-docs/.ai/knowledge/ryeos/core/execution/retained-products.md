@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:13:17Z:329a28cd9848fbc551f6c68a1b06578561afd519b5cdcad682b6f118db637b39:UxAj+6BP6qtgmA/UGP9RNALVh0wgb8Cr3YOahTXaAg/qYD+KTP8BsnvqtRx6fx7L2vUAbrggFmpvRb7t/frEAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:13Z:369d6c432d7ff02f8042305d91636da7be2f850ef28ae62c6ec6de404e0a9887:vpzKoOnw2Ht1ucpmkjQSwWlD+2GZnqROCTVI6O2K3GRpH8ibeaNHQugs0yZ5X5Wo/LzlNziZbS6ZXXVXfChQBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -106,7 +106,7 @@ route, and prints `testimony_hash`, `acceptance_hash`, `coordinate_id` and
 `reused_existing`. Keep `acceptance_hash`; selections name it.
 
 The receiver accepts only when the testimony's signer is the authenticated
-caller and holds a current `remote_operator` grant, the named acceptance
+caller and holds a current `remote_principal` grant, the named acceptance
 policy resolves and allows the lane, the origin's qualification policy is the
 same signed bytes the receiver resolves for that ref, and the qualified
 product was received from that origin by that operator.

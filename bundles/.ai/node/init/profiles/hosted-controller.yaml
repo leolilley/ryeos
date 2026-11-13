@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T15:12:59Z:30a978d695c7465475ef74c0ff5781adb1e04a83d23457ff43f4ec97aaf0c165:BsfkhU4p5+qZl88vRtmLtBa84X8XCH+QQf5hxc5BkBpnei+wkj1jfefXEAoz6ozoGTYzL34JFjnYIOy2CPKWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:13Z:3b0afb03a10a2a77ba3ea8c3a494f73cfdbe1bbf3f5d882240697238673f2295:QdASRjbvm/kxWunrNIqP6r85PSqIhYfKyktKIchenaIXYWioiELMlvoOdzS3w9DbSiE4ilnPaOwh59qCbEHrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -237,7 +237,7 @@ policies:
     # The origin operator that drives this controller may request, through
     # signed offline operations applied at the next start, external placement
     # composition and the controller's wiring: a remote-node or
-    # remote-operator grant, a remote pinned from its descriptor, and a site
+    # remote-principal grant, a remote pinned from its descriptor, and a site
     # bundle installed or replaced from an archive. Delegating one
     # authority-bearing operation is close to delegating them all (a grant or a
     # bundle changes who the node trusts and what it runs), so the operator

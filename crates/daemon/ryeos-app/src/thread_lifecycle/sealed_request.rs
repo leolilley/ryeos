@@ -3033,7 +3033,7 @@ mod authority_tests {
     }
 
     #[test]
-    fn sealed_remote_operator_handler_authority_round_trips_exactly() {
+    fn sealed_remote_principal_handler_authority_round_trips_exactly() {
         let mut fixture = SealedRootExecutionRequest::storage_test_fixture();
         fixture.current_site_id = "site:target".to_string();
         fixture.origin_site_id = "site:source".to_string();
@@ -3041,7 +3041,7 @@ mod authority_tests {
             "session:test".to_string(),
             Vec::new(),
             true,
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -3311,7 +3311,7 @@ mod authority_tests {
             owner.clone(),
             vec!["*".to_string()],
             true,
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".to_string()),
         ));
         fixture.validate_handler_context().unwrap();
@@ -3384,7 +3384,7 @@ mod authority_tests {
                 owner_principal: owner,
                 origin_site_id: "site:source".to_string(),
                 principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "f".repeat(64),
                 scopes: vec!["*".to_string()],
             },
@@ -3483,7 +3483,7 @@ mod authority_tests {
             capsule_target
                 .handler_context()
                 .and_then(|context| context.authorized_key_class),
-            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator)
+            Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal)
         );
         assert_eq!(capsule_target.parameters, capsule_resume.parameters);
     }

@@ -796,7 +796,7 @@ mod authority_tests {
 
         for class in [
             ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
-            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
         ] {
             let rejected = HandlerContext::new_with_authority(
                 "fp:operator".into(),

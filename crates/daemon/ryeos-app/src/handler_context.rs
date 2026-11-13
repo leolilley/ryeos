@@ -167,7 +167,7 @@ pub struct HandlerContext {
     /// non-RyeOS verifiers and synthetic contexts.
     pub authorized_key_class: Option<ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass>,
     /// Site identity established by a remote-node request, or by a
-    /// remote-operator request plus its source-node co-signature. Request
+    /// remote-principal request plus its source-node co-signature. Request
     /// payloads never populate this field. `None` denotes a local or non-RyeOS
     /// caller.
     pub authenticated_origin_site_id: Option<String>,
@@ -592,7 +592,7 @@ impl HandlerContext {
             }
             Some(
                 ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode
-                | ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                | ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
             ) if self.authenticated_origin_site_id.is_none() => {
                 anyhow::bail!("remote handler context has no authenticated origin");
             }

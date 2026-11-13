@@ -78,8 +78,8 @@ async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
     .await
     .unwrap();
     assert_eq!(first["fingerprint"], merged["fingerprint"]);
-    assert_eq!(merged["principal_class"], "remote_operator");
-    assert_eq!(merged["previous_principal_class"], "remote_operator");
+    assert_eq!(merged["principal_class"], "remote_principal");
+    assert_eq!(merged["previous_principal_class"], "remote_principal");
     assert_eq!(merged["origin_site_id"], "site:source");
     assert_eq!(merged["previous_origin_site_id"], "site:source");
     assert_eq!(merged["dropped_scopes"], json!([]));
@@ -142,7 +142,7 @@ async fn non_operator_callers_are_rejected_before_decoding_or_grant_access() {
             operator.principal_id(),
             vec!["*".into()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".into()),
         ),
         HandlerContext::new_with_authority(

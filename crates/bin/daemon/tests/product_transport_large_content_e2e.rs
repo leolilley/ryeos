@@ -4,7 +4,7 @@
 //! ORIGIN publishes a product whose manifest names a file held in its
 //! large-object store, together with the witness attestation and the origin
 //! admission. HOSTED is configured with a remote entry for ORIGIN (pinned
-//! signing key, principal id, site id), a remote-operator grant for ORIGIN's
+//! signing key, principal id, site id), a remote-principal grant for ORIGIN's
 //! operator bound to ORIGIN's site, and a remote-node grant for ORIGIN's node
 //! key. ORIGIN holds a remote entry named `hosted` so the push service can
 //! address HOSTED.
@@ -195,21 +195,21 @@ fn authorize_remote_node(
     Ok(())
 }
 
-/// Admit `remote_operator` on the daemon at `state_path` as a remote operator
+/// Admit `remote_principal` on the daemon at `state_path` as a remote operator
 /// bound to `remote_site_id`.
-fn authorize_remote_operator(
+fn authorize_remote_principal(
     state_path: &Path,
     local: &FastFixture,
-    remote_operator: &SigningKey,
+    remote_principal: &SigningKey,
     remote_site_id: &str,
     scopes: &[&str],
 ) -> Result<()> {
     let public_key = base64::engine::general_purpose::STANDARD
-        .encode(remote_operator.verifying_key().as_bytes());
+        .encode(remote_principal.verifying_key().as_bytes());
     let identity = daemon_identity(state_path)?;
     ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(
         &authorized_keys_dir(state_path),
-        &fingerprint(remote_operator),
+        &fingerprint(remote_principal),
         &public_key,
         &scope_strings(scopes),
         "product-transport-operator",
@@ -471,7 +471,7 @@ async fn start_pair() -> Result<Pair> {
                 ORIGIN_NODE_SCOPES,
             )?;
             for operator in [&origin_operator, &second] {
-                authorize_remote_operator(
+                authorize_remote_principal(
                     state_path,
                     fixture,
                     operator,
@@ -1319,7 +1319,7 @@ async fn a_hosted_node_wired_by_delegated_offline_operations_takes_a_push() -> R
         hosted_node_key(),
         hosted_operator_key(),
         |state_path, _, fixture| {
-            authorize_remote_operator(
+            authorize_remote_principal(
                 state_path,
                 fixture,
                 &origin_operator,
@@ -1376,7 +1376,7 @@ async fn a_hosted_node_wired_by_delegated_offline_operations_takes_a_push() -> R
             "public_key": encode(&origin_operator),
             "scopes": PUSH_SCOPES,
             "label": "origin operator",
-            "class": "remote_operator",
+            "class": "remote_principal",
             "origin_site_id": origin_site,
             "merge_scopes": true,
         }),

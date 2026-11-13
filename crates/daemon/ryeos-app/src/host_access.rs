@@ -538,7 +538,7 @@ mod tests {
             principal.clone(),
             vec!["*".into()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source".into()),
         );
         let refusal = refused(admit(

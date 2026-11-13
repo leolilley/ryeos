@@ -100,7 +100,7 @@ impl AuthorizeClientRequest {
         }
         let subject = match (self.origin_site_id, self.remote_node_origin_site_id) {
             (Some(origin_site_id), None) => {
-                AuthorizeClientSubject::RemoteOperator { origin_site_id }
+                AuthorizeClientSubject::RemotePrincipal { origin_site_id }
             }
             (None, Some(origin_site_id)) => AuthorizeClientSubject::RemoteNode { origin_site_id },
             (None, None) => AuthorizeClientSubject::LocalClient,
@@ -123,7 +123,7 @@ impl AuthorizeClientRequest {
 pub enum AuthorizeClientSubject {
     LocalClient,
     RemoteNode { origin_site_id: String },
-    RemoteOperator { origin_site_id: String },
+    RemotePrincipal { origin_site_id: String },
 }
 
 /// Parameters for the authorize-client action.
@@ -377,8 +377,8 @@ fn reconcile_client_grant(
         AuthorizeClientSubject::RemoteNode { origin_site_id } => {
             ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode { origin_site_id }
         }
-        AuthorizeClientSubject::RemoteOperator { origin_site_id } => {
-            ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteOperator { origin_site_id }
+        AuthorizeClientSubject::RemotePrincipal { origin_site_id } => {
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemotePrincipal { origin_site_id }
         }
     };
     let (path, dropped_scopes, transition) =
@@ -670,7 +670,7 @@ admission_enabled: {admission_enabled}
     }
 
     #[test]
-    fn authorize_client_can_emit_exact_scope_remote_operator_grant() {
+    fn authorize_client_can_emit_exact_scope_remote_principal_grant() {
         let tmp = tempfile::tempdir().unwrap();
         let _fixture = HostedPolicyFixture::new(tmp.path());
         let client = lillux::crypto::SigningKey::generate(&mut OsRng).verifying_key();
@@ -681,7 +681,7 @@ admission_enabled: {admission_enabled}
             label: "forwarded operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            subject: AuthorizeClientSubject::RemoteOperator {
+            subject: AuthorizeClientSubject::RemotePrincipal {
                 origin_site_id: "site:source".to_owned(),
             },
             allow_semantic_conversion: false,
@@ -690,7 +690,7 @@ admission_enabled: {admission_enabled}
 
         assert_eq!(result.origin_site_id.as_deref(), Some("site:source"));
         let signed = std::fs::read_to_string(result.path).unwrap();
-        assert!(signed.contains("principal_class = \"remote_operator\""));
+        assert!(signed.contains("principal_class = \"remote_principal\""));
         assert!(signed.contains("origin_site_id = \"site:source\""));
     }
 
@@ -720,7 +720,7 @@ admission_enabled: {admission_enabled}
             label: "operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            subject: AuthorizeClientSubject::RemoteOperator {
+            subject: AuthorizeClientSubject::RemotePrincipal {
                 origin_site_id: "site:source".to_owned(),
             },
             allow_semantic_conversion: false,
@@ -738,7 +738,7 @@ admission_enabled: {admission_enabled}
             label: "operator".to_owned(),
             allow_wildcard: false,
             merge: false,
-            subject: AuthorizeClientSubject::RemoteOperator {
+            subject: AuthorizeClientSubject::RemotePrincipal {
                 origin_site_id: "site:source".to_owned(),
             },
             allow_semantic_conversion: true,
@@ -749,7 +749,7 @@ admission_enabled: {admission_enabled}
             Some("local_client")
         );
         assert_eq!(converted.previous_origin_site_id, None);
-        assert_eq!(converted.principal_class, "remote_operator");
+        assert_eq!(converted.principal_class, "remote_principal");
         assert_eq!(converted.origin_site_id.as_deref(), Some("site:source"));
 
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(tmp.path());

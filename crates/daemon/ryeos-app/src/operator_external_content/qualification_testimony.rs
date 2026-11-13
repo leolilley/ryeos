@@ -497,7 +497,7 @@ fn content_testimony_expiry(qualification: &Attestation, now: &str) -> anyhow::R
 }
 
 /// Controller side, blocking. `owner_principal` is the authenticated
-/// `remote_operator` and `origin_node_key` the pinned key of the configured
+/// `remote_principal` and `origin_node_key` the pinned key of the configured
 /// origin. The testimony is admitted only under the receiver's own signed
 /// policy; the resulting node-signed acceptance is idempotent per coordinate
 /// and a contradicting head is refused. The product lane joins the testimony
@@ -1182,14 +1182,14 @@ struct AttesterGrant {
     origin_site_id: String,
 }
 
-/// The attester must hold a current node-signed `remote_operator` grant. Its
+/// The attester must hold a current node-signed `remote_principal` grant. Its
 /// key and configured origin site come from that grant alone.
 fn current_attester_grant(state: &AppState, principal: &str) -> anyhow::Result<AttesterGrant> {
     let authority =
         crate::operator_authority::admitted_operator_authority_for_principal(state, principal)?;
     ensure!(
-        authority.principal_class == AuthorizedKeyPrincipalClass::RemoteOperator,
-        "remote qualification attester must hold a remote_operator grant"
+        authority.principal_class == AuthorizedKeyPrincipalClass::RemotePrincipal,
+        "remote qualification attester must hold a remote_principal grant"
     );
     let fingerprint = principal
         .strip_prefix("fp:")

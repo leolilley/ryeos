@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:24:05Z:a0ee0627171bf5840c16341a53acb81faae35a6151c759286c08eed571ddfd1d:6fuu8gLu22bzRLoLENJwpoNAu9CK16OsojndjlxuUq7jPE+S5QqJD4WFEy3WzGftLWxucnGQ2a8ilHrFOb+JDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:13Z:d18a7124c26111599e9c49beaacdb34453cff5074c0e2629d0618368596bc642:UwxBAxE93J3tCLxu82qW3I5Nc6djd8+EDDHYfRzOKQ5RQsS0iX/sRgYBw3IF2klQh/SYlXo8TbY5zHH9GeG5Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -102,7 +102,7 @@ Daemon startup may repair the local user's authorized-key entry after
 `ryeos init` has created the required keys and trust docs, but the daemon
 never writes user trust.
 
-An opt-in `remote_operator` grant is the narrow exception for an
+An opt-in `remote_principal` grant is the narrow exception for an
 operator-owned workflow forwarded by another RyeOS node. The source request is
 still signed by that source node's configured operator key, while the target
 retains only its public key in a node-signed grant constrained to one canonical
@@ -128,7 +128,7 @@ Local CLI requests are signed with the user key and verified against the local
 authorized-keys store. Ordinary daemon-to-daemon requests are signed with the
 caller node key. Explicit configured-operator forwarding is instead signed by
 that operator key and co-signed by the source node key. The target requires an
-exact `remote_operator` allowed-site grant and an exact `remote_node`
+exact `remote_principal` allowed-site grant and an exact `remote_node`
 forwarding-attestation grant. In both cases, authenticated origin comes from
 verified key/grant evidence, never an unsigned caller claim.
 

@@ -198,7 +198,7 @@ pub fn check_authenticated_grants(
                 ));
             }
         }
-        AuthorizedKeyPrincipalClass::RemoteNode | AuthorizedKeyPrincipalClass::RemoteOperator => {
+        AuthorizedKeyPrincipalClass::RemoteNode | AuthorizedKeyPrincipalClass::RemotePrincipal => {
             if grant.configured_origin_site_id.as_deref() != Some(effective_origin_site_id.as_str())
             {
                 return Err(refused(

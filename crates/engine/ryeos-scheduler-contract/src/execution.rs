@@ -248,10 +248,10 @@ pub fn validate_schedule_execution(execution: &ScheduleExecution) -> Result<()> 
                         );
                     }
                 }
-                AuthorizedKeyPrincipalClass::RemoteOperator => {
+                AuthorizedKeyPrincipalClass::RemotePrincipal => {
                     let forwarding = grant_authority.forwarding.as_ref().ok_or_else(|| {
                         anyhow::anyhow!(
-                            "remote-operator schedule authority requires forwarding evidence"
+                            "remote-principal schedule authority requires forwarding evidence"
                         )
                     })?;
                     validate_principal_id(&format!("fp:{}", forwarding.source_node_fingerprint))?;
@@ -413,7 +413,7 @@ mod tests {
             effective_origin_site_id: "site:test".into(),
             grant_authority: AuthenticatedGrantAuthority {
                 principal_grant_hash: "55".repeat(32),
-                forwarding: matches!(class, AuthorizedKeyPrincipalClass::RemoteOperator).then(
+                forwarding: matches!(class, AuthorizedKeyPrincipalClass::RemotePrincipal).then(
                     || ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                         source_node_fingerprint: "66".repeat(32),
                         source_node_grant_hash: "77".repeat(32),
@@ -427,14 +427,14 @@ mod tests {
 
     #[test]
     fn execution_wire_keeps_tagged_authority_and_refuses_unknown_fields() {
-        let value = authenticated_execution(AuthorizedKeyPrincipalClass::RemoteOperator);
+        let value = authenticated_execution(AuthorizedKeyPrincipalClass::RemotePrincipal);
         let wire = serde_json::to_value(&value).unwrap();
         assert_eq!(
             wire["authority"],
             serde_json::json!({
                 "kind": "authenticated",
                 "principal_id": format!("fp:{}", "44".repeat(32)),
-                "principal_class": "remote_operator",
+                "principal_class": "remote_principal",
                 "effective_origin_site_id": "site:test",
                 "grant_authority": {
                     "principal_grant_hash": "55".repeat(32),
@@ -468,7 +468,7 @@ mod tests {
         for class in [
             AuthorizedKeyPrincipalClass::LocalClient,
             AuthorizedKeyPrincipalClass::RemoteNode,
-            AuthorizedKeyPrincipalClass::RemoteOperator,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
         ] {
             let mut value = authenticated_execution(class);
             validate_schedule_execution(&value).unwrap();
@@ -478,7 +478,7 @@ mod tests {
             else {
                 unreachable!();
             };
-            grant_authority.forwarding = if class == AuthorizedKeyPrincipalClass::RemoteOperator {
+            grant_authority.forwarding = if class == AuthorizedKeyPrincipalClass::RemotePrincipal {
                 None
             } else {
                 Some(
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn authenticated_testimony_refuses_noncanonical_hashes_and_site() {
-        let valid = authenticated_execution(AuthorizedKeyPrincipalClass::RemoteOperator);
+        let valid = authenticated_execution(AuthorizedKeyPrincipalClass::RemotePrincipal);
         for field in [
             "principal_id",
             "registration_request_hash",

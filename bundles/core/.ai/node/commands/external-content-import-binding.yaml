@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-16T03:00:17Z:07e63bc6e9b3147cbe918606384f383325eb1c07650b21034256a3c3a06e1f9a:KhpxbfXOX0u9hglHWQRtEjQNRpvT3Cfipf49trAZDzRFTct7jv9L/cViiKpFplduZUcrssQipAPxwtYSxS3fCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T16:31:13Z:5019f0504acd0944e97e87f4c0e66eb9beb232ecc30378ff4f567f8e84a13a16:Om6kZpmT0/3eTao3955UL5ODacpULKghxTgvtIh5/HaXOqGjD4Rj3QUwCF+j136kYag/eD2aA5ub04qKMMujBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, import-binding]
 description: Stage an exact active binding's retained manifest for an independently authorized consumer
 defaults:
@@ -15,7 +15,7 @@ help:
   usage: ryeos external-content import-binding <binding-hash> <maximum-bytes> [binding-owner-principal]
   examples:
     - ryeos external-content import-binding <exact-active-binding-hash> 16777216
-    - ryeos external-content import-binding <exact-active-binding-hash> 16777216 fp:<admitted-remote-operator-fingerprint>
+    - ryeos external-content import-binding <exact-active-binding-hash> 16777216 fp:<admitted-remote-principal-fingerprint>
 dispatch:
   kind: execute_ref
   execute: service:external-content/import

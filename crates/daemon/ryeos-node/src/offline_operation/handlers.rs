@@ -317,7 +317,7 @@ pub enum GrantClass {
     /// The node key of a remote RyeOS node, bound to its site.
     RemoteNode,
     /// An operator key forwarded by a remote RyeOS node of one origin site.
-    RemoteOperator,
+    RemotePrincipal,
 }
 
 /// Most scopes one grant operation may name.
@@ -1041,8 +1041,8 @@ pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
         GrantClass::RemoteNode => ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteNode {
             origin_site_id: &arguments.origin_site_id,
         },
-        GrantClass::RemoteOperator => {
-            ryeos_node_runtime::identity::AuthorizedKeySubject::RemoteOperator {
+        GrantClass::RemotePrincipal => {
+            ryeos_node_runtime::identity::AuthorizedKeySubject::RemotePrincipal {
                 origin_site_id: &arguments.origin_site_id,
             }
         }

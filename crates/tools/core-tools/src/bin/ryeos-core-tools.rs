@@ -254,7 +254,7 @@ enum Cmd {
         merge_scopes: bool,
 
         /// Bind this operator key to an authenticated forwarding RyeOS site.
-        /// Emits a remote_operator grant and rejects wildcard scopes.
+        /// Emits a remote_principal grant and rejects wildcard scopes.
         #[arg(long)]
         origin_site_id: Option<String>,
 
@@ -1912,7 +1912,7 @@ mod tests {
         let error = serde_json::from_value::<AuthorizeClientStdinParams>(serde_json::json!({
             "public_key": "ZmFrZQ==",
             "scopes": "scope:a",
-            "principal_class": "remote_operator"
+            "principal_class": "remote_principal"
         }))
         .unwrap_err();
 

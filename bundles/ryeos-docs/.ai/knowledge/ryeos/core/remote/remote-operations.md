@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:13:17Z:dd29c8401900489ad96e67910a9b4362f86f8a0c3922f8f61da150c1b6722f53:RNhTanBv3yUdzHLv24mHkosSZx2a8l1eQyZ405Uw3gXbmIuc3edK7m6K76oFLeNFiTfr+445TuorURjhgf5KCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:13Z:a927d7eefcf5fbaa6ba998ad8b6c7be0ab8157f32351a3f4d1737f4875aece80:s2cXpDZeCJHKUAP5bCmL+AKjNIxrGdxkBNoAwFYGZTf3icchiCu4AZWfYCOeaugpYueRjo9m7HmLZgY+TgndCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -68,7 +68,7 @@ Operator-owned durable workflows may explicitly select the configured
 operator on `service:remote/push`; the matching retained-current-HEAD accepted
 `service:remote/run` preserves it automatically. Both local requests must be
 made by that exact configured operator, and the destination must authorize the
-same operator key through a node-signed `remote_operator` grant bound to the
+same operator key through a node-signed `remote_principal` grant bound to the
 source site's canonical ID and exact scopes. The destination separately admits
 the source node key as `remote_node` with
 `ryeos.attest.request.forwarded-operator`; that key co-signs every exact
@@ -213,7 +213,7 @@ RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
 ```
 
 Do not use `--origin-site-id` for this key: that flag describes the separate
-forwarded `remote_operator` principal.
+forwarded `remote_principal` principal.
 
    Common remote-side scopes:
 
@@ -227,7 +227,7 @@ forwarded `remote_operator` principal.
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
-   | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_operator` principal) |
+   | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_principal` principal) |
 
    `ryeos.use.vault.operator` lets an execution read the target's
    operator vault (`include_operator_vault: true`, or the `operator` vault
@@ -326,7 +326,7 @@ offline operations, which the controller's signed profile delegates
 
 | Operation | Input | Effect |
 |---|---|---|
-| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_operator` grant (public key, exact scopes, label, origin site, `merge_scopes`). Never an offline-operation scope or a wildcard. |
+| `node.authorize-client` | arguments only | Reconcile one `remote_node` or `remote_principal` grant (public key, exact scopes, label, origin site, `merge_scopes`). Never an offline-operation scope or a wildcard. |
 | `node.remote.pin` | `descriptor` (64 KiB) | Pin a remote from its descriptor, as `ryeos remote pin`. |
 | `node.bundle.replace` | `archive` (2 MiB `.tar.gz`) | Install or replace a bundle, verified as `bundle install --replace` is. The archive holds one top-level directory named after the bundle, and only directories and regular files. |
 

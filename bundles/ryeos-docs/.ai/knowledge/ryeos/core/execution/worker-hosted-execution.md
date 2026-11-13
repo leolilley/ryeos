@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:48:58Z:089e2de9ae6f21b2845e0e946a56800cd67f3396c56017e057ff3c821d3a350f:4DB3PbV7uVIULh7xiv0CNpTLj0eVffrq3aPKU5NN9aaI/2i/Bo4oHVBKqc/OwqmhcQmcaSstKn+WWC1r7Ci9BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:13Z:17c65dd8a2a0b62530ac7539e68cc4309e24399e1a5cca398b0d2e630a01dcb8:ML2v2rVjq5FWmsVCjjReyuEn/HQ5wJ4FVUUsu5l4FCTMtSFafLa7bOS7IXWc8VIMszwaK30po8vgrgqPaGKMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -130,7 +130,7 @@ the request. Payload semantics remain governed by the admitted protocol.
 
 Every profile and worker-execution entry point admits only an exact
 node-admitted operator principal: either the node's configured local operator
-or a node-signed, origin-bound `remote_operator` grant with verified
+or a node-signed, origin-bound `remote_principal` grant with verified
 source-node forwarding proof. Authenticated requests may use local or remote
 transport; local transport is not the predicate. Owner rows are defense in
 depth and do not claim hostile multi-principal isolation.
@@ -143,7 +143,7 @@ request must already authenticate locally as the source node's exact
 configured operator, the source daemon then signs the outbound request with
 that same local key, and the destination retains only its public key in a
 node-signed, exact-scope
-`remote_operator` grant bound to the source site's canonical ID. The source
+`remote_principal` grant bound to the source site's canonical ID. The source
 node also co-signs the exact request, and the destination accepts that proof
 only from a separately admitted `remote_node` grant carrying
 `ryeos.attest.request.forwarded-operator`. The principal remains the operator
@@ -510,7 +510,7 @@ adoption/runtime-install critical section, conditionally install state, attach
 its held process identities, and release the new placement.
 
 The target also resolves an exact `AdmittedOperatorAuthority` from its current
-node-signed `remote_operator` grant for the owner and immutable origin site.
+node-signed `remote_principal` grant for the owner and immutable origin site.
 That authority binds the principal class, owner principal, configured origin,
 grant digest, and sorted canonical scopes. It must cover both the target
 capsule's retained effective capabilities and its required-nullable parent

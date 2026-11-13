@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:49:33Z:0736d95abb12a05016d6300368b561855a442a87e9011cb200588ead80f35afa:0sffqeatECfIT4jFLvoKxHUlxgEi37uEaQ+9y8n/eqemCTMGYPRNj7RYp3u4Fe2AXrbhIsKBicNyj95U4LHaBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:13Z:b86cf8badb16d416d1d27e45dd27b3656ca6a2598e2aabd05744b31889ab6a14:aWKuSWcy7TbgKP3RiCBT5yQ9sym4s+6m0jvP5SWQOalEoSCUFWF2Kwbs296uqzhRq2CWIBQ8Jx/OFSyIoJXjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signed-offline-operations"
@@ -82,7 +82,7 @@ signed against.
 ## Who may sign
 
 - The node's configured local operator.
-- A `remote_operator` grant. Its signature is checked against the grant's key,
+- A `remote_principal` grant. Its signature is checked against the grant's key,
   the grant is re-read for every request and must still have the digest the
   request names, and the request must name the grant's origin site. This is
   a separate path from the online `require_admitted_operator`, which needs a

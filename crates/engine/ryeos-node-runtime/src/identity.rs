@@ -346,13 +346,13 @@ pub fn validate_forwarding_origin_assertion(
     authenticated_origin_site_id: Option<&str>,
 ) -> Result<()> {
     let Some(required_origin_site_id) = required_origin_site_id else {
-        if principal_class == Some(AuthorizedKeyPrincipalClass::RemoteOperator) {
-            bail!("remote_operator execution requires a signed forwarding-origin assertion");
+        if principal_class == Some(AuthorizedKeyPrincipalClass::RemotePrincipal) {
+            bail!("remote_principal execution requires a signed forwarding-origin assertion");
         }
         return Ok(());
     };
-    if principal_class != Some(AuthorizedKeyPrincipalClass::RemoteOperator) {
-        bail!("forwarding-origin assertions are valid only for remote_operator principals");
+    if principal_class != Some(AuthorizedKeyPrincipalClass::RemotePrincipal) {
+        bail!("forwarding-origin assertions are valid only for remote_principal principals");
     }
     validate_canonical_site_id(required_origin_site_id)?;
     if authenticated_origin_site_id != Some(required_origin_site_id) {
@@ -386,7 +386,7 @@ pub enum AuthorizedKeySubject<'a> {
     /// A configured operator key forwarded by another RyeOS node. The key
     /// remains the workflow owner, while the node-signed grant constrains the
     /// one source site whose separately admitted node key may co-sign it.
-    RemoteOperator {
+    RemotePrincipal {
         origin_site_id: &'a str,
     },
 }
@@ -430,7 +430,7 @@ pub struct VerifiedAuthorizedKeyGrant {
     pub principal_class: AuthorizedKeyPrincipalClass,
     /// Site to which a remote grant is constrained. For `remote_node`, the
     /// subject key itself authenticates this site when it signs a request. For
-    /// `remote_operator`, this is only an allow-list constraint until a
+    /// `remote_principal`, this is only an allow-list constraint until a
     /// separately admitted source-node key co-signs the exact request.
     pub configured_origin_site_id: Option<String>,
     /// Whole-file digest of the exact signed grant bytes used for this view.
@@ -518,15 +518,15 @@ fn load_verified_authorized_key_from_directory(
                 Some(site_id.to_owned()),
             )
         }
-        "remote_operator" => {
+        "remote_principal" => {
             let site_id = grant.origin_site_id.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "remote_operator authorized-key grant has no authenticated origin_site_id"
+                    "remote_principal authorized-key grant has no authenticated origin_site_id"
                 )
             })?;
             validate_canonical_site_id(site_id)?;
             (
-                AuthorizedKeyPrincipalClass::RemoteOperator,
+                AuthorizedKeyPrincipalClass::RemotePrincipal,
                 Some(site_id.to_owned()),
             )
         }
@@ -760,8 +760,8 @@ fn render_authorized_key_toml_for_subject(
         AuthorizedKeySubject::RemoteNode { origin_site_id } => {
             ("remote_node", Some(origin_site_id))
         }
-        AuthorizedKeySubject::RemoteOperator { origin_site_id } => {
-            ("remote_operator", Some(origin_site_id))
+        AuthorizedKeySubject::RemotePrincipal { origin_site_id } => {
+            ("remote_principal", Some(origin_site_id))
         }
     };
     let body = toml::to_string(&AuthorizedKeyGrantBody {
@@ -879,7 +879,7 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
     let requested_origin_site_id = match subject {
         AuthorizedKeySubject::LocalClient => None,
         AuthorizedKeySubject::RemoteNode { origin_site_id } => Some(origin_site_id),
-        AuthorizedKeySubject::RemoteOperator { origin_site_id } => Some(origin_site_id),
+        AuthorizedKeySubject::RemotePrincipal { origin_site_id } => Some(origin_site_id),
     };
     if let Some(origin_site_id) = requested_origin_site_id {
         validate_canonical_site_id(origin_site_id)
@@ -896,7 +896,7 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
     let requested_class = match subject {
         AuthorizedKeySubject::LocalClient => AuthorizedKeyPrincipalClass::LocalClient,
         AuthorizedKeySubject::RemoteNode { .. } => AuthorizedKeyPrincipalClass::RemoteNode,
-        AuthorizedKeySubject::RemoteOperator { .. } => AuthorizedKeyPrincipalClass::RemoteOperator,
+        AuthorizedKeySubject::RemotePrincipal { .. } => AuthorizedKeyPrincipalClass::RemotePrincipal,
     };
     if merge
         && let Some(existing) = existing.as_ref()
@@ -987,11 +987,11 @@ pub fn reconcile_authorized_key_toml_scopes(
     node_identity: &NodeIdentity,
     wildcard: WildcardPolicy,
     merge: bool,
-    remote_operator_origin_site_id: Option<&str>,
+    remote_principal_origin_site_id: Option<&str>,
     allow_semantic_conversion: bool,
 ) -> Result<(std::path::PathBuf, Vec<String>, AuthorizedKeyTransition)> {
-    let subject = match remote_operator_origin_site_id {
-        Some(origin_site_id) => AuthorizedKeySubject::RemoteOperator { origin_site_id },
+    let subject = match remote_principal_origin_site_id {
+        Some(origin_site_id) => AuthorizedKeySubject::RemotePrincipal { origin_site_id },
         None => AuthorizedKeySubject::LocalClient,
     };
     reconcile_authorized_key_toml_scopes_for_subject(
@@ -1294,14 +1294,14 @@ mod tests {
         .unwrap();
         validate_forwarding_origin_assertion(
             Some("site:source"),
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:source"),
         )
         .unwrap();
         assert!(
             validate_forwarding_origin_assertion(
                 None,
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 Some("site:source")
             )
             .is_err()
@@ -1317,7 +1317,7 @@ mod tests {
         assert!(
             validate_forwarding_origin_assertion(
                 Some("site:source"),
-                Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+                Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
                 Some("site:different")
             )
             .is_err()
@@ -1325,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_operator_reconciliation_preserves_owner_and_origin() {
+    fn remote_principal_reconciliation_preserves_owner_and_origin() {
         let dir = tempfile::tempdir().unwrap();
         let node = NodeIdentity::from_signing_key(test_signing_key()).unwrap();
         let client = test_signing_key().verifying_key();
@@ -1352,10 +1352,10 @@ mod tests {
         assert_eq!(transition.previous_principal_class, None);
         assert_eq!(
             transition.principal_class,
-            AuthorizedKeyPrincipalClass::RemoteOperator
+            AuthorizedKeyPrincipalClass::RemotePrincipal
         );
         let content = std::fs::read_to_string(path).unwrap();
-        assert!(content.contains("principal_class = \"remote_operator\""));
+        assert!(content.contains("principal_class = \"remote_principal\""));
         assert!(content.contains("origin_site_id = \"site:source\""));
         let grant = load_verified_authorized_key(&fingerprint, dir.path(), &node)
             .unwrap()
@@ -1366,7 +1366,7 @@ mod tests {
         );
         assert_eq!(
             grant.principal_class,
-            AuthorizedKeyPrincipalClass::RemoteOperator
+            AuthorizedKeyPrincipalClass::RemotePrincipal
         );
         assert_eq!(
             grant.configured_origin_site_id.as_deref(),
@@ -1375,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_operator_reconciliation_rejects_invalid_origin_and_wildcard_mode() {
+    fn remote_principal_reconciliation_rejects_invalid_origin_and_wildcard_mode() {
         let dir = tempfile::tempdir().unwrap();
         let node = NodeIdentity::from_signing_key(test_signing_key()).unwrap();
         let client = test_signing_key().verifying_key();
@@ -1581,7 +1581,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             grant.principal_class,
-            AuthorizedKeyPrincipalClass::RemoteOperator
+            AuthorizedKeyPrincipalClass::RemotePrincipal
         );
         assert_eq!(
             grant.configured_origin_site_id.as_deref(),

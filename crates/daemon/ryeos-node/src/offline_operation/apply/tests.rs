@@ -150,8 +150,8 @@ impl Fixture {
         refusals[0].body.reason
     }
 
-    /// A remote-operator grant, returning its fingerprint, key and digest.
-    fn remote_operator(
+    /// A remote-principal grant, returning its fingerprint, key and digest.
+    fn remote_principal(
         &self,
         scopes: &[&str],
         site: &str,
@@ -414,9 +414,9 @@ fn an_unknown_operation_is_refused() {
 }
 
 #[test]
-fn a_remote_operator_with_the_exact_scope_is_applied() {
+fn a_remote_principal_with_the_exact_scope_is_applied() {
     let fx = fixture();
-    let (key, grant) = fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let (key, grant) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
     let body = fx.remote_body(&key, &grant, SITE, "node.allow-restart");
     let request = SignedRequest::sign(body, &key).unwrap();
     fx.drop_request(&request);
@@ -483,9 +483,9 @@ fn wildcard_grants_are_reported_at_startup() {
 }
 
 #[test]
-fn a_remote_operator_without_the_scope_is_refused() {
+fn a_remote_principal_without_the_scope_is_refused() {
     let fx = fixture();
-    let (key, grant) = fx.remote_operator(
+    let (key, grant) = fx.remote_principal(
         &["ryeos.execute.service.remote/run"],
         SITE,
         WildcardPolicy::Reject,
@@ -499,7 +499,7 @@ fn a_remote_operator_without_the_scope_is_refused() {
 #[test]
 fn a_grant_that_changed_after_signing_is_refused() {
     let fx = fixture();
-    let (key, old_grant) = fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let (key, old_grant) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
     // The grant is rewritten (a scope is added) after the request was signed.
     fx.write_grant(
         &key,
@@ -516,7 +516,7 @@ fn a_grant_that_changed_after_signing_is_refused() {
 #[test]
 fn a_remote_request_without_a_grant_digest_is_refused() {
     let fx = fixture();
-    let (key, grant) = fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let (key, grant) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
     let mut body = fx.remote_body(&key, &grant, SITE, "node.allow-restart");
     body.signer_grant_digest = None;
     body.signer_origin_site_id = None;
@@ -528,7 +528,7 @@ fn a_remote_request_without_a_grant_digest_is_refused() {
 #[test]
 fn a_request_naming_another_origin_site_is_refused() {
     let fx = fixture();
-    let (key, grant) = fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let (key, grant) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
     let body = fx.remote_body(&key, &grant, "site:somewhere-else", "node.allow-restart");
     fx.drop_request(&SignedRequest::sign(body, &key).unwrap());
     fx.run();
@@ -566,7 +566,7 @@ fn a_remote_node_grant_may_not_sign() {
 fn an_authority_bearing_operation_is_not_delegable_by_default() {
     let fx = fixture();
     let scope = "ryeos.offline.node.policy-apply";
-    let (key, grant) = fx.remote_operator(&[scope], SITE, WildcardPolicy::Reject);
+    let (key, grant) = fx.remote_principal(&[scope], SITE, WildcardPolicy::Reject);
     let mut body = fx.remote_body(&key, &grant, SITE, "node.policy-apply");
     body.arguments = json!({ "section": "external_content" });
     fx.drop_request(&SignedRequest::sign(body, &key).unwrap());
@@ -578,7 +578,7 @@ fn an_authority_bearing_operation_is_not_delegable_by_default() {
 fn only_the_local_operator_may_reset_authorization() {
     let fx = fixture();
     let scope = "ryeos.offline.node.reset.authorization";
-    let (key, grant) = fx.remote_operator(&[scope], SITE, WildcardPolicy::Reject);
+    let (key, grant) = fx.remote_principal(&[scope], SITE, WildcardPolicy::Reject);
     let body = fx.remote_body(&key, &grant, SITE, "node.reset.authorization");
     fx.drop_request(&SignedRequest::sign(body, &key).unwrap());
     fx.run();
@@ -1050,8 +1050,8 @@ fn reset_request(fx: &Fixture) -> SignedRequest {
 #[test]
 fn the_authorization_reset_lists_every_discarded_grant_in_its_receipt() {
     let fx = fixture();
-    let (_a, grant_a) = fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
-    let (_b, grant_b) = fx.remote_operator(
+    let (_a, grant_a) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let (_b, grant_b) = fx.remote_principal(
         &["ryeos.execute.service.remote/run"],
         "site:origin-b",
         WildcardPolicy::Reject,
@@ -1104,7 +1104,7 @@ fn the_authorization_reset_lists_every_discarded_grant_in_its_receipt() {
 #[test]
 fn the_receipt_is_in_the_ledger_before_the_grants_are_swapped() {
     let fx = fixture();
-    let (_a, grant) = fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let (_a, grant) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
     let request = reset_request(&fx);
     let digest = request.digest().unwrap();
     let name = fx.drop_request(&request);
@@ -1472,7 +1472,7 @@ fn the_local_path_finishes_an_interrupted_operation_before_its_own() {
 #[test]
 fn a_node_that_died_between_the_receipt_and_the_intent_record_still_makes_the_effect() {
     let fx = fixture();
-    fx.remote_operator(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
     let request = reset_request(&fx);
     let digest = request.digest().unwrap();
     let pending = pending_for(&fx, request.clone(), Phase::Running);
@@ -1636,11 +1636,11 @@ fn authorize_client_operation_merges_scopes() {
     let second = "ryeos.execute.service.objects/stage-chunk";
     apply_grant(
         &fx,
-        grant_arguments(&peer, &[first], "remote_operator", false),
+        grant_arguments(&peer, &[first], "remote_principal", false),
     );
     let report = apply_grant(
         &fx,
-        grant_arguments(&peer, &[second], "remote_operator", true),
+        grant_arguments(&peer, &[second], "remote_principal", true),
     );
     assert_eq!(report.applied.len(), 1, "{:?}", report.refused);
     let grant = ryeos_node_runtime::identity::load_verified_authorized_key(
@@ -1697,7 +1697,7 @@ fn undelegated_operation_refused_for_remote_signer() {
     ] {
         let fx = fixture();
         let scope = format!("ryeos.offline.{operation}");
-        let (key, grant) = fx.remote_operator(&[scope.as_str()], SITE, WildcardPolicy::Reject);
+        let (key, grant) = fx.remote_principal(&[scope.as_str()], SITE, WildcardPolicy::Reject);
         let mut body = fx.remote_body(&key, &grant, SITE, operation);
         body.arguments = arguments;
         fx.drop_request(&SignedRequest::sign(body, &key).unwrap());

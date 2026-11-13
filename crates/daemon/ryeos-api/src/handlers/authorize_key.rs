@@ -139,7 +139,7 @@ pub async fn handle(
 
     // 8. Create the authorized-key TOML. Online delegation is deliberately
     // create-only: an API caller may not replace or reclassify an existing
-    // local-client, remote-node, remote-operator, or bootstrap grant.
+    // local-client, remote-node, remote-principal, or bootstrap grant.
     let now = lillux::time::iso8601_now();
     // Grants live where the authenticator reads them.
     let auth_dir = state.config.authorized_keys_dir.clone();

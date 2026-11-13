@@ -24,7 +24,7 @@ pub struct NodeMaintenancePolicy {
     /// disables every stopped-node native consumer.
     pub offline_native: BTreeMap<String, OfflineNativeQuota>,
     /// Authority-bearing offline operations (by operation id) that a
-    /// `remote_operator` grant may be authorized for on this node. An
+    /// `remote_principal` grant may be authorized for on this node. An
     /// authority-bearing operation changes what the node trusts or runs, so a
     /// remote signer may not request one unless this signed policy names it.
     /// An empty list means none (the field is required); the local operator is never governed by this list.
