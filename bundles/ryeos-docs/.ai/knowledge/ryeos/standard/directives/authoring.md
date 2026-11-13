@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-31T02:06:51Z:83fad713521ac63d56180ab1ae22e6e12790ccc8a1eff7cc813a5239168b7711:jdqPlSs/JMOU2Ea2sovWQmcvlrpBb2ers7gAWPdPOzP0wz7e4ytFia2je0ZAVIMw22GISSRaSEP3NG1rTUe3BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:43:16Z:2601934de69584ee8f7b4680e1f2c532e0e83d719b49dd502562728f9973e346:m3Gc2GkXJYQiCBbavMx8+J7UWFkb3Qr4IC85varyE8TUY4gj+G5KhnK8I9ZA7RjodJNi+ssMgPruD86RPzKFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -44,7 +44,7 @@ Instructions for the runtime.
 ## Important fields
 
 - `extends`: parent directive ref. Children inherit through `extends-chain`.
-- `requires.capabilities.declared`: a flat list of self-asserted capability strings (the cap encodes its own verb, e.g. `ryeos.execute.tool.echo`). Children may narrow but not widen the parent's declared set.
+- `requires.capabilities.declared`: a flat list of the capability strings the directive needs (the cap encodes its own verb, e.g. `ryeos.execute.tool.echo`). Declaring is asking, not granting: the caller launching the directive must hold every declared cap, otherwise the launch is refused with `caller_capability_not_covered`. Declare the narrowest set the body really uses; a broad wildcard can only be launched by a caller holding it. Children may narrow but not widen the parent's declared set.
 - `requires.capabilities.manifest.runtime_authority`: runtime callback authority (bundle events / vault / item authoring / project snapshots) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
 - `context`: knowledge refs grouped by position (`system`, `before`, `after`).
 - `model`: optional explicit provider/model/context window; otherwise routing tiers apply.

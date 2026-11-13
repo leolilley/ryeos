@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:8269383daade2b5a2957486f3531933bdcc30628e63501b7fa2028878a946a7e:z8B3jN/IOvc2/9kR4aqzispJoGhuShl00Ca9dHnF2+AVBCSrPgIyMdouVhhtZrKsfnWLPmSsGZ2ooBMuBTiVCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:43:16Z:27889cbbfd51b459198449207b626d49da1026b390136499f32e4159b1b644ed:PIYwnhVtWo5guXnyJJtTmgrGiMappLKqlgpAS6Y4OpE8e7/O6ZdmQyF4g7hGpXXpWkHaGHiBtZ46emDDY7lRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -176,6 +176,29 @@ capability set for the launched item. Across an `extends` chain, every direct
 child may only narrow the already-narrowed parent; authority discarded by an
 intermediate document cannot be recovered by the root.
 This is what the item is allowed to dispatch back to the daemon.
+
+#### Root admission: callers lend authority
+
+Items declare what they need; they never grant themselves authority. At root
+admission every cap in the composed `declared` set (an `extends` chain
+included) must be covered by the launching caller's scopes, with wildcards in
+the caller's grant working as everywhere else. The thread then runs with
+exactly its declared caps plus the runtime caps its own signed bundle manifest
+grants — never the caller's full scopes. Manifest runtime caps need no caller
+coverage: a bundle's signed manifest gives its runtime that authority.
+
+A caller that does not cover every declared cap is refused (403) with the
+typed code `caller_capability_not_covered`, which names the item, the caller,
+every uncovered cap and the cure: grant the caller the cap, or narrow the
+item's `requires.capabilities.declared`. The same rule applies to a scheduled
+fire (the schedule's stored caps are its scopes) and to an operator follow-up
+on a running thread: the follow-up runs with the thread's sealed caps exactly,
+and the sender must cover them. Routes whose principal carries no scopes
+cannot launch an item that declares caps.
+
+The thread records the covering principal and, when the caller authenticated
+under an authorized-key grant, that grant's digest, so work running under a
+revoked grant can be found.
 
 ### 4. Effective Caps → Callback Tokens
 
