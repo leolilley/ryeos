@@ -287,6 +287,16 @@ pub struct QualificationComposeArguments {
     pub maximum_lifetime_seconds: Option<u32>,
 }
 
+/// Recompose installed bindings against the installed bundles. An empty
+/// list recomposes every binding whose pins the installed bundles fail; the
+/// optional `consumer_verifiers` input carries the running node's derive.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecomposeArguments {
+    #[serde(default)]
+    pub bindings: Vec<ryeos_app::node_config::recompose::BindingRef>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapacityArguments {
@@ -1147,6 +1157,25 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
     Ok(serde_json::to_value(report)?)
 }
 
+pub(super) fn recompose(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: RecomposeArguments = ctx.arguments()?;
+    let consumer_verifiers = ctx
+        .inputs
+        .get("consumer_verifiers")
+        .map(|bytes| read_json(bytes, "consumer verifiers"))
+        .transpose()?;
+    let report = ryeos_app::node_config::recompose::recompose_bindings(
+        ryeos_app::node_config::recompose::RecomposeRequest {
+            app_root: ctx.app_root,
+            state_lock: ctx.state_lock,
+            bindings: arguments.bindings,
+            consumer_verifiers,
+            dry_run: false,
+        },
+    )?;
+    Ok(serde_json::to_value(report)?)
+}
+
 // ── Capacity and restart ─────────────────────────────────────────────────
 
 pub(super) fn capacity_reissue(ctx: &HandlerContext<'_>) -> Result<Value> {
@@ -1564,6 +1593,64 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .expect("workspace root with bundles/ directory")
             .to_path_buf()
+    }
+
+    #[test]
+    fn recompose_operation_is_idempotent_on_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().to_path_buf();
+        let node =
+            NodeIdentity::create(&RuntimeRoot::new(state.clone()).node_signing_key_path()).unwrap();
+        let lock = StateLock::acquire(&default_lock_path(&state)).unwrap();
+        let request = |bindings: serde_json::Value| RequestBody {
+            schema: REQUEST_SCHEMA.to_owned(),
+            node_fingerprint: node.fingerprint().to_owned(),
+            signer_fingerprint: "b".repeat(64),
+            signer_grant_digest: None,
+            signer_origin_site_id: None,
+            operation: "node.external-execution.recompose".to_owned(),
+            arguments: json!({ "bindings": bindings }),
+            inputs: BTreeMap::new(),
+            expected_result: BTreeMap::new(),
+            precondition: BTreeMap::new(),
+            issued_at: "2026-11-13T00:00:00Z".to_owned(),
+            not_after: "2026-11-13T01:00:00Z".to_owned(),
+        };
+        let inputs = VerifiedInputs::new(BTreeMap::new());
+        let run = |request: &RequestBody| {
+            recompose(&HandlerContext {
+                app_root: &state,
+                state_lock: &lock,
+                request,
+                request_digest: &"c".repeat(64),
+                inputs: &inputs,
+                host: &BareHost,
+                node: &node,
+            })
+        };
+        // A node whose bindings already match its bundles: the effect and its
+        // replay both publish nothing and report the same.
+        let all = request(json!([]));
+        let first = run(&all).expect("first application");
+        let replay = run(&all).expect("replay after the crash");
+        assert_eq!(first, replay);
+        assert_eq!(first["recomposed"], json!([]));
+        // A named binding that is not installed is refused, typed, every time.
+        let absent = request(json!(["runtime_snapshot_production/render-snapshot"]));
+        for _ in 0..2 {
+            let error = run(&absent).unwrap_err();
+            let refusal = error
+                .downcast_ref::<ryeos_app::node_config::recompose::RecomposeRefusal>()
+                .unwrap_or_else(|| panic!("typed refusal: {error:#}"));
+            assert_eq!(
+                refusal.code,
+                ryeos_app::node_config::recompose::RECOMPOSE_BINDING_NOT_INSTALLED
+            );
+        }
+        assert!(
+            serde_json::from_value::<RecomposeArguments>(json!({"bindings": ["bundles/core"]}))
+                .is_err()
+        );
     }
 
     #[test]

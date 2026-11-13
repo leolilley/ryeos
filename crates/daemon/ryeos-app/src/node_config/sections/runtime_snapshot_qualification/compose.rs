@@ -158,6 +158,96 @@ pub fn compose_runtime_snapshot_qualification_binding(
     })
 }
 
+/// Verify signed qualification bytes exactly as the loader would and build
+/// the installed authority from them.
+pub(crate) fn admit_signed_qualification(
+    app_root: &Path,
+    id: &str,
+    signed: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<super::InstalledRuntimeSnapshotQualificationBinding> {
+    let body = verify_node_signed(signed, identity, "runtime snapshot qualification binding")?;
+    // The section parse is the loader's own gate for this document.
+    RuntimeSnapshotQualificationSection.parse(
+        &item_context(app_root, SECTION_NAME, id, identity.fingerprint()),
+        &body,
+    )?;
+    let document: QualificationDocument =
+        serde_json::from_value(body).context("invalid runtime snapshot qualification binding")?;
+    document.validate()?;
+    let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "domain": "ryeos.runtime-snapshot-qualification-binding.v1",
+        "id": id,
+        "signer": identity.fingerprint(),
+        "signed_source": lillux::sha256_hex(signed.as_bytes()),
+    }))?;
+    Ok(super::InstalledRuntimeSnapshotQualificationBinding {
+        id: id.to_owned(),
+        document,
+        digest,
+    })
+}
+
+/// Read an installed qualification binding back the way the loader admits it.
+pub(crate) fn installed_qualification_binding(
+    app_root: &Path,
+    id: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<super::InstalledRuntimeSnapshotQualificationBinding> {
+    validate_document_id(id, "runtime snapshot qualification binding")?;
+    let signed =
+        crate::node_config::sections::external_execution::compose::read_installed_document(
+            app_root,
+            SECTION_NAME,
+            id,
+        )?;
+    admit_signed_qualification(app_root, id, &signed, identity)
+}
+
+/// Re-pin the installed qualification binding to its producer's current
+/// digest, the producer adapter's installed provider spec and restoration
+/// verifier, and the given consumer selections (`None` carries the installed
+/// ones). Every other field is carried. Signs and verifies, publishes nothing.
+pub(crate) fn repin_qualification(
+    app_root: &Path,
+    installed: &super::InstalledRuntimeSnapshotQualificationBinding,
+    production_binding_digest: &str,
+    provider_spec_digest: &str,
+    verifier_artifact_hash: &str,
+    consumer_verifiers: Option<BTreeMap<String, ConsumerRuntimeVerifierSelection>>,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<
+    crate::node_config::recompose::RepinOutcome<
+        super::InstalledRuntimeSnapshotQualificationBinding,
+    >,
+> {
+    let mut document = installed.document.clone();
+    document.production_binding_digest = production_binding_digest.to_owned();
+    document.provider_spec_digest = provider_spec_digest.to_owned();
+    document.verifier_artifact_hash = verifier_artifact_hash.to_owned();
+    if let Some(selections) = consumer_verifiers {
+        document.consumer_verifiers = selections;
+    }
+    let fields_changed = crate::node_config::recompose::changed_fields(
+        &serde_json::to_value(&installed.document)?,
+        &serde_json::to_value(&document)?,
+    );
+    if fields_changed.is_empty() {
+        return Ok(crate::node_config::recompose::RepinOutcome::unchanged(
+            installed.clone(),
+        ));
+    }
+    document.validate()?;
+    let signed = sign_node_document(&serde_yaml::to_string(&document)?, identity)?;
+    let new = admit_signed_qualification(app_root, &installed.id, &signed, identity)?;
+    Ok(crate::node_config::recompose::RepinOutcome {
+        old: installed.clone(),
+        new,
+        signed: Some(signed),
+        fields_changed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

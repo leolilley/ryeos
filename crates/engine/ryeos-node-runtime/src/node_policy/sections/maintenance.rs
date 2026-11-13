@@ -133,6 +133,7 @@ mod tests {
             delegating[0].1,
             [
                 "node.external-execution.compose",
+                "node.external-execution.recompose",
                 "node.authorize-client",
                 "node.remote.pin",
                 "node.bundle.replace",

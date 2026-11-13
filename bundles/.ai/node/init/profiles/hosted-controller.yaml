@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T18:15:39Z:5654dec9e35aeedc75e830a599f15c78f52b9570a8c0c92fd68d413a61b7fe43:YvE3M0Q4hbQ2CWg13cs+KHPRSFZhsRURa/OqBu3GE1t3obKjo0etKarfyjloj6/9G1wRsFvoyKTqBP5uWG8uDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T21:21:48Z:ef4bd467d20d0b4af84b25fbffbf4a4449816d393d2b4a1362fee68a272f6c43:Zb9DumOIDa+F1hRDiC0uvJZq4/T9vK9+To0V35o1Becy8oq7WEchF8RCRzdS3k8qDPXLUi0LQ0+CieeX2dAwDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -236,15 +236,18 @@ policies:
     schedules: []
     # The origin operator that drives this controller may request, through
     # signed offline operations applied at the next start, external placement
-    # composition and the controller's wiring: a remote-node or
-    # remote-principal grant, a remote pinned from its descriptor, and a site
-    # bundle installed or replaced from an archive. Delegating one
-    # authority-bearing operation is close to delegating them all (a grant or a
-    # bundle changes who the node trusts and what it runs), so the operator
-    # granted these scopes is trusted with the whole controller. No other
-    # authority-bearing offline operation is open to a remote signer.
+    # composition, the recompose that re-pins installed bindings to the
+    # installed bundles after a payload change, and the controller's wiring: a
+    # remote-node or remote-principal grant, a remote pinned from its
+    # descriptor, and a site bundle installed or replaced from an archive.
+    # Delegating one authority-bearing operation is close to delegating them
+    # all (a grant or a bundle changes who the node trusts and what it runs),
+    # so the operator granted these scopes is trusted with the whole
+    # controller. No other authority-bearing offline operation is open to a
+    # remote signer.
     remote_offline_operations:
       - node.external-execution.compose
+      - node.external-execution.recompose
       - node.authorize-client
       - node.remote.pin
       - node.bundle.replace
