@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# ryeos:signed:2026-11-13T00:09:46Z:e5544bec26c137f595af6cfae2ba438e2229e1b4de61cb2c5f033981afc03997:I6LOYJMigERrgXnrTLagID/v1fTr+0KnN7Odx7gMcR61eSr0V2960/mHsI9wzprVxurrjWjjXcHrklwP8IMJAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
 """Read-only check that a contained node's process-scope proofs come from the OCI provider.
 
 The guarantee asserted is that every provided.* process-scope proof is measured

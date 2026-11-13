@@ -114,6 +114,10 @@ jobs:
           python3 tests/development/hosted_oci_runtime_verifier.py
           python3 tests/development/oci_hook_contract.py
           python3 tests/development/contained_workflow_products.py
+          python3 -B tests/development/prove_contained_oci_provider.py
+
+      - name: Check build-support input rebuild planning
+        run: python3 -B tests/e2e/authoring-environment/test_rebuild_build_support_inputs.py
 
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh

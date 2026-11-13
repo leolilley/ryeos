@@ -42,8 +42,8 @@ PATH="$tool_dir:$PATH" "$actionlint" -color
     scripts/gate.sh \
     tests/e2e/configured-remote/qualify.sh \
     tests/e2e/configured-remote/test_qualification.sh \
-    scripts/dev-tui.sh \
-    scripts/dev-ui-assets.sh \
+    .ai/tools/ryeos/development/interactive-host/lib/dev-tui.sh \
+    .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh \
     tests/e2e/execute-stream/smoke.sh \
     tests/e2e/installed-resume/smoke.sh \
     scripts/populate-bundles.sh \

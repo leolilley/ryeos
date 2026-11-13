@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-08T06:40:08Z:baa410f009fbe20ffece98f6246d9a0d88f02d5f900903bc95ed7628cbb38ef9:jYZzHybIiBMv3hukVBH05mHckzGQ+o64fO9STBE2zfkk05AF5aLoC5GklVBxGPzWgUUgbsf/gYHXBLXpKl1bBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:09:46Z:3c27948a96ebe3396a1875f66150057a0b61d0548d07801a0915cb3be8630ed6:Dmq8wfoZpofVMcgHvzaRDipBMbOQSUr/luvu6KisBgtLeK8dgXrDF5BO5jTq5N3KCn/tFm8GaW20ZnOE1KvhDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
@@ -570,7 +570,7 @@ The build writes a private generation to `target/ui-browser-stage`; it does not
 publish `pkg/`. The stage validator rejects extra chunks, source maps, bare
 imports, external URLs and any lazy chunk.
 
-`scripts/dev-ui-assets.sh` serves an already assembled generation with manual
+`.ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh` serves an already assembled generation with manual
 refresh; it is not the source hot-reload workflow above. Use staged/installed
 generation checks separately when qualifying production assets.
 

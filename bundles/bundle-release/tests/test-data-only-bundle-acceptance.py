@@ -147,7 +147,7 @@ class DataOnlyBundleAcceptance(unittest.TestCase):
                 self.assertIn(mode, {0o644, 0o755})
             self.assertEqual(sorted(path.name for path in product.parent.iterdir()), ["tree"])
             subprocess.run(
-                [str(ROOT / "scripts/dev/sign-dev.sh"), str(product / ".ai/manifest.yaml")],
+                [str(ROOT / ".ai/tools/ryeos/development/maintainer/lib/sign-dev.sh"), str(product / ".ai/manifest.yaml")],
                 check=True,
                 capture_output=True,
                 text=True,

@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 import unittest
 
-SPEC = importlib.util.spec_from_file_location("prove", Path(__file__).with_name("prove-contained-oci-provider.py"))
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location(
+    "prove", ROOT / ".ai/tools/ryeos/development/contained-oci-provider/lib/prove-contained-oci-provider.py")
 PROVE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PROVE)
 

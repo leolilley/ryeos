@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# ryeos:signed:2026-11-13T00:09:46Z:5256c92a8e9e711f4c810037b68aa231da3b4cd1fa73e21c9c46c59c43b1c6f9:H0jyRxYUhOHGnSGAh5D0rEBqN4v3Ug+MSIm1jEtFTeVuQn1zFBTFcgiV2/6+3dZfqY6LVmFa5sgwFk349dAJBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Externally invoked host helper in the development bundle; lib/ is excluded
+# from Tool resolution, so this is signed source, not an admitted Tool. It
+# grants no RyeOS authority. Run it from a checkout of this repository.
 """Rebuild the pinned `build-support-inputs` tree from its upstream sources.
 
 The signed inventory names every member with its sha256, size and mode. Each
@@ -37,7 +41,7 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[6]
 INVENTORY = ROOT / ".ai/config/development/ryeos/authoring-build-support-inputs.yaml"
 ACQUISITION = ROOT / ".ai/config/development/ryeos/authoring-source-acquisition.yaml"
 SOURCE_ACTIVATION = (ROOT / "bundles/environment-qualification/.ai/config/development/ryeos/"
