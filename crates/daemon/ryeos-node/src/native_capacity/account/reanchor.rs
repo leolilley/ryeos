@@ -745,6 +745,9 @@ pub struct CapacityPolicyAmendmentReport {
     /// Digest of the canonical JSON of the policy now in force.
     pub policy_digest: String,
     pub already_applied: bool,
+    /// The dead incarnation whose debit was settled before the amendment,
+    /// as the next start would have settled it; absent when none was owed.
+    pub settled_incarnation: Option<String>,
 }
 
 /// One line of the bounded policy-amendment evidence log.
@@ -872,7 +875,9 @@ impl PreparedCapacityPolicyAmendment<'_> {
     pub fn involves_amendment(&self) -> bool {
         match &self.plan.outcome {
             PolicyAmendmentOutcome::InForce { owed, .. } => owed.is_some(),
-            PolicyAmendmentOutcome::Amend { .. } => true,
+            PolicyAmendmentOutcome::Amend { .. } | PolicyAmendmentOutcome::SettleFirst { .. } => {
+                true
+            }
         }
     }
 
@@ -922,6 +927,16 @@ enum PolicyAmendmentOutcome {
         prior_binding_digest: String,
         reason: String,
     },
+    /// The account carries a dead incarnation's debit. A node stopped by its
+    /// host without a clean shutdown always does, and a node whose new binary
+    /// cannot start under the old generation can never settle it by
+    /// restarting. The write settles it exactly as that start would, then
+    /// plans again from the settled position, whose anchor the document names.
+    SettleFirst {
+        prior: Box<NativeCapacityAccountBinding>,
+        policy: Box<NodeNativeCapacityPolicy>,
+        reason: String,
+    },
 }
 
 struct OwedPolicyEvidence {
@@ -932,8 +947,9 @@ struct OwedPolicyEvidence {
 
 /// Every check an amendment makes before its first write: the policy and
 /// reason bounds, the evidence log it must extend, and, when the policy is
-/// not yet in force, that the account carries no outstanding debit and that
-/// its current image fits the new policy.
+/// not yet in force, that the account carries no outstanding debit, or only a
+/// provably dead incarnation's (settled by the write, as a start would), and
+/// that its current image fits the new policy.
 fn plan_policy_at(
     places: &AmendmentPlaces,
     prior: &NativeCapacityAccountBinding,
@@ -1004,7 +1020,6 @@ fn plan_policy_at(
         issuance,
         &prior.policy,
     )?;
-    let position = owner.require_no_outstanding_debit(&prior.policy)?;
     // Every later start validates the account's current image under the
     // generation's policy, so the image must already fit the new one.
     let mut fit = StoppedCapacityAccount::open(
@@ -1015,6 +1030,23 @@ fn plan_policy_at(
         issuance,
         policy,
     )?;
+    if owner.owes_cold_settlement(&prior.policy)? {
+        // The settled image, recovery charge included, must fit the new
+        // policy too, or the re-plan after the settlement write would refuse.
+        fit.owes_cold_settlement(policy).context(
+            "the capacity account, once its dead incarnation is settled, does not fit the new \
+             policy; open a fresh epoch with `ryeos node capacity reissue` first, then apply the policy",
+        )?;
+        return Ok(PlannedPolicyAmendment {
+            policy_digest,
+            outcome: PolicyAmendmentOutcome::SettleFirst {
+                prior: Box::new(prior.clone()),
+                policy: Box::new(policy.clone()),
+                reason: reason.to_owned(),
+            },
+        });
+    }
+    let position = owner.require_no_outstanding_debit(&prior.policy)?;
     fit.require_no_outstanding_debit(policy).context(
         "the capacity account's current image does not fit the new policy; open a fresh epoch \
          with `ryeos node capacity reissue` first, then apply the policy",
@@ -1087,6 +1119,7 @@ impl PlannedPolicyAmendment {
                     prior_binding_digest: None,
                     policy_digest,
                     already_applied: true,
+                    settled_incarnation: None,
                 })
             }
             PolicyAmendmentOutcome::Amend {
@@ -1112,7 +1145,34 @@ impl PlannedPolicyAmendment {
                     prior_binding_digest: Some(prior_binding_digest),
                     policy_digest,
                     already_applied: false,
+                    settled_incarnation: None,
                 })
+            }
+            PolicyAmendmentOutcome::SettleFirst {
+                prior,
+                policy,
+                reason,
+            } => {
+                let settled = StoppedCapacityAccount::open(
+                    places.directory.try_clone()?,
+                    prior.account_identity,
+                    places.onboarding.try_clone()?,
+                    places.state.try_clone()?,
+                    prior.issuance_digest()?,
+                    &prior.policy,
+                )?
+                .settle_cold(&prior.policy)?;
+                let replanned = plan_policy_at(places, &prior, &policy, identity, &reason)?;
+                ensure!(
+                    !matches!(
+                        replanned.outcome,
+                        PolicyAmendmentOutcome::SettleFirst { .. }
+                    ),
+                    "the capacity account still carries a debit after its dead-incarnation settlement"
+                );
+                let mut report = replanned.write(places, identity, actor, command)?;
+                report.settled_incarnation = settled;
+                Ok(report)
             }
         }
     }

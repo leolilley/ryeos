@@ -225,8 +225,9 @@ impl StoppedCapacityAccount {
 
     /// Load the anchor and refuse unless the stopped account carries no
     /// outstanding incarnation debit and holds its anchor's target image.
-    /// A debit, live or dead, is settled by a restart or a re-issuance,
-    /// never by moving the account's location.
+    /// A debit, live or dead, is never settled by moving the account's
+    /// location: a restart or a re-issuance settles it, and a policy amendment
+    /// settles a provably dead one first ([`Self::settle_cold`]).
     ///
     /// Returns where the account stands: its epoch, its debit sequence and
     /// the digest of the anchor's committed image, which a signed re-anchor
@@ -261,6 +262,129 @@ impl StoppedCapacityAccount {
             sequence: target.sequence,
             anchor_digest: hex_digest(&sha2::Sha256::digest(current.encode(policy)?).into()),
         })
+    }
+
+    /// Whether the stopped account owes the cold settlement a restart would
+    /// perform first, checked under `policy` without writing: an outstanding
+    /// debit whose incarnation has provably ended (dry-running the recovery
+    /// charge and the settlement transition under `policy`), or an account
+    /// image a published redo has not reached yet. A live or unproved
+    /// incarnation is refused.
+    pub(super) fn owes_cold_settlement(
+        &mut self,
+        policy: &NodeNativeCapacityPolicy,
+    ) -> Result<bool> {
+        self.anchor
+            .load(policy, &self.issuance, self.budget.deadline, &|steps| {
+                self.budget.pay(steps)
+            })?;
+        let current = *self.anchor.current()?;
+        let bytes = self
+            .account
+            .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        ensure!(
+            current.accepts_account_bytes(&bytes)?,
+            "capacity account corruption has no permitted redo"
+        );
+        let torn = bytes != encode(current.target())?;
+        let Some(debit) = current.target().outstanding else {
+            return Ok(torn);
+        };
+        ensure!(
+            debit
+                .process
+                .exact()?
+                .has_ended()
+                .map_err(anyhow::Error::msg)?,
+            "outstanding native incarnation remains live or unproved; stop it first"
+        );
+        if let Some(previous) = current.recovery_process() {
+            ensure!(
+                previous.exact()?.has_ended().map_err(anyhow::Error::msg)?,
+                "previous capacity recovery process remains live or unproved"
+            );
+        }
+        let process = lillux::process_control::capture_current_process_identity()
+            .map_err(anyhow::Error::msg)?;
+        let charged = current.charge_recovery(&process, policy)?;
+        charged.successor(
+            Operation::DeadIncarnationSettlement,
+            CapacityRecord {
+                outstanding: None,
+                ..*charged.target()
+            },
+            policy,
+        )?;
+        Ok(true)
+    }
+
+    /// Perform the cold settlement [`Self::owes_cold_settlement`] found, as
+    /// the next start would: bring the account image to its published redo,
+    /// then, while a dead incarnation's debit is outstanding, charge one
+    /// recovery attempt to this process and publish and apply the
+    /// dead-incarnation settlement. The debit's units stay consumed and the
+    /// charge is never refunded; only the outstanding marker is cleared. A run
+    /// interrupted anywhere converges on rerun. Returns the settled
+    /// incarnation's digest when the anchor's last transition settled one.
+    pub(super) fn settle_cold(
+        &mut self,
+        policy: &NodeNativeCapacityPolicy,
+    ) -> Result<Option<String>> {
+        if !self.owes_cold_settlement(policy)? {
+            return Ok(None);
+        }
+        let current = *self.anchor.current()?;
+        let bytes = self
+            .account
+            .read_bytes(self.budget.deadline, &|steps| self.budget.pay(steps))?;
+        if bytes != encode(current.target())? {
+            self.account
+                .apply_redo(&current, self.budget.deadline, &|steps| {
+                    self.budget.pay(steps)
+                })?;
+        }
+        if current.target().outstanding.is_some() {
+            let process = lillux::process_control::capture_current_process_identity()
+                .map_err(anyhow::Error::msg)?;
+            let admission = current.charge_recovery(&process, policy)?;
+            self.anchor.publish(
+                admission,
+                policy,
+                &self.issuance,
+                self.budget.deadline,
+                &|steps| self.budget.pay(steps),
+            )?;
+            self.account
+                .apply_redo(self.anchor.current()?, self.budget.deadline, &|steps| {
+                    self.budget.pay(steps)
+                })?;
+            let charged = *self.anchor.current()?;
+            let settlement = charged.successor(
+                Operation::DeadIncarnationSettlement,
+                CapacityRecord {
+                    outstanding: None,
+                    ..*charged.target()
+                },
+                policy,
+            )?;
+            self.anchor.publish(
+                settlement,
+                policy,
+                &self.issuance,
+                self.budget.deadline,
+                &|steps| self.budget.pay(steps),
+            )?;
+            self.account
+                .apply_redo(self.anchor.current()?, self.budget.deadline, &|steps| {
+                    self.budget.pay(steps)
+                })?;
+        }
+        Ok(self
+            .anchor
+            .current()?
+            .settled_incarnation()
+            .as_ref()
+            .map(hex_digest))
     }
 
     fn crash_after(&self, step: Step) -> Result<()> {
@@ -579,6 +703,7 @@ fn append_evidence(directory: &PinnedDirectory, evidence: &CapacityReissueEviden
 pub(crate) fn leave_outstanding_debit(
     app_root: &Path,
     binding: &NativeCapacityAccountBinding,
+    process: &lillux::process_control::ExactProcessIdentity,
 ) -> Result<()> {
     let open = |path: &str| -> Result<PinnedDirectory> {
         PinnedDirectory::open(&app_root.join(path))?.with_context(|| format!("{path} absent"))
@@ -606,6 +731,10 @@ pub(crate) fn leave_outstanding_debit(
         consumed,
         outstanding: Some(super::IncarnationDebit {
             units: policy.incarnation.units,
+            process_digest: process
+                .incarnation_digest_bytes()
+                .map_err(anyhow::Error::msg)?,
+            process: super::redo::StoredProcess::capture(process)?,
             ..debited.outstanding.context("fixture debit")?
         }),
         ..before
@@ -1116,6 +1245,131 @@ mod controls {
         f.debit_dead_incarnation();
         assert!(f.run(None).unwrap_err().to_string().contains("epoch bound"));
         assert_eq!(f.current().0.epoch(), 2);
+    }
+
+    #[test]
+    fn cold_settlement_settles_a_dead_debit_once_and_converges_after_a_torn_write() {
+        let f = Fixture::new();
+        assert!(!f.owner().owes_cold_settlement(&f.policy).unwrap());
+        assert_eq!(f.owner().settle_cold(&f.policy).unwrap(), None);
+        f.debit_dead_incarnation();
+        let (debited, _) = f.current();
+
+        // Interrupted after the settlement is published, before the account
+        // image is written: the anchor no longer owes the debit, the file does.
+        let mut owner = f.owner();
+        let deadline = owner.budget.deadline;
+        owner
+            .anchor
+            .load(&f.policy, &f.issuance, deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        let process = lillux::process_control::capture_current_process_identity().unwrap();
+        let charged = debited.charge_recovery(&process, &f.policy).unwrap();
+        owner
+            .anchor
+            .publish(charged, &f.policy, &f.issuance, deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        owner
+            .account
+            .apply_redo(owner.anchor.current().unwrap(), deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        let settlement = charged
+            .successor(
+                Operation::DeadIncarnationSettlement,
+                CapacityRecord {
+                    outstanding: None,
+                    ..*charged.target()
+                },
+                &f.policy,
+            )
+            .unwrap();
+        owner
+            .anchor
+            .publish(settlement, &f.policy, &f.issuance, deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        drop(owner);
+        let (torn, bytes) = f.current();
+        assert!(torn.target().outstanding.is_none());
+        assert_ne!(bytes, encode(torn.target()).unwrap());
+        f.owner()
+            .require_no_outstanding_debit(&f.policy)
+            .expect_err("a torn image still blocks a plain move");
+
+        // The rerun completes the image without charging again.
+        assert!(f.owner().owes_cold_settlement(&f.policy).unwrap());
+        let settled = f.owner().settle_cold(&f.policy).unwrap();
+        assert_eq!(settled, Some(hex_digest(&f.dead.process_digest)));
+        let (after, bytes) = f.current();
+        assert_eq!(after, torn);
+        assert_eq!(bytes, encode(after.target()).unwrap());
+        assert_eq!(after.recovery_attempts(), debited.recovery_attempts() + 1);
+        assert!(!f.owner().owes_cold_settlement(&f.policy).unwrap());
+        f.owner()
+            .require_no_outstanding_debit(&f.policy)
+            .expect("settled and whole");
+    }
+
+    #[test]
+    fn cold_settlement_refuses_a_live_debit_without_writing() {
+        let f = Fixture::new();
+        let (current, _) = f.current();
+        let before = *current.target();
+        let (sequence, consumed) = before
+            .prepare_debit(f.policy.allowance, f.policy.incarnation.units)
+            .unwrap();
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        let next = current
+            .successor(
+                Operation::Debit,
+                CapacityRecord {
+                    sequence,
+                    consumed,
+                    outstanding: Some(IncarnationDebit {
+                        process_digest: live.incarnation_digest_bytes().unwrap(),
+                        process: redo::StoredProcess::capture(&live).unwrap(),
+                        ..f.dead
+                    }),
+                    ..before
+                },
+                &f.policy,
+            )
+            .unwrap();
+        let mut owner = f.owner();
+        let deadline = owner.budget.deadline;
+        owner
+            .anchor
+            .load(&f.policy, &f.issuance, deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        owner
+            .anchor
+            .publish(next, &f.policy, &f.issuance, deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        owner
+            .account
+            .apply_redo(owner.anchor.current().unwrap(), deadline, &|steps| {
+                owner.budget.pay(steps)
+            })
+            .unwrap();
+        drop(owner);
+        let before = f.current();
+        let error = f.owner().settle_cold(&f.policy).expect_err("a live debit");
+        assert!(
+            format!("{error:#}").contains("remains live or unproved"),
+            "{error:#}"
+        );
+        assert_eq!(f.current(), before);
     }
 
     #[test]

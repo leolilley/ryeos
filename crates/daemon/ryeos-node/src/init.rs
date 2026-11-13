@@ -3787,33 +3787,83 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_capacity_amendment_the_account_refuses_leaves_the_node_untouched() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = tmp.path().join("state");
-        let (_, other) = node_issued_under_another_capacity_policy(&state);
-        let operator = fixture_operator_key(&state);
+    /// A node issued under another capacity policy whose account carries an
+    /// outstanding debit owned by `process`, as a start that never released.
+    fn node_with_outstanding_debit(
+        state: &Path,
+        process: &lillux::process_control::ExactProcessIdentity,
+    ) {
+        let (_, other) = node_issued_under_another_capacity_policy(state);
+        let operator = fixture_operator_key(state);
         let in_force = crate::native_capacity::load_existing_capacity_binding(
-            &state,
+            state,
             &compute_fingerprint(&operator.verifying_key()),
-            &ryeos_node_runtime::identity::node_identity_fingerprint(&state).unwrap(),
+            &ryeos_node_runtime::identity::node_identity_fingerprint(state).unwrap(),
             &other,
         )
         .expect("the binding in force");
-        crate::native_capacity::leave_outstanding_debit(&state, &in_force).unwrap();
+        crate::native_capacity::leave_outstanding_debit(state, &in_force, process).unwrap();
+    }
+
+    #[test]
+    fn a_capacity_amendment_over_a_live_incarnation_leaves_the_node_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        node_with_outstanding_debit(&state, &live);
         let before = replacement_subjects(&state);
         let evidence = amendment_evidence(&state);
 
         let refused = run_init(&full_profile_replacement(&state))
-            .expect_err("an outstanding debit refuses the amendment");
+            .expect_err("a live incarnation's debit refuses the amendment");
         let message = format!("{refused:#}");
         assert!(
-            message.contains("incarnation debit is outstanding")
-                && message.contains("nothing was changed"),
+            message.contains("remains live or unproved") && message.contains("nothing was changed"),
             "{message}"
         );
         assert_eq!(replacement_subjects(&state), before);
         assert_eq!(amendment_evidence(&state), evidence);
+    }
+
+    #[test]
+    fn a_capacity_amendment_settles_a_dead_incarnation_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        // A host that kills the container leaves the last start's debit
+        // outstanding, and the new binary cannot start under the old
+        // generation to settle it; the amendment settles it as that start would.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("read x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead =
+            lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(dead.has_ended().unwrap());
+        node_with_outstanding_debit(&state, &dead);
+        let recorded = amendment_evidence(&state).len();
+
+        let report = run_init(&full_profile_replacement(&state)).expect("replacement");
+        let amendment = report.capacity_amendment.expect("the amendment");
+        assert!(!amendment.already_applied);
+        assert_eq!(
+            amendment.settled_incarnation.as_deref(),
+            Some(dead.incarnation_digest().unwrap().as_str())
+        );
+        assert!(amendment.document_digest.is_some());
+        assert_eq!(amendment_evidence(&state).len(), recorded + 1);
+
+        let rerun = run_init(&full_profile_replacement(&state)).expect("rerun");
+        let again = rerun.capacity_amendment.expect("the rerun names it too");
+        assert!(again.already_applied);
+        assert_eq!(again.settled_incarnation, None);
+        assert_eq!(again.document_digest, amendment.document_digest);
+        assert_eq!(amendment_evidence(&state).len(), recorded + 1);
     }
 
     #[test]
