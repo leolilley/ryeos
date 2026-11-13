@@ -278,7 +278,7 @@ mod tests {
         let vk = state.identity.verifying_key();
         ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
             &state.config.authorized_keys_dir,
-            &lillux::signature::compute_fingerprint(&vk),
+            &lillux::signature::compute_fingerprint(vk),
             &base64::engine::general_purpose::STANDARD.encode(vk.as_bytes()),
             &[ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE.to_string()],
             "origin-node",
