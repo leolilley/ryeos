@@ -793,7 +793,31 @@ mod tests {
         assert!(done["queued"].as_array().unwrap().is_empty());
         assert_eq!(done["receipts"].as_array().unwrap().len(), 1);
         assert_eq!(done["ledger_sequence"], 1);
-        let facts = facts_report(fx.path(), &fx.node).unwrap();
+        let facts = facts_report(fx.path(), &fx.node, None).unwrap();
         assert_eq!(facts["ledger_head"], done["ledger_head"]);
+        assert!(facts.get("signer").is_none());
+    }
+
+    #[test]
+    fn facts_name_the_authority_the_signing_key_holds() {
+        let fx = fixture();
+        let operator = fingerprint(&fx.operator);
+        let local = facts_report(fx.path(), &fx.node, Some(&operator)).unwrap();
+        assert_eq!(local["signer"]["fingerprint"], operator.as_str());
+        assert_eq!(local["signer"]["local_operator"], true);
+        assert!(local["signer"].get("grant_digest").is_none());
+
+        let key = lillux::crypto::generate_signing_key();
+        let grant = fx.grant(&key, &[RESTART_SCOPE], WildcardPolicy::Reject);
+        let remote = signer_report(fx.path(), &fx.node, &fingerprint(&key));
+        assert_eq!(remote["local_operator"], false);
+        assert_eq!(remote["grant_digest"], grant.as_str());
+        assert_eq!(remote["origin_site_id"], SITE);
+        assert_eq!(remote["principal_class"], "remote_principal");
+
+        let stranger = fingerprint(&lillux::crypto::generate_signing_key());
+        let ungranted = signer_report(fx.path(), &fx.node, &stranger);
+        assert_eq!(ungranted["fingerprint"], stranger.as_str());
+        assert!(ungranted["grant_digest"].is_null());
     }
 }
