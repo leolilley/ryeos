@@ -439,6 +439,22 @@ pub enum EngineError {
         second_item_id: String,
     },
 
+    // ── Project trust documents ──────────────────────────────────────
+    /// A trust document in a project's `.ai/config/keys/trusted/` that is
+    /// not vouched for by the node: unsigned (including raw `.pub`/`.key`
+    /// files), self-signed by a key the node does not hold, or signed by a
+    /// key outside the node's own trust store. `code` is one of
+    /// [`crate::trust::PROJECT_TRUST_UNSIGNED`],
+    /// [`crate::trust::PROJECT_TRUST_SELF_SIGNED`] and
+    /// [`crate::trust::PROJECT_TRUST_UNTRUSTED_SIGNER`].
+    #[error("{code}: project trust document {path}: {reason}. {cure}")]
+    ProjectTrustDocumentRefused {
+        code: &'static str,
+        path: String,
+        reason: String,
+        cure: String,
+    },
+
     // ── Internal ─────────────────────────────────────────────────────
     #[error("internal engine error: {0}")]
     Internal(String),

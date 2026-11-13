@@ -225,6 +225,77 @@ async fn a_direct_tool_signed_by_an_unpinned_key_is_refused_by_default() {
     );
 }
 
+// ── Project trust documents (gap C stopgap) ─────────────────────────────
+
+/// Write `key`'s trust document into the project's own trust directory,
+/// signed by `signer`.
+fn plant_project_pin(project: &Path, key: &SigningKey, signer: &SigningKey) {
+    let verifying_key = key.verifying_key();
+    let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
+    let body = ryeos_engine::trust::TrustedKeyDoc {
+        fingerprint: fingerprint.clone(),
+        owner: "planted".to_owned(),
+        version: "1.0.0".to_owned(),
+        attestation: None,
+        verifying_key,
+    }
+    .to_toml();
+    let dir = project.join(".ai/config/keys/trusted");
+    std::fs::create_dir_all(&dir).expect("create project trust dir");
+    std::fs::write(
+        dir.join(format!("{fingerprint}.toml")),
+        lillux::signature::sign_content(&body, signer, "#", None),
+    )
+    .expect("write project trust document");
+}
+
+/// Audit 6b: a key pinned by writing its own self-signed document into the
+/// project used to make that key's tools `trusted_project`. The node never
+/// vouched for it, so the project's resolution is refused and the tool does
+/// not run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_signed_project_pin_cannot_admit_a_tool() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let planted = SigningKey::from_bytes(&[0x5bu8; 32]);
+    plant_project_pin(project.path(), &planted, &planted);
+    plant_gap_echo(project.path(), Some(&planted));
+
+    let (status, body) = execute_gap_echo(&h, project.path()).await;
+    assert!(!status.is_success(), "status={status}; body={body:#}");
+    let message = body.to_string();
+    assert!(
+        message.contains(ryeos_engine::trust::PROJECT_TRUST_SELF_SIGNED),
+        "the refusal names the project trust code: {body:#}"
+    );
+    assert!(
+        message.contains("trust-pin"),
+        "the refusal names the cure: {body:#}"
+    );
+    assert!(
+        !message.contains("gap-b-check\\n"),
+        "the tool must not have run: {body:#}"
+    );
+}
+
+/// The same project pin, signed by the node's operator key, still admits the
+/// project author's tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_pin_signed_by_the_operator_admits_a_tool() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let author = SigningKey::from_bytes(&[0x5cu8; 32]);
+    plant_project_pin(project.path(), &author, &fixture.user);
+    plant_gap_echo(project.path(), Some(&author));
+
+    let (status, body) = execute_gap_echo(&h, project.path()).await;
+    assert!(status.is_success(), "status={status}; body={body:#}");
+    assert!(
+        body.to_string().contains("gap-b-check"),
+        "the operator-vouched project tool must run: {body:#}"
+    );
+}
+
 // ── Operator admission and narrow principals ────────────────────────────
 
 /// Replace the node-signed `launch_trust` policy section before the daemon

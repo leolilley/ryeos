@@ -5444,6 +5444,7 @@ fn map_engine_root_resolution_error(
         | EngineError::SignatureMissing { .. }
         | EngineError::SignatureVerificationFailed { .. }
         | EngineError::UntrustedSigner { .. }
+        | EngineError::ProjectTrustDocumentRefused { .. }
         | EngineError::ContentHashMismatch { .. }
         | EngineError::InvalidMetadata { .. }
         | EngineError::EffectiveItemNotFound { .. }

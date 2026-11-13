@@ -1704,14 +1704,25 @@ pem = """
         )
     }
 
+    /// Write `signing_key`'s trust document under `dir`, self-signed. A
+    /// project copy counts only when the node trust store holds that key.
     fn create_trust_store(dir: &Path, signing_key: &SigningKey) {
-        let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
-        let toml_content = trust_document(signing_key);
+        create_trust_store_signed_by(dir, signing_key, signing_key);
+    }
+
+    /// Write `key`'s trust document under `dir`, signed by `signer`.
+    fn create_trust_store_signed_by(dir: &Path, key: &SigningKey, signer: &SigningKey) {
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let toml_content = lillux::signature::sign_content(&trust_document(key), signer, "#", None);
         create_file(
             dir,
             &format!(".ai/config/keys/trusted/{fingerprint}.toml"),
             &toml_content,
         );
+    }
+
+    fn trusted_dir(root: &Path) -> PathBuf {
+        root.join(".ai/config/keys/trusted")
     }
 
     fn sign_md(body: &str, signing_key: &SigningKey) -> String {
@@ -1913,12 +1924,15 @@ pem = """
     #[test]
     fn project_trust_cannot_admit_bundle_or_node_config() {
         let project_key = SigningKey::from_bytes(&[51u8; 32]);
+        let operator_key = SigningKey::from_bytes(&[50u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         let node_config = tmp.path().join("node-config");
-        let node_trust = tmp.path().join("node-trust");
+        let node_root = tmp.path().join("node-root");
+        let node_trust = trusted_dir(&node_root);
         let bundle = tmp.path().join("bundle");
-        create_trust_store(&project, &project_key);
+        create_trust_store(&node_root, &operator_key);
+        create_trust_store_signed_by(&project, &project_key, &operator_key);
         create_file(
             &bundle,
             ".ai/config/test.yaml",
@@ -1974,7 +1988,7 @@ pem = """
         let content = fs::read_to_string(&entry).unwrap();
         fs::write(&entry, content.replace(&declared, &"f".repeat(64))).unwrap();
 
-        let error = TrustStore::load(tmp.path(), &no_operator_trust()).unwrap_err();
+        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
         assert!(format!("{error:#}").contains("fingerprint mismatch"));
     }
 
@@ -1990,7 +2004,8 @@ pem = """
         fs::write(&path, &signed).unwrap();
 
         let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_dir(tmp.path()))
+                .unwrap();
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(!verified.content.contains("ryeos:signed:"));
@@ -2026,7 +2041,8 @@ pem = """
         fs::write(&path, &tampered).unwrap();
 
         let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_dir(tmp.path()))
+                .unwrap();
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -2054,7 +2070,8 @@ pem = """
         fs::write(&path, &forged).unwrap();
 
         let loader =
-            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &trusted_dir(tmp.path()))
+                .unwrap();
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -2133,6 +2150,48 @@ pem = """
         );
     }
 
+    /// Gap C in a runtime: a project trust document must be signed by a key
+    /// the node trust store holds, exactly as in the daemon.
+    #[test]
+    fn runtime_refuses_project_trust_documents_the_node_did_not_sign() {
+        let operator = SigningKey::from_bytes(&[67u8; 32]);
+        let planted = SigningKey::from_bytes(&[68u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let node_root = tmp.path().join("app-root");
+        create_trust_store(&node_root, &operator);
+        let fingerprint = lillux::signature::compute_fingerprint(&planted.verifying_key());
+
+        for (name, document, code) in [
+            (
+                "unsigned",
+                trust_document(&planted),
+                ryeos_engine::trust::PROJECT_TRUST_UNSIGNED,
+            ),
+            (
+                "self-signed",
+                lillux::signature::sign_content(&trust_document(&planted), &planted, "#", None),
+                ryeos_engine::trust::PROJECT_TRUST_SELF_SIGNED,
+            ),
+        ] {
+            let project = tmp.path().join(name);
+            create_file(
+                &project,
+                &format!(".ai/config/keys/trusted/{fingerprint}.toml"),
+                &document,
+            );
+            let error = TrustStore::load(&project, &trusted_dir(&node_root)).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(code),
+                "{name}: unexpected error: {error:#}"
+            );
+        }
+
+        let vouched = tmp.path().join("vouched");
+        create_trust_store_signed_by(&vouched, &planted, &operator);
+        let store = TrustStore::load(&vouched, &trusted_dir(&node_root)).unwrap();
+        assert!(store.get(&fingerprint).is_some());
+    }
+
     #[test]
     fn trust_store_loads_operator_and_project_dirs() {
         let op_sk = SigningKey::from_bytes(&[42u8; 32]);
@@ -2141,7 +2200,7 @@ pem = """
         let operator_root = tmp.path().join("app-root");
         let project = tmp.path().join("project");
         create_trust_store(&operator_root, &op_sk);
-        create_trust_store(&project, &proj_sk);
+        create_trust_store_signed_by(&project, &proj_sk, &op_sk);
 
         let store =
             TrustStore::load(&project, &operator_root.join(".ai/config/keys/trusted")).unwrap();

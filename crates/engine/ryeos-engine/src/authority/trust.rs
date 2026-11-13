@@ -1,7 +1,10 @@
 //! Item signer trust store and signature verification.
 //!
 //! Loads trusted signer public keys from `.ai/config/keys/trusted/`. Trust
-//! is **operator-tier state only**: the resolution order is project > user.
+//! is **operator-tier state only**. A project's own
+//! `.ai/config/keys/trusted/` adds keys only through documents a key in the
+//! node's trust store has signed (`TrustStore::with_project_key_files`);
+//! unsigned, raw and self-signed project documents are refused.
 //! Bundles never auto-trust their own keys — operators pin publisher keys
 //! explicitly via `ryeos init` (platform author) and `ryeos trust pin <fp>`
 //! (third parties). Old bundle-internal trust dirs are ignored.
@@ -185,6 +188,30 @@ pub fn require_document_signer(
         role,
         cure: cure.to_string(),
     })
+}
+
+// ── Project trust documents ─────────────────────────────────────────
+
+/// Refusal code: a project trust document carries no signature (this
+/// includes raw `.pub`/`.key` files, which cannot carry one).
+pub const PROJECT_TRUST_UNSIGNED: &str = "project_trust_document_unsigned";
+/// Refusal code: a project trust document is signed only by the key it
+/// declares, and the node does not trust that key.
+pub const PROJECT_TRUST_SELF_SIGNED: &str = "project_trust_document_self_signed";
+/// Refusal code: a project trust document is signed by a key outside the
+/// node's own trust store.
+pub const PROJECT_TRUST_UNTRUSTED_SIGNER: &str = "project_trust_document_untrusted_signer";
+
+/// The cure every project trust refusal names.
+pub const PROJECT_TRUST_CURE: &str = "A project trust document counts only when a key in the node's own trust store (`<app_root>/.ai/config/keys/trusted/`, such as the operator key) has signed it. Either have that key sign the document, or pin the key on the node instead with `ryeos-core-tools trust-pin --app-root <app_root> --from <PUBLISHER_TRUST.toml>` and delete the project copy";
+
+fn project_trust_refusal(code: &'static str, path: &Path, reason: String) -> EngineError {
+    EngineError::ProjectTrustDocumentRefused {
+        code,
+        path: path.display().to_string(),
+        reason,
+        cure: PROJECT_TRUST_CURE.to_string(),
+    }
 }
 
 // ── Trusted signer entry ────────────────────────────────────────────
@@ -435,36 +462,18 @@ impl TrustStore {
         project_root: Option<&Path>,
         operator_config_root: &Path,
     ) -> Result<Self, EngineError> {
-        let mut signers = HashMap::new();
-
-        // Collect trust dirs only. Bundles are NOT a trust source.
-        let mut dirs: Vec<PathBuf> = Vec::new();
-        if let Some(root) = project_root {
-            dirs.push(root.join(crate::AI_DIR).join(crate::TRUST_KEYS_DIR));
+        // Bundles are NOT a trust source. The node's own trust dir is
+        // loaded first; a project's trust documents only count when a node
+        // key vouches for them (see `with_project_key_files`).
+        let node = Self::load_from_dir(&operator_config_root.join("keys").join("trusted"))?;
+        let store = match project_root {
+            Some(root) => node.with_project_keys(root)?.into_owned(),
+            None => node,
+        };
+        if !store.is_empty() {
+            tracing::info!(count = store.len(), "loaded trust store (operator-tier)");
         }
-        dirs.push(operator_config_root.join("keys").join("trusted"));
-
-        for dir in &dirs {
-            if !dir.is_dir() {
-                continue;
-            }
-            let partial = Self::load_from_dir(dir)?;
-            for (fp, signer) in partial.signers {
-                // First match wins — don't override higher-priority spaces
-                signers.entry(fp).or_insert(signer);
-            }
-        }
-
-        let count = signers.len();
-        if count > 0 {
-            tracing::info!(
-                count,
-                dirs = dirs.len(),
-                "loaded trust store (operator-tier)"
-            );
-        }
-
-        Ok(Self { signers })
+        Ok(store)
     }
 
     /// Warn about bundle-internal trust dirs. They are never loaded.
@@ -574,12 +583,55 @@ impl TrustStore {
     /// parsed and verified: the daemon's engine and the runtime-side loader
     /// (`ryeos-runtime` `verified_loader`) both call it, so they cannot
     /// disagree about which project keys count. Paths are diagnostic only.
+    ///
+    /// A project trust document counts only when a key in this node store
+    /// signed it. Unsigned documents and raw `.pub`/`.key` files are
+    /// refused ([`PROJECT_TRUST_UNSIGNED`]), as are documents self-signed by
+    /// a key the node does not hold ([`PROJECT_TRUST_SELF_SIGNED`]) and
+    /// documents signed by any other key outside the node store
+    /// ([`PROJECT_TRUST_UNTRUSTED_SIGNER`]), so writing a project directory
+    /// can no longer pin a key. One project document never vouches for
+    /// another.
     pub fn with_project_key_files(
         &self,
         files: impl IntoIterator<Item = (PathBuf, Vec<u8>)>,
     ) -> Result<Self, EngineError> {
-        let project_keys = Self::load_from_files(files)?;
-        let mut merged = project_keys.signers;
+        let mut files = files.into_iter().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut merged = HashMap::new();
+        for (path, bytes) in files {
+            let ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            match ext {
+                "toml" => {
+                    let content = std::str::from_utf8(&bytes).map_err(|error| {
+                        EngineError::Internal(format!(
+                            "trusted key doc {} is not UTF-8: {error}",
+                            path.display()
+                        ))
+                    })?;
+                    let doc = load_project_trust_doc_content(content, &path, &self.signers)?;
+                    merged.insert(
+                        doc.fingerprint.clone(),
+                        TrustedSigner {
+                            fingerprint: doc.fingerprint,
+                            verifying_key: doc.verifying_key,
+                            label: Some(doc.owner),
+                        },
+                    );
+                }
+                "pub" | "key" => {
+                    return Err(project_trust_refusal(
+                        PROJECT_TRUST_UNSIGNED,
+                        &path,
+                        "a raw public-key file carries no signature".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
         for (fingerprint, signer) in &self.signers {
             merged
                 .entry(fingerprint.clone())
@@ -701,7 +753,8 @@ fn load_signer_key_content(raw: &[u8], path: &Path) -> Result<TrustedSigner, Eng
 /// Performs integrity verification when a signature line is present:
 /// - Self-signed (signer_fp == key_fp): verifies using the key in the file
 /// - Cross-signed (signer_fp != key_fp): looks up signer in already-loaded signers
-/// - Unsigned files are accepted with a warning log
+/// - Unsigned files are accepted here (node trust dir only; project
+///   documents go through `load_project_trust_doc_content` first)
 fn load_trusted_key_doc_content(
     content: &str,
     path: &Path,
@@ -744,6 +797,50 @@ fn load_trusted_key_doc_content(
         attestation,
         verifying_key,
     })
+}
+
+/// Load one project trust document. It must carry a signature line naming
+/// a key in `node_signers`; the signature is then verified against that
+/// node key (or, when the document declares a key the node already holds,
+/// against that same key).
+fn load_project_trust_doc_content(
+    content: &str,
+    path: &Path,
+    node_signers: &HashMap<String, TrustedSigner>,
+) -> Result<TrustedKeyDoc, EngineError> {
+    let Some(signature_line) = content
+        .lines()
+        .find(|line| line.starts_with("# ryeos:signed:"))
+    else {
+        return Err(project_trust_refusal(
+            PROJECT_TRUST_UNSIGNED,
+            path,
+            "the document has no `# ryeos:signed:` line".to_string(),
+        ));
+    };
+    let signer = signature_line.rsplit(':').next().unwrap_or("").trim();
+    if !node_signers.contains_key(signer) {
+        let declared =
+            toml::from_str::<TrustedKeyToml>(&lillux::signature::strip_signature_lines(content))
+                .map(|parsed| parsed.fingerprint)
+                .unwrap_or_default();
+        return Err(if signer == declared {
+            project_trust_refusal(
+                PROJECT_TRUST_SELF_SIGNED,
+                path,
+                format!(
+                    "it is signed only by the key it declares ({signer}), which the node does not trust"
+                ),
+            )
+        } else {
+            project_trust_refusal(
+                PROJECT_TRUST_UNTRUSTED_SIGNER,
+                path,
+                format!("it is signed by {signer}, which is not in the node's trust store"),
+            )
+        });
+    }
+    load_trusted_key_doc_content(content, path, node_signers)
 }
 
 /// Parse a public key from the `[public_key].pem` field.
@@ -1545,21 +1642,34 @@ mod tests {
 
     // ── Project + operator trust tests ─────────────────────────────
 
-    #[test]
-    fn load_project_overrides_operator() {
+    fn project_and_operator_dirs() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         let project = tempdir();
         let operator_config = tempdir();
-
-        let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
-        let project_trust = project.join(&trust_subdir);
+        let project_trust = project.join(Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR));
         let operator_trust = operator_config.join("keys").join("trusted");
         fs::create_dir_all(&project_trust).unwrap();
         fs::create_dir_all(&operator_trust).unwrap();
+        (project, operator_config, project_trust, operator_trust)
+    }
 
-        let (_, vk, fp) = gen_key();
+    fn project_refusal_code(error: EngineError) -> &'static str {
+        match error {
+            EngineError::ProjectTrustDocumentRefused { code, cure, .. } => {
+                assert!(cure.contains("ryeos-core-tools trust-pin"), "cure: {cure}");
+                code
+            }
+            other => panic!("expected a project trust refusal, got {other:?}"),
+        }
+    }
 
-        // Same fingerprint in both spaces, different labels
-        let project_toml = build_key_doc_toml(&fp, "project_owner", &vk);
+    #[test]
+    fn load_project_overrides_operator() {
+        let (project, operator_config, project_trust, operator_trust) = project_and_operator_dirs();
+        let (sk, vk, fp) = gen_key();
+
+        // Same fingerprint in both spaces, different labels. The project copy
+        // is signed by the key itself, which the node already pins.
+        let project_toml = sign_toml_doc(&build_key_doc_toml(&fp, "project_owner", &vk), &sk);
         let operator_toml = build_key_doc_toml(&fp, "operator_owner", &vk);
         fs::write(project_trust.join(format!("{fp}.toml")), &project_toml).unwrap();
         fs::write(operator_trust.join(format!("{fp}.toml")), &operator_toml).unwrap();
@@ -1576,23 +1686,15 @@ mod tests {
 
     #[test]
     fn load_merges_project_and_operator() {
-        let project = tempdir();
-        let operator_config = tempdir();
-
-        let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
-        let project_trust = project.join(&trust_subdir);
-        let operator_trust = operator_config.join("keys").join("trusted");
-        fs::create_dir_all(&project_trust).unwrap();
-        fs::create_dir_all(&operator_trust).unwrap();
-
+        let (project, operator_config, project_trust, operator_trust) = project_and_operator_dirs();
         let (_, vk1, fp1) = gen_key();
-        let (_, vk2, fp2) = gen_key2();
+        let (sk2, vk2, fp2) = gen_key2();
 
-        // Key 1 in project only
-        let t1 = build_key_doc_toml(&fp1, "alice", &vk1);
+        // Key 1 in project only, cross-signed by the node-pinned key 2.
+        let t1 = sign_toml_doc(&build_key_doc_toml(&fp1, "alice", &vk1), &sk2);
         fs::write(project_trust.join(format!("{fp1}.toml")), &t1).unwrap();
 
-        // Key 2 in operator config only
+        // Key 2 in operator config only (node bootstrap docs may be unsigned).
         let t2 = build_key_doc_toml(&fp2, "bob", &vk2);
         fs::write(operator_trust.join(format!("{fp2}.toml")), &t2).unwrap();
 
@@ -1601,6 +1703,121 @@ mod tests {
         assert_eq!(store.len(), 2);
         assert!(store.is_trusted(&fp1));
         assert!(store.is_trusted(&fp2));
+    }
+
+    /// Gap C: writing an unsigned document into a project used to pin a key.
+    #[test]
+    fn unsigned_project_trust_doc_is_refused() {
+        let (project, operator_config, project_trust, _) = project_and_operator_dirs();
+        let (_, vk, fp) = gen_key();
+        fs::write(
+            project_trust.join(format!("{fp}.toml")),
+            build_key_doc_toml(&fp, "planted", &vk),
+        )
+        .unwrap();
+        let error = TrustStore::load(Some(&project), &operator_config).unwrap_err();
+        assert_eq!(project_refusal_code(error), PROJECT_TRUST_UNSIGNED);
+    }
+
+    #[test]
+    fn self_signed_project_trust_doc_is_refused() {
+        let (project, operator_config, project_trust, _) = project_and_operator_dirs();
+        let (sk, vk, fp) = gen_key();
+        fs::write(
+            project_trust.join(format!("{fp}.toml")),
+            sign_toml_doc(&build_key_doc_toml(&fp, "planted", &vk), &sk),
+        )
+        .unwrap();
+        let error = TrustStore::load(Some(&project), &operator_config).unwrap_err();
+        assert_eq!(project_refusal_code(error), PROJECT_TRUST_SELF_SIGNED);
+    }
+
+    #[test]
+    fn project_trust_doc_signed_by_unpinned_key_is_refused() {
+        let (project, operator_config, project_trust, _) = project_and_operator_dirs();
+        let (_, vk, fp) = gen_key();
+        let (stranger, _, _) = gen_key2();
+        fs::write(
+            project_trust.join(format!("{fp}.toml")),
+            sign_toml_doc(&build_key_doc_toml(&fp, "planted", &vk), &stranger),
+        )
+        .unwrap();
+        let error = TrustStore::load(Some(&project), &operator_config).unwrap_err();
+        assert_eq!(project_refusal_code(error), PROJECT_TRUST_UNTRUSTED_SIGNER);
+    }
+
+    #[test]
+    fn raw_public_key_file_in_project_is_refused() {
+        let (project, operator_config, project_trust, _) = project_and_operator_dirs();
+        let (_, vk, _) = gen_key();
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        fs::write(
+            project_trust.join("planted.pub"),
+            format!("ed25519:{key_b64}\n"),
+        )
+        .unwrap();
+        let error = TrustStore::load(Some(&project), &operator_config).unwrap_err();
+        assert_eq!(project_refusal_code(error), PROJECT_TRUST_UNSIGNED);
+    }
+
+    /// One project document never vouches for another: the signer must be
+    /// in the node store itself.
+    #[test]
+    fn project_trust_doc_cannot_vouch_for_another_project_doc() {
+        let (project, operator_config, project_trust, operator_trust) = project_and_operator_dirs();
+        let (node_sk, node_vk, node_fp) = gen_key();
+        let (middle_sk, middle_vk, middle_fp) = gen_key2();
+        let leaf_sk = SigningKey::from_bytes(&[7u8; 32]);
+        let leaf_vk = leaf_sk.verifying_key();
+        let leaf_fp = compute_fingerprint(&leaf_vk);
+        fs::write(
+            operator_trust.join(format!("{node_fp}.toml")),
+            build_key_doc_toml(&node_fp, "operator", &node_vk),
+        )
+        .unwrap();
+        // "a-" sorts first: the node-vouched middle key loads before the leaf.
+        fs::write(
+            project_trust.join("a-middle.toml"),
+            sign_toml_doc(
+                &build_key_doc_toml(&middle_fp, "middle", &middle_vk),
+                &node_sk,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            project_trust.join("b-leaf.toml"),
+            sign_toml_doc(&build_key_doc_toml(&leaf_fp, "leaf", &leaf_vk), &middle_sk),
+        )
+        .unwrap();
+        let error = TrustStore::load(Some(&project), &operator_config).unwrap_err();
+        assert_eq!(project_refusal_code(error), PROJECT_TRUST_UNTRUSTED_SIGNER);
+    }
+
+    /// The node's own bootstrap documents keep loading as init writes them:
+    /// operator and node self-signed, publisher pins unsigned.
+    #[test]
+    fn node_trust_dir_bootstrap_documents_still_load() {
+        let operator_config = tempdir();
+        let operator_trust = operator_config.join("keys").join("trusted");
+        fs::create_dir_all(&operator_trust).unwrap();
+        let (operator_sk, operator_vk, operator_fp) = gen_key();
+        let (_, publisher_vk, publisher_fp) = gen_key2();
+        fs::write(
+            operator_trust.join(format!("{operator_fp}.toml")),
+            sign_toml_doc(
+                &build_key_doc_toml(&operator_fp, "self", &operator_vk),
+                &operator_sk,
+            ),
+        )
+        .unwrap();
+        fs::write(
+            operator_trust.join(format!("{publisher_fp}.toml")),
+            build_key_doc_toml(&publisher_fp, "ryeos-official", &publisher_vk),
+        )
+        .unwrap();
+        let store = TrustStore::load(None, &operator_config).unwrap();
+        assert!(store.is_trusted(&operator_fp));
+        assert!(store.is_trusted(&publisher_fp));
     }
 
     #[test]
