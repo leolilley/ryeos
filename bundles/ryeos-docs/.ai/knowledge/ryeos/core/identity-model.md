@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:15:40Z:5e0ce828ed02d23ffba7136e4cf0367b30a1c75cef617523ece1bd5043499119:LfuiWM9ryDeQIjUmONbEHsd8igGMlVsMAXNXKqtuofEHEQKOJfLEykEvrbHD796UK1+aCLTBqNMPRzEN3KIgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:64518cf8f57797dd96e0fd3d2e0afd020e5cac81a954fa41913b4af90220c0a4:hl+GzO60L1SdPw3XbN3YActSZ6Y8ZMZkh4BBeSaFR3GLw7cmfzsk2czLcHI/yB5qSpySqddeOm5vPZfs2A4VCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -155,19 +155,22 @@ key as `remote_principal`. There is no upgrade or reclassify operation.
 `ryeos node doctor` lists expired, soon-expiring, stale and unreadable grants
 in its `authorized_keys` row.
 
-An opt-in `remote_principal` grant is the narrow exception for an
-operator-owned workflow forwarded by another RyeOS node. The source request is
-still signed by that source node's configured operator key, while the target
-retains only its public key in a node-signed grant constrained to one canonical
-`origin_site_id` and concrete scopes. The
-target separately admits the source node key as `remote_node` with
-`ryeos.attest.request.forwarded-operator`; it must co-sign the exact primary
-request. Only the two verified grants plus that co-signature create
-authenticated remote origin. A caller header cannot create or remove it.
-The source operator private key never moves to the target. The target's own
-local operator remains a separate `local_client` for local maintenance.
-Because grants are keyed by fingerprint, every target-side use of the source
-key is remote and fails without the source-node proof.
+A `remote_principal` grant admits a principal whose home is another RyeOS
+node. The principal signs, with its own key, a bounded delegation that lets its
+home node act for it (see [Remote operations](remote/remote-operations.md#identity-requirements)).
+The target retains only the principal's public key in a node-signed grant
+constrained to one canonical `origin_site_id` and concrete scopes. It
+separately admits the home node's key as `remote_node` with
+`ryeos.attest.request.forwarded-operator`; that key signs and co-signs each
+forwarded request. The target verifies both grants, the co-signature and the
+delegation, and runs the request as the principal with scopes equal to the
+grant intersected with the delegation. A caller header cannot create or remove
+authenticated origin, and the principal's private key never leaves its owner.
+The target's own local operator remains a separate `local_client` for local
+maintenance. Because grants are keyed by fingerprint, every target-side use of
+the principal's key is remote and fails without the source-node proof. The
+target keeps a ledger of revoked delegation digests (`.ai/node/auth/
+delegation_revocations/`); a tombstoned delegation is refused at once.
 
 ## Vault X25519
 
@@ -178,12 +181,13 @@ vault rewrap flows.
 ## Request authentication
 
 Local CLI requests are signed with the user key and verified against the local
-authorized-keys store. Ordinary daemon-to-daemon requests are signed with the
-caller node key. Explicit configured-operator forwarding is instead signed by
-that operator key and co-signed by the source node key. The target requires an
-exact `remote_principal` allowed-site grant and an exact `remote_node`
-forwarding-attestation grant. In both cases, authenticated origin comes from
-verified key/grant evidence, never an unsigned caller claim.
+authorized-keys store. Daemon-to-daemon requests are signed with the caller
+node key; a request made for a principal also carries that principal's signed
+delegation and the source node's forwarding co-signature. The target requires
+an exact `remote_principal` allowed-site grant for the principal and an exact
+`remote_node` forwarding-attestation grant for the node. In every case,
+authenticated origin comes from verified key/grant evidence, never an unsigned
+caller claim.
 
 ## Browser sessions
 
