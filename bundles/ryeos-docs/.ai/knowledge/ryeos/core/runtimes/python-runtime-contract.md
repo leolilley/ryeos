@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:c915d3b03f76e3a23e9bd9b0da5a68fdb4adbd1d8f7e7753aa25031f3fa8c3df:FapYT7OuMQjU7v8gTSXBJNA/cKXOAqQ3Cpo/haBzaU1Aw3XAOmZd432FxJdq5y4fOdydHxhMRK3r9FGGqzOTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:15:23Z:834e1bd5e0e66c652470992da76a90f4d79301e5a9fc02353221088a198a7933:cl+zvKU4vi7QN1PXLoH/WB+MTpNP/lj2S/4Jcd1R43iiA6OpkbZvVRWENfuR6PjowJm/At2UfOQISrb5fNbXDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/runtimes
 tags: [runtime, python, contract, tools]
@@ -137,6 +137,12 @@ The shared runtime declares:
 - `RYE_PYTHON=<resolved interpreter>` when its local interpreter selection owns
   the invocation; realization selection does not export a symbolic selector as
   an executable environment path.
+
+Python tools run under `tool_callback`, which also injects `RYE_THREAD_ID`,
+`RYE_PROJECT_PATH`, the callback socket and token, `RYEOSD_THREAD_ID`,
+`RYEOSD_PROJECT_STATE_SCOPE`, `RYEOSD_THREAD_AUTH_TOKEN` and
+`RYEOSD_ACTING_PRINCIPAL` (the principal the daemon authorized for the launch,
+for information; do not persist it as proof of who acted).
 
 plus any vault/host bindings the dispatch layer attaches.
 

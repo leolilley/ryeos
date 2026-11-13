@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T01:54:55Z:5fe3606717bb9f7e252fe36cfcf82d78f98f2b8fa121633763bba986ddbb7611:GrErQ5+eay0Cu15KnsYVrmRQ2McXDoZ9jTYwyJN9zzARc0Kmn63YYcC06zFsOHiSTcBIRmZ3mlTD10YwyT64Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T04:15:23Z:1b0b74aecea821afee6da6f1d5f7994f28eb5aadf6683a01df733c417063a587:iyKQcHUL/SiY3dqJwljiGQ7k+fK7Ji2O9IZvobDBYAhUchj/tN34w0A5SlPI1BvRi2x/itaGSTw9JmEOO98bDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: tool_streaming
 category: ryeos/core
@@ -14,6 +14,7 @@ stdout:
 env_injections:
   - { name: RYE_THREAD_ID, source: thread_id }
   - { name: RYE_PROJECT_PATH, source: project_path }
+  - { name: RYEOSD_ACTING_PRINCIPAL, source: acting_principal }
 capabilities:
   allows_pushed_head: true
   allows_target_site: true

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-18T22:04:37Z:dc8ccd221fca128ed6c10117a2faf6cd84daa983f989eabcdf81ba1da98fe954:N9PUDsmL4EAWtADXKMHVu4slBWJ5XmholRWbs8sPmFVzP1oLoiJhT0gnodaUrLwM+OWNXlLD7tENY/YZ8oq6Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T04:15:23Z:e142287d473d42068c3dc3a1b11a78dfb9385df4cb992121f881935ee5f58be2:P6PA1q13Z+mXCR9CHZ+1UAD+40vfuk0cJB5MrA46acKwiPZpj+WEjaET8hKWjec3KxlQccm5aLeVxtlii/q/CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: tool_callback
 category: ryeos/core
@@ -17,6 +17,7 @@ env_injections:
   - { name: RYEOSD_THREAD_ID, source: thread_id }
   - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
   - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+  - { name: RYEOSD_ACTING_PRINCIPAL, source: acting_principal }
 capabilities:
   allows_pushed_head: true
   allows_target_site: true
