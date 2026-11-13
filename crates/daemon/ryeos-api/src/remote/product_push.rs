@@ -838,6 +838,7 @@ fn gather_local_product(
         admission_record,
         objects,
         large,
+        declared_maximum_bytes,
     })
 }
 
