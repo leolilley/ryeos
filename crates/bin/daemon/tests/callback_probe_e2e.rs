@@ -134,7 +134,7 @@ fn authoring_authority() -> ProbeAuthority {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_covered_author_writes_a_machine_draft_item() {
-    let (h, _fixture, _guard, project) = start_authoring_daemon(&authoring_authority()).await;
+    let (h, fixture, _guard, project) = start_authoring_daemon(&authoring_authority()).await;
     let body = graph_body(&format!(
         "requires:\n  capabilities:\n    declared:\n      - {COVERED_CAP}\n"
     ));
@@ -179,6 +179,19 @@ async fn a_covered_author_writes_a_machine_draft_item() {
         .and_then(|rows| rows.iter().find(|row| row["position"] == "root"))
         .unwrap_or_else(|| panic!("authorship must include the root: {effective:#}"));
     assert_eq!(root["runtime_authored"], true, "{effective:#}");
+    // The item is signed by the authoring key, not the node or operator key,
+    // and the key's default scope admits no kind: the draft is untrusted.
+    assert_eq!(root["signer_role"], "authoring", "{effective:#}");
+    assert_eq!(
+        authored["signer_fingerprint"],
+        fixture.authoring_fp(),
+        "{authored:#}"
+    );
+    assert_eq!(
+        effective.pointer("/result/trust_class"),
+        Some(&json!("untrusted_project")),
+        "{effective:#}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
