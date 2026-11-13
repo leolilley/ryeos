@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:a23215f0eb5848eed81aacca934b6b496d0c177402f0ae76c854c39a47dfcfda:CjGUaAOdqDRKoV0sYb1K2yFPheerGiS4mj4XMW9snU+qwZfBD9MYxAD/unk0ETZ/H3yAy23QncJQlwVRK5o0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:41:47Z:5476014279d9587d20e729a8aec3c9dd5962b0984f8087fab538b398d52f9e5b:M6/oT5Lv+bBZuLsDf1nSfYJnBYdBuzoJTIvTHo/EB62EA+MgyFF0pBbztfwbME5TiDLscc4yHwydhDWiNYGlBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -88,9 +88,18 @@ Notes:
 Add or update a named remote in local node config.
 
 ```bash
-ryeos remote configure --remote prod --url https://ryeos.example.com
 ryeos remote configure --descriptor ./prod.remote.yaml
+ryeos remote configure --remote prod --url https://ryeos.example.com \
+  --expect-fingerprint <64-hex node fingerprint>
 ```
+
+The remote node key must be pinned. Pass either `--descriptor` (a descriptor
+exported by the remote operator) or `--expect-fingerprint` (the remote node
+fingerprint, the SHA-256 hex of its Ed25519 public key, as `ryeos identity public-key`
+prints it on the remote). Get either one from the remote operator out of band.
+There is no trust-on-first-use: without a pin, configure refuses with
+`remote_key_unpinned` and names the fingerprint the live node reported, so you
+can check it with the remote operator and rerun with `--expect-fingerprint`.
 
 The command fetches the remote node public key, principal id, canonical site
 ID, vault fingerprint, and ingest-ignore rules. Results are stored in
@@ -117,6 +126,13 @@ Failure modes:
   canonical in a signed descriptor, uses non-loopback HTTP, or redirects
 - fails if the remote cannot be reached
 - fails if `/public-key` or `/ingest-ignore` returns invalid data
+- refuses with `remote_key_unpinned` (nothing written) when neither
+  `--descriptor` nor `--expect-fingerprint` is given; the refusal names the
+  fingerprint seen
+- refuses with `remote_expected_fingerprint_invalid` when
+  `--expect-fingerprint` is not 64 lowercase hex characters
+- refuses with `remote_key_pin_mismatch` when `--expect-fingerprint` differs
+  from the live node fingerprint
 - fails if a descriptor pins a different node key/fingerprint than the
   live remote reports
 - later signed requests fail if the remote's node key changes and the
@@ -593,7 +609,8 @@ ryeos remote vault-delete --remote prod --name API_KEY
 - **401/403 from target daemon**: the caller node key is not authorized
   on the remote, or the authorized-key scopes do not include the route's
   required capability.
-- **signature/audience errors**: re-run `ryeos remote configure`; the
+- **signature/audience errors**: re-run `ryeos remote configure` with a
+  verified `--expect-fingerprint` or `--descriptor`; the
   target node key or principal id may have changed.
 - **push uses unexpected ignore rules**: re-run `ryeos remote configure`
   to refresh the cached remote ingest-ignore config.

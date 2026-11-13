@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:cf3efbbc0f8ce20ce3a8adf8510f4174681972e3911cc6c58c92edba285b2b99:cvxawVPVg/9WYySQj2VrKfdKj7p0d842JcXrWed3nsv/vwUpSgvnauzDR2a69BFyV9R5EEK486LINA/eG8erDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:41:47Z:426ffa115e1722988e562d2652c4b58ae08169795aebee0704b0986ea56b2afa:xuyvH6xOZMmLMjbaOpe00PNca11i1GLkwPB6kMwdu+F5wkEfexycWGV0lxD7CCmIGF3vvhnXtpWkaE/YbJ+gAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -371,7 +371,8 @@ ryeos identity
 Configure a named remote:
 
 ```bash
-ryeos remote configure prod --url https://ryeos.example.com
+ryeos remote configure prod --url https://ryeos.example.com \
+  --expect-fingerprint <remote node fingerprint>
 ryeos remote list
 ryeos remote status prod
 ```

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-22T05:18:30Z:c9facce46c2322fef77081b27eb3582594766d5179a082ca9ec0ff3b29aa5fde:HQbHoH8HoRO0HGhZxYI7COZ0dJqgGwudYMvU9Yv2/Buw6I5YehgIaiNIUjNkNUcSsTEQFWmyWxadgrQuMMb6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:41:47Z:a4f2e2b976ea6b5c4d1767ee3d3ab65eabc07d9e053cfce8a160d296dd7852c1:D61sDUy3VPrPxiHmirUKyDjv+ihCfpEC2qc1DUjOmC0oLHRgH4BXAJ9aK/JFk7lxzpgYkhS05ZqTCXp91WoACA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -108,7 +108,8 @@ choose its authenticated origin.
    self-signed admission request:
 
    ```bash
-   ryeos remote configure --remote production --url https://ryeos.example.com
+   ryeos remote configure --remote production --url https://ryeos.example.com \
+     --expect-fingerprint <remote node fingerprint>
    ryeos remote admit \
      --remote production \
      --token "<one-time-token>" \
@@ -205,10 +206,17 @@ forwarded `remote_operator` principal.
 1. **Configure the remote**:
 
    ```bash
-   ryeos remote configure --remote production --url https://ryeos.example.com
-   # or, with a provider/operator descriptor pin:
    ryeos remote configure --descriptor ./production.remote.yaml
+   # or, with the node fingerprint the remote operator gave you:
+   ryeos remote configure --remote production --url https://ryeos.example.com \
+     --expect-fingerprint <remote node fingerprint>
    ```
+
+   The remote node key must be pinned by a descriptor or an expected
+   fingerprint obtained out of band; configure never trusts the key it is
+   shown on first contact. Without either pin it refuses with
+   `remote_key_unpinned`, writes nothing, and names the fingerprint the live
+   node reported so you can confirm it with the remote operator.
 
    This discovers the remote's public key, principal id, canonical site ID,
    vault fingerprint, and ingest-ignore rules. A descriptor is a trust pin
@@ -353,7 +361,8 @@ authorize the new node key.
 
 1. Rotate the node key on the caller.
 2. On the remote: `ryeos authorize-key` with the new node public key.
-3. On the caller: `ryeos remote configure` to pick up changes.
+3. On the caller: `ryeos remote configure` with the caller's existing
+   `--descriptor` or `--expect-fingerprint` pin to pick up changes.
 4. On the remote: remove any superseded authorized-key TOML from
    `.ai/node/auth/authorized_keys/`.
 
@@ -365,7 +374,8 @@ cached target exclusions with the source node's current signed exclusions to
 capture the pushed project snapshot policy and tree. The destination still
 validates actual paths against its current policy before accepting a HEAD.
 
-If the remote changes its ignore rules, re-run `ryeos remote configure`.
+If the remote changes its ignore rules, re-run `ryeos remote configure` with
+the same `--descriptor` or `--expect-fingerprint` pin.
 
 If no cached rules are available, the push handler fetches them inline for the
 operation without manufacturing or persisting partial remote configuration. If
