@@ -1801,6 +1801,12 @@ fn run_authorize_client(
         lifetime_secs,
     }
     .into_params_as_local_operator(app_root)?;
+    if lillux::crypto::fingerprint(&params.public_key) == operator.fingerprint() {
+        anyhow::bail!(
+            "grant_is_operator: the configured operator's grant is managed by `ryeos init` and \
+             `ryeos node reset authorization`; it cannot be rewritten through authorize-client"
+        );
+    }
     let terms = ryeos_core_tools::actions::authorize::authorize_client_terms(
         &params,
         lifetime_secs,

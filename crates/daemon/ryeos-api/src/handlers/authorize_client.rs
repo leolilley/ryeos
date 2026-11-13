@@ -28,6 +28,14 @@ pub async fn handle(
     // identity that may put an offline-operation scope into a grant.
     let lifetime_secs = request.lifetime_secs;
     let params = request.into_params_as_local_operator(state.config.app_root.clone())?;
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+            .context("load configured operator identity")?;
+    if lillux::crypto::fingerprint(&params.public_key) == operator.fingerprint() {
+        return Err(anyhow::Error::from(
+            super::grant_terms::operator_grant_refusal(),
+        ));
+    }
     let terms = ryeos_core_tools::actions::authorize::authorize_client_terms(
         &params,
         lifetime_secs,

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:f68f1318c9dd25f8a8a68118f341d5177fd2deae8df80b1c802b7ce49ad12ca9:p/J0yjPjtFVBp394sZIHITWYW4ftd/6Namm6/YNeogidfGNccg1KeayQL7M3ToUt2ApzJwIw1CSWw508RRT4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:57Z:a9300119335c7f99c17c778dd36312025636fc51ea3955654898cf6f4300c285:woloR/Wyvb95CEvnW3pFYJWx6nS2AdtLL8GWcDjQam5gWRAzJeiFXFQikmDeCLylYcml51zFyDO8kLX0N4CdDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -140,7 +140,10 @@ keeps its key, class, origin, scopes, label and granting authority. Only the
 principal that granted the key (while it still holds the grant's scopes) or the
 configured operator may renew: the grantee cannot extend its own grant. A
 refused renewal is `grant_renewal_not_permitted`, `grant_renewal_scopes_not_covered`,
-`grant_not_found` or `grant_never_expires` (the operator grant is not renewed).
+`grant_not_found` or `grant_never_expires` (the operator grant is not renewed). The operator's grant is managed only by
+`ryeos init` and `ryeos node reset authorization`: `authorize-key` and
+`authorize-client` aimed at the operator's fingerprint are refused with
+`grant_is_operator` (HTTP 409) rather than rewriting it as a bounded grant.
 
 Grants written before schema 3 are refused, not read: `grant_schema_stale`
 names the cure (re-issue the key with `ryeos authorize-client`, or run

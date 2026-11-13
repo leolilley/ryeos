@@ -41,6 +41,23 @@ pub(crate) fn lifetime_refusal(error: GrantLifetimeError) -> HandlerError {
     }
 }
 
+/// The refusal for any online attempt to write the configured operator's
+/// grant: that grant never lapses and is managed by init and the offline
+/// authorization reset, so rewriting it here would silently bound it.
+pub(crate) fn operator_grant_refusal() -> HandlerError {
+    let message = "the configured operator's grant is managed by `ryeos init` and \
+                   `ryeos node reset authorization`; it cannot be written or reclassified \
+                   through authorize-key or authorize-client";
+    HandlerError::Structured {
+        code: "grant_is_operator".to_owned(),
+        status: 409,
+        body: serde_json::json!({
+            "error": message,
+            "error_code": "grant_is_operator",
+        }),
+    }
+}
+
 /// A renewal the node refuses, as a typed refusal: 404 for a missing grant,
 /// 403 for a caller who may not renew it, 400 for the operator grant.
 pub(crate) fn renewal_refusal(error: &AuthorizedKeyRenewError) -> HandlerError {

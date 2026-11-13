@@ -78,9 +78,7 @@ pub async fn handle(
     )
     .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
     if fingerprint == configured_operator.fingerprint() {
-        return Err(HandlerError::Forbidden(
-            "configured-operator authorization and class changes are offline-only".to_string(),
-        ));
+        return Err(super::grant_terms::operator_grant_refusal());
     }
 
     // 3. Validate label is non-empty.
@@ -433,5 +431,34 @@ mod tests {
             .is_none(),
             "a refused request must write no grant"
         );
+    }
+
+    #[tokio::test]
+    async fn authorize_key_refuses_the_configured_operator_with_a_typed_conflict() {
+        use base64::Engine as _;
+        let (_tmp, _owner, state) = crate::test_support::build_test_state();
+        let state = Arc::new(state);
+        let scope = "ryeos.execute.service.vault/list";
+        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.config.operator_signing_key_path,
+        )
+        .unwrap();
+        let request = Request {
+            public_key: format!(
+                "ed25519:{}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(operator.verifying_key().as_bytes())
+            ),
+            label: "operator".to_string(),
+            scopes: vec![scope.to_string()],
+            lifetime_secs: None,
+        };
+        match handle(request, caller(scope), state).await.unwrap_err() {
+            HandlerError::Structured { code, status, .. } => {
+                assert_eq!(code, "grant_is_operator");
+                assert_eq!(status, 409);
+            }
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
     }
 }
