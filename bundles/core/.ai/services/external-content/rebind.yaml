@@ -1,0 +1,12 @@
+# ryeos:signed:2026-11-13T02:54:45Z:57c6b588a4cb1143ecc577c3141fca5d6f055965c50dd140212f46f7032ac815:5rGXKW6bLU952Q4VNlX2Zbxosb2395cYfiySaTnytDhKbCp+uDevqJAWRu7t+xUJOTpnxRxl+sexE7cQoFeuAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.rebind
+required_caps: ["ryeos.execute.service.external-content/rebind"]
+schema:
+  prior_binding_hash: string
+  project_snapshot_hash: string
+  project_path: string?
+  product_selections: array?
+  product_owner_principal: string?
+  maximum_bytes: integer?
+description: "Operator-authorized renewal of a pinned-project content binding: re-stage the prior binding's exact retained manifest and bind it to the same consumer at a new project snapshot or consumer definition"

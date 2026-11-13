@@ -28,6 +28,7 @@ pub mod product_receipt;
 pub mod products;
 pub mod qualification_launch;
 pub mod qualification_testimony;
+pub mod rebind;
 mod retained_binding;
 mod retained_product;
 mod retained_result;
@@ -158,54 +159,73 @@ pub enum BindConsumerKind {
 
 impl BindRequest {
     pub fn validate_consumer_request(&self) -> anyhow::Result<()> {
-        match (&self.product_selections, &self.product_owner_principal) {
-            (Some(selections), Some(owner)) => {
-                product_composition::validate_selection_batch(selections)?;
-                let fingerprint = owner.strip_prefix("fp:").ok_or_else(|| {
-                    anyhow::anyhow!("selected binding product_owner_principal is not canonical")
-                })?;
-                if !lillux::valid_hash(fingerprint)
-                    || fingerprint.bytes().any(|byte| byte.is_ascii_uppercase())
-                {
-                    anyhow::bail!("selected binding product_owner_principal is not canonical");
-                }
+        validate_consumer_fields(
+            self.consumer_kind,
+            self.project_snapshot_hash.as_deref(),
+            self.project_path.as_deref(),
+            self.product_selections.as_deref(),
+            self.product_owner_principal.as_deref(),
+        )
+    }
+}
+
+/// The consumer coordinate shared by bind, the binding inventory and rebind:
+/// an installed bundle names no generation; a pinned project names exactly
+/// one snapshot and its logical project path; a product selection always
+/// names its exact owner.
+pub(crate) fn validate_consumer_fields(
+    consumer_kind: BindConsumerKind,
+    project_snapshot_hash: Option<&str>,
+    project_path: Option<&std::path::Path>,
+    product_selections: Option<
+        &[ryeos_state::external_content::products::composition::ProductSelection],
+    >,
+    product_owner_principal: Option<&str>,
+) -> anyhow::Result<()> {
+    match (product_selections, product_owner_principal) {
+        (Some(selections), Some(owner)) => {
+            product_composition::validate_selection_batch(selections)?;
+            let fingerprint = owner.strip_prefix("fp:").ok_or_else(|| {
+                anyhow::anyhow!("selected binding product_owner_principal is not canonical")
+            })?;
+            if !lillux::valid_hash(fingerprint)
+                || fingerprint.bytes().any(|byte| byte.is_ascii_uppercase())
+            {
+                anyhow::bail!("selected binding product_owner_principal is not canonical");
             }
-            (Some(_), None) => {
-                anyhow::bail!("selected binding requires an exact product_owner_principal")
-            }
-            (None, Some(_)) => {
-                anyhow::bail!("unselected binding cannot carry product_owner_principal")
-            }
-            (None, None) => {}
         }
-        match self.consumer_kind {
-            BindConsumerKind::InstalledBundle
-                if self.project_snapshot_hash.is_none() && self.project_path.is_none() =>
+        (Some(_), None) => {
+            anyhow::bail!("selected binding requires an exact product_owner_principal")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("unselected binding cannot carry product_owner_principal")
+        }
+        (None, None) => {}
+    }
+    match consumer_kind {
+        BindConsumerKind::InstalledBundle
+            if project_snapshot_hash.is_none() && project_path.is_none() =>
+        {
+            Ok(())
+        }
+        BindConsumerKind::PinnedProject
+            if project_snapshot_hash.is_some() && project_path.is_some() =>
+        {
+            let snapshot = project_snapshot_hash.expect("checked pinned-project snapshot");
+            if !lillux::valid_hash(snapshot)
+                || snapshot.bytes().any(|byte| byte.is_ascii_uppercase())
             {
-                Ok(())
+                anyhow::bail!(
+                    "pinned-project binding project_snapshot_hash is not a canonical digest"
+                );
             }
-            BindConsumerKind::PinnedProject
-                if self.project_snapshot_hash.is_some() && self.project_path.is_some() =>
-            {
-                let snapshot = self
-                    .project_snapshot_hash
-                    .as_deref()
-                    .expect("checked pinned-project snapshot");
-                if !lillux::valid_hash(snapshot)
-                    || snapshot.bytes().any(|byte| byte.is_ascii_uppercase())
-                {
-                    anyhow::bail!(
-                        "pinned-project binding project_snapshot_hash is not a canonical digest"
-                    );
-                }
-                Ok(())
-            }
-            BindConsumerKind::InstalledBundle => anyhow::bail!(
-                "installed-bundle binding cannot carry project snapshot or path fields"
-            ),
-            BindConsumerKind::PinnedProject => anyhow::bail!(
-                "pinned-project binding requires project_snapshot_hash and project_path"
-            ),
+            Ok(())
+        }
+        BindConsumerKind::InstalledBundle => {
+            anyhow::bail!("installed-bundle binding cannot carry project snapshot or path fields")
+        }
+        BindConsumerKind::PinnedProject => {
+            anyhow::bail!("pinned-project binding requires project_snapshot_hash and project_path")
         }
     }
 }

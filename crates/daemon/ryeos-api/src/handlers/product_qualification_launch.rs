@@ -63,6 +63,17 @@ fn map_reservation_error(
     }
 }
 
+/// A missing generation-scoped content binding is operator-correctable and
+/// keeps its typed 409; every other preparation failure stays a 400.
+fn refused(stage: &str, error: anyhow::Error) -> HandlerError {
+    if let Some(missing) =
+        error.downcast_ref::<ryeos_app::external_content_admission::ContentBindingMissing>()
+    {
+        return missing.handler_error();
+    }
+    HandlerError::BadRequest(format!("{stage}: {error:#}"))
+}
+
 fn dispatch_error(error: ryeos_executor::dispatch_error::DispatchError) -> HandlerError {
     HandlerError::Structured {
         code: error.code().to_string(),
@@ -211,9 +222,7 @@ async fn handle_source(
             .map_err(|error| {
                 HandlerError::Internal(format!("qualification preparation stopped: {error}"))
             })?
-            .map_err(|error| {
-                HandlerError::BadRequest(format!("qualification preparation refused: {error:#}"))
-            })?
+            .map_err(|error| refused("qualification preparation refused", error))?
     };
     if prepared.launch_id() != req.launch_id() || prepared.owner_fingerprint() != ctx.fingerprint {
         return Err(HandlerError::Internal(
@@ -449,7 +458,7 @@ async fn handle_source(
             provenance.project_authority(),
             super::qualification_project_context::resolver(state.as_ref()).as_ref(),
         )
-        .map_err(|error| HandlerError::BadRequest(format!("pinned verifier identity refused: {error:#}")))?;
+        .map_err(|error| refused("pinned verifier identity refused", error))?;
         prepared
             .verifier_admitted_definition_digest()
             .map(str::to_owned)
@@ -583,9 +592,7 @@ async fn handle_source(
         .map_err(|error| {
             HandlerError::Internal(format!("qualification attachment stopped: {error}"))
         })?
-        .map_err(|error| {
-            HandlerError::BadRequest(format!("qualification root refused: {error:#}"))
-        })?
+        .map_err(|error| refused("qualification root refused", error))?
     };
     let mut prepared = returned_prepared;
     let options = DispatchLaunchOptions::admitted(

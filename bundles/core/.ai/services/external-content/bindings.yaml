@@ -1,0 +1,12 @@
+# ryeos:signed:2026-11-13T02:54:45Z:ce706f586040b83e39c4b821004e3a5c13948a2f993dfe820435d40d111f1a53:Tymxf9rp7aQTrHwcgF3bK1lctV18D8HB0pmCMweDigrOCpkQsxzHmimK4kfOX+ccmNHNGIqk//zi9LljTHEEDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: external-content.bindings
+required_caps: ["ryeos.execute.service.external-content/bindings"]
+schema:
+  consumer_ref: string
+  consumer_kind: string
+  project_snapshot_hash: string?
+  project_path: string?
+  product_selections: array?
+  product_owner_principal: string?
+description: "List one consumer's content bindings, say whether each still authorizes the consumer resolved at the given generation, and name the prior binding for each declaration that has none; read only"

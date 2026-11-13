@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:48:41Z:dea90e2c53c5aa062a5c685c92a9ebbfd4c16d57b1cc2c884e110cee73c3c50f:qrOg+nKD6+Q4b52uLO5pGOmDMkYlC+ztJgXzXQyu7ZBJUXYxUuds7B7vC/AEaM0Gc8toiry6+uzGSEb0SDfABw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:49:46Z:3f9a5c8d269ae24afd623f5de6be1058b4ab996ec0d76366c2ba6c52b17bcedf:CsO4zufd0of+LCtO4/elDYuLs/k2CgNGym7lRQRBY6yqIsrfPOBm1bq3LdFcb0Zlv4YPSUBvGqQAKqrUHq3+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -233,6 +233,19 @@ ryeos external-content import-result <chain-root> <thread> <result-snapshot> <pa
 ryeos external-content import-binding <exact-active-binding-hash> <maximum-bytes> [binding-owner-principal]
 ryeos external-content import-product <exact-product-witness-hash> <maximum-bytes>
 ```
+
+A pinned-project binding is scoped to one project snapshot and one effective
+consumer definition. To see which bindings a consumer holds at a generation and
+renew one made at an earlier generation, use:
+
+```
+ryeos external-content bindings <consumer-ref> <installed_bundle|pinned_project> [project-snapshot-hash]
+ryeos external-content rebind <prior-binding-hash> <project-snapshot-hash>
+```
+
+`rebind` re-stages the prior binding's manifest exactly as `import-binding`
+does and binds it through the ordinary bind; see
+`ryeos/core/execution/retained-products` for its refusals.
 
 The optional binding owner is required when the active source binding belongs
 to an admitted remote operator. Only the configured local operator may perform
