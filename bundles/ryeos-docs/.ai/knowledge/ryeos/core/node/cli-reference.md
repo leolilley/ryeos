@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T01:27:14Z:d1abb2d2244de7dd963a0d92d218bb6ec96b437f7246f0161101ab0450ba4516:vnIZa5StHQTV99nXi81v33aJYCLBuisc7eqOZLidYVvTb2QTtnbp63rTWfjvLuzILv9GTQxHlIDnIkJtZWVlAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T03:56:20Z:7c79dc704e32a1d3324217bd5ad18e8446c23cbc32fbfc5c5295e95512340252:ZrWg2+NO4LUb1P6Y5U+6YRYT7dY/+uN7u5Fike2uylBu5iWMblM7AVfvFX19ouMVYpM+EFpk2X+/t5xe7ha4Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.5.3"
+version: "3.6.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -207,6 +207,23 @@ are not read. A binding file in a schema the node no longer admits fails the
 schema and protocol seen and those admitted. At run time, an operation through
 a production binding whose pinned adapter generation is not installed is
 refused with HTTP 409 `binding_artifact_not_installed`, naming the same pin.
+
+The `remote_content_testimonies` row reads this node's accepted remote
+qualification testimonies from its signed heads, offline and without
+resolving bundles. For each content-lane acceptance it checks whether this
+node holds an activation of exactly the content the origin qualified (same
+activation program digest, consumer and declaration). It is advisory: it
+warns but never fails the doctor, and is `n/a` when nothing is accepted.
+
+| Code | Meaning |
+|---|---|
+| `ok` | this node activated the qualified release; launch can use the testimony |
+| `no_local_activation` (warn) | this node has not activated it; the fix names `ryeos external-content activate` |
+| `local_activation_differs` (warn) | this node activated the same activation ref as another program; both digests are listed, and the fix is the origin's release or a re-qualification against this node's |
+| `acceptance_superseded` (warn) | an acceptance of either lane was recorded under an earlier acceptance evidence schema; export the testimony again from the origin |
+
+See [Retained products](../execution/retained-products.md) for the content
+testimony workflow.
 
 ### `ryeos node reset execution-history`
 

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:8d8d580864a795c8856909f971d77ce11a413a23870e0994435ca4bb9b014d9d:S53NQpla6GU0F5w0zk9ZVF89Mme2F6h2G6vQ/r1J8jb8qZq0ZD6fLrqtclVljdYHTr+87dqOCqsh5TTlacWOCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T03:56:20Z:29c8fd6eba27d0b76355b8234bbd734f0c159506230f3cec611f9afb93d47a51:JcFcBj9dzWaETmZK9dvRC5btKQuniUsRiRu/faSkHBWBUt7yN7TZ2owKW8TBYtVtgKGLPCb2eGyqYQVZKZn+Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
-version: "1.0.0"
+version: "1.1.0"
 description: Exact ownership and node-local provisioning boundaries for retained build products.
 ---
 
@@ -138,6 +138,17 @@ the testimony. An acceptance is also immutable at its coordinate: a different
 testimony for the same coordinate is refused, and re-qualifying on the origin
 is the remedy.
 
+Acceptances are recorded as acceptance evidence v4. An acceptance recorded
+before v4 is refused wherever it is used, with the code
+`remote_qualification_acceptance_superseded` (or
+`remote_content_acceptance_superseded` when a content testimony is used). To
+cure it, run the export above again from the origin; the receiver records a
+new acceptance at the same coordinate. If the origin refuses the export
+because its qualification is stale or expired, re-qualify there first. Then
+re-sign every selection or placement binding that named the old acceptance
+hash with the new one. `ryeos node doctor` lists superseded acceptances under
+`remote_content_testimonies`.
+
 Age and expiry are checked at every use, not only at acceptance. Selection
 and every launch re-run them against the current time, so a
 testimony older than `max_testimony_age_seconds` stops new launches even
@@ -177,6 +188,47 @@ and `selection_identity_digest`. It writes nothing.
 `ryeos node external-execution compose --program` reads the bare `program`
 object, not that envelope. A product-sourced program carries no runtime
 content qualification: pass `--runtime-content-qualification none`.
+
+### Using a content testimony
+
+A runtime that is activated content rather than a captured product crosses on
+the content lane. The receiver does not take the origin's activation on
+trust: it activates the same signed release itself, and every use compares its
+own activation with the content the origin qualified. Only the content's
+identity is compared: the activation program digest (the signed activation,
+its pinned archives and the consumer's declarations, including mounts), the
+consumer, the declaration, the exact manifest and its realization. The
+origin's receipt, binding and node are its own records and are never
+compared.
+
+1. Install the same signed Bundle release on the receiver as on the origin,
+   including the qualification policy and the verifier.
+2. Install a content acceptance policy whose `allowed_lanes` includes
+   `content`.
+3. Export from the origin with `--content '{"activation_ref": ...,
+   "coordinate_id": ..., "manifest_hash": ...}'`. The receiver may accept
+   before it has activated.
+4. Activate on the receiver: `ryeos external-content activate <activation-ref>
+   <online|offline> [offline-archive-root]`. Keep the verifier's pinned content
+   resident and bound on the receiver, as for a local qualification.
+5. Emit the program and binding selection as the attesting operator:
+   `ryeos external-execution admit-candidate-program <activation-ref>
+   <coordinate-id> <attestation-hash> <runtime-manifest-hash> --required-claims
+   <json> --remote-testimony '{"acceptance_hash": ..., "acceptance_policy_ref":
+   ..., "owner_principal": ...}'`. Compose the placement binding with the
+   returned `runtime_content_qualification`, which carries `remote_testimony`.
+6. Read `ryeos node doctor`: the `remote_content_testimonies` row reports each
+   accepted content testimony as `ok`, `no_local_activation` or
+   `local_activation_differs`.
+
+Launch and the emitter refuse with a typed code that names what differs and
+its fix: `remote_content_no_local_activation`,
+`remote_content_identity_differs` (naming each differing field, such as
+`activation_program_digest`, `manifest_hash` or `realization`),
+`remote_content_policy_differs`, `remote_content_producer_differs`,
+`remote_content_verifier_differs` and `remote_content_acceptance_superseded`.
+A different release on the receiver needs either the origin's release or a
+re-qualification at the origin against the receiver's release.
 
 ## Evidence is not task success
 
