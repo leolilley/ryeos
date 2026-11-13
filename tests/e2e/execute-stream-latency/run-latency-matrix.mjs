@@ -18,7 +18,7 @@ const PROJECT_PATH =
 const RYEOSD_URL = process.env.RYEOSD_URL ?? "http://127.0.0.1:7400";
 const KEY_PATH =
   process.env.RYEOS_CLI_KEY_PATH ??
-  path.join(APP_ROOT, ".ai/config/keys/signing/private_key.pem");
+  path.join(APP_ROOT, ".ai/node/operator/signing/private_key.pem");
 const DAEMON_LOG = path.join(
   APP_ROOT,
   ".ai/state/ryeosd-start.stderr.log",

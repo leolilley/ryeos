@@ -112,7 +112,7 @@ scripts/pkg/install-local-direct.sh --prefix /opt/ryeos-dev \
 ## Directory layout after init/start
 
 ```text
-<system-space>/.ai/config/keys/signing/private_key.pem
+<system-space>/.ai/node/operator/signing/private_key.pem
 <system-space>/.ai/node/trust/signers/<fp>.yaml     # node-signed signer records
 <system-space>/.ai/node/trust/events/               # node-signed hash-chained key events
 

@@ -38,7 +38,7 @@ ryeOS has four distinct identity/trust layers:
 | Layer | Purpose | Storage | Created by |
 |---|---|---|---|
 | Signer registry | Verify signed items; node-signed signer records with role, scope and status | `<system>/.ai/node/trust/signers/<fp>.yaml` | `ryeos init` / `ryeos trust pin` |
-| User (CLI) key | Sign local CLI HTTP requests | `<user>/.ai/config/keys/signing/private_key.pem` | `ryeos init` |
+| User (CLI) key | Sign local CLI HTTP requests | `<user>/.ai/node/operator/signing/private_key.pem` | `ryeos init` |
 | Node (daemon) key | Sign outbound daemon requests and authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem` | `ryeos init` |
 | Vault X25519 | Seal/unseal vault secrets | `<system>/.ai/node/vault/private_key.pem` | `ryeos init`, repaired if missing after init |
 
@@ -56,7 +56,7 @@ binary release because the public key bytes are compiled into
 
 The user key is the operator identity for signing local daemon requests.
 The CLI resolves it from `RYEOS_CLI_KEY_PATH` when set, otherwise from
-`<user>/.ai/config/keys/signing/private_key.pem`. It must not fall back
+`<user>/.ai/node/operator/signing/private_key.pem`. It must not fall back
 to the node key.
 
 ## Node (daemon) key

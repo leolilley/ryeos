@@ -541,7 +541,7 @@ pub struct InitProgress {
 ///   2. Pin official publisher key into user trust dir + additional trust files
 ///   3. Verify the selected profile and refuse, before any key exists, when
 ///      its capability floor needs durable app-root storage the host lacks
-///   4. Operator key (load-or-create at `<app_root>/.ai/config/keys/signing/private_key.pem`)
+///   4. Operator key (load-or-create at `<app_root>/.ai/node/operator/signing/private_key.pem`)
 ///   5. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
 ///   6. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
 ///   7. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
@@ -833,13 +833,8 @@ fn run_init_under_lock_on_storage(
 
     // ── 4. User key ──
     progress(InitPhase::InitializingIdentity, None, None, None)?;
-    let user_key_path = opts
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
+    let user_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(opts.app_root.clone()).operator_signing_key_path();
     if let Some(ceremony) = ceremony.as_ref() {
         validate_operator_ceremony(ceremony)?;
     }
@@ -1844,9 +1839,8 @@ pub(crate) fn seal_current_init_completion(
     app_root: &Path,
     expected_policy_generation_digest: Option<&str>,
 ) -> Result<()> {
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
+    let operator_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
     let operator_pem = Zeroizing::new(String::from_utf8(
         lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
     )?);
@@ -1961,9 +1955,8 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
     let first_completion = onboarding
         .open_pinned_regular(OsStr::new("init-completion.json"), false)?
         .is_none();
-    let operator_key_path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/keys/signing/private_key.pem");
+    let operator_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
     let operator_pem = Zeroizing::new(String::from_utf8(
         lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
     )?);
@@ -2548,11 +2541,9 @@ fn create_layout(app_root: &Path) -> Result<()> {
             .join("refs"),
         // Installed bundles directory
         app_root.join(ryeos_engine::AI_DIR).join("bundles"),
-        // Operator config (operator-edited)
-        app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
+        // Operator key material
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+            .operator_dir()
             .join("signing"),
         app_root
             .join(ryeos_engine::AI_DIR)
@@ -2679,11 +2670,8 @@ fn ensure_operator_genesis(
     key_created: bool,
     contribution_digest: Option<&str>,
 ) -> Result<()> {
-    let path = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("identity")
-        .join("operator-genesis.json");
+    let path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
     lillux::with_exclusive_file_lock(&path, || {
         ensure_operator_genesis_locked(
             &path,
@@ -3034,7 +3022,7 @@ mod tests {
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(
             state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
     }
@@ -3077,7 +3065,7 @@ mod tests {
         assert!(text.contains("No identity or key was created"), "{text}");
         assert!(
             !state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
         assert!(!state.join(".ai/node/identity/private_key.pem").exists());
@@ -3267,7 +3255,7 @@ mod tests {
         );
         assert!(
             !state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
         assert!(!state.join(".ai/node/identity/private_key.pem").exists());
@@ -3383,7 +3371,7 @@ mod tests {
         assert!(state.join(".ai/node/vault").is_dir());
         assert!(
             state
-                .join(".ai/config/keys/signing/private_key.pem")
+                .join(".ai/node/operator/signing/private_key.pem")
                 .exists()
         );
         let registry = TrustStore::load_node_registry(&state).expect("node signer registry");
@@ -3454,7 +3442,7 @@ mod tests {
         let user = tmp.path().join("home");
         let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
-        let genesis_path = state.join(".ai/config/identity/operator-genesis.json");
+        let genesis_path = state.join(".ai/node/operator/genesis.json");
         let genesis = fs::read(&genesis_path).expect("operator genesis #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
@@ -3820,7 +3808,7 @@ mod tests {
             )
             .expect("prepare the native_capacity member replacement");
         let (operator, _, _) = load_or_create_operator_key(
-            &state.join(".ai/config/keys/signing/private_key.pem"),
+            &state.join(".ai/node/operator/signing/private_key.pem"),
             None,
         )
         .expect("operator key");
@@ -4019,7 +4007,8 @@ mod tests {
         let user = tmp.path().join("home");
         run_init(&make_opts(&state, &user)).expect("initial full generation");
         let node_key = fs::read(state.join(".ai/node/identity/private_key.pem")).unwrap();
-        let operator_key = fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap();
+        let operator_key =
+            fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap();
         fs::write(state.join(".ai/state/preserved-sentinel"), b"preserved").unwrap();
 
         let replacement = InitOptions {
@@ -4052,7 +4041,7 @@ mod tests {
             node_key
         );
         assert_eq!(
-            fs::read(state.join(".ai/config/keys/signing/private_key.pem")).unwrap(),
+            fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap(),
             operator_key
         );
         assert_eq!(

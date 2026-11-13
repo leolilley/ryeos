@@ -156,7 +156,7 @@ async fn fast_fixture_boots_daemon_without_real_init() {
     assert!(h.state_path.join(".ai/node/config.yaml").exists());
     assert!(
         h.state_path
-            .join(".ai/config/keys/signing/private_key.pem")
+            .join(".ai/node/operator/signing/private_key.pem")
             .exists()
     );
 }
@@ -252,7 +252,7 @@ async fn fast_fixture_output_is_byte_stable_across_runs() {
             ),
             (
                 "config/signing/private_key.pem".into(),
-                hash_file(&state.join(".ai/config/keys/signing/private_key.pem")),
+                hash_file(&state.join(".ai/node/operator/signing/private_key.pem")),
             ),
             (
                 "trust/signers/publisher.yaml".into(),

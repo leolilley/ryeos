@@ -14,7 +14,7 @@
 //!   * `<state>/.ai/node/substrate-identity.json`
 //!   * `<state>/.ai/node/vault/private_key.pem`      (deterministic X25519)
 //!   * `<state>/.ai/node/vault/public_key.pem`
-//!   * `<user>/.ai/config/keys/signing/private_key.pem`
+//!   * `<user>/.ai/node/operator/signing/private_key.pem`
 //!   * `<state>/.ai/node/trust/signers/<fp>.yaml` node-signed registry records
 //!     for the publisher and operator keys (the node key is the implicit root)
 //!
@@ -405,7 +405,7 @@ pub fn install_signed_bundle_binary(
 /// <state>/.ai/state/locators/                          (empty dir)
 /// <state>/.ai/state/refs/                              (empty dir)
 /// <state>/.ai/state/recovery/thread-projection/        (empty dir)
-/// <state>/.ai/config/keys/signing/private_key.pem      (deterministic operator Ed25519)
+/// <state>/.ai/node/operator/signing/private_key.pem      (deterministic operator Ed25519)
 /// <state>/.ai/node/trust/signers/<publisher_fp>.yaml   (node-signed signer record)
 /// <state>/.ai/node/trust/signers/<user_fp>.yaml        (node-signed signer record)
 /// ```
@@ -450,8 +450,8 @@ pub fn populate_initialized_state_with_profile_and_identities(
         state_path.join(AI_DIR).join("state").join("refs"),
         state_path
             .join(AI_DIR)
-            .join("config")
-            .join("keys")
+            .join("node")
+            .join("operator")
             .join("signing"),
     ] {
         fs::create_dir_all(&d).with_context(|| format!("create {}", d.display()))?;
@@ -503,8 +503,8 @@ pub fn populate_initialized_state_with_profile_and_identities(
     write_pem_signing_key(
         &state_path
             .join(AI_DIR)
-            .join("config")
-            .join("keys")
+            .join("node")
+            .join("operator")
             .join("signing")
             .join("private_key.pem"),
         &user,
@@ -711,7 +711,7 @@ pub fn write_harness_bootstrap_config(
             .join("node/identity/private_key.pem"),
         operator_signing_key_path: state_path
             .join(AI_DIR)
-            .join("config/keys/signing/private_key.pem"),
+            .join("node/operator/signing/private_key.pem"),
         authorized_keys_dir: state_path.join(AI_DIR).join("node/auth/authorized_keys"),
     };
     fs::write(

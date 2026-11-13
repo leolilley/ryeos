@@ -77,7 +77,7 @@ impl SignSource {
 ///
 /// `project_path` is required when `source = Project`; ignored
 /// otherwise. The operator signing key is loaded from
-/// `<app_root>/.ai/config/keys/signing/private_key.pem`.
+/// `<app_root>/.ai/node/operator/signing/private_key.pem`.
 ///
 /// Returns a `BatchReport` always — single-item refs produce a one-
 /// element vec. Per-item failures are collected; a failed validator
@@ -1410,7 +1410,7 @@ pub fn load_operator_signing_key(runtime_root: &Path) -> Result<SigningKey> {
     let root = lillux::PinnedDirectory::open(runtime_root)?
         .ok_or_else(|| anyhow!("operator runtime root is unavailable"))?;
     let mut parent = root.try_clone()?;
-    for segment in [ryeos_engine::AI_DIR, "config", "keys", "signing"] {
+    for segment in [ryeos_engine::AI_DIR, "node", "operator", "signing"] {
         parent = parent
             .open_child_directory(std::ffi::OsStr::new(segment))?
             .ok_or_else(|| anyhow!("operator signing-key directory is unavailable"))?;

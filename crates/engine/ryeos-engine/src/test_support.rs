@@ -81,7 +81,7 @@ pub fn workflow_bundle_roots() -> [PathBuf; 3] {
 /// in the dev tree — kind schemas, handler descriptor YAMLs, and the
 /// binary `item_source.json` sidecars all anchor to this single key.
 /// Public-key bytes are pinned here so the engine doesn't have to read
-/// `<app_root>/.ai/config/keys/signing/private_key.pem` from operator state.
+/// `<app_root>/.ai/node/operator/signing/private_key.pem` from operator state.
 ///
 /// PEM source: `crates/bin/daemon/tests/fixtures/trusted_signers/<fp>.toml`.
 pub fn platform_author_verifying_key() -> VerifyingKey {

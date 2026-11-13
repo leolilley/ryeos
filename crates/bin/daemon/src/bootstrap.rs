@@ -192,7 +192,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 
     // 7. Authorize the operator key so the local CLI can authenticate to
     // the local daemon. The CLI signs requests with the operator's persistent
-    // identity at <app_root>/.ai/config/keys/signing/.
+    // identity at <app_root>/.ai/node/operator/signing/.
     // The authorized-key TOML must be signed by the node key per
     // auth::load_authorized_key().
     let user_auth_entry = config

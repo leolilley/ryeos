@@ -116,11 +116,27 @@ impl RuntimeRoot {
         self.managed_external_content().join("staging")
     }
 
+    /// Node-volume home of the local operator's key material
+    /// (`.ai/node/operator`).
+    pub fn operator_dir(&self) -> PathBuf {
+        self.node().join("operator")
+    }
+
+    /// The local operator's signing key. This is the only owner of the path;
+    /// every reader and writer goes through it.
     pub fn operator_signing_key_path(&self) -> PathBuf {
-        self.config()
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem")
+        self.operator_dir().join("signing").join("private_key.pem")
+    }
+
+    /// The operator-signed genesis record created by `ryeos init`.
+    pub fn operator_genesis_path(&self) -> PathBuf {
+        self.operator_dir().join("genesis.json")
+    }
+
+    /// Node-signed remote pin records, one `<name>.yaml` per remote
+    /// (`.ai/node/remotes`).
+    pub fn remote_pins_dir(&self) -> PathBuf {
+        self.node().join("remotes")
     }
 
     /// Node-owned signer registry root (`.ai/node/trust`).

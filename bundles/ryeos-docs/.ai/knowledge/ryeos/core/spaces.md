@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T10:30:23Z:d0d08cb41f293f3649b3951bf4731a178b21df096652e59200247c9bb85d2a42:Uw1fvFrByG8SQSLLc6PNb9DoQc2s8LwIzj31gMkQLspHHTisCeu7nSh+3S4gWEvLjn9fYPRUpALHq1vvzu1UCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T11:09:13Z:0d545bffeec5eb2ca8f3a53d2b73783daa077ad3f77065174af4b92f46535dd2:Y2A8JRTZrlJnBtGiys+CB446k4yRxtsjhhrwxBQdCnXg2o9nBBvu696BLXPRxxtcy0+YDn0G0uQsYVFq1wQlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -43,9 +43,11 @@ overridable via `RYEOS_APP_ROOT`. Created by `ryeos init`.
 
 ```
 <system_space_dir>/.ai/
-├── config/keys/
-│   └── signing/private_key.pem      ← operator's Ed25519 identity
 ├── node/
+│   ├── operator/
+│   │   ├── signing/private_key.pem  ← operator's Ed25519 identity
+│   │   └── genesis.json             ← operator-signed genesis record
+│   ├── remotes/<name>.yaml          ← node-signed remote pin records
 │   ├── trust/
 │   │   ├── signers/<fp>.yaml        ← node-signed signer records
 │   │   └── events/                  ← node-signed hash-chained key events
