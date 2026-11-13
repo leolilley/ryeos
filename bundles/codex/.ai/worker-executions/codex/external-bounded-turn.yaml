@@ -4,7 +4,7 @@ category: codex
 description: >-
   Run one completion-fenced Codex turn on a remote lease and retain its private candidate for owner review.
   Its lifetime plus the node's turn-end margin (600 s) must end before the lease does, and an external
-  binding's lease is at most 3600 s, so the turn is bounded at 2700 s.
+  binding's lease is at most 3600 s, so the turn is bounded at 2400 s, leaving 600 s for restore, dial, Ready and session.start before the turn starts.
 config:
   worker_ref: null
   environment_binding: environment
@@ -19,7 +19,7 @@ config:
   workspace_env: RYEOS_WORKSPACE
   require_pinned_cow: true
   required_terminal_publication: retain_result
-  max_lifetime_seconds: 2700
+  max_lifetime_seconds: 2400
   recover_upstream_session: true
   mode:
     kind: bounded_turn
@@ -31,7 +31,7 @@ config:
     - ryeos.execute.tool.*
 limits:
   turns: 1
-  duration_seconds: 3300
+  duration_seconds: 3000
 requires:
   capabilities:
     declared:
