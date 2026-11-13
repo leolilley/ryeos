@@ -85,6 +85,41 @@ fn run_work_margin_watch(
     }
 }
 
+/// What remains of one live incarnation before its planned rollover: the
+/// time until the signed rollover drain margin ahead of the service edge, and
+/// the service work until the signed rollover work margin. The daemon begins
+/// its graceful stop at whichever comes first, so work admitted against more
+/// than this would be cut by the rollover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceHeadroom {
+    pub service_until_rollover: std::time::Duration,
+    pub work_until_rollover: u64,
+}
+
+/// Headroom from the edge, the incarnation's rollover margins and the prepaid
+/// work counters. Work is the envelope less the cleanup reserve, less the
+/// work margin when the policy plans one (schema 7), less what service SQL
+/// has spent; each step saturates at zero.
+fn rollover_headroom(
+    edge: &lillux::time::OccupancyServiceEdge,
+    drain_margin: std::time::Duration,
+    work_margin_steps: Option<u64>,
+    budget: &lillux_sqlite::OriginalNativeBudgetSnapshot,
+) -> Result<ServiceHeadroom> {
+    let service_until_rollover = edge
+        .remaining_before(drain_margin)
+        .map_err(|error| anyhow::anyhow!("read the service window: {error}"))?;
+    let work_until_rollover = budget
+        .allocator_steps_limit
+        .saturating_sub(budget.cleanup_reserved)
+        .saturating_sub(work_margin_steps.unwrap_or(0))
+        .saturating_sub(budget.allocator_steps);
+    Ok(ServiceHeadroom {
+        service_until_rollover,
+        work_until_rollover,
+    })
+}
+
 /// Service-refusal latch of one live incarnation, with the fixed BOOTTIME
 /// edge of its service window. Shared by the authority and the window timer;
 /// it holds no factory, authority, region or account owner, so retaining it
@@ -1117,6 +1152,19 @@ impl LiveNativeFactory {
         self.authority.reservation.incarnation_lineage()
     }
 
+    /// What remains of this incarnation before its planned rollover, read
+    /// live: refused once the factory refuses service.
+    pub fn service_headroom(self: &Arc<Self>) -> Result<ServiceHeadroom> {
+        let budget = self.ready_factory()?.budget_snapshot()?;
+        let incarnation = self.authority.reservation.inputs()?.policy.incarnation;
+        rollover_headroom(
+            &self.authority.latch.edge,
+            std::time::Duration::from_millis(incarnation.rollover_drain_margin_ms),
+            incarnation.rollover_work_margin_steps,
+            &budget,
+        )
+    }
+
     /// Return the original captured service deadline, never a fresh interval.
     pub fn original_sql_deadline(&self) -> Result<lillux::time::MonotonicDeadline> {
         self.authority.require_original(false)?;
@@ -1209,6 +1257,91 @@ mod service_refusal_latch_tests {
         assert_ne!(latch.bits() & service_refusal::FACT, 0);
         latch.latch(service_refusal::BOUNDARY_REFUSED);
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod service_headroom_tests {
+    use super::*;
+
+    fn budget(spent: u64) -> lillux_sqlite::OriginalNativeBudgetSnapshot {
+        lillux_sqlite::OriginalNativeBudgetSnapshot {
+            storage_bytes: 0,
+            allocator_steps: spent,
+            allocator_steps_limit: 10_000,
+            cleanup_reserved: 1_000,
+            cleanup_steps: 0,
+            connections_issued: 0,
+        }
+    }
+
+    fn edge(max_secs: u64, cleanup_secs: u64) -> lillux::time::OccupancyServiceEdge {
+        let clock = lillux::time::RetainedOccupancyClock::capture().unwrap();
+        let limit =
+            lillux::time::OccupancyLimit::new(clock.start().clone(), max_secs * 1_000_000_000)
+                .unwrap();
+        clock
+            .service_edge(&limit, lillux::time::Duration::from_secs(cleanup_secs))
+            .unwrap()
+    }
+
+    #[test]
+    fn service_headroom_ends_at_the_drain_margin_not_the_edge() {
+        // Max 60 s, cleanup 5 s: the edge is at 55 s; the drain margin of 5 s
+        // starts the rollover at 50 s.
+        let headroom = rollover_headroom(
+            &edge(60, 5),
+            std::time::Duration::from_secs(5),
+            None,
+            &budget(0),
+        )
+        .unwrap();
+        assert!(
+            headroom.service_until_rollover <= std::time::Duration::from_secs(50)
+                && headroom.service_until_rollover > std::time::Duration::from_secs(45),
+            "{headroom:?}"
+        );
+        let wide = rollover_headroom(
+            &edge(60, 5),
+            std::time::Duration::from_secs(120),
+            None,
+            &budget(0),
+        )
+        .unwrap();
+        assert_eq!(wide.service_until_rollover, std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn service_headroom_excludes_the_work_margin() {
+        let headroom = rollover_headroom(
+            &edge(60, 5),
+            std::time::Duration::ZERO,
+            Some(2_000),
+            &budget(3_000),
+        )
+        .unwrap();
+        // 10_000 - 1_000 cleanup - 2_000 margin - 3_000 spent.
+        assert_eq!(headroom.work_until_rollover, 4_000);
+        let spent_past = rollover_headroom(
+            &edge(60, 5),
+            std::time::Duration::ZERO,
+            Some(2_000),
+            &budget(8_000),
+        )
+        .unwrap();
+        assert_eq!(spent_past.work_until_rollover, 0);
+    }
+
+    #[test]
+    fn service_headroom_without_a_work_margin_is_unchanged() {
+        let headroom = rollover_headroom(
+            &edge(60, 5),
+            std::time::Duration::ZERO,
+            None,
+            &budget(3_000),
+        )
+        .unwrap();
+        assert_eq!(headroom.work_until_rollover, 6_000);
     }
 }
 
