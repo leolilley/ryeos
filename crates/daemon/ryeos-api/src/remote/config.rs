@@ -385,8 +385,14 @@ fn parse_remotes_report(
                         path.display()
                     ),
                     RemoteConfigScope::Operator => match diagnostic_url.as_deref() {
-                        Some(url) => format!("run `ryeos remote configure {} --url {}`", name, url),
-                        None => format!("run `ryeos remote configure {} --url <https-url>`", name),
+                        Some(url) => format!(
+                            "run `ryeos remote configure {} --url {} --expect-fingerprint <fingerprint>` (or `--descriptor <file>`)",
+                            name, url
+                        ),
+                        None => format!(
+                            "run `ryeos remote configure {} --url <https-url> --expect-fingerprint <fingerprint>` (or `--descriptor <file>`)",
+                            name
+                        ),
                     },
                 };
                 report.invalid.push(InvalidRemote {

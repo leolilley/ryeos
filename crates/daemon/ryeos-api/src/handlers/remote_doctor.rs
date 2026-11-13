@@ -65,7 +65,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
         }
         next_steps.push(serde_json::json!({
             "name": "configure_remote",
-            "command": format!("ryeos remote configure {} --url <https-url>", req.remote),
+            "command": format!("ryeos remote configure {} --url <https-url> --expect-fingerprint <fingerprint>", req.remote),
         }));
         return Ok(serde_json::json!({
             "remote": req.remote,
@@ -105,7 +105,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
             }));
             next_steps.push(serde_json::json!({
                 "name": "check_remote_url",
-                "command": format!("ryeos remote configure {} --url <https-url>", req.remote),
+                "command": format!("ryeos remote configure {} --url <https-url> --expect-fingerprint <fingerprint>", req.remote),
             }));
             None
         }
@@ -153,8 +153,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
             if !configured_identity_matches {
                 next_steps.push(serde_json::json!({
                     "name": "review_remote_identity_pin",
-                    "command": format!("ryeos remote configure {} --url {}", req.remote, remote_cfg.url),
-                    "note": "The live remote identity differs from the configured principal/key/site/vault coordinate. Only reconfigure if you expect this complete identity change.",
+                    "command": format!("ryeos remote configure {} --url {} --expect-fingerprint <fingerprint>", req.remote, remote_cfg.url),
+                    "note": "The live remote identity differs from the configured principal/key/site/vault coordinate. Only reconfigure if you expect this complete identity change, and pin the new key with a fingerprint or descriptor verified with the remote operator out of band.",
                 }));
             }
             (

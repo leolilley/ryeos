@@ -96,6 +96,12 @@ pub struct ExecuteRequest {
     /// diagnostics block.
     #[serde(default)]
     pub state_root: Option<String>,
+    /// Ask this node to sign the successful response envelope for this exact
+    /// signed request and executed item ref
+    /// (`crate::remote::result_attestation`). A forwarding node sets it
+    /// and refuses an unsigned result.
+    #[serde(default)]
+    pub attest_result: bool,
 }
 
 impl ExecuteRequest {
@@ -990,6 +996,26 @@ impl CompiledResponseMode for CompiledExecuteMode {
     ) -> Result<axum::response::Response, RouteDispatchError> {
         let request: ExecuteRequest = ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+        // A forwarding node asks for a result signed for this exact request.
+        // The request was verified by the `ryeos_signed` invoker; recompute
+        // its digest from the same bytes.
+        let attestation_binding = if request.attest_result {
+            let request_digest = crate::auth::signed_request_digest(
+                &ctx.state.identity.principal_id(),
+                ctx.request_parts.method.as_str(),
+                &ctx.request_parts.uri,
+                &ctx.request_parts.headers,
+                &ctx.body_raw,
+            )
+            .ok_or_else(|| {
+                RouteDispatchError::BadRequest(
+                    "attest_result requires a ryeos_signed request".to_string(),
+                )
+            })?;
+            Some((request_digest, request.item_ref.clone()))
+        } else {
+            None
+        };
         // This assertion belongs to the authenticated wire ingress. Nested
         // admission consumes verified handler authority, not a second proof.
         ryeos_node_runtime::identity::validate_forwarding_origin_assertion(
@@ -1000,7 +1026,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         .map_err(|e| RouteDispatchError::Forbidden(format!("{e:#}")))?;
         // HTTP only owns ingress/response adaptation, never a second admission.
         let accepted = ctx.request_parts.uri.path() == "/execute/launch";
-        let outcome = admit_execution_with_publication(
+        let identity = ctx.state.identity.clone();
+        let mut outcome = admit_execution_with_publication(
             request,
             ctx.principal.handler_context(),
             ctx.state,
@@ -1009,6 +1036,19 @@ impl CompiledResponseMode for CompiledExecuteMode {
             ctx.publication,
         )
         .await?;
+        if let Some((request_digest, item_ref)) = attestation_binding
+            && outcome.status.is_success()
+        {
+            crate::remote::result_attestation::attest(
+                &mut outcome.body,
+                &identity,
+                &request_digest,
+                &item_ref,
+            )
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!("sign remote execute result: {error}"))
+            })?;
+        }
         Ok((outcome.status, axum::Json(outcome.body)).into_response())
     }
 }
@@ -2396,6 +2436,13 @@ fn map_forward_error_to_dispatch(
                 detail: detail.clone(),
             }
         }
+        RemoteForwardError::ResultUnsigned
+        | RemoteForwardError::ResultAttestationInvalid { .. } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
+                target_site_id: target_site_id.to_string(),
+                detail: format!("[{}] {e}", e.code()),
+            }
+        }
         RemoteForwardError::MissingSnapshotHash => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
                 target_site_id: target_site_id.to_string(),
@@ -3413,6 +3460,7 @@ mod tests {
             usage_subject: None,
             debug_raw: false,
             state_root: None,
+            attest_result: false,
         }
     }
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-22T05:18:30Z:c9facce46c2322fef77081b27eb3582594766d5179a082ca9ec0ff3b29aa5fde:HQbHoH8HoRO0HGhZxYI7COZ0dJqgGwudYMvU9Yv2/Buw6I5YehgIaiNIUjNkNUcSsTEQFWmyWxadgrQuMMb6AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T00:50:49Z:b91e20a555d5a31651fb8b7c1af4687373aa076f9ace36051c91eed619d64164:Z56xOrmYV2+pGKf90n9Cm6GsNWQDyECuTVIkxbg0vcBaJ6hTo6jIfr5LEQdICxgRijkuFwQq+kPeUvmCqJP4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -30,7 +30,11 @@ v1 remote execution is for **operator-trusted remotes**, not mutually
 untrusted tenants.
 
 - CAS is shared/global within a node; capability checks protect access,
-  not storage partitioning.
+  not storage partitioning. `objects/get` serves any hash to any holder of
+  the grant: knowing a hash plus holding `ryeos.execute.service.objects/get`
+  fetches the object, whoever pushed it. Granting a caller node
+  `objects/get` gives it read access to every object on this node whose hash
+  it learns. See [Services: objects](../services/objects.md#authority-a-hash-plus-the-grant-fetches-the-object).
 - Vault is a single shared store in v1; capability checks protect
   mutation/listing, not per-principal isolation.
 - Remote requests are normally signed with the **caller's node Ed25519 key**;
@@ -71,6 +75,33 @@ operator and make verified remote origin visible to destination policy. A
 delegated caller cannot turn the node into an operator-key signing oracle or
 choose its authenticated origin.
 
+### Attribution: remote runs act as the node, not the user
+
+`remote execute`, `remote push` (default mode) and target-site forwarding
+from `/execute` sign every request to the remote with the caller's **node
+key**. The remote therefore sees, authorizes and records one principal, the
+caller node, whichever local user started the run:
+
+- the remote's authorized-key scopes are granted to the node, so every local
+  user allowed to start remote work (for example `remote/admin` for
+  `remote execute`, `remote/push` for `remote push`) acts with the node's full
+  grant on that remote;
+- the remote stores pushed project HEADs and thread ownership under the node
+  key's fingerprint, so all of a node's users share one namespace there;
+- remote threads, results and audit records name the node, not the user. The
+  caller's own sync job (`service:sync/jobs/inspect`) is the only record of
+  which local principal (`acting_principal`) asked for the run.
+
+Grant remote rights to local users on that basis: giving a user remote
+capabilities lends them the node's identity on every configured remote. The configured
+operator continuity mode above is the one exception, and it is reserved for
+the exact configured operator.
+
+Per-user outbound keys, where each local principal holds its own key admitted
+and capped separately on the remote, are not available yet. They come with the
+keys work (per-user key custody on the caller and per-signer admission on the
+remote); until then, attribute and cap remote work per node.
+
 ## Prerequisites
 
 ### On the remote node
@@ -108,7 +139,8 @@ choose its authenticated origin.
    self-signed admission request:
 
    ```bash
-   ryeos remote configure --remote production --url https://ryeos.example.com
+   ryeos remote configure --remote production --url https://ryeos.example.com \
+     --expect-fingerprint <remote node fingerprint>
    ryeos remote admit \
      --remote production \
      --token "<one-time-token>" \
@@ -205,10 +237,17 @@ forwarded `remote_operator` principal.
 1. **Configure the remote**:
 
    ```bash
-   ryeos remote configure --remote production --url https://ryeos.example.com
-   # or, with a provider/operator descriptor pin:
    ryeos remote configure --descriptor ./production.remote.yaml
+   # or, with the node fingerprint the remote operator gave you:
+   ryeos remote configure --remote production --url https://ryeos.example.com \
+     --expect-fingerprint <remote node fingerprint>
    ```
+
+   The remote node key must be pinned by a descriptor or an expected
+   fingerprint obtained out of band; configure never trusts the key it is
+   shown on first contact. Without either pin it refuses with
+   `remote_key_unpinned`, writes nothing, and names the fingerprint the live
+   node reported so you can confirm it with the remote operator.
 
    This discovers the remote's public key, principal id, canonical site ID,
    vault fingerprint, and ingest-ignore rules. A descriptor is a trust pin
@@ -353,7 +392,8 @@ authorize the new node key.
 
 1. Rotate the node key on the caller.
 2. On the remote: `ryeos authorize-key` with the new node public key.
-3. On the caller: `ryeos remote configure` to pick up changes.
+3. On the caller: `ryeos remote configure` with the caller's existing
+   `--descriptor` or `--expect-fingerprint` pin to pick up changes.
 4. On the remote: remove any superseded authorized-key TOML from
    `.ai/node/auth/authorized_keys/`.
 
@@ -365,7 +405,8 @@ cached target exclusions with the source node's current signed exclusions to
 capture the pushed project snapshot policy and tree. The destination still
 validates actual paths against its current policy before accepting a HEAD.
 
-If the remote changes its ignore rules, re-run `ryeos remote configure`.
+If the remote changes its ignore rules, re-run `ryeos remote configure` with
+the same `--descriptor` or `--expect-fingerprint` pin.
 
 If no cached rules are available, the push handler fetches them inline for the
 operation without manufacturing or persisting partial remote configuration. If
@@ -581,6 +622,39 @@ Resuming a `pushed_head` thread under the per-request overlay is
 tracked separately; the resume path falls back to the daemon engine.
 Detached children from callbacks are disallowed at the callback
 dispatcher (inline only).
+
+## Result Verification
+
+The remote node signs every remote-execute result it returns. The forwarding
+node sends `attest_result: true` on `/execute`; the remote then adds a
+`result_attestation` member to its successful response, signed with its node
+key over a `ryeos.remote_execute_result.v1` statement that binds:
+
+- `request_digest`: the `ryeos-request-v1` content hash of the exact signed
+  request (method, path, body hash, timestamp, nonce, audience), so a result
+  cannot be replayed onto another request;
+- `item_ref`: the canonical item ref the remote executed;
+- `result_digest`: the SHA-256 of the canonical JSON of the whole response
+  without `result_attestation`.
+
+Before it reads the thread status, the result snapshot or anything else from
+the response, the forwarding node checks that the signer is the pinned remote
+principal, that the request digest and item ref are the ones it sent, that
+the result digest matches, and that the signature verifies under the key
+pinned by `remote configure`. It refuses with:
+
+- `remote_result_unsigned` when the response has no attestation;
+- `remote_result_attestation_invalid` when the attestation names another
+  signer, request or item, does not match the returned result, or does not
+  verify under the pinned key.
+
+A refused result fails the sync job in phase `remote_result_unverified`;
+nothing is pulled or applied locally. The check is only as strong as the pin,
+which is why `remote configure` requires a descriptor or an expected
+fingerprint.
+
+Both nodes must run a version with result attestation. An older remote rejects
+the `attest_result` request field, and the forwarding node fails closed.
 
 ## Pull-Back
 
