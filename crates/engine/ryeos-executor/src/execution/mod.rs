@@ -1849,6 +1849,37 @@ impl HeadAdvanceNotApplied {
     }
 }
 
+impl HeadAdvanceNotApplied {
+    /// The terminal completion of a managed runtime whose fold-back HEAD
+    /// advance was refused: `failed` with outcome
+    /// [`HEAD_ADVANCE_NOT_APPLIED`] and the retained-generation payload,
+    /// keeping the runtime's cost and its reported status as testimony. The
+    /// runtime's own result is not committed; its publication did not happen.
+    pub fn failed_completion(
+        &self,
+        reported: &ryeos_engine::contracts::ExecutionCompletion,
+    ) -> ryeos_engine::contracts::ExecutionCompletion {
+        let mut error = self.error_payload();
+        error
+            .as_object_mut()
+            .expect("head-advance payload is an object")
+            .insert(
+                "reported_status".into(),
+                serde_json::Value::String(reported.status.as_str().to_owned()),
+            );
+        ryeos_engine::contracts::ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Failed,
+            outcome_code: Some(HEAD_ADVANCE_NOT_APPLIED.to_owned()),
+            result: None,
+            error: Some(error),
+            artifacts: Vec::new(),
+            final_cost: reported.final_cost.clone(),
+            continuation_request: None,
+            metadata: None,
+        }
+    }
+}
+
 impl std::fmt::Display for HeadAdvanceNotApplied {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -3210,6 +3241,42 @@ mod head_advance_not_applied_tests {
         assert_eq!(payload["observed_head"], "e".repeat(64));
         assert_eq!(payload["retained_snapshot_hash"], "c".repeat(64));
         assert_eq!(payload["retained_output_capture_hash"], "d".repeat(64));
+    }
+
+    #[test]
+    fn failed_completion_replaces_a_reported_success_with_the_typed_failure() {
+        let reported = ryeos_engine::contracts::ExecutionCompletion {
+            status: ryeos_engine::contracts::ThreadTerminalStatus::Completed,
+            outcome_code: Some("success".into()),
+            result: Some(serde_json::json!({"answer": 42})),
+            error: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: None,
+        };
+        let failed = not_applied(ryeos_state::refs::ProjectHeadAdvanceRefusal::Conflict {
+            expected: "b".repeat(64),
+            observed: Some("e".repeat(64)),
+        })
+        .failed_completion(&reported);
+        assert_eq!(
+            failed.status,
+            ryeos_engine::contracts::ThreadTerminalStatus::Failed
+        );
+        assert_eq!(
+            failed.outcome_code.as_deref(),
+            Some(HEAD_ADVANCE_NOT_APPLIED)
+        );
+        assert!(
+            failed.result.is_none(),
+            "the unpublished result is not committed"
+        );
+        let error = failed.error.unwrap();
+        assert_eq!(error["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(error["reported_status"], "completed");
+        assert_eq!(error["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(error["observed_head"], "e".repeat(64));
     }
 
     #[test]

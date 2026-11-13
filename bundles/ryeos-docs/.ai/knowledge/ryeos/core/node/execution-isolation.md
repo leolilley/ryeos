@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:53:36Z:2d7e9b536ee83f579d14258c126340b359d3f5f4a4a329d8f424fdc6f1d9eed8:RZopGRdzigHy7ZALUpL7X+Tk/MvqTTnOWwOcJ7iYLv4mo3Ep7eh8GWr4dWa8ZrOsF8HckWy+Wr4iTbhmTGIsCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T02:21:34Z:bf1a76712842cb176794e60f25de44d9f6bda34223568e4ad125f8231e8b81ff:VFEgfdJbxgnHS7hpOKhSVjESouuPHtGiQbuW1+tFG4IqE6Dky6kLc5BYGgkD+4Fc2OeUh1VyBpCB5WkGeQ1GBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -269,12 +269,16 @@ A pinned execution whose terminal publication advances HEAD freezes its result
 generation, binds it to the workspace journal, and only then compare-and-swaps
 HEAD from the admitted base. Three outcomes follow: HEAD advances (published);
 the CAS is refused before any write, most often because HEAD moved off the
-base, and a direct item execution fails with outcome
-`head_advance_not_applied`, its error naming the reason, expected and observed
-HEAD and the retained `retained_snapshot_hash` /
-`retained_output_capture_hash` (a managed runtime reports the same typed
-refusal as its terminal-result error); or fold-back itself breaks, which stays
-`foldback_failed`. A not-applied result is never retried or
+base, and the thread fails with outcome `head_advance_not_applied` in every
+lane (direct item, managed runtime callback, and a managed runtime that exited
+before its callback), its error naming the reason, expected and observed HEAD,
+the runtime's reported status where there is one, and the retained
+`retained_snapshot_hash` / `retained_output_capture_hash`. The retained
+generation joins the failed terminal, so it stays reachable after the
+workspace closes, and a parent following the thread receives a failure
+envelope; or fold-back itself breaks, which stays `foldback_failed`. Startup
+recovery of an interrupted freeze binds the generation but does not advance
+HEAD. A not-applied result is never retried or
 merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
 publication. Their writes are discarded at process cleanup and never fold back

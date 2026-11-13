@@ -302,6 +302,18 @@ impl ExecutionGuard {
         outcome_code: &str,
         error: serde_json::Value,
     ) -> ExecutionCleanupOutcome {
+        self.fail_thread_with_error_retaining(outcome_code, error, None)
+    }
+
+    /// [`Self::fail_thread_with_error`] whose failed terminal also commits a
+    /// retained (unpublished) result generation, keeping it reachable from
+    /// thread history after the workspace journal closes.
+    fn fail_thread_with_error_retaining(
+        &mut self,
+        outcome_code: &str,
+        error: serde_json::Value,
+        result_generation: Option<&ryeos_state::objects::WorkspaceGenerationPair>,
+    ) -> ExecutionCleanupOutcome {
         self.revoke_callback_token();
         self.revoke_thread_auth_token();
         if self.thread_finalized {
@@ -352,9 +364,13 @@ impl ExecutionGuard {
                 final_cost: None,
                 summary_json: None,
             };
-            let finalize = match self.launch_owner.as_deref() {
-                Some(owner) => self.state.threads.finalize_thread_owned(&params, owner),
-                None => self.state.threads.finalize_thread(&params),
+            let finalize = match (self.launch_owner.as_deref(), result_generation) {
+                (Some(owner), Some(generation)) => self
+                    .state
+                    .threads
+                    .finalize_thread_owned_retaining_generation(&params, owner, generation),
+                (Some(owner), None) => self.state.threads.finalize_thread_owned(&params, owner),
+                (None, _) => self.state.threads.finalize_thread(&params),
             };
             match finalize {
                 Ok(_) => {
@@ -5896,9 +5912,10 @@ pub async fn run_and_wait(
                     // fold-back.
                     match super::HeadAdvanceNotApplied::find(error) {
                         Some(not_applied) => {
-                            guard.fail_thread_with_error(
+                            guard.fail_thread_with_error_retaining(
                                 super::HEAD_ADVANCE_NOT_APPLIED,
                                 not_applied.error_payload(),
+                                Some(&not_applied.retained),
                             );
                         }
                         None => {
@@ -7449,21 +7466,19 @@ async fn dispatch_detached_bg_task(
                                 error = format!("{error:#}"),
                                 "authoritative fold-back failed; refusing successful settlement"
                             );
-                            let (outcome_code, failure) =
-                                match super::HeadAdvanceNotApplied::find(&error) {
-                                    Some(not_applied) => (
-                                        super::HEAD_ADVANCE_NOT_APPLIED,
-                                        not_applied.error_payload(),
-                                    ),
-                                    None => {
-                                        ("foldback_failed", json!({ "code": "foldback_failed" }))
-                                    }
-                                };
+                            let not_applied = super::HeadAdvanceNotApplied::find(&error);
+                            let (outcome_code, failure) = match not_applied {
+                                Some(not_applied) => {
+                                    (super::HEAD_ADVANCE_NOT_APPLIED, not_applied.error_payload())
+                                }
+                                None => ("foldback_failed", json!({ "code": "foldback_failed" })),
+                            };
                             if let Err(cleanup_error) = fail_thread_static_owned_with_error(
                                 &bg_state,
                                 &bg_thread_id,
                                 outcome_code,
                                 failure,
+                                not_applied.map(|not_applied| &not_applied.retained),
                                 &launch_owner,
                             ) {
                                 tracing::error!(
@@ -7729,6 +7744,7 @@ fn fail_thread_static_owned(
         thread_id,
         outcome_code,
         json!({ "code": outcome_code }),
+        None,
         launch_owner,
     )
 }
@@ -7739,6 +7755,7 @@ fn fail_thread_static_owned_with_error(
     thread_id: &str,
     outcome_code: &str,
     error_payload: serde_json::Value,
+    result_generation: Option<&ryeos_state::objects::WorkspaceGenerationPair>,
     launch_owner: &str,
 ) -> Result<ExecutionCleanupOutcome> {
     match super::process_attachment::finalize_requested_stop_if_present(state, thread_id) {
@@ -7763,7 +7780,15 @@ fn fail_thread_static_owned_with_error(
         final_cost: None,
         summary_json: None,
     };
-    match state.threads.finalize_thread_owned(&params, launch_owner) {
+    let finalized = match result_generation {
+        Some(generation) => state.threads.finalize_thread_owned_retaining_generation(
+            &params,
+            launch_owner,
+            generation,
+        ),
+        None => state.threads.finalize_thread_owned(&params, launch_owner),
+    };
+    match finalized {
         Ok(_) => Ok(ExecutionCleanupOutcome::Finalized),
         Err(error) => {
             let terminal = state

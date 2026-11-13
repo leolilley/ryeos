@@ -43,8 +43,8 @@ mod terminal;
 
 use runtime_request::{SpawnRuntimeParams, spawn_runtime};
 use terminal::{
-    fallback_finalization, is_thread_terminal_status, reconcile_terminal_finalization,
-    runtime_terminal_status,
+    fallback_finalization, head_advance_not_applied_finalization, is_thread_terminal_status,
+    reconcile_terminal_finalization, runtime_terminal_status,
 };
 
 const MAX_SIGNED_EXECUTOR_MANIFEST_REF_BYTES: u64 = 256 * 1024;
@@ -7744,25 +7744,43 @@ async fn run_claimed_thread_row_inner(
         // Preserve the runtime's failure testimony and destroy the controller
         // workspace after terminalization; only a completed authenticated
         // import may enter the ordinary retained-generation freeze owner.
+        // A HEAD advance refused before any write is a terminal fact: the
+        // thread fails `head_advance_not_applied` below, with the retained
+        // generation joining that failed terminal.
+        let mut head_advance_not_applied = None;
         let result_generation = if owns_workspace && !external_candidate_without_completion {
-            super::prepare_stopped_managed_runtime_terminal_project_result(
+            match super::prepare_stopped_managed_runtime_terminal_project_result(
                 state,
                 provenance,
                 &thread_id,
                 launch_owner,
-            )
-            .map_err(|error| {
-                tracing::error!(
-                    thread_id = %thread_id,
-                    launch_owner,
-                    item_ref = %resolved.item_ref,
-                    error = %format!("{error:#}"),
-                    "failed to prepare stopped managed runtime terminal project result"
-                );
-                BuildAndLaunchError::Internal(
-                    error.context("prepare stopped managed runtime terminal project result"),
-                )
-            })?
+            ) {
+                Ok(generation) => generation,
+                Err(error) => match super::HeadAdvanceNotApplied::find(&error) {
+                    Some(not_applied) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            launch_owner,
+                            error = %not_applied,
+                            "stopped managed runtime HEAD advance was not applied; failing with the retained generation"
+                        );
+                        head_advance_not_applied = Some(not_applied.clone());
+                        Some(not_applied.retained.clone())
+                    }
+                    None => {
+                        tracing::error!(
+                            thread_id = %thread_id,
+                            launch_owner,
+                            item_ref = %resolved.item_ref,
+                            error = %format!("{error:#}"),
+                            "failed to prepare stopped managed runtime terminal project result"
+                        );
+                        return Err(BuildAndLaunchError::Internal(error.context(
+                            "prepare stopped managed runtime terminal project result",
+                        )));
+                    }
+                },
+            }
         } else {
             None
         };
@@ -7906,7 +7924,19 @@ async fn run_claimed_thread_row_inner(
             );
         }
         let observed_runtime_status = runtime_result.status;
-        let fallback = fallback_finalization(&thread_id, &runtime_result, terminal_status);
+        let fallback = match head_advance_not_applied.as_ref() {
+            // An operator stop still settles as that stop.
+            Some(not_applied)
+                if !matches!(
+                    terminal_status,
+                    ryeos_state::objects::ThreadStatus::Killed
+                        | ryeos_state::objects::ThreadStatus::Cancelled
+                ) =>
+            {
+                head_advance_not_applied_finalization(&thread_id, &runtime_result, not_applied)
+            }
+            _ => fallback_finalization(&thread_id, &runtime_result, terminal_status),
+        };
         runtime_result = fallback.runtime_result;
         let mut hosted_root_terminalization =
             if state.state_store.dedicated_session(&thread_id)?.is_some() {
