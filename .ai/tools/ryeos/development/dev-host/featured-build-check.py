@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:3af426443b5dcfdda25f29e7f5efa32e15f3cc18dfe41d2fe10d671723eb4fa5:4hWTCA3IGSfJVgdqHqSPKAD+l60loLYtcNjhEBIiJij6TaaEZZsBpwNo04z8h2K1hHdjMxCy6LZAuvSFBiPHDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:28ab824744e4d1eaa8b82c589f710bd2d296ecc23265c394456a5bc445d370a0:QPV3hqYbQAYNse5hc9afQlIbH7qVZZXyOHuMzNC8apR/S9VGkOE8uIqVS3WvpdklFb9rp8KnkOeakf4w4JU3AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/featured-build-check
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Check a ryeosd binary was compiled with the features a bundle set needs, on the host
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -58,7 +58,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         argv = ["--json", "--config-file", str(entry.config_file(request)),

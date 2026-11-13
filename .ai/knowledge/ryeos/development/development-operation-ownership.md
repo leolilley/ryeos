@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:27:19Z:7a8d6797dc09590b66315efa6d73b862cb2918b378ca1317c0df1388c980ec7f:TWHkLzYCEBFGZCyTEuvEQxF/5quHwslCanEfrH9I+7caFXZPZfgX/rBOMSH03XKLZR/3czKKXBfyIvikAk8lDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:47:49Z:9f7cca5949e94fd8fc2368a9a965e2a3bf97a3dca0b6359e2b3a0d1965ab3a23:g3ugEPy/Czd6z/8kXnoSM5NFpsmOsRiy2Vlyqrqo1HQ8xH8yPRUtM6bv5sEMoiFKXVE1JvcH4tEZlss0Q/2IDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/development
 tags: [development, tooling, production, qualification]
@@ -163,10 +163,9 @@ Moved out on 2026-11-13: the bundle-release source tests to
 `bundles/bundle-release/tests/`; `sign-dev.sh` and `revert-sig-churn.sh` to
 `.ai/tools/ryeos/development/maintainer/lib/`; `dev-tui.sh` and
 `dev-ui-assets.sh` to `.ai/tools/ryeos/development/interactive-host/lib/`;
-`rebuild-build-support-inputs.py` to
-`.ai/tools/ryeos/development/build-support-inputs/lib/`;
-`prove-contained-oci-provider.py` to
-`.ai/tools/ryeos/development/contained-oci-provider/lib/`, with their tests
+`rebuild-build-support-inputs.py` and `prove-contained-oci-provider.py` to
+`.ai/tools/ryeos/development/dev-host/lib/` (first under their own tool
+directories, then beside the other host helpers), with their tests
 in `tests/e2e/authoring-environment/` and `tests/development/`. Removed:
 `check-ui-wasm-fresh.sh` (call `browser-assets-production/publish.sh --check`),
 `release/verify-contained-oci-hook.sh`,

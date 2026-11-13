@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-12T23:59:42Z:4070721466463f2c4dae094579af2a117389bc8e9e05a57848bea2c35fef0b9a:02M/S3YwKRrDEhFp/8dIoWQo09jZU1q0fzHOaG1+8fixJAgKJE5o6LcGEJyYOokiI8XS7vsACl5ZvyR6Ghd4CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:e1dd30258dacc25f47883bb6ff69b34ac4c8985c69165bbe6eadf0b1f4d80187:E3dk7gGCFYSFMTMDcPa0LOY6lb63DI4hip0b0AfhtwZ8SMXIAL1HpXnGSabf+f1ATUlPeEgJE/1IU1HEGjf4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Check Render's current sandbox response still fits the adapter's strict parser.
 
 External development host tool; it grants no RyeOS authority. One free,
@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 
 _spec = importlib.util.spec_from_file_location(
-    "dev_host", Path(__file__).resolve().parents[2] / "dev-host/lib/dev_host.py")
+    "dev_host", Path(__file__).resolve().parent / "dev_host.py")
 dev_host = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev_host)
 ToolError = dev_host.ToolError

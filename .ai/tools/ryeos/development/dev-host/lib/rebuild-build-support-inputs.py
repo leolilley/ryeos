@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:ab4ccf6ecda63345251cd6531f6ab9341cdb79ecd9c1c1b455ee285060c28fe3:txscuz8XYYJBqQhPiRTSK6UwtqPcTvz63iVIU2PaUqbV2PF755eWs9mJ3jbTo1M6/edhnd+9n+pz4a352bgxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:ab4ccf6ecda63345251cd6531f6ab9341cdb79ecd9c1c1b455ee285060c28fe3:txscuz8XYYJBqQhPiRTSK6UwtqPcTvz63iVIU2PaUqbV2PF755eWs9mJ3jbTo1M6/edhnd+9n+pz4a352bgxCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.

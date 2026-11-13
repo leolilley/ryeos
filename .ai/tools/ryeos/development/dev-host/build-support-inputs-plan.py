@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:fe467fb370045da1bd6b6cafc9977d4bc7896caf7bb8c11a62da5de9f5728a9e:kvUaa64oxfLVsQbxDvlYZeb78UvD7uAuctF6LuLEcUjfm/3ekKcbl7VpTESk3ViKtQB3tPNbZmQjPBTTK5cuAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:c820f37d5ebd9845575efeb7476464a4ea2a462842d5a010b43c5981f6eacb06:7ClmeLaRE3xC/ZGVBgqHPAdyQXAmZKsFLVgh/oUy0viW7FpaalnVr6dCqMoqnq2wGzTqLCqi6SbxKwkd3Go9Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/build-support-inputs
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Print the plan for rebuilding the pinned build-support-inputs tree, read from the project's pins
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -17,7 +17,7 @@
 
 It reads repository YAML from the project and prints the rebuild plan; no
 docker, no network, no host access. The rebuild itself is the host-authority
-`execute` Tool beside it.
+`build-support-inputs-execute` Tool beside it.
 """
 
 from pathlib import Path
@@ -34,7 +34,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         entry.read_request()
         project = entry.project_path()

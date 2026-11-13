@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-12T23:59:42Z:cb59d8de273bf57fc61d7cd08b04158983269a648aa2daefb5d580e1f96899df:x6iyDrFeivDPCIWdnzbmA4WtFxFbOXpkylZ8cpZjjxrUzY+GIiE+KAEkCm3qmGttQ9IlMlcov7iCHOpjnjDsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:764df69543403d8c21c52e3538c21de480c68b6aa26134ae283ca395a12b674d:TBHGzdD13F+ets2/O3QTDdnJYjuQQKm3iCgX8BTOcyZQEzE/pqpv1MnBoEeGkH4nu4GcMkf4EJ5ovh0rrh3zDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Report where a dev node's installed binaries and bundles differ from a worktree.
 
 External development host tool; it grants no RyeOS authority and changes
@@ -32,7 +32,7 @@ import subprocess
 import sys
 
 _spec = importlib.util.spec_from_file_location(
-    "dev_host", Path(__file__).resolve().parents[2] / "dev-host/lib/dev_host.py")
+    "dev_host", Path(__file__).resolve().parent / "dev_host.py")
 dev_host = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev_host)
 ToolError = dev_host.ToolError

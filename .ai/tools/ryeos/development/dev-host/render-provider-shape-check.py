@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:7626ac622b5956fe31c5de0f7b55351cdbdb5ca2400cce6d7a24479316b05f0a:oIHCamaFVnVE9g7XPRbe5Z50ltixwRA/B17Wo+bMSEaUQkoEPw/F0Bpn3EhBrvppsbO106Z353MlI+DQ0+OPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:0d9c3385db1f42e55fb40934ce15dc67ae7dc9a7a5130c67979b9d046b91a513:amRAFh0HUIgLJsR3JN9GRcpNBSUpjg7Ula4JeN4cuTrYzVwE/Fi6JjUFFeoJL1pX4X91DhmxUR62PdvVVRPQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/render-provider-shape-check
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Check Render's current sandbox response still fits the render-sandbox adapter's strict parser
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -42,7 +42,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         project = entry.project_path()

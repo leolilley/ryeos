@@ -516,8 +516,8 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            default_grant_id("tool:ryeos/development/guarded-cargo/run").unwrap(),
-            "ryeos-development-guarded-cargo-run"
+            default_grant_id("tool:ryeos/development/dev-host/guarded-cargo").unwrap(),
+            "ryeos-development-dev-host-guarded-cargo"
         );
     }
 }

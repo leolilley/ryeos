@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:42cf79181049498b509d82365fae81c5181b854efacbbb3b03667db6c22165ff:vkXYciQ+d3dUuqs19HKD0L9FTSu4k5GZ2boFvezRwQf3u7zeBQLSBnFDUVZ5hi5z5yPOuygyWb2nDr73uHjVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:d04d9a606aa1fab2eec33ea036e8a7970ee16679761b64766b540a5b7b3a4da3:GBuFNqbczscJ1Ve6PqVPgmZOmvZy24omISGbAWudIuJ62eJ3iRIttnFriumgQZoPLicYyFA9AClDp4ylMHG4Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/bundle-set-init-smoke
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Initialize a throwaway node from a bundle set and optionally start it, on the host
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -67,7 +67,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         argv = ["--json", "--config-file", str(entry.config_file(request)),

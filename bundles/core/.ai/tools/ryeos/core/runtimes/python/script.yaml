@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-08T01:19:41Z:319a9245fcc8a44e435090846a6d11cd1861c305270d84509001b561d37fae82:6bXFZDcLnSqWFYVdWAmG9moYLWz9ahOGGgRnM8tzcjzvb5a+eifkuH0l3wakURQg4wOPT2Mw+UnnTtc/mLXQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:9451e5cf189f3fd205f9a356f01be2bfe8611ef8769fc7ef81fd9228038d36e0:zm7KlPeUhPPf+9FqsLwcDFWIAyo14QhMc8Fhz8UsCKSg7EQb0Ytb/X4pyDw8U44w+sgXOhhuG18NteOPsX19Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
-version: "1.1.1"
+version: "1.2.0"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
 description: "Python script runtime - runs Python scripts that manage their own __main__ entry point"
@@ -17,9 +17,12 @@ env_config:
     PYTHONDONTWRITEBYTECODE: "1"
     PYTHONUNBUFFERED: "1"
 
+# The source closure is the tool's own directory, its `lib/` included. A
+# grant or digest that pins it changes only when that directory changes, not
+# when an unrelated tool in the same namespace does.
 source_scope:
-  location: item_namespace
-  load_roots: [item_directory, namespace_root, namespace_lib]
+  location: item_directory
+  load_roots: [item_directory]
   materialization: read_only
 
 config_resolve:
@@ -68,10 +71,9 @@ config:
         if not rel.parts:
             raise SystemExit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
 
-        tool_namespace_root = tools_root / rel.parts[0] if len(rel.parts) > 1 else tools_root
         tool_dir = tool_path.parent
 
-        for path in reversed([tool_dir, tool_namespace_root, tool_namespace_root / "lib"]):
+        for path in reversed([tool_dir, tool_dir / "lib"]):
             prepend(path)
 
         sys.argv = [str(tool_path), "--project-path", project_path]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:2c5b74256f8beb5612084b65899261d0c0b52ade9af98833842426796d47f7eb:ouFjfOPTNENEYO/MIumpAnMnSqwp/lbZuiLkGvnnghbCstIYSt4q62kPZMZfAy678UQekOZd6a0h3pTnAaTRAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:6d4357163df828b1e4b25de6bf4c4dc293261b5f584c2a09238df9abb53cc8b7:Thjrg7QfA9OsTKcQf/UUS5p0EJrujcFTgACSydc5t4/XYS4GZuJS+yBL6B1aRgPv8T8RpiL3rgKqWqmAZ0XaBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/codex-worker-handshake-check
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Run a candidate Codex binary through the worker handshake profile, on the host
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -48,7 +48,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         argv = ["--worktree", entry.absolute(request.get("worktree"), "worktree"),

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:91bf77954b85483477c539bb3a0522162fb821e3f7fb22482d63cb7293337120:uZiA35mG1e2U79Ws4KHMuw/6xLegFEa3JW+A9HwIZ2+ZEk00PVv5yxHCYScOOlPpVMnvX8+HqXK6LgAt6l4/Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:5d6cfe29851ff3d66e496d58ea024f92a62fc503cb8ab8e8b7dfe3c046f5697d:Ae+HDaO0sjEzL4bHWe8SfBMIYNQQwiZ0xE9yvILGAowKgWx63PJjCotPvRQtaDsxhN+YbX6jjiQadvFHyVRcBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/contained-oci-provider
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Check a saved contained node doctor report for OCI-provider process-scope proofs
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -39,7 +39,7 @@ if __name__ == "__main__":
     import json
     import tempfile
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         project = entry.project_path()

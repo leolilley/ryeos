@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:31:47Z:20eb05dbcb9f0722477a4913e94a4f9a8a603dc0440395cf0d70b9bfcf730ce0:Wfi2ui8RvWwX8AolMcJf74/XjPaZq1p2Di4j8u8GTFXnRf1JQMKcrtwhqndv4ARIPqTTGvrRPTxWFpA/OSNPAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T06:47:49Z:532155273fe99dff65be5364a9bbf0cc799312e65e00e49e24a2b70239602c16:ZAC2tefALtHjmconBtAWWyfenDlMr+bZtK05Ya1b2LAde67HWGYCyzGK0yB0V5gGqZ4az1oFPDlW4YlqtdqPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, host-access, node-policy, operator]
@@ -59,8 +59,8 @@ launches, no structured callback surface.
 host_access:
   schema: 1
   grants:
-    - id: ryeos-development-guarded-cargo-run
-      item: tool:ryeos/development/guarded-cargo/run
+    - id: ryeos-development-dev-host-guarded-cargo
+      item: tool:ryeos/development/dev-host/guarded-cargo
       signer: 741a8bc6...                 # 64 hex
       source_closure: 3f0c...             # 64 hex content-manifest digest, or null
       runtime:
@@ -74,8 +74,8 @@ host_access:
 - The grant pins the exact bytes: signer, effective source-closure manifest
   and runtime. The development publisher key is public, so a grant keyed on
   the signer alone would admit anything anyone signs with it. Any edit to the
-  item, anything in its source closure (for a Python tool, its whole
-  `.ai/tools/<namespace>/` tree) or its runtime makes the grant stale: grant
+  item, anything in its source closure (for a Python tool, its own directory,
+  `lib/` included) or its runtime makes the grant stale: grant
   again, then restart.
 - `origins` lists the launch roots that may reach the grant: `direct` (the
   operator runs it), `graph_child` (a node of a graph the operator rooted;
@@ -136,8 +136,8 @@ their provenance stays byte-identical:
 execution_posture:
   host_direct:
     policy_generation: <node policy generation digest>
-    grant_id: ryeos-development-guarded-cargo-run
-    item: tool:ryeos/development/guarded-cargo/run
+    grant_id: ryeos-development-dev-host-guarded-cargo
+    item: tool:ryeos/development/dev-host/guarded-cargo
     signer: <64 hex>
     source_closure: <64 hex or null>
     runtime_ref: tool:ryeos/core/runtimes/python/script
@@ -151,12 +151,12 @@ execution_posture:
 
 ```bash
 # Stop the node first; grants take effect at the next start.
-ryeos node host-access grant tool:ryeos/development/guarded-cargo/run \
+ryeos node host-access grant tool:ryeos/development/dev-host/guarded-cargo \
   --project ~/src/ryeos --origin direct --origin graph_child \
   --env HOME --env PATH --env CARGO_HOME --env RUSTUP_HOME --env XDG_RUNTIME_DIR \
   --containment scope_required
 ryeos node host-access list --project ~/src/ryeos   # current or stale per grant
-ryeos node host-access revoke ryeos-development-guarded-cargo-run
+ryeos node host-access revoke ryeos-development-dev-host-guarded-cargo
 ```
 
 `grant` resolves the item in the project, prints the signer and digests it

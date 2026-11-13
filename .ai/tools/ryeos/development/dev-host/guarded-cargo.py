@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:be3bbf4aeca2c33b620ea835d5b3908fcb345f6d5b06a6678aec3aeaa006d5d8:gjbMmM3W186vHVkPiy+pVSEsSCmY0M4H2gieqivA/jWL0FvC56nKnFhzBKowv6uw9DOrC2TSyzHSq7Ec7k/6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:8a982558e8dfbaab3ea403c34f6a78e229cf542ef89f64bc3be65e2c751571da:C+3qcuawB3TC9Iy2RDbTMKtnUzTeCkNSOKvePy3VNdXYJuJZ01nf2GvFQeehVF2y0WQv60+Kf/5Xe/quG/lpDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/guarded-cargo
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Run one cargo command for a worktree under the machine's shared build guard, on the host
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -59,7 +59,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         argv = ["--config-file", str(entry.config_file(request)),

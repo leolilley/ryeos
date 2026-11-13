@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:c3c6b6db5f5b0ba90ab0fe0c7b6065467210b4fc9571812d30a6123883799f3d:P7py/cGzz0+euoy0qEQFsXUGOQYzrDWd+VfVlzRlEcI6Hiuy+cW7a3ka2Ad4DoFaJTygz0U0N/3YafSnBYdTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:a4ce7d8310ede4bf3bda0bb105e54d6b9b00f25ef9ea6bce7111035a8fd8083c:kXnYghdyWwV1MmsCNtvVEmo1HxWuCwY/pFE8kYVW4ppoQKNTsZxZ5FF6U5PJ2pIcFiZ0NCZN99yvi00k7KQhDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/contained-oci-provider
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Prove a running contained node's process-scope proofs come from the OCI provider, via docker exec on the host
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -23,7 +23,7 @@
 """Node entry for contained-oci-provider `--container`: a host-authority Tool.
 
 It runs `docker exec <container> ryeos node doctor --json` on the host, so it
-runs under an operator grant. The report check is the ordinary `report` Tool.
+runs under an operator grant. The report check is the ordinary `contained-oci-provider-report` Tool.
 """
 
 from pathlib import Path
@@ -40,7 +40,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         container = request.get("container")

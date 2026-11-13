@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:158cce5dfa9462fc7d14a4936b64e42fef37d3219340bac8b876dffe3a5451b8:SFtDGKc1PQQGOdU2Ys6UvJ1XVFoPaRjHcV9TN385SkQexjH5L3HUnj3DQw4RKAf4vEfynAMxkawEFH111GLdBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:8b3b4e0d5ecace4169213f5b53e09eeace91852e20c32dfd6d0e361b0a5efa8f:XyDz0AsifAsiyGQx0imykUmVUGdpbY2DfGIHaaa6KzNdWkW1EhnEHWgCA3EQmUNe2v+2zPKFM0+KDqEa4RTICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/dev-node-drift-check
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Compare the dev node's installed binaries and bundles with a worktree, on the host
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -53,7 +53,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         argv = ["--json", "--config-file", str(entry.config_file(request)),

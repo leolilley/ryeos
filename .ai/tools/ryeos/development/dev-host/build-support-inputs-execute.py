@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:25:04Z:056b2782b03da649f2ed5d857a84146a0219d4a14cbfda018d6adc0ec247e415:WeDGXwu2nFn0EI6mfCAjF75/tKR9IzfqiB+MvtNjMitXfTKCn9KZLRCo1iefdUTZCgDuJecqjmFKcvT9xwvdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:b74170038707ba6e8566faa40ff8e12d59289720b8c2f4e960add8919591e32b:NebZG2rtJANkExLxKnzI/stVhmjVnsaTOfSdAw804adP8QwiRPn701f6YqQUmg/tr9s9bbWCV4V5yMOPcYssAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/development/build-support-inputs
+#   category: ryeos/development/dev-host
 #   version: "1.0.0"
 #   description: Rebuild the pinned build-support-inputs tree with docker and the network, on the host
 #   executor_id: tool:ryeos/core/runtimes/python/script
@@ -32,7 +32,7 @@
 
 It runs `docker cp` from the pinned image (root-equivalent docker access) and
 fetches pinned archives over the network, so it runs on the host under an
-operator grant. The dry run is the ordinary `plan` Tool beside it.
+operator grant. The dry run is the ordinary `build-support-inputs-plan` Tool beside it.
 """
 
 from pathlib import Path
@@ -49,7 +49,7 @@ def _load(path: Path, name: str):
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent
-    entry = _load(here.parent / "dev-host/lib/node_entry.py", "node_entry")
+    entry = _load(here / "lib/node_entry.py", "node_entry")
     try:
         request = entry.read_request()
         argv = ["--execute",

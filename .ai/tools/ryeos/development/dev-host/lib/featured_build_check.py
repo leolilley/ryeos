@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-12T23:59:42Z:bc556c8164f67ca5d531324e75e8a9ecc6573999eab04834592bb532c00ce1e1:VWW5qB3BlrNUxCdXQNZe77TVhOwNnQ199+zcTdnb6+vl0SC3kFs84bPTU4TVpSFAM6lUbcyLkun/fbwiyPctAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T06:47:49Z:4808ad336f891f905761e7346aea0599e68b1945d3477bf6e630f81025f846c4:9us3/QQG+6vCLOiOnvhpvbjY6OVHlvOM3yBvEpLyhFYjgoEZyEsCirblDsB7C0U03loJ7ePLBQzBgsIIS27bBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Check that a built ryeosd carries the Cargo features a bundle set needs.
 
 External development host tool; it grants no RyeOS authority. A plain
@@ -29,7 +29,7 @@ from pathlib import Path
 import sys
 
 _spec = importlib.util.spec_from_file_location(
-    "dev_host", Path(__file__).resolve().parents[2] / "dev-host/lib/dev_host.py")
+    "dev_host", Path(__file__).resolve().parent / "dev_host.py")
 dev_host = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dev_host)
 ToolError = dev_host.ToolError
