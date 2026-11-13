@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T10:13:58Z:97d123b07e0d0e24c3d1c8b03dfc940e815b0161f43ebb0115199e1c25b4741f:yVkd5MpzqC5q578ajqmau7PPIhvvDJ8uNcrI/rnQF5IuzLXyopQZfSvdEP9S3a4s2YmeXbKIqkeH/FIXU8F8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T04:12:18Z:ac7a4e8d26d4abb047ca285d8e93c48cdd24c4a5864fe29e7e15e19e514f73d8:k5vlFhYrIzAjwB39FwMdeJTKatp4eHyurME//r3e3yDUkp90sQlc3Oobe0cGJpXLChhBbbpVCU026qvJJdC6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -167,7 +167,9 @@ inert unless it is signed by a pinned key.
 
 **One name, one item.** Two files with the same name and different
 formats in one folder (for example `x.py` and `x.yaml`) are refused as
-ambiguous rather than one silently winning.
+ambiguous rather than one silently winning. A launch refuses with 409
+`ambiguous_item_formats`, naming the item, the space and both candidate
+files; the cure is to keep exactly one of them.
 
 ## Trust Store
 

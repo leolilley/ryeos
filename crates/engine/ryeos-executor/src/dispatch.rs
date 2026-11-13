@@ -5435,9 +5435,20 @@ fn map_engine_root_resolution_error(
             kind: kind.clone(),
             detail: error.to_string(),
         }),
+        EngineError::AmbiguousResolution {
+            canonical_ref,
+            space,
+            candidates,
+        } => Some(DispatchError::AmbiguousItemFormats {
+            item_ref: canonical_ref.clone(),
+            space: space.clone(),
+            candidates: candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        }),
         EngineError::ItemNotFound { .. }
         | EngineError::ItemResolutionUnavailable { .. }
-        | EngineError::AmbiguousResolution { .. }
         | EngineError::PinnedVersionNotFound { .. }
         | EngineError::NoExtensionsForKind { .. }
         | EngineError::SchemaLoaderError { .. }
@@ -6764,6 +6775,35 @@ mod tests {
                 assert_eq!(details.warnings[0].path, "extra");
             }
             other => panic!("expected structured composed-contract failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ambiguous_formats_map_to_typed_conflict() {
+        let error = anyhow::Error::new(ryeos_engine::error::EngineError::AmbiguousResolution {
+            canonical_ref: "tool:demo/x".to_string(),
+            space: "project (project)".to_string(),
+            candidates: vec![
+                std::path::PathBuf::from(".ai/tools/demo/x.py"),
+                std::path::PathBuf::from(".ai/tools/demo/x.yaml"),
+            ],
+        })
+        .context("admitted root resolution failed");
+
+        match map_root_resolution_validation_error(error, "tool:demo/x") {
+            DispatchError::AmbiguousItemFormats {
+                item_ref,
+                space,
+                candidates,
+            } => {
+                assert_eq!(item_ref, "tool:demo/x");
+                assert_eq!(space, "project (project)");
+                assert_eq!(
+                    candidates,
+                    vec![".ai/tools/demo/x.py", ".ai/tools/demo/x.yaml"]
+                );
+            }
+            other => panic!("expected ambiguous_item_formats, got {other:?}"),
         }
     }
 
