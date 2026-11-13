@@ -225,6 +225,20 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         .await;
     }
 
+    // `external-content product publish` is a client composite too: it
+    // sequences the verified produce, capture, admit and push commands.
+    if crate::product_publish::matches(&cli.rest) {
+        return crate::product_publish::run(
+            &cli.rest[crate::product_publish::TOKENS.len()..],
+            &app_root,
+            cli.project.as_deref(),
+            snapshot,
+            &command_registration_policy,
+            console,
+        )
+        .await;
+    }
+
     // Node-registered client handlers own local byte-oriented UX that cannot
     // be represented as an `/execute` JSON result. The verified command is
     // still only routing: the handler's signed daemon requests carry the
@@ -460,7 +474,20 @@ pub(crate) async fn execute_verified_command(
     command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
     argv: &[String],
 ) -> Result<Value, CliError> {
-    let resolved = resolve_command_for_daemon(argv, snapshot, command_registration_policy, None)?;
+    execute_verified_command_in(app_root, snapshot, command_registration_policy, argv, None).await
+}
+
+/// [`execute_verified_command`] with the project a command defaults to when
+/// its argv names none.
+pub(crate) async fn execute_verified_command_in(
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
+    argv: &[String],
+    default_project: Option<&Path>,
+) -> Result<Value, CliError> {
+    let resolved =
+        resolve_command_for_daemon(argv, snapshot, command_registration_policy, default_project)?;
     let mut body = daemon_execute_body(&resolved)?;
     if resolved.async_launch {
         let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());

@@ -124,3 +124,26 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ryeos admission submit <subject>` defaults to exactly the policy and
+    /// claim this service admits, so the command cannot drift from it.
+    #[test]
+    fn the_admission_submit_command_defaults_to_the_local_policy() {
+        let command: serde_json::Value = serde_yaml::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../bundles/core/.ai/node/commands/admission-submit.yaml"
+        )))
+        .unwrap();
+        assert_eq!(command["defaults"]["policy"], LOCAL_ADMISSION_POLICY);
+        assert_eq!(command["defaults"]["claim"], default_claim());
+        assert_eq!(command["dispatch"]["execute"], DESCRIPTOR.service_ref);
+        assert_eq!(
+            command["tokens"],
+            serde_json::json!(["admission", "submit"])
+        );
+    }
+}

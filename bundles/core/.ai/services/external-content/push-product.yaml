@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-22T05:18:13Z:8449fd56b799a74f13296c658d485c49a466a0ff86e3dd613e0fab235496c713:Cj0JeG9Yjq2Y+YqoNWD3Vetwo2SxXh8jnBOGWjlByXjvCP4CuCPfeOgwct9W5by9PD/q3vGybUHRojZf/sv0Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T10:01:36Z:3742e9b9ad9cf507017e6c3275a35463fda4475d183975422f5fc2a6209b2e45:eEGqAp6pZQt6ABcDSTeUvtcRNfWb3qPX8TWJBVzcxjfmYtZMt8wsDVJoPwWU2+Wfaa1nyHSnadtXvwMDnBKPBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.push-product
 required_caps: ["ryeos.execute.service.external-content/push-product"]
@@ -6,5 +6,5 @@ schema:
   remote: string
   witness_hash: string
   origin_admission_hash: string
-  maximum_bytes: integer
-description: "Origin-side push of an exact admitted product to a pinned node remote: offers the closure, streams missing blobs and large objects in bounded chunks, then asks the remote to publish its acceptance without transferring consumer or qualification authority"
+  maximum_bytes: integer?
+description: "Origin-side push of an exact admitted product to a pinned node remote: offers the closure, streams missing blobs and large objects in bounded chunks under the operator byte bound (absent, the product declaration's maximum_total_bytes; refused above it), then asks the remote to publish its acceptance without transferring consumer or qualification authority"

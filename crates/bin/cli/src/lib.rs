@@ -23,6 +23,7 @@ pub mod node_descriptors;
 pub mod offline_apply;
 pub mod offline_dispatch;
 pub mod presenter;
+mod product_publish;
 pub mod project_resolve;
 #[cfg(feature = "model-provider-setup")]
 pub(crate) mod setup;

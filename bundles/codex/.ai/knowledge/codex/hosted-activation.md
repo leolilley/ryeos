@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T02:52:55Z:36ee6d97308e9c1a76a355da1ec450f42ac4a0d5880868957df7039762155172:t6yRDia4O6SmBjQiTvyhRaj6vdp+jiqxonK0PMTtOx9CJF6gaRfLkIpVZk+wNOc8rcQ9o59eIcJdQsQJG+7YAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T10:01:36Z:b4586462cfee83c7bfd2971c5ba461ffb940d6dfdeda68c1f5cb4ebeb3249fb9:TYQPmZEG00oFY/mFcC0tavXY7NzQV//0CbBB7zeTmt+bbT4QTgHdSsPbrw/Z5NLulWL8GIn29Af0zFsAnsRAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -449,6 +449,28 @@ survive restart and also bound queued worker writes. A pending command or an
 already-reserved contact allowance cannot extend either deadline. Exact settled
 replay remains readable after expiry; a possible-contact boundary without a
 proven result remains unknown and is never resent.
+
+## Producing the guest products
+
+The guest runtime products are declared by `config:codex/guest-runtime-products`
+and `config:codex/guest-owner-runtime-products`,
+and produced by `graph:codex/guest-runtime-production` (the Codex runtime) and
+`graph:codex/guest-owner-runtime-production` (the occurrence owner). After a
+Codex pin bump, publish both on the origin and push them to the controller:
+
+```sh
+ryeos --project <project> external-content product publish \
+  graph:codex/guest-runtime-production runtime \
+  --activation config:codex/guest-runtime-activation --push-to <controller-remote>
+ryeos --project <project> external-content product publish \
+  graph:codex/guest-owner-runtime-production runtime --push-to <controller-remote>
+```
+
+Each run prints the witness, admission and acceptance hashes. A run that
+stopped after production resumes with `--from-thread <thread-id>`. The push
+needs the controller's grants for the origin's node and operator; a controller
+wired without a shell gets them through the signed offline operations its
+profile delegates (see the remote-operations knowledge).
 
 ## Mechanical policy boundary
 

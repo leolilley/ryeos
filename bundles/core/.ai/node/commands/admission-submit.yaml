@@ -1,0 +1,16 @@
+# ryeos:signed:2026-11-13T10:01:36Z:034ef553bb83d8e89a6ee6445c07f67b8bfa8f20a54fe379a25b9487381c5df8:TGkEXt7twVKhsUBHsFRyHyz0yl19H+5WasyyupAiZJ+i5Sa43Eqw0cRsTryA0ElEfWcojn5Jk5WuMNg7n6bICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [admission, submit]
+description: Admit a local CAS root, such as a captured product witness, under a node admission policy
+defaults:
+  policy: local-node-v2
+  claim: accepted
+forms:
+  - slots:
+      - field: subject_hash
+help:
+  usage: ryeos admission submit <subject-hash> [--policy <id>] [--claim accepted]
+  examples:
+    - ryeos admission submit <witness-hash>
+dispatch:
+  kind: execute_ref
+  execute: service:admission/submit

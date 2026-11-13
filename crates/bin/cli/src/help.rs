@@ -1001,6 +1001,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Sign RyeOS items by canonical ref, glob, or .ai path",
             "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
         ),
+        "external-content product publish" => (
+            "ryeos external-content product publish",
+            "Produce a named product and ship it: activate, execute the producer, wait, capture, admit the witness, and push it when asked",
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
+        ),
         "codex login device" => (
             "ryeos codex login device",
             "Log a Codex credential profile in with a device code: open the login session, show the code, wait for the account, end the session, and confirm",
@@ -1055,6 +1060,33 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
         ],
         #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "external-content product publish" => &[
+            (
+                "--activation <config-ref>",
+                "Activate this external-content recipe online first and wait for it",
+            ),
+            (
+                "--from-thread <thread-id>",
+                "Resume from a completed producer thread instead of executing again",
+            ),
+            (
+                "--push-to <remote>",
+                "Push the admitted product to this remote under the declared byte bound",
+            ),
+            (
+                "--project-snapshot <hash>",
+                "Execute the producer from this published project snapshot",
+            ),
+            (
+                "--current-head",
+                "Execute the producer from the current principal project HEAD",
+            ),
+            (
+                "--timeout-secs <n>",
+                "Give up waiting after this many seconds",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
         "codex login device" => &[
             (
                 "--create",

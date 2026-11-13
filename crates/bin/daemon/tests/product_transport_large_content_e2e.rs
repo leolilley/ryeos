@@ -1405,3 +1405,79 @@ async fn a_hosted_node_wired_by_delegated_offline_operations_takes_a_push() -> R
     assert_resident_and_exact(&pair.hosted, &pair.origin.product).await?;
     Ok(())
 }
+
+// ── The push bound defaults to the declaration ───────────────────────────
+
+/// The declared `maximum_total_bytes` of the product `publish_large_product`
+/// captures.
+const DECLARED_MAXIMUM_BYTES: u64 = 8 * 1024 * 1024;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_without_a_bound_takes_the_declared_maximum_after_a_command_admission() -> Result<()> {
+    let pair = start_pair().await?;
+    let product = &pair.origin.product;
+    // Admission through the service `ryeos admission submit` dispatches to:
+    // idempotent per subject and policy, so it names the origin admission.
+    let (status, body) = pair
+        .origin
+        .harness
+        .post_execute(
+            "service:admission/submit",
+            ".",
+            json!({
+                "subject_hash": product.witness_hash,
+                "policy": "local-node-v2",
+                "claim": "accepted",
+            }),
+        )
+        .await?;
+    ensure!(
+        status.is_success(),
+        "admission/submit returned {status}: {body}"
+    );
+    assert_eq!(body["result"]["attestation_hash"], product.admission_hash);
+
+    // A bound above the declaration is refused before anything is offered.
+    let (status, body) = pair
+        .origin
+        .harness
+        .post_execute(
+            "service:external-content/push-product",
+            ".",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "witness_hash": product.witness_hash,
+                "origin_admission_hash": product.admission_hash,
+                "maximum_bytes": DECLARED_MAXIMUM_BYTES + 1,
+            }),
+        )
+        .await?;
+    assert_refused(
+        status,
+        &body.to_string(),
+        "product_push_bound_exceeds_declaration",
+        "bound above the declaration",
+    );
+
+    let (status, body) = pair
+        .origin
+        .harness
+        .post_execute(
+            "service:external-content/push-product",
+            ".",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "witness_hash": product.witness_hash,
+                "origin_admission_hash": product.admission_hash,
+            }),
+        )
+        .await?;
+    ensure!(
+        status.is_success(),
+        "push-product returned {status}: {body}"
+    );
+    assert_eq!(body["result"]["maximum_bytes"], DECLARED_MAXIMUM_BYTES);
+    assert_eq!(body["result"]["witness_hash"], product.witness_hash);
+    assert_resident_and_exact(&pair.hosted, product).await?;
+    Ok(())
+}

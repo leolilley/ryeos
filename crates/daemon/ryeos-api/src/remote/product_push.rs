@@ -55,7 +55,58 @@ pub struct ProductPushRequest {
     pub remote: String,
     pub witness_hash: String,
     pub origin_admission_hash: String,
-    pub maximum_bytes: u64,
+    /// The operator's byte bound. `None` takes the product declaration's
+    /// signed `maximum_total_bytes`, the bound its capture already enforced.
+    pub maximum_bytes: Option<u64>,
+}
+
+/// Stable refusal code: an explicit push bound above the product
+/// declaration's own maximum.
+pub const PRODUCT_PUSH_BOUND_EXCEEDS_DECLARATION: &str = "product_push_bound_exceeds_declaration";
+/// Stable refusal code: the push bound is above this node's import policy.
+pub const PRODUCT_PUSH_BOUND_EXCEEDS_IMPORT_POLICY: &str =
+    "product_push_bound_exceeds_import_policy";
+
+/// The byte bound a push carries: the operator's, which may not exceed the
+/// declaration's signed maximum, or the declaration's own; and never above
+/// the node's import policy.
+pub fn resolve_push_bound(
+    requested: Option<u64>,
+    declared_maximum: u64,
+    policy_maximum: u64,
+) -> Result<u64, crate::handler_error::HandlerError> {
+    let refusal = |code: &str, message: String| crate::handler_error::HandlerError::Structured {
+        code: code.to_owned(),
+        status: 400,
+        body: serde_json::json!({
+            "code": code,
+            "message": message,
+            "requested_bytes": requested,
+            "declared_maximum_bytes": declared_maximum,
+            "policy_maximum_bytes": policy_maximum,
+        }),
+    };
+    let bound = match requested {
+        Some(requested) if requested > declared_maximum => {
+            return Err(refusal(
+                PRODUCT_PUSH_BOUND_EXCEEDS_DECLARATION,
+                format!(
+                    "the push bound {requested} exceeds the product declaration's maximum_total_bytes {declared_maximum}; omit it to push under the declared bound"
+                ),
+            ));
+        }
+        Some(requested) => requested,
+        None => declared_maximum,
+    };
+    if bound > policy_maximum {
+        return Err(refusal(
+            PRODUCT_PUSH_BOUND_EXCEEDS_IMPORT_POLICY,
+            format!(
+                "the push bound {bound} exceeds this node's import policy max_total_bytes {policy_maximum}"
+            ),
+        ));
+    }
+    Ok(bound)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -70,6 +121,8 @@ pub struct ProductPushOutcome {
     pub large_objects_pushed: u64,
     /// Chunk payload bytes sent in this call, blobs and large objects.
     pub bytes_pushed: u64,
+    /// The byte bound the push carried.
+    pub maximum_bytes: u64,
 }
 
 /// Shape a manifest declares for one large object.
@@ -86,6 +139,8 @@ struct LocalProduct {
     /// Canonical objects of the closure keyed by hash.
     objects: BTreeMap<String, Value>,
     large: BTreeMap<String, LargeDeclared>,
+    /// The product declaration's signed `maximum_total_bytes`.
+    declared_maximum_bytes: u64,
 }
 
 pub async fn push_product(
@@ -105,9 +160,20 @@ pub async fn push_product(
             .await
             .context("product push local read task stopped")??
     };
+    let policy_maximum = state
+        .node_policy
+        .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?
+        .limits
+        .max_total_bytes;
+    let bound = resolve_push_bound(
+        request.maximum_bytes,
+        local.declared_maximum_bytes,
+        policy_maximum,
+    )?;
     tracing::info!(
         remote = %request.remote,
         witness = %request.witness_hash,
+        maximum_bytes = bound,
         objects = local.objects.len(),
         large_objects = local.large.len(),
         "product push: closure collected"
@@ -117,6 +183,7 @@ pub async fn push_product(
         state,
         client: &client,
         request,
+        bound,
         local: &local,
         staging_id: None,
         large_objects_pushed: 0,
@@ -129,6 +196,7 @@ struct Driver<'a> {
     state: &'a Arc<AppState>,
     client: &'a RemoteClient,
     request: &'a ProductPushRequest,
+    bound: u64,
     local: &'a LocalProduct,
     staging_id: Option<String>,
     large_objects_pushed: u64,
@@ -225,7 +293,7 @@ impl Driver<'_> {
             staging_id: staging_id.clone(),
             witness_hash: self.request.witness_hash.clone(),
             origin_admission_hash: self.request.origin_admission_hash.clone(),
-            maximum_bytes: self.request.maximum_bytes,
+            maximum_bytes: self.bound,
         };
         let accepted = retried("accept", || self.client.product_accept(&accept))
             .await
@@ -247,6 +315,7 @@ impl Driver<'_> {
             manifest_hash: accepted.manifest_hash,
             large_objects_pushed: self.large_objects_pushed,
             bytes_pushed: self.bytes_pushed,
+            maximum_bytes: self.bound,
         })
     }
 
@@ -309,7 +378,7 @@ impl Driver<'_> {
         let request = ProductOfferRequest {
             witness_hash: self.request.witness_hash.clone(),
             origin_admission_hash: self.request.origin_admission_hash.clone(),
-            maximum_bytes: self.request.maximum_bytes,
+            maximum_bytes: self.bound,
             origin_admission: self.local.admission_record.clone(),
             objects: hashes
                 .iter()
@@ -673,7 +742,7 @@ fn gather_local_product(
 
     // The witness must be this operator's current published product; the
     // source loader refuses an absent, foreign, or superseded witness.
-    load_product_source(
+    let source = load_product_source(
         state,
         &authority,
         &guard,
@@ -689,6 +758,7 @@ fn gather_local_product(
             request.witness_hash
         )
     })?;
+    let declared_maximum_bytes = source.evidence.declaration.bounds.maximum_total_bytes;
 
     let local_issuer = format!("fp:{}", state.identity.fingerprint());
     let records = state.state_store.with_state_db(|db| {
@@ -1103,9 +1173,35 @@ mod tests {
             remote: "hosted".to_owned(),
             witness_hash: "ab".repeat(32),
             origin_admission_hash: "cd".repeat(32),
-            maximum_bytes: 1024,
+            maximum_bytes: Some(1024),
         };
         let owner = format!("fp:{}", "11".repeat(32));
         assert!(gather_local_product(&state, &owner, &request).is_err());
+    }
+
+    fn code_of(error: crate::handler_error::HandlerError) -> String {
+        match error {
+            crate::handler_error::HandlerError::Structured { code, .. } => code,
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_product_defaults_bound_to_declared_maximum() {
+        assert_eq!(resolve_push_bound(None, 4096, 1 << 30).unwrap(), 4096);
+        assert_eq!(resolve_push_bound(Some(1024), 4096, 1 << 30).unwrap(), 1024);
+        assert_eq!(resolve_push_bound(Some(4096), 4096, 1 << 30).unwrap(), 4096);
+    }
+
+    #[test]
+    fn push_product_refuses_bound_above_declaration() {
+        assert_eq!(
+            code_of(resolve_push_bound(Some(4097), 4096, 1 << 30).unwrap_err()),
+            PRODUCT_PUSH_BOUND_EXCEEDS_DECLARATION
+        );
+        assert_eq!(
+            code_of(resolve_push_bound(None, 4096, 2048).unwrap_err()),
+            PRODUCT_PUSH_BOUND_EXCEEDS_IMPORT_POLICY
+        );
     }
 }

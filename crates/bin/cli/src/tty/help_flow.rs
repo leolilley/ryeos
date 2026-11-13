@@ -857,6 +857,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node host retire --confirm [--app-root <DIR> | --orphaned]",
             "--confirm         confirm removing the administrator-owned host association\n--app-root <DIR>  application root of the stopped node whose service to retire\n--orphaned        retire every node service whose app root no longer exists",
         ),
+        "external-content product publish" => (
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
+            "--activation <ref>   activate the recipe online first\n--from-thread <id>   resume from a completed producer thread\n--push-to <remote>   push the admitted product\n--json               emit the final result as JSON",
+        ),
         "codex login device" => (
             "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
             "--create   create the profile first\n--trusted  open the login on an explicitly trusted process-group node\n--yes      confirm the observed account without asking\n--json     emit the final result as JSON",
