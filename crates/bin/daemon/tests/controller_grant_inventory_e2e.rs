@@ -91,9 +91,10 @@ const SINGLE_SERVICES: [&str; 2] = [
 ];
 
 /// Operator vault access. The launch gate requires this fixed capability
-/// whenever the request's execution policy overlays the operator vault, which
-/// the live-project policy these launches use does. It is a property of the
-/// execution policy's environment, not of the trusted-lane environment config.
+/// whenever the request's execution policy overlays the operator vault. The
+/// operator's launches carry `include_operator_vault: false`, so the capability
+/// is outside the operator grant; it is a property of the execution policy's
+/// environment, not of the trusted-lane environment config.
 const OPERATOR_VAULT_CAP: &str = "ryeos.use.vault.operator";
 const OPERATOR_VAULT_REFUSAL: &str = "operator_vault_capability_required";
 
@@ -120,7 +121,6 @@ fn derived_grant() -> Vec<String> {
         LOGIN_EXECUTE_CAP.to_owned(),
     ];
     grant.extend(SESSION_CAPS.map(str::to_owned));
-    grant.push(OPERATOR_VAULT_CAP.to_owned());
     grant.extend(OPERATOR_SERVICES.map(service_cap));
     grant.extend(SINGLE_SERVICES.map(service_cap));
     grant
@@ -420,7 +420,25 @@ impl Controller {
         .expect("post to the controller")
     }
 
+    /// Launch with the operator's execution policy: a live project whose
+    /// environment overlay does not expose the operator vault.
     async fn launch_worker(&self, item_ref: &str, bindings: Value) -> (reqwest::StatusCode, Value) {
+        self.launch_worker_with_policy(item_ref, bindings, false)
+            .await
+    }
+
+    async fn launch_worker_with_policy(
+        &self,
+        item_ref: &str,
+        bindings: Value,
+        include_operator_vault: bool,
+    ) -> (reqwest::StatusCode, Value) {
+        let mut policy = serde_json::to_value(ExecutionPolicy::local_live(ExecutionResponse::Wait))
+            .expect("serialize the execution policy");
+        *policy
+            .pointer_mut("/environment/include_operator_vault")
+            .expect("the live policy overlays the project environment") =
+            json!(include_operator_vault);
         self.post(json!({
             "item_ref": item_ref,
             "ref_bindings": bindings,
@@ -429,7 +447,7 @@ impl Controller {
                 "goal": {},
                 "credential_profile_id": "controller-grant-inventory",
             },
-            "execution_policy": ExecutionPolicy::local_live(ExecutionResponse::Wait),
+            "execution_policy": policy,
         }))
         .await
     }
@@ -476,15 +494,6 @@ async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps(
             "the refusal must name {dropped}: {body:#}"
         );
     }
-
-    controller.grant(&without(&grant, OPERATOR_VAULT_CAP));
-    let (status, body) = controller.launch_worker(TURN_ITEM, turn_bindings()).await;
-    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body:#}");
-    assert_eq!(
-        body.get("code").and_then(Value::as_str),
-        Some(OPERATOR_VAULT_REFUSAL),
-        "dropping {OPERATOR_VAULT_CAP} must refuse the hosted turn: {body:#}"
-    );
 }
 
 async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap(lane: Lane) {
@@ -526,15 +535,6 @@ async fn trusted_login_needs_exactly_its_execute_and_session_caps(lane: Lane) {
             "the refusal must name {dropped}: {body:#}"
         );
     }
-
-    controller.grant(&without(&grant, OPERATOR_VAULT_CAP));
-    let (status, body) = controller.launch_worker(LOGIN_ITEM, json!({})).await;
-    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body:#}");
-    assert_eq!(
-        body.get("code").and_then(Value::as_str),
-        Some(OPERATOR_VAULT_REFUSAL),
-        "dropping {OPERATOR_VAULT_CAP} must refuse the trusted login: {body:#}"
-    );
 }
 
 async fn each_operator_service_needs_exactly_its_own_execute_cap(lane: Lane) {
@@ -572,6 +572,55 @@ fn every_granted_service_ships_as_a_core_service_item() {
         assert!(
             root.join(format!("{service}.yaml")).is_file(),
             "{service} is not a shipped core service"
+        );
+    }
+}
+
+async fn a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy_avoids(
+    lane: Lane,
+) {
+    let controller = Controller::start(lane).await;
+    let grant = derived_grant();
+    assert!(
+        !grant.iter().any(|cap| cap == OPERATOR_VAULT_CAP),
+        "the operator grant does not hold the operator vault capability"
+    );
+
+    for item in [TURN_ITEM, LOGIN_ITEM] {
+        let bindings = if item == TURN_ITEM {
+            turn_bindings()
+        } else {
+            json!({})
+        };
+
+        controller.grant(&grant);
+        let (status, body) = controller
+            .launch_worker_with_policy(item, bindings.clone(), false)
+            .await;
+        assert!(
+            !is_capability_refusal(status, &body),
+            "the operator policy passes the vault gate without the capability for {item}: {status} {body:#}"
+        );
+
+        let (status, body) = controller
+            .launch_worker_with_policy(item, bindings.clone(), true)
+            .await;
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{item}: {body:#}");
+        assert_eq!(
+            body.get("code").and_then(Value::as_str),
+            Some(OPERATOR_VAULT_REFUSAL),
+            "a vault overlay without {OPERATOR_VAULT_CAP} must be refused for {item}: {body:#}"
+        );
+
+        let mut with_vault = grant.clone();
+        with_vault.push(OPERATOR_VAULT_CAP.to_owned());
+        controller.grant(&with_vault);
+        let (status, body) = controller
+            .launch_worker_with_policy(item, bindings, true)
+            .await;
+        assert!(
+            body.get("code").and_then(Value::as_str) != Some(OPERATOR_VAULT_REFUSAL),
+            "holding {OPERATOR_VAULT_CAP} admits the vault overlay for {item}: {status} {body:#}"
         );
     }
 }
@@ -653,4 +702,19 @@ async fn each_operator_service_needs_exactly_its_own_execute_cap_locally() {
 async fn each_operator_service_needs_exactly_its_own_execute_cap_through_the_remote_principal_forwarding_path()
  {
     each_operator_service_needs_exactly_its_own_execute_cap(Lane::forwarded()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy_avoids_locally() {
+    a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy_avoids(Lane::Local)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy_avoids_through_the_remote_principal_forwarding_path()
+ {
+    a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy_avoids(
+        Lane::forwarded(),
+    )
+    .await;
 }
