@@ -86,7 +86,8 @@ fn compile_stimulus(
 /// Render the stimulus that opens a run, then append inputs the authored
 /// template did not reference directly.
 ///
-/// Callers invoke this only on fresh launches and operator follow-ups. A
+/// Callers invoke this only on fresh launches. An operator follow-up injects
+/// the operator's input instead (see [`operator_follow_up_stimulus`]), and a
 /// suppressed machine continuation must not call it: its unused prompt is
 /// deliberately neither compiled nor rendered.
 fn render_stimulus(
@@ -96,6 +97,21 @@ fn render_stimulus(
 ) -> Result<String> {
     let evaluation_limits = ryeos_runtime::EvaluationLimits::default();
     render_stimulus_with_limits(prompt_template, inputs, scheduled_fire, &evaluation_limits)
+}
+
+/// The stimulus of an operator follow-up is the operator's input, carried by
+/// `threads.input` as `{"input": <text>}`. The directive's opening template was
+/// authored against its launch inputs and is already in the folded chain:
+/// rendering it again against the follow-up inputs would repeat the opening
+/// turn, and would refuse every template that names a launch input.
+fn operator_follow_up_stimulus(inputs: &serde_json::Value) -> Result<String> {
+    if let Some(fields) = inputs.as_object()
+        && fields.len() == 1
+        && let Some(serde_json::Value::String(input)) = fields.get("input")
+    {
+        return Ok(input.clone());
+    }
+    anyhow::bail!("operator follow-up inputs must be exactly {{\"input\": <string>}}")
 }
 
 fn render_stimulus_with_limits(
@@ -449,8 +465,8 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         );
     }
 
-    // The opening stimulus is rendered only where it is actually injected (fresh
-    // launch, or operator follow-up). A MACHINE continuation suppresses it
+    // The opening stimulus is rendered only on a fresh launch; an operator
+    // follow-up injects the operator's input instead. A MACHINE continuation suppresses it
     // entirely and never renders — a changed/broken prompt template must not be
     // able to abort a cut-off task that asks for nothing new.
     // A daemon native-resume respawns this exact thread. Its original launch
@@ -500,11 +516,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         // are the source's originals, already present in the folded chain, so
         // re-injecting them would double the opening stimulus.
         if !same_thread_resume && !envelope.request.suppress_stimulus {
-            let rendered_prompt = render_stimulus(
-                &bootstrap_output.config.user_prompt,
-                &envelope.request.inputs,
-                envelope.request.scheduled_fire.as_ref(),
-            )?;
+            let rendered_prompt = operator_follow_up_stimulus(&envelope.request.inputs)?;
             callback.emit_stimulus(&rendered_prompt).await?;
             resume_state.messages.push(directive::ProviderMessage {
                 role: "user".to_string(),
@@ -644,8 +656,24 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
 
 #[cfg(test)]
 mod tests {
-    use super::{render_stimulus, render_stimulus_with_limits};
+    use super::{operator_follow_up_stimulus, render_stimulus, render_stimulus_with_limits};
     use serde_json::json;
+
+    #[test]
+    fn operator_follow_up_stimulus_is_the_operator_input_not_the_opening_template() {
+        assert_eq!(
+            operator_follow_up_stimulus(&json!({"input": "continue"})).expect("follow-up input"),
+            "continue"
+        );
+        for refused in [
+            json!({}),
+            json!({"input": 3}),
+            json!({"input": "x", "name": "World"}),
+            json!("continue"),
+        ] {
+            assert!(operator_follow_up_stimulus(&refused).is_err(), "{refused}");
+        }
+    }
 
     #[test]
     fn rendered_stimulus_appends_only_unreferenced_inputs() {
