@@ -432,6 +432,35 @@ fn finalize_dead(
         None,
         ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
     )?;
+    // A run interrupted after its fold-back froze and bound a generation,
+    // but before it advanced HEAD, is never published by recovery: it fails
+    // with the typed head-advance outcome, and the retained generation joins
+    // the failed terminal so it stays reachable after the workspace closes.
+    if let Some((payload, generation)) = interrupted_head_advance(state, thread_id) {
+        let mut error = payload;
+        error["recovery"] = error_obj;
+        tracing::warn!(
+            thread_id,
+            retained_snapshot_hash = %generation.snapshot_hash,
+            "interrupted run's HEAD advance was not applied; failing with the retained generation"
+        );
+        state.threads.finalize_thread_retaining_generation(
+            &ThreadFinalizeParams {
+                thread_id: thread_id.to_string(),
+                status: "failed".to_string(),
+                outcome_code: Some(ryeos_executor::execution::HEAD_ADVANCE_NOT_APPLIED.to_string()),
+                result: None,
+                error: Some(error),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            },
+            &generation,
+        )?;
+        *reconciled += 1;
+        return Ok(());
+    }
     state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: "failed".to_string(),
@@ -445,6 +474,75 @@ fn finalize_dead(
     })?;
     *reconciled += 1;
     Ok(())
+}
+
+/// The not-applied payload and retained generation of a dead thread whose
+/// admitted terminal publication advances HEAD and whose workspace froze and
+/// bound a result generation that HEAD does not name. `None` for every other
+/// thread, which keeps its ordinary recovery failure.
+fn interrupted_head_advance(
+    state: &AppState,
+    thread_id: &str,
+) -> Option<(
+    serde_json::Value,
+    ryeos_state::objects::WorkspaceGenerationPair,
+)> {
+    let thread = state.state_store.get_thread(thread_id).ok().flatten()?;
+    let resume = thread
+        .runtime
+        .launch_metadata
+        .as_ref()?
+        .resume_context
+        .as_ref()?;
+    let ryeos_state::objects::PinnedTerminalPublication::AdvanceHead {
+        head_ref,
+        expected_hash,
+    } = resume.project_authority.terminal_publication()?
+    else {
+        return None;
+    };
+    let workspace = match state.state_store.execution_workspace_for_thread(thread_id) {
+        Ok(workspace) => workspace?,
+        Err(error) => {
+            tracing::warn!(thread_id, error = %format!("{error:#}"),
+                "cannot read the workspace of a dead advance-head thread; ordinary recovery failure");
+            return None;
+        }
+    };
+    let generation = ryeos_state::objects::WorkspaceGenerationPair {
+        snapshot_hash: workspace.frozen_snapshot_hash?,
+        output_capture_hash: workspace.frozen_output_capture_hash,
+    };
+    let observed = advance_head_ref_coordinates(head_ref).and_then(|(principal, project)| {
+        state
+            .state_store
+            .with_state_db(|db| db.read_project_head(principal, project))
+            .ok()
+            .flatten()
+    });
+    let payload = ryeos_executor::execution::interrupted_head_advance_payload(
+        expected_hash,
+        observed.as_deref(),
+        &generation,
+    )?;
+    Some((payload, generation))
+}
+
+/// The principal and project of a canonical `projects/<principal>/<project>/head`.
+fn advance_head_ref_coordinates(head_ref: &str) -> Option<(&str, &str)> {
+    let mut components = head_ref.split('/');
+    match (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) {
+        (Some("projects"), Some(principal), Some(project), Some("head"), None) => {
+            Some((principal, project))
+        }
+        _ => None,
+    }
 }
 
 fn has_in_process_handler_driver(thread: &ThreadDetail) -> bool {
@@ -4144,6 +4242,20 @@ fn converge_reserved_follow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advance_head_ref_coordinates_accept_only_the_canonical_project_head() {
+        let principal = "a".repeat(64);
+        let project = "b".repeat(64);
+        let head_ref = format!("projects/{principal}/{project}/head");
+        assert_eq!(
+            advance_head_ref_coordinates(&head_ref),
+            Some((principal.as_str(), project.as_str()))
+        );
+        assert!(advance_head_ref_coordinates("projects/a/b").is_none());
+        assert!(advance_head_ref_coordinates("projects/a/b/head/extra").is_none());
+        assert!(advance_head_ref_coordinates("chains/a/b/head").is_none());
+    }
     use ryeos_app::launch_metadata::ResumeContext;
     use ryeos_engine::contracts::{
         EffectivePrincipal, ExecutionHints, NativeResumeSpec, Principal, ProjectContext,

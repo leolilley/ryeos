@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T02:21:34Z:bf1a76712842cb176794e60f25de44d9f6bda34223568e4ad125f8231e8b81ff:VFEgfdJbxgnHS7hpOKhSVjESouuPHtGiQbuW1+tFG4IqE6Dky6kLc5BYGgkD+4Fc2OeUh1VyBpCB5WkGeQ1GBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T03:06:11Z:6a3fbdc60d13cf618023a6b77fe3329d58e9796ad23cdeea8bb25b69e02a7097:pTOQjgLIuiXqkB0mX+lWZqR0Tsd7r75RR7aIkV3CrlYhLtuYUqDklCOjEBFNDJOzaixpAvYW1V3d+YhvDZTlDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -276,9 +276,12 @@ the runtime's reported status where there is one, and the retained
 `retained_snapshot_hash` / `retained_output_capture_hash`. The retained
 generation joins the failed terminal, so it stays reachable after the
 workspace closes, and a parent following the thread receives a failure
-envelope; or fold-back itself breaks, which stays `foldback_failed`. Startup
-recovery of an interrupted freeze binds the generation but does not advance
-HEAD. A not-applied result is never retried or
+envelope; or fold-back itself breaks, which stays `foldback_failed`. Recovery
+never publishes. A run interrupted after its freeze has the generation bound by
+recovery; if it cannot resume it fails `head_advance_not_applied` with reason
+`interrupted` (expected and, if readable, observed HEAD and the retained
+hashes) and the generation joins that failed terminal, while a resumable run
+relaunches and its next finish takes the normal path. A not-applied result is never retried or
 merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
 publication. Their writes are discarded at process cleanup and never fold back

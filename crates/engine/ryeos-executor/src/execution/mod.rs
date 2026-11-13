@@ -1880,6 +1880,34 @@ impl HeadAdvanceNotApplied {
     }
 }
 
+/// Error payload of a run whose fold-back froze and bound a generation but
+/// was interrupted before it could advance HEAD. Recovery never publishes,
+/// so the run fails [`HEAD_ADVANCE_NOT_APPLIED`] with reason `interrupted`.
+/// `None` when HEAD already names the retained generation: the advance did
+/// happen before the interruption, so it was applied.
+pub fn interrupted_head_advance_payload(
+    expected_head: &str,
+    observed_head: Option<&str>,
+    retained: &ryeos_state::objects::WorkspaceGenerationPair,
+) -> Option<serde_json::Value> {
+    if observed_head == Some(retained.snapshot_hash.as_str()) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "code": HEAD_ADVANCE_NOT_APPLIED,
+        "reason": "interrupted",
+        "message": format!(
+            "the run was interrupted after freezing its result generation {} and before \
+             advancing HEAD; recovery never publishes, so the generation is retained",
+            retained.snapshot_hash
+        ),
+        "expected_head": expected_head,
+        "observed_head": observed_head,
+        "retained_snapshot_hash": retained.snapshot_hash,
+        "retained_output_capture_hash": retained.output_capture_hash,
+    }))
+}
+
 impl std::fmt::Display for HeadAdvanceNotApplied {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -3277,6 +3305,31 @@ mod head_advance_not_applied_tests {
         assert_eq!(error["reported_status"], "completed");
         assert_eq!(error["retained_snapshot_hash"], "c".repeat(64));
         assert_eq!(error["observed_head"], "e".repeat(64));
+    }
+
+    #[test]
+    fn an_interrupted_advance_is_not_applied_unless_head_names_the_generation() {
+        let retained = ryeos_state::objects::WorkspaceGenerationPair {
+            snapshot_hash: "c".repeat(64),
+            output_capture_hash: Some("d".repeat(64)),
+        };
+        let base = "b".repeat(64);
+        let payload =
+            interrupted_head_advance_payload(&base, Some(&base), &retained).expect("not applied");
+        assert_eq!(payload["code"], HEAD_ADVANCE_NOT_APPLIED);
+        assert_eq!(payload["reason"], "interrupted");
+        assert_eq!(payload["expected_head"], base);
+        assert_eq!(payload["observed_head"], base);
+        assert_eq!(payload["retained_snapshot_hash"], "c".repeat(64));
+        assert_eq!(payload["retained_output_capture_hash"], "d".repeat(64));
+        assert!(
+            interrupted_head_advance_payload(&base, None, &retained).unwrap()["observed_head"]
+                .is_null()
+        );
+        assert!(
+            interrupted_head_advance_payload(&base, Some(&"c".repeat(64)), &retained).is_none(),
+            "HEAD already names the generation: the advance was applied"
+        );
     }
 
     #[test]
