@@ -1,4 +1,4 @@
-# ryeos:signed:2026-08-24T14:13:52Z:23f709e0c634d68475cc4bfbc3e1e5f344b6ee7c1d7c345cde7cced19544cec1:fE5Uk3mejdesLTlWohFAQStKQWzu9R0beHzOV+kzPrDKvUWmnEbcOkhm4UeLL9hVZzDkH1+9j01kmTFYIUW/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T14:29:21Z:3dabd1f845cea738fa3bf96f32cd01714e1c8e82b8d24e3f157c98a2c443f4e8:9EB/m5ijSYXpaC5iJV2tlF46Qk66CkToJV4eH5QTWAien7tylkVOUSXS6xKEnNCHtK5WavyZbyoUTyybdjJXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.push
 required_caps: ["ryeos.execute.service.remote/push"]
@@ -6,4 +6,4 @@ schema:
   remote: string?
   project: string
   outbound_principal: string?
-description: "Push project content to a remote node; outbound_principal defaults to node and may explicitly select configured_operator"
+description: "Push project content to a remote node. outbound_principal is delegated (the caller, under its signed delegation) or node; it defaults to delegated unless the caller is the node itself."

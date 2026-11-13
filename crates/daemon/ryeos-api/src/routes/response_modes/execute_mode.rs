@@ -2234,9 +2234,21 @@ async fn admit_execution_with_publication(
             if let Err(error) = resolution_preflight {
                 return Ok(dispatch_error_response(error));
             }
-            let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote)
-                    .map_err(|error| RouteDispatchError::Internal(error.to_string()))?;
+            let client = crate::handlers::remote_push::OutboundPrincipal::resolve(
+                None, &state, &principal,
+            )
+            .client(&state, &plan.remote.remote, &principal)
+            .map_err(|error| match error {
+                crate::handler_error::HandlerError::Structured { code, status, body } => {
+                    RouteDispatchError::Structured {
+                        code,
+                        status,
+                        body,
+                        thread_id: None,
+                    }
+                }
+                other => RouteDispatchError::Forbidden(other.to_string()),
+            })?;
             let rules = plan
                 .remote
                 .remote
