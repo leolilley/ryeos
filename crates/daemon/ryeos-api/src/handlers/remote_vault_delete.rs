@@ -23,7 +23,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
     let result = client.vault_delete(&req.name).await;
     drop(client);
     result

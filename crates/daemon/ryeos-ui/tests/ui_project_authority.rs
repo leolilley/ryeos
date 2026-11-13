@@ -361,57 +361,6 @@ fn write_project_file(root: &std::path::Path, relative: &str, content: &str) {
     std::fs::write(path, content).expect("write fixture file");
 }
 
-fn invalid_remote_names(report: &[serde_json::Value]) -> Vec<String> {
-    report
-        .iter()
-        .filter_map(|entry| entry["name"].as_str().map(str::to_owned))
-        .collect()
-}
-
-#[test]
-fn remotes_list_reads_the_retained_project_after_its_path_is_swapped() {
-    let (_state_dir, _state_owner, state) = test_state::build_test_state();
-    let projects = tempfile::tempdir().expect("projects tempdir");
-    let project = projects.path().join("project");
-    let decoy = projects.path().join("decoy");
-    let remotes = ".ai/config/remotes/remotes.yaml";
-    write_project_file(&project, remotes, "remotes:\n  original-remote: {}\n");
-    write_project_file(&decoy, remotes, "remotes:\n  decoy-remote: {}\n");
-    let canonical_project = project.canonicalize().expect("canonical project");
-
-    let (_session, access) = retained_access_then_swap(&state, &project, &decoy);
-
-    // A by-name walk of the project path now reaches the decoy's layer.
-    let by_name = ryeos_api::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(&project),
-    )
-    .expect("by-name remotes report");
-    assert_eq!(
-        by_name
-            .invalid
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["decoy-remote"]
-    );
-
-    let listed = ryeos_ui::handlers::ui_remotes::remotes_list_for_access(
-        &state.config.app_root,
-        Some(&access),
-    )
-    .expect("remotes list through retained access");
-    let invalid = listed["invalid_remotes"]
-        .as_array()
-        .expect("invalid remote rows");
-    assert_eq!(invalid_remote_names(invalid), vec!["original-remote"]);
-    assert_eq!(invalid[0]["scope"], "project");
-    assert_eq!(
-        invalid[0]["config_path"],
-        serde_json::json!(canonical_project.join(remotes))
-    );
-}
-
 #[test]
 fn seat_admission_reads_the_retained_project_after_its_path_is_swapped() {
     let (_state_dir, _state_owner, state) = test_state::build_test_state_with_live_bundles();

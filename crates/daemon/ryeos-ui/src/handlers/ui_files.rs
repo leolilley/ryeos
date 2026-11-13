@@ -675,7 +675,7 @@ mod tests {
             4,
             1,
             1_000,
-            &ignore_matcher(&["target/", "/.ai/config/remotes/"]),
+            &ignore_matcher(&["target/", "/.ai/node/remotes/"]),
         )
         .expect("tree");
 

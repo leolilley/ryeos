@@ -52,7 +52,7 @@
 //! (see `offline_dispatch.rs`) or forwarded to the daemon.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -2702,6 +2702,19 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Remote pins: node-signed records under `.ai/node/remotes`. An unsigned
+    // or edited record, or a leftover unsigned config file, is a failure with
+    // the cure named.
+    if initialized {
+        checks.push(remote_pins_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "remote_pins",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // The wall clock the node issues external execution windows from. Always
     // reported; a node policy that requires a synchronized clock turns an
     // unsatisfied reading into a failure.
@@ -4189,6 +4202,60 @@ fn host_services_check(
             "fix": "run: ryeos node host retire --orphaned --confirm",
         }),
     )
+
+/// The `remote_pins` doctor row.
+fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match ryeos_api::remote::config::load_remotes_report(app_root) {
+        Ok(report) if report.invalid.is_empty() => {
+            let mut remotes: Vec<serde_json::Value> = report
+                .remotes
+                .values()
+                .map(|loaded| {
+                    serde_json::json!({
+                        "name": loaded.config.name,
+                        "pin_source": loaded.pin_source.as_str(),
+                        "signature": "verified",
+                    })
+                })
+                .collect();
+            remotes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            check("remote_pins", OK, serde_json::json!({ "remotes": remotes }))
+        }
+        Ok(report) => {
+            let mut invalid: Vec<serde_json::Value> = report
+                .invalid
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "name": entry.name,
+                        "code": entry.code,
+                        "path": entry.config_path,
+                        "error": entry.error,
+                        "fix": entry.repair_hint,
+                    })
+                })
+                .collect();
+            invalid.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            check(
+                "remote_pins",
+                FAIL,
+                serde_json::json!({ "invalid_remotes": invalid }),
+            )
+        }
+        Err(error) => {
+            let (code, fix) =
+                match error.downcast_ref::<ryeos_api::remote::config::RemotePinError>() {
+                    Some(typed) => (Some(typed.code()), typed.to_string()),
+                    None => (None, format!("{error:#}")),
+                };
+            check(
+                "remote_pins",
+                FAIL,
+                serde_json::json!({ "code": code, "error": format!("{error:#}"), "fix": fix }),
+            )
+        }
+    }
 }
 
 fn check(

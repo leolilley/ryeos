@@ -26,8 +26,8 @@ pub struct IgnoreConfig {
 /// - **glob** (no trailing `/`): matches the filename component (e.g. `*.pyc`).
 /// - **anchored path prefix** (leading `/`, or an internal `/` before the
 ///   trailing `/`): matches a path prefix rooted at the repo, on segment
-///   boundaries (e.g. `/.ai/config/remotes/` matches `.ai/config/remotes` and
-///   `.ai/config/remotes/foo`, but not `.ai/config/remotes2`).
+///   boundaries (e.g. `/.ai/node/remotes/` matches `.ai/node/remotes` and
+///   `.ai/node/remotes/foo`, but not `.ai/node/remotes2`).
 #[derive(Debug, Clone)]
 pub struct IgnoreMatcher {
     dir_patterns: Vec<String>,
@@ -84,7 +84,7 @@ impl IgnoreMatcher {
 
         for pattern in &config.patterns {
             if is_anchored_pattern(pattern) {
-                // Anchored path prefix (e.g. `/.ai/config/remotes/`).
+                // Anchored path prefix (e.g. `/.ai/node/remotes/`).
                 let normalized = normalize_anchored(pattern)?;
                 canonical_patterns.push(format!("/{normalized}/"));
                 anchored_patterns.push(normalized);
@@ -250,16 +250,16 @@ mod tests {
 
     #[test]
     fn anchored_prefix_matches_on_segment_boundary() {
-        let m = matcher_from_patterns(&["/.ai/config/remotes/"]);
+        let m = matcher_from_patterns(&["/.ai/node/remotes/"]);
         // exact prefix and anything below it
-        assert!(m.is_ignored(".ai/config/remotes"));
-        assert!(m.is_ignored(".ai/config/remotes/remotes.yaml"));
-        assert!(m.is_ignored(".ai/config/remotes/sub/dir/x"));
+        assert!(m.is_ignored(".ai/node/remotes"));
+        assert!(m.is_ignored(".ai/node/remotes/prod.yaml"));
+        assert!(m.is_ignored(".ai/node/remotes/sub/dir/x"));
         // a stray leading slash on the candidate is normalized
-        assert!(m.is_ignored("/.ai/config/remotes/remotes.yaml"));
+        assert!(m.is_ignored("/.ai/node/remotes/prod.yaml"));
         // sibling with a shared prefix must NOT match
-        assert!(!m.is_ignored(".ai/config/remotes2"));
-        assert!(!m.is_ignored(".ai/config/remotes2/x"));
+        assert!(!m.is_ignored(".ai/node/remotes2"));
+        assert!(!m.is_ignored(".ai/node/remotes2/x"));
         // a same-named dir elsewhere must NOT match (anchored, not component)
         assert!(!m.is_ignored("src/remotes/x"));
         assert!(!m.is_ignored(".ai/other/config/remotes/x"));
@@ -268,9 +268,9 @@ mod tests {
     #[test]
     fn anchored_without_leading_slash_is_still_rooted() {
         // An internal '/' makes it a path prefix even without the leading '/'.
-        let m = matcher_from_patterns(&[".ai/config/remotes/"]);
-        assert!(m.is_ignored(".ai/config/remotes/x"));
-        assert!(!m.is_ignored("src/.ai/config/remotes/x"));
+        let m = matcher_from_patterns(&[".ai/node/remotes/"]);
+        assert!(m.is_ignored(".ai/node/remotes/x"));
+        assert!(!m.is_ignored("src/.ai/node/remotes/x"));
     }
 
     #[test]

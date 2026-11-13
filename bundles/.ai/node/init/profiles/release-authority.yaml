@@ -399,7 +399,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       # Exclude this project's build output, not package source directories
       # such as a vendored crate's src/target/ required by its checksums.

@@ -193,10 +193,17 @@ fn install_single_remote(
     state_path: &Path,
     remote: ryeos_api::remote::config::RemoteConfig,
 ) -> Result<()> {
-    ryeos_api::remote::config::save_remotes(
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf()).node_signing_key_path(),
+    )?;
+    ryeos_api::remote::config::write_remote_pin(
         state_path,
-        &HashMap::from([(remote.name.clone(), remote)]),
-    )
+        node.signing_key(),
+        &remote,
+        ryeos_api::remote::config::PinSource::ExpectedFingerprint,
+        None,
+    )?;
+    Ok(())
 }
 
 fn authorized_keys_dir(state_path: &Path) -> std::path::PathBuf {
@@ -726,6 +733,7 @@ fn resolve_policy_source(
         |generation| -> Result<ProductQualificationPolicySource> {
             let resolution = generation.effective_resolution_output(
                 ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(policy_ref)?,
                     expected_kind: Some("config".into()),
                     project_root: None,

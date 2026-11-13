@@ -17,11 +17,11 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// Optional local project path. When supplied, the project's remotes
-    /// file is checked; it can neither define nor override a remote.
+    /// Local project path the CLI may forward. Remote pins are node-level
+    /// records, so a project never changes which remote is used.
     #[serde(default, alias = "project")]
     pub project_path: Option<PathBuf>,
-    /// Pass-through for the CLI's `--no-project` flag.
+    /// Pass-through for the CLI's `--no-project` flag. Has no effect.
     #[serde(default)]
     pub no_project: bool,
     /// Ed25519 public key in `ed25519:<base64>` format.
@@ -40,12 +40,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let project = if req.no_project {
-        None
-    } else {
-        req.project_path.as_deref()
-    };
-    let client = RemoteClient::from_named_remote(&state, &req.remote, project)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
     let resp = client
         .authorize_key(&req.public_key, &req.label, &req.scopes)
         .await?;

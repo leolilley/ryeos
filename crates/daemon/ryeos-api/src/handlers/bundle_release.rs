@@ -2211,8 +2211,7 @@ async fn catalog_remote_publish_locked(
     // Publication destinations are operator-configured node remotes. Release
     // source content must not be able to redirect authorized-uploader
     // catalog writes through a project-local remotes override.
-    let client =
-        crate::remote::client::RemoteClient::from_named_remote(&state, &request.remote, None)?;
+    let client = crate::remote::client::RemoteClient::from_named_remote(&state, &request.remote)?;
     let authority = state.state_store.pinned_state_authority()?;
     let _guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
@@ -2539,6 +2538,7 @@ async fn run_release_graph(
         let site_id = state.threads.site_id().to_owned();
         let origin_site_id = context.execution_origin(&site_id);
         let plan_ctx = ryeos_engine::contracts::PlanContext {
+            logical_project_root: None,
             requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                 ryeos_engine::contracts::Principal {
                     fingerprint: context.fingerprint.clone(),

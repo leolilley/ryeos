@@ -46,7 +46,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         anyhow::bail!("object_hashes and blob_hashes must not both be empty");
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
     let presence = client
         .objects_has(&req.object_hashes, &req.blob_hashes)
         .await?;

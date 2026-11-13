@@ -69,7 +69,7 @@ impl RemoteAuthority {
         let completion = ryeos_node::verify_init_completion(app_root)?
             .context("node has no verified initialization completion")?;
         let substrate = ryeos_node::load_verified_substrate_identity(app_root)?;
-        let remotes = config::load_remotes_layered(app_root, None)?;
+        let remotes = config::load_remotes(app_root)?;
         let remote = config::get_remote(&remotes, &request.catalog_remote)?;
         let identity = Arc::new(ryeos_node_runtime::identity::NodeIdentity::load(
             &request.operator_signing_key,

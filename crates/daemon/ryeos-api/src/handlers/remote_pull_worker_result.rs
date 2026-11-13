@@ -609,7 +609,7 @@ fn resolve_initial_route(
 ) -> Result<(String, RemoteConfig, String)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&canonical))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
@@ -635,7 +635,7 @@ fn resolve_current_route(state: &AppState, intent: &PullIntent) -> Result<Remote
         bail!("durable hosted worker-result pull operator grant changed");
     }
     let project = PathBuf::from(&intent.local_project_path);
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&project))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, &intent.remote)?;
     if loaded.config.url != intent.remote_url
         || loaded.config.site_id != intent.target_site_id

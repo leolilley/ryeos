@@ -129,7 +129,9 @@ can check it with the remote operator and rerun with `--expect-fingerprint`.
 
 The command fetches the remote node public key, principal id, canonical site
 ID, vault fingerprint, and ingest-ignore rules. Results are stored in
-`<system_space_dir>/.ai/config/remotes/remotes.yaml`.
+`<system_space_dir>/.ai/node/remotes/<name>.yaml`, one node-signed record per
+remote that also stores how the key was pinned (`pin_source`) and when. Only
+the configured local operator may run this command.
 
 The URL is one canonical, credential-free base URL. User information, query,
 fragment, control/whitespace characters, and a trailing slash are not part of
@@ -140,11 +142,12 @@ signed request refuse redirects, so the configured URL must address the target
 directly rather than an origin-changing redirector.
 
 When `--descriptor` is supplied, the descriptor is a trust/discovery pin,
-not a credential. It pins only the node signing key and its fingerprint.
-`remote configure` still fetches the live `/public-key` document, refuses to
-write config if those descriptor pins differ, and records the live principal,
-key/fingerprint, site ID, and vault fingerprint as the complete configured
-identity used by later contact.
+not a credential. It is a version 2 document signed by the node key it pins,
+binding the remote's name, URL, site ID, vault fingerprint and key.
+`remote configure` verifies the signature, still fetches the live
+`/public-key` document, refuses to write config if the descriptor's pins
+differ, and records the live principal, key/fingerprint, site ID, and vault
+fingerprint as the complete configured identity used by later contact.
 
 Failure modes:
 
@@ -159,8 +162,13 @@ Failure modes:
   `--expect-fingerprint` is not 64 lowercase hex characters
 - refuses with `remote_key_pin_mismatch` when `--expect-fingerprint` differs
   from the live node fingerprint
-- fails if a descriptor pins a different node key/fingerprint than the
-  live remote reports
+- fails if a descriptor pins a different node key, fingerprint, site ID or
+  vault fingerprint than the live remote reports
+- refuses a descriptor with `remote_descriptor_unsigned` (version 1 or no
+  signature), `remote_descriptor_wrong_signer` (signed by a key other than the
+  one it pins) or `remote_descriptor_tampered` (edited after signing); the cure
+  is to ask the remote operator to re-export it
+- fails unless the caller is the configured local operator
 - later signed requests fail if the remote's node key changes and the
   remote config is not refreshed
 
@@ -177,12 +185,13 @@ ryeos remote-descriptor \
 ```
 
 This is local operator tooling. It reads the node's
-`.ai/node/identity/public-identity.json`, emits descriptor YAML with the
-node public key and fingerprint, and optionally writes it to disk. The
+`.ai/node/identity/public-identity.json` and vault public key, emits a version
+2 descriptor with the node public key, fingerprint, site ID and vault
+fingerprint, signs it with the node key, and optionally writes it to disk. The
 descriptor can be hosted, emailed, checked into infra, or served by any
 provider-specific layer. It is still only a trust/discovery pin: callers
 must import it with `remote configure --descriptor`, which verifies the
-pin against the live `/public-key` response.
+signature and the pin against the live `/public-key` response.
 
 ## `ryeos admission-token`
 

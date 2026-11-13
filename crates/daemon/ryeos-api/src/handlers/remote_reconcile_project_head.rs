@@ -932,7 +932,7 @@ fn resolve_initial_route(
 ) -> Result<(String, RemoteConfig, String)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local_project_path = config::local_project_identity(&canonical)?.to_owned();
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&canonical))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
@@ -961,7 +961,7 @@ fn validate_current_route_and_authority(
         bail!("durable project-head reconciliation operator grant changed");
     }
     let project = PathBuf::from(&operation.local_project_path);
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&project))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, &operation.remote)?;
     if loaded.config.site_id != operation.remote_site_id
         || loaded.config.principal_id != operation.remote_principal_id

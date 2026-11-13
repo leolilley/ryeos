@@ -115,21 +115,16 @@ pub async fn handle(
         }
     };
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote, abs_project_path.as_deref())
-        .map_err(|e| {
-            config::typed_load_error_or(e, |e| {
-                HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote))
-            })
-        })?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote).map_err(|e| {
+        config::typed_load_error_or(e, |e| {
+            HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote))
+        })
+    })?;
 
     // Load remote config for project binding and ignore rules.
-    let report =
-        config::load_remotes_layered_report(&state.config.app_root, abs_project_path.as_deref())
-            .map_err(|e| {
-                config::typed_load_error_or(e, |e| {
-                    HandlerError::Internal(format!("load remotes: {e:#}"))
-                })
-            })?;
+    let report = config::load_remotes_report(&state.config.app_root).map_err(|e| {
+        config::typed_load_error_or(e, |e| HandlerError::Internal(format!("load remotes: {e:#}")))
+    })?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
 

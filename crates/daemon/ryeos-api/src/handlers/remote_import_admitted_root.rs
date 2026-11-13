@@ -64,7 +64,7 @@ fn default_policy() -> String {
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let remote_cfg = {
-        let remotes = config::load_remotes_layered(&state.config.app_root, req.project.as_deref())?;
+        let remotes = config::load_remotes(&state.config.app_root)?;
         config::get_remote(&remotes, &req.remote)?
     };
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);

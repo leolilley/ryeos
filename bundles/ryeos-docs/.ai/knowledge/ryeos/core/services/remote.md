@@ -47,16 +47,10 @@ The authoritative matrix is in
   forwarding site with an exact-scope `remote_operator` grant. The source node
   co-signs each exact request, and its independently admitted `remote_node`
   grant must carry `ryeos.attest.request.forwarded-operator`.
-- `remote configure` stores remote identity, vault fingerprint, URL, and
-  ingest-ignore config in the local system space under
-  `.ai/config/remotes/remotes.yaml`.
-- Remote identity comes only from that node file. A project's
-  `.ai/config/remotes/remotes.yaml` cannot define or override a remote; one
-  that names `signing_key`, `principal_id`, `fingerprint`,
-  `vault_fingerprint` or `descriptor` refuses remote operations for that
-  project with `project_remote_trust_material` (409), naming
-  `ryeos remote configure <name> --url <https-url> --expect-fingerprint <fingerprint>`
-  as the cure.
+- `remote configure` (configured local operator only) stores remote identity,
+  vault fingerprint, URL, ingest-ignore config and the pin source as a
+  node-signed record in the local system space under
+  `.ai/node/remotes/<name>.yaml`. Projects never contribute remotes.
 - `remote configure` requires a pin for the remote node key: a remote
   descriptor or an `expect_fingerprint` (64 lowercase hex). Without either it
   refuses with `remote_key_unpinned` and names the fingerprint seen; there is

@@ -148,7 +148,7 @@ pub async fn preflight(
         ));
     }
 
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -412,7 +412,7 @@ pub async fn prepare(
             "placement request targets another site".into(),
         ));
     }
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &req.source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -831,8 +831,7 @@ pub async fn adopt(
                 .ok_or_else(|| {
                     HandlerError::BadRequest("target placement authority does not exist".into())
                 })?;
-            let remotes =
-                config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+            let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
             let source_remote = config::resolve_remote_by_site_id(&remotes, &source_site_id)
                 .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
             require_authenticated_source_node(
@@ -848,7 +847,7 @@ pub async fn adopt(
     let job = job.expect("target placement job presence checked");
     let operation = WorkerSessionHandoffJobOperation::from_value(job.operation)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &operation.source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -965,7 +964,7 @@ pub async fn abort(
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let source_operation = req.operation.clone();
     let authenticated_source_site = authenticated_remote_node_site(&ctx)?.to_owned();
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &authenticated_source_site)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     require_authenticated_source_node(
@@ -1687,7 +1686,7 @@ async fn adopt_authorized(
     let mut adoption_attempt = TargetAdoptionAttempt::begin(state.clone(), &job_id, &operation)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
 
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let source_remote = config::resolve_remote_by_site_id(&remotes, &source_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     let source_key = source_remote

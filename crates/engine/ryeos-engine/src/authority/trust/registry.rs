@@ -533,8 +533,10 @@ fn envelope() -> crate::contracts::SignatureEnvelope {
     }
 }
 
-/// Verify a node-signed registry document and return its YAML body text.
-fn verify_node_signed_text(
+/// Verify a document signed by `node_key` (a `# ryeos:signed:` line) and
+/// return its body text without the signature line. Node-owned records of
+/// any kind use this one verifier.
+pub fn verify_node_signed_text(
     path: &Path,
     bytes: &[u8],
     node_key: &VerifyingKey,

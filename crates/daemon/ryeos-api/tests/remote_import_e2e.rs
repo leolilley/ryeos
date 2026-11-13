@@ -269,9 +269,14 @@ fn remote_config(name: &str, remote: &RemoteNode) -> RemoteConfig {
 }
 
 fn install_remote(local: &AppState, cfg: RemoteConfig) {
-    let mut remotes = HashMap::new();
-    remotes.insert(cfg.name.clone(), cfg);
-    config::save_remotes(&local.config.app_root, &remotes).unwrap();
+    config::write_remote_pin(
+        &local.config.app_root,
+        local.identity.signing_key(),
+        &cfg,
+        config::PinSource::ExpectedFingerprint,
+        None,
+    )
+    .unwrap();
 }
 
 async fn admit_subject(state: Arc<AppState>, subject_hash: String) -> String {
@@ -851,67 +856,6 @@ async fn import_admitted_head_rejects_wrong_pinned_key() {
         format!("{err:#}").contains("failed to verify federated head"),
         "unexpected error: {err:#}"
     );
-}
-
-/// A project's remotes file names the node's remote with another key. Before
-/// the fix the project entry won and its key verified the imported head; now
-/// the load is refused with a typed code and nothing is imported.
-#[tokio::test]
-async fn project_remote_file_cannot_redirect_import_signer() {
-    let remote = RemoteNode::start(SINGLE_SUBJECT);
-    let [subject_hash]: [String; 1] = remote.subjects();
-
-    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
-    install_remote(&local_state, remote_config("upstream", &remote));
-    let project = tempfile::tempdir().unwrap();
-    let project_root = project.path().canonicalize().unwrap();
-    let attacker_key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
-    let mut project_cfg = remote_config("upstream", &remote);
-    project_cfg.signing_key = format!(
-        "ed25519:{}",
-        base64::engine::general_purpose::STANDARD.encode(attacker_key.as_bytes())
-    );
-    project_cfg.principal_id = format!("fp:{}", lillux::crypto::fingerprint(&attacker_key));
-    let mut project_remotes = HashMap::new();
-    project_remotes.insert(project_cfg.name.clone(), project_cfg);
-    config::save_remotes(&project_root, &project_remotes).unwrap();
-    let local_state = Arc::new(local_state);
-
-    let err = remote_import_admitted_head::handle(
-        remote_import_admitted_head::Request {
-            remote: "upstream".to_string(),
-            project: Some(project_root.clone()),
-            policy: "local-node-v2".to_string(),
-            subject_hash: Some(subject_hash.clone()),
-            limit: 100,
-            max_objects: Some(16),
-            max_blobs: Some(16),
-            max_object_bytes: Some(4096),
-            max_total_object_bytes: Some(4096),
-            max_blob_bytes: Some(4096),
-            max_total_blob_bytes: Some(4096),
-            max_response_bytes: Some(64 * 1024),
-            max_links_per_object: Some(16),
-        },
-        local_state.clone(),
-    )
-    .await
-    .unwrap_err();
-
-    match ryeos_app::handler_error::extract_handler_error(&err) {
-        Some(ryeos_app::handler_error::HandlerError::Structured { code, status, body }) => {
-            assert_eq!(code, config::PROJECT_REMOTE_TRUST_MATERIAL);
-            assert_eq!(status, 409);
-            assert_eq!(body["remotes"][0]["name"], "upstream");
-            assert_eq!(
-                body["cures"][0],
-                "ryeos remote configure upstream --url <https-url> --expect-fingerprint <fingerprint>"
-            );
-        }
-        other => panic!("expected project_remote_trust_material, got {other:?}: {err:#}"),
-    }
-    let local_cas = lillux::cas::CasStore::new(local_state.state_store.cas_root().unwrap());
-    assert!(local_cas.get_object(&subject_hash).unwrap().is_none());
 }
 
 #[tokio::test]

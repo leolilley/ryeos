@@ -79,7 +79,7 @@ async fn deliver_locked(
     authenticated_target_principal: String,
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
-    let remotes = config::load_remotes_layered(&state.config.app_root, None).map_err(internal)?;
+    let remotes = config::load_remotes(&state.config.app_root).map_err(internal)?;
     let target_remote = config::resolve_remote_by_site_id(&remotes, &req.target_site_id)
         .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
     if target_remote.remote.principal_id != authenticated_target_principal {
@@ -579,7 +579,7 @@ pub async fn recover_durable_remote_follow_deliveries(state: &AppState) -> Resul
                 terminalize_invalid_delivery_job(state, &job, &error)?;
                 continue;
             }
-            let remotes = config::load_remotes_layered(&state.config.app_root, None)?;
+            let remotes = config::load_remotes(&state.config.app_root)?;
             let parent_remote =
                 config::resolve_remote_by_site_id(&remotes, &operation.parent_site_id)?;
             let client = RemoteClient::from_remote_cfg(state, &parent_remote.remote);

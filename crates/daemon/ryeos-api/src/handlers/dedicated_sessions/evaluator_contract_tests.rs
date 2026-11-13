@@ -174,6 +174,7 @@ config_schema: {type: object, properties: {}, additionalProperties: false}
     fn capsule(&self, kind: &str) -> Result<(AdmittedLaunchCapsule, ThreadSnapshot)> {
         let engine = &self.state.engine;
         let context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: self.state.identity.principal_id(),
                 scopes: vec!["*".into()],

@@ -1332,10 +1332,7 @@ fn fold_rooted_source_handoff_terminal(
         return Ok(None);
     };
 
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let target =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if target.config.site_id != operation.target_site_id {
@@ -1437,10 +1434,7 @@ fn validate_source_handoff_terminal(
     operation: &ryeos_app::worker_handoff::WorkerSessionHandoffJobOperation,
 ) -> Result<ValidatedSourceHandoffTerminal> {
     validate_source_handoff_job_coordinates(job, operation)?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let target =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if target.config.site_id != operation.target_site_id {
@@ -2971,11 +2965,8 @@ async fn handoff_preflight(
         .ok_or_else(|| {
             HandlerError::BadRequest("preflight source has no stable project endpoint".into())
         })?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(&source_project_path),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
@@ -3413,11 +3404,8 @@ async fn handoff(
         .ok_or_else(|| {
             HandlerError::BadRequest("handoff source has no stable project endpoint".into())
         })?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(&source_project_path),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote = crate::remote::config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
     let binding =
@@ -4435,11 +4423,8 @@ async fn resume_committed_handoff_locked(
             "committed remote continuation contradicts source handoff progress",
         ));
     }
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )
-    .map_err(internal)?;
+    let report =
+        crate::remote::config::load_remotes_report(&state.config.app_root).map_err(internal)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)
             .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?;
@@ -5307,10 +5292,7 @@ pub async fn recover_durable_source_handoffs(state: &AppState) -> Result<usize> 
                 tracing::error!(job_id = %job.job_id, "source handoff durable progress contradicts signed chain authority");
                 continue;
             }
-            let report = crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                Some(std::path::Path::new(&operation.source_project_path)),
-            )?;
+            let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
             let loaded_remote = crate::remote::config::get_loaded_remote(
                 &report.remotes,
                 &operation.peer_remote_name,
@@ -5463,10 +5445,7 @@ async fn recover_exported_source_writer_cut(
         .placement_attestation_hash
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("exported source handoff has no target placement"))?;
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if loaded_remote.config.site_id != operation.target_site_id {
@@ -5712,10 +5691,7 @@ async fn recover_pre_cut_source_handoff_abort(
         operation,
     )?;
 
-    let report = crate::remote::config::load_remotes_layered_report(
-        &state.config.app_root,
-        Some(std::path::Path::new(&operation.source_project_path)),
-    )?;
+    let report = crate::remote::config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote =
         crate::remote::config::get_loaded_remote(&report.remotes, &operation.peer_remote_name)?;
     if loaded_remote.config.site_id != operation.target_site_id {
@@ -7711,6 +7687,7 @@ async fn start_candidate_operation(
             scopes: effective_caps.clone(),
         });
     let base_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: base_provenance.logical_project_root(),
         requested_by: requested_by.clone(),
         project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
             path: base.effective_path.clone(),

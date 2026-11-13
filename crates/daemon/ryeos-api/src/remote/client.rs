@@ -407,23 +407,16 @@ impl RemoteClient {
 
     /// Build a client from a named remote config + app state.
     ///
-    /// Looks up `remote_name` in the node's remotes config. Pass
-    /// `Some(project_path)` when the caller is acting in the context of a
-    /// local project; that project's remotes file is checked and refused
-    /// if it names remote trust material.
-    pub fn from_named_remote(
-        state: &AppState,
-        remote_name: &str,
-        project_path: Option<&std::path::Path>,
-    ) -> Result<Self> {
-        let remotes = super::config::load_remotes_layered(&state.config.app_root, project_path)?;
+    /// Looks up `remote_name` among the node-signed remote pins. A project
+    /// never contributes remotes.
+    pub fn from_named_remote(state: &AppState, remote_name: &str) -> Result<Self> {
+        let remotes = super::config::load_remotes(&state.config.app_root)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
         Ok(Self::from_remote_cfg(state, &remote))
     }
 
     /// Build a client from an already-resolved `RemoteConfig`.
-    /// Callers that need project layering should resolve via
-    /// [`super::config::load_remotes_layered`] first.
+    /// Resolve it from [`super::config::load_remotes`] first.
     pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {
         let mut client = Self::new(&remote.url, &remote.principal_id, state.identity.clone());
         client.origin_site_id = Some(state.threads.site_id().to_string());

@@ -256,6 +256,16 @@ The `service_window` row reports the running node's service window (see
 node runs, and `n/a` while it is stopped or reports no window. It judges
 nothing; the caller compares it with what it is about to run.
 
+The `remote_pins` row verifies every node-signed remote pin record under
+`.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
+cure, for a record that is unsigned (`remote_pin_unsigned`), signed by a key
+other than the node key (`remote_pin_wrong_signer`), edited after signing
+(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`), and for
+an unsigned remotes config file this node no longer reads
+(`remote_config_file_unsupported`): re-pin each remote with
+`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`,
+then delete the file.
+
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and
 `runtime_snapshot_qualification` binding with the installed signed bundles and
@@ -535,7 +545,7 @@ until the external snapshot driver is retired.
 
 - `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
-- `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's remote descriptor trust pin.
+- `ryeos remote-descriptor --name <name> --url <url> [--output <path>]` — export this node's signed remote descriptor (a trust pin signed by the node key).
 - `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 
