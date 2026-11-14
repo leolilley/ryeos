@@ -359,9 +359,10 @@ async fn head_moved_case(item_ref: &str) -> Result<()> {
 
     let (status, body) = h
         .post_json(
-            "/execute",
+            "/execute/launch",
             json!({
                 "item_ref": item_ref,
+                "launch_id": "L-0123456789abcdef0123456789abcdef",
                 "ref_bindings": {},
                 "project_path": project.path(),
                 "parameters": {"gate": gate},
@@ -375,7 +376,7 @@ async fn head_moved_case(item_ref: &str) -> Result<()> {
         "advance-head run refused: {status}: {body:#}"
     );
     let thread_id = body
-        .pointer("/thread/thread_id")
+        .get("thread_id")
         .and_then(Value::as_str)
         .with_context(|| format!("accepted response has no thread id: {body:#}"))?
         .to_owned();
