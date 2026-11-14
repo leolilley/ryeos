@@ -511,6 +511,9 @@ impl DispatchError {
         if native_headroom_refusal(self).is_some() {
             return StatusCode::SERVICE_UNAVAILABLE;
         }
+        if quarantined_large_object(self).is_some() {
+            return StatusCode::NOT_FOUND;
+        }
         match self {
             Self::InvalidRef(..)
             | Self::AliasCycle { .. }
@@ -602,6 +605,9 @@ impl DispatchError {
         }
         if native_headroom_refusal(self).is_some() {
             return ryeos_app::native_headroom::NativeHeadroomInsufficient::CODE;
+        }
+        if quarantined_large_object(self).is_some() {
+            return crate::execution::external_content::LARGE_OBJECT_QUARANTINED_CODE;
         }
         if let Some(refusal) = source_owner_trust_refusal(self) {
             return if refusal.unsigned {
@@ -700,6 +706,20 @@ fn source_owner_trust_refusal(
         DispatchError::Internal(error) => error.chain().find_map(|cause| {
             cause.downcast_ref::<ryeos_app::source_closure_admission::SourceOwnerTrustRefused>()
         }),
+        _ => None,
+    }
+}
+
+/// A launch whose content needs a large object that scrub quarantined is an
+/// operator-correctable resource state wherever the store's refusal surfaced:
+/// it travels as an internal error's cause and keeps its own code.
+pub(crate) fn quarantined_large_object(
+    error: &DispatchError,
+) -> Option<&ryeos_state::LargeObjectQuarantined> {
+    match error {
+        DispatchError::Internal(error) => error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectQuarantined>()),
         _ => None,
     }
 }
@@ -1016,6 +1036,21 @@ mod tests {
         assert_eq!(unpinned.code(), "effective_trust_refused");
         let other = DispatchError::Internal(anyhow::anyhow!("disk full"));
         assert_eq!(other.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn a_quarantined_large_object_keeps_its_code_wherever_it_surfaced() {
+        let quarantined = ryeos_state::LargeObjectQuarantined {
+            file_sha256: "a".repeat(64),
+        };
+        let error = DispatchError::Internal(
+            anyhow::Error::new(quarantined.clone()).context("redeem the realization"),
+        );
+        assert_eq!(error.http_status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.code(), "large_object_quarantined");
+        let body = crate::structured_error::dispatch_error_value(&error);
+        assert_eq!(body["code"], "large_object_quarantined");
+        assert_eq!(body["error"], quarantined.to_string());
     }
 
     #[test]

@@ -4009,6 +4009,16 @@ fn restore_process_workspace_output_generation(
     )
 }
 
+/// A large object scrub quarantined surfaces here, at store redemption after
+/// thread birth. Keep it the typed operator-correctable refusal rather than an
+/// internal failure; the thread is still failed by the caller.
+pub(crate) fn classify_prepared_input_error(error: anyhow::Error) -> anyhow::Error {
+    match super::external_content::classify_quarantined_large_object(&error) {
+        Some(typed) => anyhow::Error::new(typed),
+        None => error,
+    }
+}
+
 pub(crate) fn prepare_process_inputs(
     state: &AppState,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
@@ -5342,7 +5352,7 @@ pub async fn run_and_wait(
             wait_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
     let wait_bound_source = wait_bound_source.map(Arc::new);
     effective_path = process_path;
@@ -6403,7 +6413,7 @@ pub async fn run_detached(
             bg_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     effective_path = process_path;
     if let Some(lifeline) = process_input_lifeline {
         guard.track_process_input_dir(lifeline);
@@ -9150,7 +9160,9 @@ async fn run_existing_recovered_thread(
         recovered_private_view_realizations,
     )
     .map_err(|error| {
-        guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
+        guard.fail_before_spawn(
+            classify_prepared_input_error(error).context("recovery_input_materialization_failed"),
+        )
     })?;
     if effective_project_root.is_some() {
         prepared_plan
