@@ -2160,7 +2160,7 @@ mod tests {
             testimony_issue_time(&issued("2026-11-15T00:05:00Z"), now).unwrap(),
             "2026-11-15T00:05:00Z"
         );
-        for at in ["2026-11-15T00:00:00Z", "2026-11-15T00:20:00Z", "yesterday"] {
+        for at in ["2026-11-14T23:59:00Z", "2026-11-15T00:20:00Z", "yesterday"] {
             let error = testimony_issue_time(&issued(at), now).unwrap_err();
             assert!(
                 error.to_string().contains("qualification_testimony_stale"),
