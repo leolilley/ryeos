@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:17:08Z:a0db9c5d7e8c9c6102f8b934a5e80605d201d94ff153760e61c2b7aa23a44116:Imrch9h+IZE6zpuTBFa762PT5jPE0pyZYJGtvFxSTo5i2DgkwbQnNGh3rqYu4SlHJcTon3QZhCgza/G5Ws5lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:51:10Z:3d0e385f54f0ef2c4c16a030bd332c08a2de3442aac54e845ef04363b435258f:Qgx4P4Ct1KB5A7SsI2dYK86TSIlp8ZXuI7NmxkWUShxWGnc8PCWgMg94jkS9lTI6OM+im8UXPEsTv7XCLd0yDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -39,8 +39,6 @@ hashes through CAS.
 |---|---|---|
 | `fetch` | `fetch` | `ryeos.execute.service.fetch` |
 | `verify` | `verify` | `ryeos.execute.service.verify` |
-| `sign` | `sign` | `ryeos.execute.service.sign` |
-| `content/pin` | `content.pin` | `ryeos.execute.service.content/pin` |
 | `projection/verify` | `projection.verify` | `ryeos.execute.service.projection/verify` |
 | `projection/rebuild` | `projection.rebuild` | `ryeos.execute.service.projection/rebuild` |
 | `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
@@ -70,9 +68,9 @@ unauthenticated discovery routes. Mutating routes such as
 `identity/authorize-key` and `system/push-head` require signed auth plus
 the listed capability.
 
-`sign` and `content/pin` are dual-mode, non-threaded local-operator services:
-they use the daemon while it is healthy and the same standalone handler while
-it is stopped. `projection/verify` and `projection/rebuild` require stopped-node
+`ryeos sign` and `ryeos content pin` are not services: the daemon holds no
+operator key, so the CLI signs with the operator key in its own process.
+`projection/verify` and `projection/rebuild` require stopped-node
 authority. Verification inspects the selected projection without mutation.
 Rebuild performs a history-sized replacement while the daemon is stopped; it
 is disaster recovery, never a scheduled maintenance job.

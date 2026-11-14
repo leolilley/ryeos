@@ -1479,7 +1479,9 @@ fn run_sign(
     let source = SignSource::parse(&source_str)?;
     let project = project_arg.or_else(|| std::env::current_dir().ok());
 
-    let batch = run_sign_batch(&item_refs, project.as_deref(), source)?;
+    let app_root = ryeos_engine::roots::runtime_root()
+        .map_err(|error| anyhow::anyhow!("cannot resolve app root: {error}"))?;
+    let batch = run_sign_batch(app_root.as_path(), &item_refs, project.as_deref(), source)?;
     println!("{}", serde_json::to_string_pretty(&batch)?);
     if !batch.is_total_success() {
         anyhow::bail!(

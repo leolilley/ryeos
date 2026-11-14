@@ -1,7 +1,8 @@
 //! Complete signed external-content pins from current project bytes.
 //!
-//! The daemon-owned path is the only public authoring transaction. It observes
-//! production manifests but owns no CAS, thread, scheduler, or runtime handle.
+//! The operator's own process is the only authoring transaction: the daemon
+//! holds no operator key. It observes production manifests but owns no CAS,
+//! thread, scheduler, or runtime handle.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -56,25 +57,36 @@ struct AuthoringContext {
     signing_key: lillux::crypto::SigningKey,
 }
 
-/// Run the content-pin transaction under daemon-owned authority.
+/// Run the content-pin transaction in the operator's own process.
 ///
-/// Authentication and command/service admission stay in the daemon handler.
-/// This function consumes only the exact already-admitted engine, ignore
-/// policy, and operator signing key; it never opens node state or takes the
-/// process-wide offline state lock.
-pub fn run_content_pin_online(
+/// It loads the node's registered engine generation and the operator signing
+/// key from `app_root`, observes the project's production manifests and
+/// rewrites the pinned item. It owns no CAS, thread, scheduler, or runtime
+/// handle and never opens node state.
+pub fn run_content_pin(
+    app_root: &Path,
     item_ref: &str,
     project_path: &Path,
     options: &ContentPinOptions,
-    engine: &ryeos_engine::engine::Engine,
-    ignore_matcher: &ryeos_state::ignore::IgnoreMatcher,
-    signing_key: &lillux::crypto::SigningKey,
 ) -> Result<ContentPinReport> {
     let project_root = lillux::PinnedDirectory::open(project_path)?
         .ok_or_else(|| anyhow!("project root is unavailable"))?;
     let _project_lock = project_root.lock_exclusive()?;
-    let context =
-        AuthoringContext::from_daemon(engine, ignore_matcher.clone(), signing_key.clone())?;
+    let authoring = sign::load_offline_authoring(app_root)?;
+    let context = AuthoringContext {
+        kinds: authoring.kinds,
+        parsers: authoring.parsers,
+        trust_store: authoring.node_trust_store,
+        // The offline path has no admitted node-policy snapshot. Pinning the
+        // complete durable-capture-safe unit is the conservative superset of
+        // every node-specific ignored view.
+        ignore_matcher: ryeos_state::ignore::IgnoreMatcher::from_config(
+            &ryeos_state::ignore::IgnoreConfig {
+                patterns: Vec::new(),
+            },
+        )?,
+        signing_key: authoring.signing_key,
+    };
     run_content_pin_prepared(item_ref, project_path, options, project_root, context)
 }
 
@@ -357,22 +369,6 @@ fn run_content_pin_prepared(
         durability_uncertain,
         declarations: declaration_reports,
     })
-}
-
-impl AuthoringContext {
-    fn from_daemon(
-        engine: &ryeos_engine::engine::Engine,
-        ignore_matcher: ryeos_state::ignore::IgnoreMatcher,
-        signing_key: lillux::crypto::SigningKey,
-    ) -> Result<Self> {
-        Ok(Self {
-            kinds: engine.kinds.clone(),
-            parsers: engine.parser_dispatcher.clone(),
-            trust_store: engine.node_trust_store.clone(),
-            ignore_matcher,
-            signing_key,
-        })
-    }
 }
 
 fn open_item_source<'a>(
