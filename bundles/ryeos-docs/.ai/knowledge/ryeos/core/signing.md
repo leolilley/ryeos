@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:02:48Z:4bc3d2e5b2682863d2fed4c05a1c2446b8e05f671b01f13f7becb68bc646c221:Qm0zITcKjF/uhHwsEmZ5gyqmzSGQ3ICqGxjdj+Ce+p6hFNIfUpjhJ2YgBY0B+AnUOzZ6FVz7MxQYNkpoxovQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:55:49Z:a7ccbc80bd4e56c0008d855786c84cba0f2196cbb815dd693bf5aa2234a95c51:bPKX7TsHr0pkS+IJUYtpvyLIxRhyzWokuDZigvBhilHMG2j6zyoaFnvUT7a2n/X118kCJQUuHC4Y7ootTsYPAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -173,7 +173,9 @@ can declare `owns_namespaces` (core owns `ryeos/core`). A project file inside
 an owned namespace, such as a copy of a core runtime at
 `.ai/tools/ryeos/core/runtimes/python/function.yaml`, is refused with a 409
 `reserved_namespace_shadow` instead of winning resolution, even when a pinned
-key signed it. See [Spaces](spaces.md).
+key signed it. An installed bundle's name is reserved the same way, so a
+project item under another installed bundle's name is refused too. See
+[Spaces](spaces.md).
 
 **One name, one item.** Two files with the same name and different
 formats in one folder (for example `x.py` and `x.yaml`) are refused as
