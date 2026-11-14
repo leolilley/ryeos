@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:37:06Z:0b47cb77d386988cc288365c5f4e7ac7ae6bb3fef1a551ab46f19a99f51aa79f:/pMmFkKHtYajyPdYLu21YwD4BU1nSNYLanZXP101AEZn8++DllIvcAMN6BZc90wZiV6vHdCgn7zLcPaASZ+GBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:47:54Z:fcb1e3fe14a3d7621ee6af0b1e578c1dddc58bc0428c9926217a4c8e25255ccb:nvHpNfsIvjzk40ZRdk4f+AlfqHlQCPIUEg/YNDOBIlcALKvihP6vwTI3w4yQGQjs4O/5jdslsfVuLRvGWsNlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -343,6 +343,10 @@ policy (schema 5), never by the cookie flags alone:
   `granted_caps`. Every later admission, event stream, project operation and
   binding compile reads that grant; binding entries the grant cannot reach are
   listed as attenuated at mint.
+  The shipped default lists no admin capability: it holds the toolset of
+  `directive:ryeos/ops/base` (fetch, verify, doctor, knowledge compose, snapshot
+  status/show/log) plus the named docs namespaces `ryeos/core/*`,
+  `ryeos/standard/*` and `ryeos/ui/*`, never a knowledge wildcard.
 - **Timing.** `session_ttl_secs` (at most 24 hours) ends a session regardless of
   use, `session_idle_secs` ends one that is not used, and `launch_token_ttl_secs`
   (at most 300) bounds the single-use activation link. None has a code default;

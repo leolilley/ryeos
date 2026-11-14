@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T07:17:08Z:b02864b81439bc840e3d6771664b33d99e31923c48270e522053172ca21fc562:OjWGhhiRsup+LWYKU7kiBAS1MwjOuUzzCC99o6hPAZo7pQ/MHAM/MFmuk7CEKLs0QRsFJ0Qyw72rR0uSNOOnCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:47:54Z:f07c9edd26203cb86adb102756b54a63d94ac7577eba0a37c4e19054c1ba5489:LkzFxiofffgZyKjXhgDv3HGPvEr2wikFEbPO51N8LbKSR86H47w3kIVFQwGw1GzSGuH5aQrVV57N76eXk+2RDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -463,7 +463,9 @@ policies:
       - ryeos.execute.tool.ryeos/core/verify
       - ryeos.execute.tool.ryeos/core/node/doctor
       - ryeos.execute.tool.ryeos/knowledge/compose
-      - ryeos.execute.knowledge.*
+      - ryeos.execute.knowledge.ryeos/core/*
+      - ryeos.execute.knowledge.ryeos/standard/*
+      - ryeos.execute.knowledge.ryeos/ui/*
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log
