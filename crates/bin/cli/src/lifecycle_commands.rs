@@ -2931,6 +2931,12 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // node, so their count is not available here.
     checks.push(ui_browser_sessions_check(&config.app_root, initialized));
 
+    // Vault names the signed ceilings do not list are operator-only.
+    checks.push(vault_names_without_ceiling_check(
+        &config.app_root,
+        initialized,
+    ));
+
     // Grants that have lapsed, are about to, or are of a retired schema or
     // class. Reading them needs only the node key and the signed policy.
     if initialized {
@@ -4589,6 +4595,96 @@ fn ui_browser_sessions_check(
     }
 }
 
+/// Doctor row `vault_names_without_ceiling`: the sealed vault names that the
+/// node's signed `sealed_vault_names` policy does not list. Such a name is
+/// operator-only, so a principal that received it before the ceilings existed
+/// no longer does until the operator lists it. Reads names only, through the
+/// read-only vault open; no value leaves the store.
+fn vault_names_without_ceiling_check(
+    app_root: &std::path::Path,
+    initialized: bool,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA};
+    use ryeos_node_runtime::node_policy::sections::sealed_vault_names::SealedVaultNamesPolicy;
+    const NAME: &str = "vault_names_without_ceiling";
+    if !initialized {
+        return check(NAME, NA, serde_json::json!({ "note": "not initialized" }));
+    }
+    let policy = (|| -> Result<SealedVaultNamesPolicy> {
+        let isolation =
+            ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(app_root)?;
+        let node_trust = isolation
+            .registered_generation_node_trust()
+            .context("retained isolation generation omitted node trust")?;
+        let policy = crate::node_descriptors::load_verified_policy_snapshot_with_trust(
+            app_root, node_trust,
+        )?;
+        Ok(policy.require::<SealedVaultNamesPolicy>()?.clone())
+    })();
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(error) => {
+            return check(
+                NAME,
+                FAIL,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "fix": "the node policy generation has no valid `sealed_vault_names` section; with the node stopped, run `ryeos node reset policy-generation` from a profile that carries it, then run `ryeos node doctor` again",
+                }),
+            );
+        }
+    };
+    let stored =
+        ryeos_app::vault::SealedEnvelopeVault::open_read_only(app_root).operator_secret_names();
+    vault_ceiling_row(stored, &policy)
+}
+
+/// The row for a read of the stored names against the node's policy. A store
+/// that cannot be read is a warning, not a verdict on the names.
+fn vault_ceiling_row(
+    stored: Result<Vec<String>>,
+    policy: &ryeos_node_runtime::node_policy::sections::sealed_vault_names::SealedVaultNamesPolicy,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    const NAME: &str = "vault_names_without_ceiling";
+    let stored = match stored {
+        Ok(stored) => stored,
+        Err(error) => {
+            return check(
+                NAME,
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "note": "the vault names could not be read, so ceilings were not compared",
+                }),
+            );
+        }
+    };
+    let without: Vec<&String> = stored
+        .iter()
+        .filter(|name| policy.entry(name).is_none())
+        .collect();
+    if without.is_empty() {
+        return check(
+            NAME,
+            OK,
+            serde_json::json!({
+                "vault_names": stored.len(),
+                "ceilinged_names": policy.names.len(),
+            }),
+        );
+    }
+    check(
+        NAME,
+        WARN,
+        serde_json::json!({
+            "names": without,
+            "note": "these vault names have no recipient or writer ceiling, so only the configured local operator may receive or write them",
+            "fix": "to let another principal receive or write a name, add an entry for it to a sealed_vault_names source (name, recipients, writers) and apply it with the node stopped: `ryeos node policy-apply sealed_vault_names <source.yaml>`; names that only the operator uses need no entry",
+        }),
+    )
+}
+
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
 /// The `host_services` row: WARN when a RyeOS node service records an app
@@ -5921,6 +6017,49 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("signature mismatch")
+        );
+    }
+
+    #[test]
+    fn doctor_lists_vault_names_that_have_no_ceiling() {
+        use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+        use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
+        use ryeos_node_runtime::node_policy::sections::sealed_vault_names::{
+            SEALED_VAULT_NAMES_POLICY_SCHEMA, SealedVaultName, SealedVaultNamesPolicy,
+        };
+        let listed = |principal: &str| NameRecipients {
+            principals: vec![principal.to_owned()],
+            capabilities: Vec::new(),
+        };
+        let policy = SealedVaultNamesPolicy {
+            schema: SEALED_VAULT_NAMES_POLICY_SCHEMA,
+            names: vec![SealedVaultName {
+                name: "API_KEY".to_owned(),
+                recipients: listed("fp:b"),
+                writers: listed("fp:op"),
+            }],
+        };
+        let stored = vec!["API_KEY".to_owned(), "OLD_KEY".to_owned()];
+        let row = vault_ceiling_row(Ok(stored), &policy);
+        assert_eq!(row.name, "vault_names_without_ceiling");
+        assert_eq!(row.status, WARN);
+        assert_eq!(row.detail["names"], serde_json::json!(["OLD_KEY"]));
+        assert!(
+            row.detail["fix"]
+                .as_str()
+                .unwrap()
+                .contains("policy-apply sealed_vault_names")
+        );
+        let all_listed = vault_ceiling_row(Ok(vec!["API_KEY".to_owned()]), &policy);
+        assert_eq!(all_listed.status, OK);
+        let empty = vault_ceiling_row(Ok(Vec::new()), &policy);
+        assert_eq!(empty.status, OK);
+        let unreadable = vault_ceiling_row(Err(anyhow::anyhow!("pending rewrap")), &policy);
+        assert_eq!(unreadable.status, WARN);
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            vault_names_without_ceiling_check(directory.path(), false).status,
+            NA
         );
     }
 
