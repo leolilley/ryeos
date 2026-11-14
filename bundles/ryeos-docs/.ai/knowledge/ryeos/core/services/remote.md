@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:32:28Z:ae2b1d6eba1f68e2be2ff39d2a514a2e5a9002010a4921c3243dc3a50a1edae3:yUNwG0vOskPl6YY1X6ZtvwWPHZZjwhQHn5TwRuN4eh/uav4A4ZlL3jY6UX+1u/BK2veLoDMrWvHlw77UWQa6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:4a873303cc5ee8e1374371f5608d819c2b92885d1408da2539e5ff18df428f1d:VfB6z0Z1rCumVlhN9JTN6jM2ewovJKuhD4um6uz9QEoFLVlALahFhErBisKCShobQfywWjlXic4ghOnyQlsWAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -32,6 +32,7 @@ The authoritative matrix is in
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/revoke` | `remote.revoke` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
 | `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
 | `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |

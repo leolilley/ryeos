@@ -1,7 +1,12 @@
-# ryeos:signed:2026-09-10T12:12:59Z:9622a9e0a9fd6cfadabd890e90baf7ff3f0ea24d6446248982dadb5423b09311:ecLRAwUDKbCDzenar0ON3xfbm0PNU7jrt4nEbchrWnGeUvwsWv0uPngI47hMTg+VsKCmZ5Brx8nUSJITQnAABw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T19:53:53Z:b7ef3c8ebef441d89419943358f934ea91ce7f6868c75135b4ba831e74169375:W0rLrLwx5lHP95PlBhRZWvYLngEHcFS6dCrJWfTpThc8h5ulFWJe9crU1f6YmM1xvhOEboVN+pOtDRwrINczDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - admission-token
-description: Mint a one-time node-local admission token for remote bootstrap
+description: Mint a one-time node-local admission token that admits one grant class (local_client, remote_node, or remote_principal bound to an origin site)
+help:
+  usage: "ryeos admission-token --class <local_client|remote_node|remote_principal> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
 dispatch:
   kind: execute_ref
   execute: service:identity/mint-admission-token

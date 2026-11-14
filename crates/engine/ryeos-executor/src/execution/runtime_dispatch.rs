@@ -2914,6 +2914,7 @@ mod tests {
                 ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY.to_string(),
                 ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
             ],
+            "fp:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap()

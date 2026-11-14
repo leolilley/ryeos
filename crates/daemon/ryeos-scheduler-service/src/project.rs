@@ -1092,14 +1092,18 @@ fn write_reconciled_schedule(
         .request
         .caller
         .authenticated_execution_authority(registration_request_hash)?;
-    let execution = serde_json::to_value(ryeos_scheduler_contract::ScheduleExecution {
+    let execution = ryeos_scheduler_contract::ScheduleExecution {
         authority,
         capabilities,
         policy: schedule.execution_policy.clone(),
         limits: schedule.limits.clone(),
         max_fires: schedule.max_fires,
         expires_at: schedule.expires_at.clone(),
-    })?;
+    };
+    ctx.request
+        .caller
+        .require_execution_admissible(&execution)?;
+    let execution = serde_json::to_value(execution)?;
     let body = serde_json::json!({
         "spec_version": 2,
         "schedule_id": schedule.schedule_id,
@@ -1731,6 +1735,13 @@ mod deploy_recovery_tests {
                 principal_id: self.identity.principal_id(),
                 effective_origin_site_id: self.identity.site_id(),
             })
+        }
+
+        fn require_execution_admissible(
+            &self,
+            _: &ryeos_scheduler_contract::ScheduleExecution,
+        ) -> Result<()> {
+            Ok(())
         }
     }
 

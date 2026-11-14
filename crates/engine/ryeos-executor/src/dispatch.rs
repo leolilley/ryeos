@@ -2555,6 +2555,7 @@ pub(crate) async fn dispatch_method(
             item_ref: runtime_item_ref.clone(),
             thread_id: thread_id.clone(),
             project_path: request.project_path.to_path_buf(),
+            bundle_state_home: None,
             runtime_state_root: request
                 .provenance
                 .state_root_override()
@@ -2596,7 +2597,7 @@ pub(crate) async fn dispatch_method(
             .env_injections
             .iter()
             .map(|injection| {
-                let value = ryeos_engine::protocol_vocabulary::produce_env_value(
+                let value = ryeos_engine::protocol_vocabulary::produce_optional_env_value(
                     injection.source,
                     &env_request,
                 )
@@ -2607,15 +2608,18 @@ pub(crate) async fn dispatch_method(
                         runtime_protocol.canonical_ref, injection.name, runtime_item_ref,
                     ),
                 })?;
-                Ok(ryeos_app::env_contract::EnvBinding::new(
+                Ok(value.map(|value| ryeos_app::env_contract::EnvBinding::new(
                     injection.name.clone(),
                     value,
                     ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection {
                         source: injection.source,
                     },
-                ))
+                )))
             })
-            .collect::<Result<Vec<_>, DispatchError>>()?;
+            .collect::<Result<Vec<_>, DispatchError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let envs = ryeos_app::env_contract::EnvContractBuilder::new()
             .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
@@ -2684,6 +2688,7 @@ pub(crate) async fn dispatch_method(
                     network_authority_ceiling,
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     captured_callback_socket: false,
@@ -4888,6 +4893,11 @@ fn require_prepared_launch_secret_availability(
                 source_kind: "launch_preparation".to_owned(),
                 source_name: "symbolic_requirement".to_owned(),
                 remediation: crate::dispatch_error::required_secret_remediation(&name),
+            }
+        }
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            DispatchError::CapabilityRejected {
+                reason: refusal.to_string(),
             }
         }
         error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
@@ -7833,11 +7843,14 @@ runtime_authority:
     #[test]
     fn trusted_live_project_mints_from_its_signed_manifest() {
         let project = tempdir().join("arc");
-        write_signed_manifest(&project.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        write_signed_manifest(
+            &project.join(ryeos_engine::AI_DIR),
+            &SELF_BUNDLE_MANIFEST.replace("name: example-bundle", "name: arc-project"),
+        );
         let ctx = test_execution_context(project.clone());
         let mut resolved = resolved_tool_in_space(
             &project,
-            "tool:example-bundle/send",
+            "tool:arc-project/send",
             ryeos_engine::contracts::ItemSpace::Project,
             &signing_key(),
         );
@@ -8179,7 +8192,7 @@ runtime_authority:
     }
 
     #[test]
-    fn node_trusted_manifest_in_exact_live_project_root_mints_runtime_authority() {
+    fn project_manifest_replaying_an_installed_bundle_manifest_is_refused_as_collision() {
         let installed_bundle = tempdir().join("installed-example-bundle");
         let installed_ai = installed_bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(&installed_ai, SELF_BUNDLE_MANIFEST);
@@ -8210,26 +8223,36 @@ runtime_authority:
             ryeos_engine::contracts::ItemSpace::Project,
             &signing_key(),
         );
-        resolved.resolved_item.metadata.extra = requires_extra(json!({
-            "capabilities": { "manifest": { "runtime_authority": {
-                "bundle_events": [
-                    { "event_kind": "example_event", "operations": ["append"] }
-                ]
-            } } }
-        }));
-
-        let caps = derive_manifest_runtime_caps(
-            &resolved.resolved_item,
-            fixture_trust(&resolved.resolved_item),
-            &resolved.item_ref,
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(
-            caps,
-            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
-            "the node-trusted manifest is bounded by exact project provenance"
-        );
+        let requirements = [
+            json!({ "bundle_events": [
+                { "event_kind": "example_event", "operations": ["append"] }
+            ] }),
+            json!({ "runtime_vault": [
+                { "namespace": "oauth", "operations": ["get"] }
+            ] }),
+            json!({ "item_authoring": [
+                { "kind": "knowledge", "namespace": "runtime-authored/*" }
+            ] }),
+        ];
+        for authority in requirements {
+            resolved.resolved_item.metadata.extra = requires_extra(json!({
+                "capabilities": { "manifest": { "runtime_authority": authority } }
+            }));
+            let err = derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx,
+            )
+            .unwrap_err();
+            let text = err.to_string();
+            assert!(
+                text.contains("project_bundle_id_collision")
+                    && text.contains("example-bundle")
+                    && text.contains("Rename the project bundle"),
+                "a project manifest named after an installed bundle must be refused: {text}"
+            );
+        }
     }
 
     #[test]

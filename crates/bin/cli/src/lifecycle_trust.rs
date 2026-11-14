@@ -32,7 +32,7 @@ struct PinArgs {
     #[arg(long = "from")]
     from: PathBuf,
 
-    /// publisher, operator or project_author.
+    /// publisher, operator, project_author or authoring.
     #[arg(long)]
     role: String,
 

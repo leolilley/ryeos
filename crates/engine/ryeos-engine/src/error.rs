@@ -53,7 +53,7 @@ pub enum EngineError {
     },
 
     #[error(
-        "project item `{canonical_ref}` at {project_path} is inside namespace `{namespace}` owned by bundle `{bundle}`; a project cannot shadow an owned namespace"
+        "project item `{canonical_ref}` at {project_path} is inside namespace `{namespace}` owned by (or named for) installed bundle `{bundle}`; a project cannot shadow an installed bundle's namespace or name"
     )]
     ReservedNamespaceShadow {
         canonical_ref: String,

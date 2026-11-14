@@ -133,7 +133,14 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
             Ok((effective, resolution))
         })
         .map_err(map_engine_error)?;
-    let authorship = authorship_rows(state.identity.fingerprint(), &resolution);
+    let authoring_fingerprints = authoring_key_fingerprints(&state.config.app_root);
+    let authorship = authorship_rows(
+        &SignerRoles {
+            node: state.identity.fingerprint(),
+            authoring: &authoring_fingerprints,
+        },
+        &resolution,
+    );
 
     // Thread-scoped mode: attach the launch-time digest (truth) alongside the
     // fresh resolution (now), with per-ancestor drift flags.
@@ -156,13 +163,14 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
 /// items, in that order) and whether it is runtime-authored. Reporting only:
 /// trust classes and launch decisions are unchanged.
 ///
-/// `signer_role` is `node` when this node's identity key signed the item,
-/// `other` for any other key (a bundle publisher, the operator signing key,
-/// or an unpinned key), and `none` when the item carries no signature.
-/// `runtime_authored` is true only for a node-signed item whose signed bytes
-/// carry the daemon's runtime provenance line: the item was written through
-/// `runtime.author_item` on behalf of a runtime, not signed by the operator.
-fn authorship_rows(node_fingerprint: &str, resolution: &ResolutionOutput) -> Vec<Value> {
+/// `signer_role` is `authoring` when a key pinned with the authoring role
+/// signed the item, `node` when this node's identity key did, `other` for any
+/// other key (a bundle publisher, the operator signing key, or an unpinned
+/// key), and `none` when the item carries no signature. `runtime_authored` is
+/// true only for an authoring-key item whose signed bytes carry the daemon's
+/// runtime provenance line: the item was written through `runtime.author_item`
+/// on behalf of a runtime, not signed by the operator.
+fn authorship_rows(roles: &SignerRoles<'_>, resolution: &ResolutionOutput) -> Vec<Value> {
     let rows = std::iter::once(("root", &resolution.root))
         .chain(resolution.ancestors.iter().map(|item| ("ancestor", item)))
         .chain(
@@ -171,17 +179,42 @@ fn authorship_rows(node_fingerprint: &str, resolution: &ResolutionOutput) -> Vec
                 .iter()
                 .map(|item| ("reference", item)),
         );
-    rows.map(|(position, item)| authorship_row(node_fingerprint, position, item))
+    rows.map(|(position, item)| authorship_row(roles, position, item))
         .collect()
 }
 
-fn authorship_row(node_fingerprint: &str, position: &str, item: &ResolvedAncestor) -> Value {
+/// The keys whose signatures name a role in `authorship` rows.
+struct SignerRoles<'a> {
+    node: &'a str,
+    /// Every key pinned with the authoring role, active or retired.
+    authoring: &'a [String],
+}
+
+/// Fingerprints of the authoring-role keys in the node's signer registry. An
+/// unreadable registry yields none: the rows are reporting only.
+fn authoring_key_fingerprints(app_root: &std::path::Path) -> Vec<String> {
+    let Ok(node_key) = ryeos_engine::trust::load_node_verifying_key(app_root) else {
+        return Vec::new();
+    };
+    ryeos_engine::trust::load_signer_records(&ryeos_engine::trust::signers_dir(app_root), &node_key)
+        .map(|records| {
+            records
+                .into_iter()
+                .filter(|record| record.role == ryeos_engine::trust::SignerRole::Authoring)
+                .map(|record| record.fingerprint)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn authorship_row(roles: &SignerRoles<'_>, position: &str, item: &ResolvedAncestor) -> Value {
     let signer_role = match item.signer_fingerprint.as_deref() {
         None => "none",
-        Some(signer) if signer == node_fingerprint => "node",
+        Some(signer) if roles.authoring.iter().any(|f| f == signer) => "authoring",
+        Some(signer) if signer == roles.node => "node",
         Some(_) => "other",
     };
-    let runtime_authored = signer_role == "node"
+    let runtime_authored = signer_role == "authoring"
         && ryeos_engine::identity::authored_provenance::has_runtime_provenance_line(
             &item.raw_content,
         );
@@ -381,7 +414,7 @@ mod tests {
         ResolutionDigestNode, ResolutionStepName, ResolvedAncestor, TrustClass,
     };
 
-    use super::{authorship_row, digest_node_json, map_engine_error};
+    use super::{SignerRoles, authorship_row, digest_node_json, map_engine_error};
     use std::collections::HashMap;
 
     fn node(resolved_ref: &str, digest: &str) -> ResolutionDigestNode {
@@ -417,22 +450,31 @@ mod tests {
 
     const AUTHORED_BODY: &str = "Body.\n\n<!-- ryeos:authored: {\"authored_by\":\"runtime\",\"content_digest\":\"ab\"} -->\n";
 
+    fn roles(authoring: &[String]) -> SignerRoles<'_> {
+        SignerRoles {
+            node: "node-fp",
+            authoring,
+        }
+    }
+
     #[test]
-    fn node_signed_item_with_provenance_is_runtime_authored() {
+    fn authoring_signed_item_with_provenance_is_runtime_authored() {
+        let authoring = ["authoring-fp".to_string()];
         let row = authorship_row(
-            "node-fp",
+            &roles(&authoring),
             "root",
-            &project_item(Some("node-fp"), AUTHORED_BODY),
+            &project_item(Some("authoring-fp"), AUTHORED_BODY),
         );
-        assert_eq!(row["signer_role"], "node");
+        assert_eq!(row["signer_role"], "authoring");
         assert_eq!(row["runtime_authored"], true);
-        assert_eq!(row["signer_fingerprint"], "node-fp");
+        assert_eq!(row["signer_fingerprint"], "authoring-fp");
     }
 
     #[test]
     fn operator_signed_item_is_not_runtime_authored_even_with_the_line() {
+        let authoring = ["authoring-fp".to_string()];
         let row = authorship_row(
-            "node-fp",
+            &roles(&authoring),
             "root",
             &project_item(Some("op-fp"), AUTHORED_BODY),
         );
@@ -441,11 +483,32 @@ mod tests {
     }
 
     #[test]
-    fn node_signed_item_without_provenance_is_not_runtime_authored() {
-        let row = authorship_row("node-fp", "root", &project_item(Some("node-fp"), "Body.\n"));
+    fn node_signed_item_is_not_runtime_authored_even_with_the_line() {
+        let authoring = ["authoring-fp".to_string()];
+        let row = authorship_row(
+            &roles(&authoring),
+            "root",
+            &project_item(Some("node-fp"), AUTHORED_BODY),
+        );
         assert_eq!(row["signer_role"], "node");
         assert_eq!(row["runtime_authored"], false);
-        let unsigned = authorship_row("node-fp", "root", &project_item(None, AUTHORED_BODY));
+    }
+
+    #[test]
+    fn authoring_signed_item_without_provenance_is_not_runtime_authored() {
+        let authoring = ["authoring-fp".to_string()];
+        let row = authorship_row(
+            &roles(&authoring),
+            "root",
+            &project_item(Some("authoring-fp"), "Body.\n"),
+        );
+        assert_eq!(row["signer_role"], "authoring");
+        assert_eq!(row["runtime_authored"], false);
+        let unsigned = authorship_row(
+            &roles(&authoring),
+            "root",
+            &project_item(None, AUTHORED_BODY),
+        );
         assert_eq!(unsigned["signer_role"], "none");
         assert_eq!(unsigned["runtime_authored"], false);
     }

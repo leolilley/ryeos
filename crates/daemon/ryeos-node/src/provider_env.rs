@@ -17,8 +17,10 @@ use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmission
 use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentPolicy;
 #[cfg(test)]
 use ryeos_node_runtime::node_policy::sections::provider_environment::{
-    PROVIDER_ENVIRONMENT_POLICY_SCHEMA, ProviderEnvironmentName, ProviderEnvironmentRecipients,
+    PROVIDER_ENVIRONMENT_POLICY_SCHEMA, ProviderEnvironmentName,
 };
+#[cfg(test)]
+use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
 
 /// Provider environment taken at startup, bound to the app root and the
 /// policy generation that declared its names. Its debug form carries names
@@ -121,7 +123,7 @@ mod tests {
                 .iter()
                 .map(|name| ProviderEnvironmentName {
                     name: (*name).to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: vec!["fp:operator".to_owned()],
                         capabilities: Vec::new(),
                     },

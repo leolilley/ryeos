@@ -49,7 +49,6 @@ pub const PROBE_TOOL_REF: &str = "tool:cbprobe/probe";
 pub struct ProbeAuthority {
     bundle_events: Vec<(String, Vec<String>)>,
     item_authoring: Vec<(String, String)>,
-    declared_caps: Vec<String>,
 }
 
 impl ProbeAuthority {
@@ -72,13 +71,6 @@ impl ProbeAuthority {
     pub fn item_authoring(mut self, kind: &str, namespace: &str) -> Self {
         self.item_authoring
             .push((kind.to_owned(), namespace.to_owned()));
-        self
-    }
-
-    /// Give the tool an ordinary declared capability, which becomes part of
-    /// the authoring ceiling for items it authors.
-    pub fn declared_cap(mut self, capability: &str) -> Self {
-        self.declared_caps.push(capability.to_owned());
         self
     }
 
@@ -135,8 +127,14 @@ pub fn plant_probe_tool(
     )
     .context("write probe manifest")?;
 
+    // An enforcing host class refuses a command whose origin is outside the
+    // live project, so the tool runs a copy planted inside it.
+    let planted_dir = project.join("probe-bin");
+    std::fs::create_dir_all(&planted_dir).context("create probe binary dir")?;
+    let planted = planted_dir.join("ryeos-callback-probe");
+    std::fs::copy(probe_binary, &planted).context("copy the probe binary into the project")?;
     let command = serde_json::to_string(
-        probe_binary
+        planted
             .to_str()
             .context("probe binary path must be UTF-8")?,
     )?;
@@ -148,12 +146,6 @@ pub fn plant_probe_tool(
          config:\n  command: {command}\n  input_data: \"${{params_json}}\"\n  timeout_secs: 60\n\
          requires:\n  capabilities:\n"
     );
-    if !authority.declared_caps.is_empty() {
-        tool.push_str("    declared:\n");
-        for capability in &authority.declared_caps {
-            tool.push_str(&format!("      - {capability}\n"));
-        }
-    }
     tool.push_str("    manifest:\n      runtime_authority:\n");
     tool.push_str(&authority.manifest_authority_yaml("        "));
     if authority.bundle_events.is_empty() && authority.item_authoring.is_empty() {

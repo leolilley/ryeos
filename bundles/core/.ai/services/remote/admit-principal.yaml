@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-13T21:35:38Z:52de12a086f4b726b08fe7e8c07a83732d68900db0fb8934779edee83399674a:GlQUFBulphjZiKGIdkGU5DBNie7UF4jVbjCd8vKOtPs2z5ZiPFTDV7l3aNfp3FvCgUVZ/68N3U3TDPGUAqr9CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.admit-principal
+required_caps: ["ryeos.execute.service.remote/admit-principal"]
+schema:
+  remote: string?
+  token: string?
+  label: string?
+  scopes: string[]?
+  signed_at: number?
+  nonce: string?
+  signature: string?
+description: "Claim a remote_principal admission token on a configured remote as the calling principal. The principal signs the claim with its own key; this node co-signs it as the origin site and forwards it. Without a signature the response carries the facts the principal needs to build the claim."

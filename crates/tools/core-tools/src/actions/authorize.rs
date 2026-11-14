@@ -17,9 +17,14 @@ use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use rand::RngCore;
 
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
+
 use crate::actions::hosted_policy::load_hosted_policy;
 
 const DEFAULT_ADMISSION_TOKEN_TTL_SECS: u64 = 600;
+/// Format version of stored admission tokens. The admission claim handler
+/// refuses every other version and names re-minting as the cure.
+pub const ADMISSION_TOKEN_FORMAT_VERSION: u32 = 2;
 
 /// Shared input for node-owned grant reconciliation. The target app root and
 /// signing authority come from the host entrypoint, never from this payload.
@@ -257,6 +262,14 @@ pub struct MintAdmissionTokenParams {
     pub label: Option<String>,
     /// Token lifetime in seconds.
     pub ttl_secs: u64,
+    /// Class of the grant redeeming this token writes.
+    pub class: AuthorizedKeyPrincipalClass,
+    /// Site the redeemed grant is bound to. Required for `remote_principal`,
+    /// whose claim a node of this site must co-sign; refused for other classes.
+    pub origin_site_id: Option<String>,
+    /// Lifetime of the grant redeeming this token writes, bounded at claim
+    /// time by the node's authorization policy. Absent: the class maximum.
+    pub grant_lifetime_secs: Option<u64>,
 }
 
 /// Signed-service input for minting one target-local admission token.
@@ -271,6 +284,15 @@ pub struct MintAdmissionTokenRequest {
     pub label: Option<String>,
     #[serde(default = "default_admission_token_ttl_secs")]
     pub ttl_secs: u64,
+    /// Class of the grant the token admits: `local_client`, `remote_node` or
+    /// `remote_principal`.
+    pub class: AuthorizedKeyPrincipalClass,
+    /// Origin site of a `remote_principal` token (`site:<name>`).
+    #[serde(default)]
+    pub origin_site_id: Option<String>,
+    /// Requested lifetime of the admitted grant, in seconds.
+    #[serde(default)]
+    pub grant_lifetime_secs: Option<u64>,
 }
 
 fn default_admission_token_ttl_secs() -> u64 {
@@ -294,6 +316,9 @@ impl MintAdmissionTokenRequest {
             scopes,
             label: self.label,
             ttl_secs: self.ttl_secs,
+            class: self.class,
+            origin_site_id: self.origin_site_id,
+            grant_lifetime_secs: self.grant_lifetime_secs,
         })
     }
 }
@@ -316,8 +341,16 @@ pub struct MintAdmissionTokenResult {
     pub scopes: Vec<String>,
     /// Optional default label stored in the token file.
     pub label: Option<String>,
+    /// Class of the grant the token admits.
+    pub class: AuthorizedKeyPrincipalClass,
+    /// Origin site a `remote_principal` token is bound to.
+    pub origin_site_id: Option<String>,
+    /// Lifetime requested for the admitted grant, in seconds.
+    pub grant_lifetime_secs: Option<u64>,
 }
 
+/// Stored admission token format. Version 2 carries the class of the grant it
+/// admits; the claim side refuses any other version as stale.
 #[derive(serde::Serialize)]
 struct AdmissionTokenFile<'a> {
     version: u32,
@@ -328,6 +361,11 @@ struct AdmissionTokenFile<'a> {
     issued_at_unix: u64,
     ttl_secs: u64,
     expires_at_unix: u64,
+    class: AuthorizedKeyPrincipalClass,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_site_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant_lifetime_secs: Option<u64>,
 }
 
 /// Authorize a client by writing a node-signed authorized-key TOML.
@@ -517,6 +555,25 @@ pub fn mint_admission_token_with_policy(
             .map_err(|e| anyhow::anyhow!("invalid scope: {e}"))?;
     }
 
+    match (params.class, params.origin_site_id.as_deref()) {
+        (AuthorizedKeyPrincipalClass::RemotePrincipal, None) => bail!(
+            "a remote_principal admission token requires --origin-site-id <site:name>, the site \
+             whose node must co-sign the principal's claim"
+        ),
+        (AuthorizedKeyPrincipalClass::RemotePrincipal, Some(site)) => {
+            ryeos_node_runtime::identity::validate_canonical_site_id(site)
+                .context("origin_site_id must use the canonical `site:<name>` form")?;
+        }
+        (class, Some(_)) => bail!(
+            "an origin site binds only a remote_principal token; drop --origin-site-id for class {}",
+            class.as_str()
+        ),
+        (_, None) => {}
+    }
+    if params.grant_lifetime_secs == Some(0) {
+        bail!("grant_lifetime_secs must be greater than zero");
+    }
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -545,13 +602,16 @@ pub fn mint_admission_token_with_policy(
     let path = token_dir.join(format!("{token_hash}.toml"));
 
     let doc = toml::to_string(&AdmissionTokenFile {
-        version: 1,
+        version: ADMISSION_TOKEN_FORMAT_VERSION,
         token_hash: &token_hash,
         label: label.as_deref(),
         scopes: &scopes,
         issued_at_unix: now,
         ttl_secs: params.ttl_secs,
         expires_at_unix,
+        class: params.class,
+        origin_site_id: params.origin_site_id.as_deref(),
+        grant_lifetime_secs: params.grant_lifetime_secs,
     })?;
     let token_dir = lillux::PinnedDirectory::open(&token_dir)?
         .ok_or_else(|| anyhow::anyhow!("admission token directory is unavailable"))?;
@@ -575,6 +635,9 @@ pub fn mint_admission_token_with_policy(
         expires_at_unix,
         scopes,
         label,
+        class: params.class,
+        origin_site_id: params.origin_site_id,
+        grant_lifetime_secs: params.grant_lifetime_secs,
     })
 }
 
@@ -678,7 +741,8 @@ admission_enabled: {admission_enabled}
     #[test]
     fn admission_token_request_has_no_node_root_input() {
         let request: MintAdmissionTokenRequest = serde_json::from_value(serde_json::json!({
-            "scopes": "ryeos.attest.request.forwarded-operator"
+            "scopes": "ryeos.attest.request.forwarded-operator",
+            "class": "remote_node"
         }))
         .expect("signed service input must decode");
         let params = request.into_params(PathBuf::from("/node")).unwrap();
@@ -894,6 +958,9 @@ admission_enabled: {admission_enabled}
             scopes: vec!["ryeos.execute.service.threads".into()],
             label: None,
             ttl_secs: 600,
+            class: AuthorizedKeyPrincipalClass::RemoteNode,
+            origin_site_id: None,
+            grant_lifetime_secs: None,
         }) {
             Ok(_) => panic!("minting should reject TTL above hosted policy"),
             Err(err) => err,
@@ -916,6 +983,9 @@ admission_enabled: {admission_enabled}
             scopes: vec!["ryeos.execute.service.threads".into()],
             label: None,
             ttl_secs: 60,
+            class: AuthorizedKeyPrincipalClass::RemoteNode,
+            origin_site_id: None,
+            grant_lifetime_secs: None,
         })
         .expect_err("explicitly disabled hosted admission must block token minting");
 
@@ -979,12 +1049,99 @@ admission_enabled: {admission_enabled}
         );
     }
 
+    fn mint_for(
+        tmp: &std::path::Path,
+        class: AuthorizedKeyPrincipalClass,
+        origin_site_id: Option<&str>,
+    ) -> Result<MintAdmissionTokenResult> {
+        let fixture = HostedPolicyFixture::new(tmp);
+        write_hosted_policy(tmp, true, 600, &fixture.key);
+        run_mint_admission_token(MintAdmissionTokenParams {
+            app_root: tmp.to_path_buf(),
+            scopes: vec!["ryeos.execute.service.threads".into()],
+            label: None,
+            ttl_secs: 60,
+            class,
+            origin_site_id: origin_site_id.map(str::to_owned),
+            grant_lifetime_secs: None,
+        })
+    }
+
+    #[test]
+    fn minted_token_records_its_class_and_origin_site() {
+        let tmp = tempfile::tempdir().unwrap();
+        let minted = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            Some("site:home"),
+        )
+        .unwrap();
+        let stored = std::fs::read_to_string(&minted.path).unwrap();
+        assert!(stored.contains("version = 2"), "{stored}");
+        assert!(stored.contains("class = \"remote_principal\""), "{stored}");
+        assert!(
+            stored.contains("origin_site_id = \"site:home\""),
+            "{stored}"
+        );
+    }
+
+    #[test]
+    fn principal_token_requires_an_origin_site_and_others_refuse_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            None,
+        )
+        .expect_err("a principal token must name its origin site");
+        assert!(
+            format!("{missing:#}").contains("--origin-site-id"),
+            "{missing:#}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let unexpected = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemoteNode,
+            Some("site:home"),
+        )
+        .expect_err("only a principal token binds an origin site");
+        assert!(
+            format!("{unexpected:#}").contains("drop --origin-site-id"),
+            "{unexpected:#}"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let malformed = mint_for(
+            tmp.path(),
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            Some("home"),
+        )
+        .expect_err("the origin site must be canonical");
+        assert!(
+            format!("{malformed:#}").contains("site:<name>"),
+            "{malformed:#}"
+        );
+    }
+
+    #[test]
+    fn token_request_requires_a_class() {
+        let error = serde_json::from_value::<MintAdmissionTokenRequest>(serde_json::json!({
+            "scopes": "ryeos.execute.service.threads"
+        }))
+        .expect_err("a token without a class must not decode");
+        assert!(error.to_string().contains("class"), "{error}");
+    }
+
     #[test]
     fn an_admission_token_cannot_carry_an_offline_operation_scope() {
         let request = MintAdmissionTokenRequest {
             scopes: "ryeos.offline.node.allow-restart".to_owned(),
             label: None,
             ttl_secs: 60,
+            class: AuthorizedKeyPrincipalClass::RemoteNode,
+            origin_site_id: None,
+            grant_lifetime_secs: None,
         };
         assert!(
             request

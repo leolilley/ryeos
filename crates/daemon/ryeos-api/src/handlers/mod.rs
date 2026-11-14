@@ -62,6 +62,7 @@ pub mod external_execution_status;
 pub mod federated_follow;
 pub mod federation_capabilities;
 pub mod federation_heads_list;
+pub(crate) mod grant_schedules;
 pub(crate) mod grant_terms;
 pub mod health_status;
 pub mod identity_public_key;
@@ -88,6 +89,7 @@ pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
 pub mod remote_admit;
+pub mod remote_admit_principal;
 pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
@@ -106,6 +108,7 @@ pub mod remote_pull;
 pub mod remote_pull_worker_result;
 pub mod remote_push;
 pub mod remote_reconcile_project_head;
+pub mod remote_revoke;
 pub mod remote_run;
 pub mod remote_status;
 pub mod remote_sync_admitted_heads;
@@ -117,6 +120,7 @@ pub mod remote_vault_list;
 pub mod remote_vault_set;
 pub mod remote_worker_workflows;
 pub mod renew_key;
+pub mod revoke_key;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_deregister;
 #[cfg(feature = "scheduling")]
@@ -329,6 +333,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     rebuild::REBUILD_DESCRIPTOR,
     authorize_key::DESCRIPTOR,
     renew_key::DESCRIPTOR,
+    revoke_key::DESCRIPTOR,
     remote_delegation::DELEGATE,
     remote_delegation::LIST,
     remote_delegation::REVOKE,
@@ -380,7 +385,9 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_sync_admitted_heads::DESCRIPTOR,
     remote_run::DESCRIPTOR,
     remote_admit::DESCRIPTOR,
+    remote_admit_principal::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
+    remote_revoke::DESCRIPTOR,
     remote_threads::DESCRIPTOR,
     remote_thread_status::DESCRIPTOR,
     remote_bundle_install::DESCRIPTOR,

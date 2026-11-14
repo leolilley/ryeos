@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-10T12:13:09Z:e8eef77ce872b300f2fcccea1faa2f47b836c2c5b3dc22dcec38ef5a6d4be371:9ky5p/x4uiHBbDTdquzaoLEZMtzndM5IzhaZRaxUzLB7xL5z4HFtr+ZrWxJcoszhnFVDFmz+dNbPVz5rlkutAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T19:53:53Z:4c7e095d8b83ae6a1ffed202f2d516f2836994e41051dfc057fd79f736648311:TPsNABRXpM56LoGcrA239wMXvD3LF8VbQp0ABudXSnKyNigvAgpOdlNDi4dyf1gwF7ldX2YbyBPhCWeXUsNdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.mint-admission-token
 availability: both
@@ -9,4 +9,7 @@ schema:
   scopes: string
   label: string?
   ttl_secs: number?
+  class: string
+  origin_site_id: string?
+  grant_lifetime_secs: number?
 description: "Mint one bounded target-local remote-admission token through retained node policy authority"

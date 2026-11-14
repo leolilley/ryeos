@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:05:09Z:c3f867f2448985b2d18b17e22d85835f77f5ca35e9addb98d2e8f82ad59cedfd:ED4smy835RERQYPnv7w2qanNDk4D7dB7eVLcvEm8bFZp4EfTK94KJ8kIXee84FRf3Sj1yJG0JqGxEbufhgXpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:7e260ea35202739bf486d1bb093a0a1e36664ba779631271def57e5087888f9d:d3D1DqnmqkMHIk2wdrb7qq5fzNjxyc5lrvjPAUSsBNR6uiPOQi40KLIlfmZEUWC6N+2LPTohslNFxr8GH1mqCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -146,10 +146,29 @@ principal that granted the key or the node operator may renew it.
 - **Required cap:** `ryeos.execute.service.identity/renew-key`
 - **Request:** `{ fingerprint, lifetime_secs? }`
 - **Response:** `{ fingerprint, label, principal_class, scopes,
-  previous_expires_at, expires_at, authorized_by }`
+  previous_expires_at, expires_at, authorized_by, schedules: { resealed,
+  paused } }`; renewal re-seals every schedule pinned to the superseded
+  generation whose capabilities the renewed grant still covers and pauses the
+  rest with `authority_narrowed`
 - **Refusals:** `grant_not_found` (404), `grant_renewal_not_permitted` and
   `grant_renewal_scopes_not_covered` (403), `grant_never_expires` (400),
   `grant_lifetime_exceeds_policy` (400)
+
+### `POST /revoke-key`
+
+Revoke an authorized-key grant and leave a node-signed tombstone.
+Authenticated; only the principal that granted the key or the node operator
+may revoke it, and the configured operator's own grant is offline only.
+
+- **Source:** `service:identity/revoke-key`
+- **Required cap:** `ryeos.execute.service.identity/revoke-key`
+- **Request:** `{ fingerprint, reason, leave_running?, keep_delegates? }`
+- **Response:** `{ fingerprint, revoked: [{ fingerprint, grant_digest,
+  revoked_at, revoked_by, reason, already_revoked, cascaded_from? }],
+  delegates_kept, schedules: { resealed, paused }, live_work: { left_running,
+  cancelled, failed } }`
+- **Refusals:** `grant_not_found` (404), `grant_revocation_not_permitted`
+  (403), `grant_is_operator` (409), `grant_revocation_reason_invalid` (400)
 
 ### `POST /admission/claim`
 
@@ -160,9 +179,15 @@ being admitted.
 - **Source:** `service:admission/claim`
 - **Auth:** none; validates token hash file, token expiry, requested
   scopes subset, nonce/timestamp, and claimant signature
-- **Request:** `{ token, public_key, label, scopes, nonce, timestamp_unix, signature }`
-- **Response:** authorized-key metadata including fingerprint, scopes and
-  `expires_at` (the `remote_node` class maximum)
+- **Request:** `{ protocol_version: 3, token, public_key, principal_class, origin_site_id?, label, scopes, signed_at, nonce, signature, forwarding_key_id?, forwarding_signature? }`.
+  `principal_class` must equal the class the token admits; a
+  `remote_principal` claim carries the origin node's co-signature in the
+  `forwarding_*` fields.
+- **Response:** authorized-key metadata including fingerprint, class, scopes
+  and `expires_at` (bounded by the authorization policy for that class)
+- **Refusals:** `admission_token_stale`, `admission_token_invalid` (400);
+  `admission_class_mismatch`, `admission_origin_site_mismatch`,
+  `admission_cosignature_missing`, `admission_cosignature_invalid` (403)
 - **Used by:** `ryeos remote admit`
 
 ## Thread Routes

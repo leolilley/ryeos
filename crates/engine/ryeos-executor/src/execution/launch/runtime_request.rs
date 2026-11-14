@@ -33,6 +33,9 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub project_state_scope: Option<&'a str>,
     pub live_access: Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
+    /// The one node-owned bundle state namespace this launch opened, derived
+    /// from its sealed access capability.
+    pub bundle_state_home: Option<&'a ryeos_engine::isolation::IsolationBundleStateHome>,
     pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     /// Whether this launch owns the journal lifecycle for the supplied
     /// workspace. Callback children may borrow the path but never its owner
@@ -194,6 +197,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         project_state_scope,
         live_access,
         state_root,
+        bundle_state_home,
         workspace_lifeline,
         owns_workspace,
         envelope,
@@ -253,6 +257,16 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             args: &["--project-path".to_string(), project_path_string],
             cwd: project_path,
             project_path,
+            // Under enforced isolation the workload sees the fixed mount
+            // destination; otherwise there is no mount and it uses the real
+            // directory.
+            bundle_state_home: bundle_state_home.map(|home| {
+                if isolation.is_enforced() {
+                    Path::new(ryeos_engine::isolation::BUNDLE_STATE_ISOLATION_DESTINATION)
+                } else {
+                    home.namespace_dir.as_path()
+                }
+            }),
             runtime_state_root: state_root.unwrap_or(project_path),
             project_state_scope,
             thread_id,
@@ -383,6 +397,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         network_authority_ceiling,
         live_access: live_access.as_ref(),
         state_root,
+        bundle_state_home,
         checkpoint_dir,
         checkpoint_authority,
         daemon_socket_path: isolation_daemon_socket_path,

@@ -234,15 +234,14 @@ fn safe_error_body(body: &str) -> String {
 
 /// A provider-call failure classified for the runner's retry loop. Every
 /// variant describes a transient provider/transport failure the runner's retry
-/// loop may re-issue. `Status`, `Timeout`, and `Send` occur STRICTLY BEFORE any
-/// SSE byte is consumed, so retrying them cannot duplicate already-emitted live
-/// `cognition_out`. `MidStream` is the one post-open class: the byte stream
-/// died under us (read timeout, reset, dropped chunk) — the request itself is
-/// idempotent (same message array), and the ephemeral deltas emitted before the
-/// cut quantify the abandoned partial; the durable `provider_retry` event
-/// delimits attempts. Any other post-open failure (invalid bytes or a runtime
-/// callback publication error) is
-/// returned as a plain `anyhow` error and is never retried.
+/// loop may re-issue only when the classification has an outcome-safe retry
+/// contract. An explicit retryable status is provider failure evidence and a
+/// connect-phase `Send` did not establish a connection. `Timeout`, non-connect
+/// `Send`, and `MidStream` can all follow provider acceptance; the cut state
+/// preserves what RyeOS observed, but identical message bytes do not make the
+/// provider effect idempotent. The runner therefore treats them as uncertain
+/// outcomes unless a future admitted provider contract supplies deduplication or
+/// outcome lookup. Other post-open failures are likewise never retried.
 ///
 /// Returned wrapped in `anyhow::Error` so diagnostic surfaces can preserve the
 /// typed detail while the runner `downcast_ref`s to read the retry
@@ -2282,10 +2281,10 @@ async fn send_prepared_streaming_inner(
             }
         };
 
-        // A chunk-level read failure (timeout, reset, dropped stream) is a
-        // TRANSIENT transport error on an idempotent request: classify it as a
-        // typed `MidStream` so the runner's retry loop can re-issue instead of
-        // failing the whole directive thread over one dropped HTTP stream.
+        // A chunk-level read failure (timeout, reset, dropped stream) occurs
+        // after provider acceptance. Preserve it as typed `MidStream` so the
+        // runner can retain accounting/cut evidence and report an explicit
+        // uncertain outcome without automatically re-issuing the request.
         let chunk: Bytes = chunk_res.map_err(|e| {
             let chain = format!("{:#}", anyhow::Error::new(e));
             anyhow::Error::new(ProviderStreamError::MidStream(Box::new(

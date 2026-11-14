@@ -1365,6 +1365,43 @@ async fn adopt_contacted_launch(
     Ok(Some(thread_id))
 }
 
+/// Whether an admitted overlay environment equals the expected one in every
+/// field except the sealed vault recipient. The recipient is the target
+/// launch's own admitted caller and its scopes, judged by vault delivery, so
+/// it is not part of the retained workflow's source-owned expectation.
+fn environment_matches_ignoring_recipient(
+    admitted: &ryeos_state::objects::EnvironmentAuthority,
+    expected: &ryeos_state::objects::EnvironmentAuthority,
+) -> bool {
+    use ryeos_state::objects::EnvironmentAuthority::ProjectOverlay;
+    match (admitted, expected) {
+        (
+            ProjectOverlay {
+                project_authority_id: admitted_id,
+                source_identity: admitted_source,
+                include_operator_vault: admitted_vault,
+                recipient_principal: _,
+                recipient_scopes: _,
+                name_authority: admitted_names,
+            },
+            ProjectOverlay {
+                project_authority_id: expected_id,
+                source_identity: expected_source,
+                include_operator_vault: expected_vault,
+                recipient_principal: _,
+                recipient_scopes: _,
+                name_authority: expected_names,
+            },
+        ) => {
+            admitted_id == expected_id
+                && admitted_source == expected_source
+                && admitted_vault == expected_vault
+                && admitted_names == expected_names
+        }
+        _ => false,
+    }
+}
+
 async fn verify_target_launch(
     client: &RemoteClient,
     operation: &Operation,
@@ -1452,6 +1489,8 @@ async fn verify_target_launch(
                 .display()
         ),
         include_operator_vault: true,
+        recipient_principal: String::new(),
+        recipient_scopes: Vec::new(),
         name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
     };
     let project_semantics_match = matches!(
@@ -1472,7 +1511,7 @@ async fn verify_target_launch(
             && display_path == Path::new(&operation.target_project_path)
             && base_snapshot_hash == &operation.source_snapshot_hash
             && snapshot_hash == &operation.source_snapshot_hash
-            && environment == &expected_environment
+            && environment_matches_ignoring_recipient(environment, &expected_environment)
     );
     let item_matches = sealed.item_ref() == compiled.driver;
     // Target admission finalizes receiver-local derived execution state (most

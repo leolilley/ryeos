@@ -1822,8 +1822,9 @@ fn handle_runtime_author_item(
     let thread_auth = thread_auth.ok_or_else(|| anyhow::anyhow!("missing thread auth state"))?;
     let params: RuntimeAuthorItemParams =
         serde_json::from_value(params.clone()).context("invalid runtime.author_item params")?;
+    let authoring = RuntimeItemAuthorService::load_authoring_identity(&state.config.app_root)?;
     serde_json::to_value(RuntimeItemAuthorService::author(
-        &state.identity,
+        &authoring,
         &state.authorizer,
         cap,
         thread_auth,
@@ -2194,6 +2195,8 @@ mod tests {
                 project_authority_id: authority_id,
                 source_identity: format!("dotenv:{path}/.env"),
                 include_operator_vault: true,
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
             },
             capability_ceiling: Vec::new(),
@@ -2461,6 +2464,9 @@ mod tests {
                 ]),
             ),
             provider_env: Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+            vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
                 tmpdir.path().join("vault-store.toml"),
                 lillux::vault::VaultSecretKey::generate(),
@@ -2836,7 +2842,7 @@ mod tests {
     /// Runtime worker stack of a live daemon. Launch and recovery futures are
     /// built for that floor; unoptimized builds exceed the 2 MiB default of
     /// a test thread while driving them.
-    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
+    const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
     /// Drive one test body to completion on a current-thread runtime owned by
     /// a dedicated thread with the daemon's worker stack. The body is built

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T18:15:39Z:331df647f4e9c5b75ae2ba0e1c511afd2f313ce4fef6f5d539f76b5850eb026f:a47WRsrPH3vT2Qs/eTWiT/q+L0KjS2ZpXxgvM6Ss42FqCcTqZ3EU9Uz0w3CyQ1mVuRv4kSVQJ2aOngn6QRdrDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:3337205d0a7ea1fa1b5b6231c6beaf30e9791c9521ddf456c5853ab2bed8dceb:eoC28G78YX4Y1XsBJF1tCJujARpheE7F/GJqtnyuLKY44Nbk1h0YaIdiV7SENEB7R5ZZPI939k44rK70V49TCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core profile: the substrate alone.
 schema: 1
 exact_bundles:
@@ -400,6 +400,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

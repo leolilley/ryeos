@@ -560,6 +560,12 @@ async fn try_dispatch_client_handler(
                 .await
                 .map(Some)
         }
+        "remote_admit" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "remote-admit.yaml")?;
+            crate::client_handlers::remote_admit(app_root, &parameters)
+                .await
+                .map(Some)
+        }
         "remote_delegate" => {
             authorize_exact_core_client_handler(
                 &matched.command,

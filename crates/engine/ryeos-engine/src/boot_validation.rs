@@ -858,6 +858,7 @@ pub fn validate_protocol_builder(
             args: &[],
             cwd: dummy_path,
             project_path: dummy_path,
+            bundle_state_home: None,
             runtime_state_root: dummy_path,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2056,6 +2057,7 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            bundle_state_home: None,
             runtime_state_root: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2124,6 +2126,7 @@ composed_value_contract:
             args: &[],
             cwd: dummy,
             project_path: dummy,
+            bundle_state_home: None,
             runtime_state_root: dummy,
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

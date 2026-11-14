@@ -380,12 +380,16 @@ pub const NODE_OWNED: &[&str] = &[
     NODE_BUNDLES_ROOT,
 ];
 
-/// Node-owned trust registry, operator key material and remote pins. Live
+/// Node-owned trust registry, operator and authoring key material and remote pins. Live
 /// execution must never read or write them. They are not part of the project
 /// snapshot floor: the floor identity is stored in every snapshot policy, so
 /// widening it would invalidate existing policies.
-pub const LIVE_EXECUTION_DENIED_ONLY: &[&str] =
-    &[".ai/node/trust", ".ai/node/operator", ".ai/node/remotes"];
+pub const LIVE_EXECUTION_DENIED_ONLY: &[&str] = &[
+    ".ai/node/trust",
+    ".ai/node/operator",
+    ".ai/node/authoring",
+    ".ai/node/remotes",
+];
 
 /// True when a `.ai/`-relative path is inside one of the node-owned roots that
 /// only the live-execution floor covers.
@@ -804,6 +808,39 @@ mod tests {
             ".ai/config/schedules/snap-track.yaml",
         ]);
         validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None).unwrap();
+    }
+
+    #[test]
+    fn bundle_state_is_node_owned_never_synced() {
+        for path in [
+            ".ai/state/bundle-state",
+            ".ai/state/bundle-state/central-auth/realm-a/session.json",
+            ".ai/state/bundle-state/central-auth/.home.json",
+        ] {
+            assert!(
+                is_project_snapshot_floor_excluded(path),
+                "{path} must never be captured or deployed"
+            );
+            assert!(
+                is_durable_content_capture_floor_excluded(path),
+                "{path} must never be copied into CAS"
+            );
+            assert!(
+                live_execution_denied_control_paths()
+                    .iter()
+                    .any(|denied| path.starts_with(denied.as_str())),
+                "{path} is outside the live-execution denied control paths"
+            );
+            assert!(matches!(
+                classify_project_ai_path(path, None),
+                ProjectAiPathClass::NodeOwned {
+                    prefix: ".ai/state"
+                }
+            ));
+        }
+        // The project manifest validator refuses a manifest that carries a home.
+        let m = manifest(&[".ai/state/bundle-state/central-auth/realm-a/x"]);
+        assert!(validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None).is_err());
     }
 
     #[test]

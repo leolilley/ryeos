@@ -230,6 +230,10 @@ pub struct EngineContext {
     /// state root and refuses that root itself. Captured execution retains
     /// this explicit grant while excluding node-policy filesystem mounts.
     pub isolation_state_root: Option<PathBuf>,
+    /// The one node-owned bundle state namespace this launch may use, derived
+    /// by the daemon from the launch's sealed access capability. Kept apart
+    /// from `isolation_state_root` so both grants can coexist.
+    pub isolation_bundle_state_home: Option<crate::isolation::IsolationBundleStateHome>,
     pub isolation_checkpoint_dir: Option<PathBuf>,
     /// Exact daemon-created checkpoint directory paired with
     /// `isolation_checkpoint_dir`. Isolation validates this descriptor against

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T01:40:30Z:d9af62a5384b977a844d27dfb0cd50641c834915929eafebf73d0e396845988e:SEBwRXRQptG1vQIvLi24P70mAET2iDv/lKRgJ/VGMD+LX3SFXbdPMJG4+YYeKQxg01TtQIdzTjz30mgTfHhcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:a0db9c5d7e8c9c6102f8b934a5e80605d201d94ff153760e61c2b7aa23a44116:Imrch9h+IZE6zpuTBFa762PT5jPE0pyZYJGtvFxSTo5i2DgkwbQnNGh3rqYu4SlHJcTon3QZhCgza/G5Ws5lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -51,6 +51,7 @@ hashes through CAS.
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
 | `identity/renew-key` | `identity.renew-key` | `ryeos.execute.service.identity/renew-key` |
+| `identity/revoke-key` | `identity.revoke-key` | `ryeos.execute.service.identity/revoke-key` |
 | `identity/revoke-delegation` | `identity.revoke-delegation` | `ryeos.execute.service.identity/revoke-delegation` |
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
@@ -97,18 +98,36 @@ Admission token files are target-node-local control-plane material, not
 execution credentials. Shape:
 
 ```toml
-version = 1
+version = 2
 token_hash = "sha256-hex-of-token"
 label = "optional-default-label"
 scopes = ["ryeos.execute.service.threads/list"]
 expires_at_unix = 1767225600
+class = "remote_principal"        # local_client | remote_node | remote_principal
+origin_site_id = "site:home"      # remote_principal only
+grant_lifetime_secs = 86400       # optional; bounded by the authorization policy
 ```
+
+The minted grant takes the token's class and origin site, the claim's scopes,
+and an expiry bounded by the node's signed authorization policy. Its
+`authorized_by` is the claimant and the digest of its signed claim, and its
+`granted_by` names the token. Tokens are a stored format with no reader for
+older versions: a token of any other version is refused with
+`admission_token_stale`, and the cure is to mint a new one.
 
 The claim signature covers:
 
 ```text
-ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}\n{sorted_scopes_csv}\n{signed_at_unix}\n{nonce}
+ryeos-admission-claim-v3\n{target_node_principal_id}\n{token_hash}\n{principal_class}\n{public_key}\n{origin_site_id_or_empty}\n{sorted_scopes_csv}\n{signed_at_unix}\n{nonce}
 ```
+
+A `remote_principal` claim also carries `forwarding_key_id` and
+`forwarding_signature`: the co-signature of an admitted `remote_node` of the
+token's origin site over the forwarded-request hash of the claim, which
+includes the principal's own signature. A claim of the wrong class, for the
+wrong origin site, or without a valid co-signature is refused with
+`admission_class_mismatch`, `admission_origin_site_mismatch`,
+`admission_cosignature_missing` or `admission_cosignature_invalid`.
 
 ## Object Services
 
@@ -135,9 +154,10 @@ Object fetch flows fail closed when requested hashes are missing.
 | `vault/list` | `vault.list` | `ryeos.execute.service.vault/list` |
 | `vault/delete` | `vault.delete` | `ryeos.execute.service.vault/delete` |
 
-Vault services mutate or read the node vault. In v1, vault storage is a
-single node-level store protected by capabilities, not a per-principal
-namespace.
+Vault services mutate or read the node vault. Vault storage is a single
+node-level store, not a per-principal namespace; each name carries its own
+recipient and writer ceiling in the signed `sealed_vault_names` policy, and a
+name without one is operator-only (see [Services: vault](vault.md)).
 
 Delivering vault secrets into an execution is separate from these services.
 An execution policy whose environment exposes the operator vault (a project
@@ -165,6 +185,7 @@ for the full matrix.
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/revoke` | `remote.revoke` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
 | `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
 | `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |

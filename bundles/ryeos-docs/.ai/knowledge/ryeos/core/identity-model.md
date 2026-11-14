@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:64518cf8f57797dd96e0fd3d2e0afd020e5cac81a954fa41913b4af90220c0a4:hl+GzO60L1SdPw3XbN3YActSZ6Y8ZMZkh4BBeSaFR3GLw7cmfzsk2czLcHI/yB5qSpySqddeOm5vPZfs2A4VCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:37:06Z:0b47cb77d386988cc288365c5f4e7ac7ae6bb3fef1a551ab46f19a99f51aa79f:/pMmFkKHtYajyPdYLu21YwD4BU1nSNYLanZXP101AEZn8++DllIvcAMN6BZc90wZiV6vHdCgn7zLcPaASZ+GBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
-version: "2.1.1"
+version: "2.2.0"
 description: >
   The four identity layers in ryEOS: publisher trust, user key, node key,
   and vault key; what each signs and who owns each artifact.
@@ -33,13 +33,14 @@ See [Mental model](mental-model.md) for the relationship to directives and work.
 
 ## Identity and trust roles
 
-ryeOS has four distinct identity/trust layers:
+ryeOS has five distinct identity/trust layers:
 
 | Layer | Purpose | Storage | Created by |
 |---|---|---|---|
 | Signer registry | Verify signed items; node-signed signer records with role, scope and status | `<system>/.ai/node/trust/signers/<fp>.yaml` | `ryeos init` / `ryeos trust pin` |
 | User (CLI) key | Sign local CLI HTTP requests | `<user>/.ai/node/operator/signing/private_key.pem` | `ryeos init` |
 | Node (daemon) key | Sign outbound daemon requests and authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem` | `ryeos init` |
+| Authoring key | Sign items the runtime authors (`runtime.author_item`); machine drafts | `<system>/.ai/node/authoring/signing/private_key.pem` | `ryeos init` |
 | Vault X25519 | Seal/unseal vault secrets | `<system>/.ai/node/vault/private_key.pem` | `ryeos init`, repaired if missing after init |
 
 ## Publisher trust
@@ -59,12 +60,89 @@ The CLI resolves it from `RYEOS_CLI_KEY_PATH` when set, otherwise from
 `<user>/.ai/node/operator/signing/private_key.pem`. It must not fall back
 to the node key.
 
+## Authoring key
+
+The authoring key signs the items a runtime authors through the daemon. It is
+neither the node key nor the operator key, so authored items can be admitted or
+refused as a class without touching either. `ryeos init` creates it and pins it
+in the signer registry with role `authoring`, spaces `[project]` and no kinds:
+authored items are machine drafts until the operator widens the scope for a kind
+(`ryeos trust scope <fp> --kind <kind>`) or reviews and re-signs them. The key
+home `.ai/node/authoring` is in the live-execution floor.
+
+## Key lifecycle
+
+Each key has one lifecycle verb, all offline and local-operator-only. A running
+node refuses with `node_running_trust_change`; stop it first.
+
+| Key | Rotate | Retire / revoke |
+|---|---|---|
+| Operator | `ryeos node operator rotate` | after rotation the old key is `retired`; `ryeos trust revoke <fp>` makes it verify nothing |
+| Authoring | `ryeos node authoring rotate` | same |
+| Publisher | `ryeos trust succeed --from <statement> --old <fp>` | `ryeos trust retire` / `revoke` |
+| Node | not rotatable (see below) | not applicable |
+| Vault | `ryeos-core-tools vault rewrap` | not applicable |
+
+A rotation generates the new key in a staging path inside the key's home, has
+the old key sign a succession statement naming it, and applies one signed
+offline operation (`node.operator.rotate`, `node.authoring.rotate`). The
+operation records the succession in the registry (the new key becomes active
+with the old key's role and scope, the old key is retired and **keeps verifying
+what it signed**) and installs the new key last. Installing replaces the old
+private key, so no retired private key stays on disk. A rotation that stopped
+part way is finished by running the same request again.
+
+An operator rotation also:
+
+- replaces `operator/genesis.json` with a genesis signed by the new key that
+  records `predecessor_fingerprint` and `predecessor_created_at`;
+- issues the new operator's grant (schema 3, `expires_at = "never"`) with
+  `authorized_by` naming the old operator and the rotation request's digest, and
+  removes the retired key's grant;
+- reseals the init completion under the new key.
+
+Refusals name their cure: `key_rotation_no_current_key`, `key_rotation_not_pinned`
+and `key_rotation_not_active` (run `ryeos init`, or inspect the record with
+`ryeos trust show`), `key_rotation_staged_key_missing`,
+`key_rotation_staged_key_mismatch` and `key_rotation_old_key_mismatch` (run the
+rotate command again instead of submitting the operation by hand), and
+`key_rotation_signer_not_old_operator` (an operator rotation must be signed by
+the key being rotated out).
+
+Native-capacity documents (the issuance, re-issuances, re-anchors and policy
+amendments) are signed by the operator and chain to the operator that issued the
+capacity account. After an operator rotation the account keeps working: a
+document signed by a successor operator verifies when the signer registry holds
+a `succeeded` key event, node-signed, that links the issuing operator to the
+signer, directly or through earlier rotations. The links are read from the
+registry's event log (each `succeeded` event records its `predecessor`), never
+from a capacity document, and re-issue, re-anchor and policy amendment are
+signed by the current operator. A revoked operator breaks the chain at its
+link: it and every operator after it are refused with
+`capacity_operator_chain_broken`, naming the revoked link. The same code covers
+an issuing operator missing from the registry, and a document signed by an
+operator the registry does not link to the issuer. Revocation is terminal; the
+cure is a fresh app root.
+
+`ryeos node doctor` reports each key's age in its `key_age` row: the node,
+operator, authoring and publisher keys, each with the time it entered service
+(from the operator genesis for the operator, from the signing time of the
+registry event that pinned the others, from the public identity for the node)
+and its age in days. Age is reported, not judged: no signed policy sets a
+rotation threshold.
+
 ## Node (daemon) key
 
 The node key normally signs outbound remote requests, signs authorized-key
 TOMLs, produces the node public identity document, and signs every signer record
 in the registry; it is the implicit trust root. Daemon startup never auto-regenerates it, because doing so
 would invalidate operator trust and remote authorizations.
+
+Node key rotation is out of scope. The node key is the root of every node
+document, so rotating it means re-signing the policy generation, grants, trust
+records, remote pins and head refs, and re-pinning the node on every remote that
+pinned it. The doctor's `key_age` row shows how old it is. The node key is
+trusted for the node space only; it no longer signs project items.
 
 ### Who signs node state
 
@@ -154,6 +232,63 @@ retired `remote_operator` class is refused as `grant_class_stale`: re-admit the
 key as `remote_principal`. There is no upgrade or reclassify operation.
 `ryeos node doctor` lists expired, soon-expiring, stale and unreadable grants
 in its `authorized_keys` row.
+
+### Naming principals across nodes
+
+A principal is its key fingerprint, `fp:<64 lowercase hex>`, on every node:
+request authentication, grants, thread records and per-principal storage keys
+all use that one spelling, and a handler that takes a principal from input
+accepts nothing else (`principal_storage_key` refuses any other form). A site
+is `site:<name>`. A principal that arrives from another site is shown as
+`fp:<hex>@site:<origin>` when its grant records an origin; that string is for
+display and is never parsed back into authority.
+
+A grant's `label` is free text for people. Two grants may share a label and
+stay distinct, and code never matches on a label. The configured operator's
+grant is labelled `operator`.
+
+`ryeos node doctor` lists every readable grant in its `authorized_keys` row:
+the principal as above, class, origin site, label, scope count and
+`authorized_by`. The row warns when any key other than the configured operator
+holds a wildcard scope.
+
+### Revocation
+
+Revoking a grant is an operator-signed action that leaves evidence. `ryeos
+revoke-key --fingerprint <fp> --reason <text> [--leave-running] [--keep-delegates]`
+writes a node-signed tombstone `.ai/node/auth/revoked/<grant digest>.toml`
+(`fingerprint`, `grant_digest`, `revoked_at`, `revoked_by`, `reason`) and only
+then removes the grant file. The grant digest is the sha256 of the exact signed
+grant file, so a saved copy put back is refused with `grant_revoked` (the
+tombstone is looked up on every read of the grant, including by the scheduler);
+authorizing the key again writes a new grant with a new digest, which the
+ledger does not block. Re-granting is an explicit act.
+
+Only the principal that granted the key or the configured operator may revoke
+it (`grant_revocation_not_permitted`, HTTP 403, otherwise). The configured
+operator's own grant is revoked only offline, with `ryeos node authorization
+revoke --fingerprint <fp> --reason <text>` on the stopped node (`grant_is_operator`,
+HTTP 409, online). The offline operation converges on a rerun and refuses an
+unknown fingerprint with `grant_not_found`.
+
+Revocation is the compromise response, so by default it also:
+
+- revokes every grant the revoked key granted, transitively, because
+  delegation was bounded by the granter (`--keep-delegates` leaves them; the
+  receipt lists the delegates it left);
+- pauses every schedule pinned to a revoked grant with `authority_revoked`;
+- cancels every live thread whose covering authority is a revoked grant, by
+  the thread cancel path without its ownership check (`--leave-running` opts
+  out). A thread that cannot be cancelled is listed with its error; the
+  revocation itself stands.
+
+The receipt lists every revoked grant (digest, time, reason, what it cascaded
+from), the paused schedules and the cancelled threads. Expiry is different: a
+lapsed grant leaves running work alone, and the scheduler pauses its schedules
+at their next fire with `authority_expired`. `ryeos remote revoke` calls the
+same service on a pinned remote. The doctor's `authorized_keys` row verifies
+the ledger: an unsigned or tampered tombstone fails it, and a tombstoned grant
+file still on disk warns.
 
 A `remote_principal` grant admits a principal whose home is another RyeOS
 node. The principal signs, with its own key, a bounded delegation that lets its

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-14T00:21:02Z:88d9e3f6569fbd04974d71d53de8ebdd1e21750d007cdb3ece54ff4539750c7e:EyMWURQNTRsU2FIPWV7DNtXUIPU4f0f+odMbZZUuu3XE6JZqe5mXd7Pl3raQCfyx2PyuHgm594jjTYhUIIQRDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:37:06Z:b08b11ef72d634973d8038c5466d2988d79781b60c22e1db67ea3a2966b07b1b:i5121BVidvMiLmnXZ8Hc9XG634Vn7dXMrORL2zW4qXnPZf4Q/Oz7DfgjwpRaWzjo7atxxMbAmw6vvDswyuGAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.6.0"
+version: "3.7.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -256,13 +256,31 @@ The `service_window` row reports the running node's service window (see
 node runs, and `n/a` while it is stopped or reports no window. It judges
 nothing; the caller compares it with what it is about to run.
 
+The `key_age` row lists the node, operator, authoring and publisher keys with
+when each entered service and its age in days. It reports age only and warns
+when the node has no active operator or authoring key (`ryeos init` creates
+both). Node key rotation is not offered.
+
 The `authorized_keys` row reads every node-signed grant without starting the
 node. It fails for a grant of a retired schema or class (`grant_schema_stale`,
 `grant_class_stale`, which also stop the daemon from starting) or one that
 cannot be read, and warns for a grant that has expired or will within the
 policy's `warn_before_secs`. Each entry names the grant and its cure: renew a
 lapsed grant with `ryeos renew-key --fingerprint <fp>` (the principal that
-granted it, or the node operator); re-issue a stale one.
+granted it, or the node operator); re-issue a stale one. The row also
+verifies the revocation ledger (`.ai/node/auth/revoked/`): it fails for a
+tombstone that is unsigned, tampered or signed by another key, and warns for a
+grant file that a tombstone already refuses but that is still on disk.
+
+It also lists every readable grant under `inventory` (principal as `fp:<hex>@site:<origin>` when the grant has an origin, class, origin site, label, scope count and `authorized_by`), and warns when a key other than the configured operator holds a wildcard scope (`wildcard_holders`, each with its cure).
+
+Revoke a grant on a running node with `ryeos revoke-key --fingerprint <fp>
+--reason <text> [--leave-running] [--keep-delegates]` (the principal that
+granted it, or the node operator), or on a remote with `ryeos remote revoke
+--fingerprint <fp> --reason <text> [--remote <name>]`. On a stopped node,
+`ryeos node authorization revoke --fingerprint <fp> --reason <text>
+[--keep-delegates]` does the same offline and is the only way to revoke the
+configured operator's own grant. See [Identity model](../identity-model.md#revocation).
 
 The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
@@ -323,6 +341,15 @@ Every listed row carries an `attention` and a `fix`:
 
 `ryeos external-execution status` prints the same view as JSON.
 
+The bundle state rows read the node-owned homes under
+`.ai/state/bundle-state` without writing: `bundle_state_homes` inventories each
+home (namespaces, bytes) and fails when a `.home.json` is missing, foreign or
+tampered, a namespace name is invalid, or a directory is wider than 0700;
+`bundle_state_orphaned` warns about homes whose bundle is not installed (removing
+a bundle keeps its state); `bundle_state_home_unenforced` warns while homes exist
+and isolation is not enforced, because then a home is a convention rather than a
+boundary.
+
 The `remote_content_testimonies` row reads this node's accepted remote
 qualification testimonies from its signed heads, offline and without
 resolving bundles. For each content-lane acceptance it checks whether this
@@ -345,6 +372,12 @@ records without root. It warns when a RyeOS node service records an app root
 that no longer exists, and names the fix,
 `ryeos node host retire --orphaned --confirm`. It reports `n/a` where no native
 service directory is readable without root.
+
+Its `vault_names_without_ceiling` row lists the sealed vault names that the
+signed `sealed_vault_names` policy does not list. Such a name is operator-only,
+so it warns and names the fix, `ryeos node policy-apply sealed_vault_names
+<source.yaml>`. It reads names only, through the read-only vault open, and
+reports a vault it cannot read (a pending rewrap) as a warning.
 
 Its `ui_browser_sessions` row checks that the signed browser-session policy is
 present and valid (schema 5: session lifetime, idle timeout, launch-token
@@ -393,6 +426,23 @@ ryeos node reset policy-generation --node-profile <name> --host-class <class> --
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
 shortcut, and none broadens into another reset scope implicitly.
+
+A bundle's node-owned state (see `ryeos/standard/bundle-state-home`) moves
+and is deleted only through three signed offline operations, local operator
+only, with the daemon stopped:
+
+```bash
+ryeos node bundle-state export --bundle <id> [--namespace <ns>] --output <abs path> [--json]
+ryeos node bundle-state import --archive <file> [--replace-namespace <ns>]... [--json]
+ryeos node bundle-state remove --bundle <id> [--namespace <ns>] --confirm [--json]
+```
+
+`export` writes a tar with a node-signed manifest and refuses an existing output
+path. `import` verifies the manifest under this node's key or a pinned peer node
+key, requires the bundle to be installed with a state home backing each
+namespace, and replaces an existing different namespace only under
+`--replace-namespace`. `remove` appends a ledger receipt naming the digest of
+the listing before it deletes. Removing a bundle never deletes its state.
 
 Large objects that `ryeos external-content scrub` quarantined for byte damage
 stay on disk as evidence, counted against the large-object budget, until an
@@ -655,7 +705,7 @@ until the external snapshot driver is retired.
 - `ryeos trust ...` — manage the node's signer registry (table below).
 - `ryeos authorize-key --public-key <ed25519:...> --label <label> --scopes <scope,...>` — authorize a caller locally.
 - `ryeos remote-descriptor --name <name> --url <url>` — ask the running daemon for this node's signed remote descriptor (a trust pin signed by the node key inside the daemon). The reply carries the descriptor and its signed `yaml`.
-- `ryeos admission-token --label <label> --scopes <scope,...> [--ttl-secs <seconds>]` — mint a one-time local admission token file for remote bootstrap.
+- `ryeos admission-token --class <local_client|remote_node|remote_principal> --scopes <scope,...> [--origin-site-id <site:id>] [--label <label>] [--ttl-secs <seconds>] [--grant-lifetime-secs <seconds>]` — mint a one-time local admission token file that admits one grant class. `--origin-site-id` is required for `remote_principal` and refused otherwise.
 - `ryeos publish <bundle-dir> --key <private-key.pem> --owner <label>` — sign/publish bundle contents.
 
 ## Trust verbs
@@ -665,7 +715,7 @@ The signer registry lives in `<app_root>/.ai/node/trust/`. See
 
 | Verb | Effect |
 |---|---|
-| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
+| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author\|authoring [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
 | `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope |
 | `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
 | `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
@@ -680,6 +730,19 @@ only). On a running node they refuse with `node_running_trust_change`; cure
 by stopping the node, or by `ryeos node offline-operation submit --stop`.
 Each change appends a node-signed, hash-chained key event under
 `<app_root>/.ai/node/trust/events/`.
+
+### Key rotation
+
+| Verb | Effect |
+|---|---|
+| `ryeos node operator rotate [--json]` | Stage a new operator key, record the succession from the old key, re-issue the operator grant, replace the genesis and reseal the init completion; the old key is retired |
+| `ryeos node authoring rotate [--json]` | Stage a new authoring key and record the succession; the new key keeps the old key's scope |
+
+Both are signed offline operations (`node.operator.rotate`,
+`node.authoring.rotate`; local signer only; the operator one is applied alone).
+They refuse on a running node with `node_running_trust_change`. See
+[Identity Model](../identity-model.md#key-lifecycle) for what each does and the
+refusal codes.
 
 ## Core daemon-backed verbs
 

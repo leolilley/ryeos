@@ -9,9 +9,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, bail};
-use ryeos_node_runtime::node_policy::sections::provider_environment::{
-    ProviderEnvironmentName, ProviderEnvironmentRecipients,
-};
+use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName;
+use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
 use zeroize::Zeroizing;
 
 /// Declared provider-environment names, their recipient ceilings, and the
@@ -197,8 +196,8 @@ impl RecipientRefusal {
 /// listed capability admits only when the principal holds that exact
 /// capability string. A wildcard grant covering a listed capability is
 /// refused by name rather than reported as unlisted.
-fn judge_recipient(
-    recipients: &ProviderEnvironmentRecipients,
+pub(super) fn judge_recipient(
+    recipients: &NameRecipients,
     principal: &str,
     capabilities: &[String],
 ) -> Option<RecipientRefusal> {
@@ -251,7 +250,7 @@ pub(crate) fn test_declaration(
         .iter()
         .map(|name| ProviderEnvironmentName {
             name: (*name).to_owned(),
-            recipients: ProviderEnvironmentRecipients {
+            recipients: NameRecipients {
                 principals: recipients.iter().map(|value| (*value).to_owned()).collect(),
                 capabilities: Vec::new(),
             },
@@ -282,14 +281,14 @@ mod tests {
             vec![
                 ProviderEnvironmentName {
                     name: "A_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(&["fp:alice"]),
                         capabilities: Vec::new(),
                     },
                 },
                 ProviderEnvironmentName {
                     name: "B_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: Vec::new(),
                         capabilities: strings(&["ryeos.receive.provider_env.b_key"]),
                     },

@@ -345,6 +345,10 @@ fn build_top_level_help(
             "Reset authorized keys for a schema cutover",
         ),
         crate::tty::Row::key_value(
+            "node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
+        ),
+        crate::tty::Row::key_value(
             "node reset policy-generation",
             "Replace an obsolete node-policy generation",
         ),
@@ -960,6 +964,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "ryeos node reset authorization",
             "Retire all grants and restore only the local operator",
             "ryeos node reset authorization --confirm [--json] [--app-root <DIR>]",
+        ),
+        "node authorization revoke" => (
+            "ryeos node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
+            "ryeos node authorization revoke --fingerprint <FINGERPRINT> --reason <TEXT> [--keep-delegates] [--json] [--app-root <DIR>]",
         ),
         "node reset replay-indexes" => (
             "ryeos node reset replay-indexes",

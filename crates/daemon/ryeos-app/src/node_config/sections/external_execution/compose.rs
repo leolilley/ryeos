@@ -1074,9 +1074,7 @@ pub(crate) mod tests {
             &root.join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
-        identity
-            .write_public_identity(&root.join(".ai/node/identity/public-identity.json"))
-            .unwrap();
+        ryeos_engine::test_support::write_node_public_identity(root, identity.verifying_key());
         identity
     }
 

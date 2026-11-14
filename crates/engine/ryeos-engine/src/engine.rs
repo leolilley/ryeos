@@ -1565,6 +1565,22 @@ impl Engine {
             .map(|bundle| bundle.canonical_root.as_path())
     }
 
+    /// The installed bundle that reserves `id` as a bundle identity: the
+    /// bundle named `id`, or one whose declared owned namespaces start at the
+    /// root segment `id`.
+    pub fn installed_bundle_reserving_id(&self, id: &str) -> Option<&str> {
+        self.registered_bundle_roots
+            .iter()
+            .find(|bundle| {
+                bundle.name == id
+                    || bundle
+                        .owned_namespaces
+                        .iter()
+                        .any(|namespace| namespace.split('/').next() == Some(id))
+            })
+            .map(|bundle| bundle.name.as_str())
+    }
+
     /// Return the name of the registered bundle whose exact canonical content
     /// root is `canonical_root`. Only an exact registered root matches; a
     /// path nested inside a bundle, or a directory basename, names nothing.

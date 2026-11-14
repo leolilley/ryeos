@@ -5,6 +5,8 @@ use base64::Engine;
 use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::grant_revocation::MAX_REVOCATION_REASON_BYTES;
+
 /// Load the current node fingerprint through its single canonical key owner.
 pub fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
     let key_path = app_root
@@ -340,6 +342,19 @@ pub fn validate_canonical_site_id(site_id: &str) -> Result<()> {
     ryeos_engine::principal_contract::validate_canonical_site_id(site_id)
 }
 
+/// How a principal is written when it is shown across nodes: its fingerprint
+/// (`fp:<64 hex>`, accepted with or without the prefix), then `@site:<origin>`
+/// when the grant records the site it arrives from. This is display only: a
+/// principal is its fingerprint, and no code may match on a label or on this
+/// string.
+pub fn cross_node_principal_display(fingerprint: &str, origin_site_id: Option<&str>) -> String {
+    let bare = fingerprint.strip_prefix("fp:").unwrap_or(fingerprint);
+    match origin_site_id {
+        Some(site) => format!("fp:{bare}@{site}"),
+        None => format!("fp:{bare}"),
+    }
+}
+
 /// Check a caller-signed forwarding-origin assertion against origin verified
 /// from the source-node co-signature and both target-signed grants. The
 /// assertion can only narrow and never creates origin authority.
@@ -533,6 +548,18 @@ pub enum AuthorizedKeyError {
         expired_at: String,
     },
     #[error(
+        "authorized-key grant {fingerprint} was revoked at {revoked_at} by {revoked_by} ({reason}); \
+         a revoked grant stays refused even if its file is put back. To trust the key again, \
+         authorize it afresh with `ryeos authorize-client`: a new grant is a new generation"
+    )]
+    Revoked {
+        fingerprint: String,
+        grant_digest: String,
+        revoked_at: String,
+        revoked_by: String,
+        reason: String,
+    },
+    #[error(
         "authorized-key grant {fingerprint} uses schema_version {seen} but this node admits only \
          {admitted}; re-issue it: remove the grant file and authorize the key again with \
          `ryeos authorize-client`, or run `ryeos node reset authorization` on the stopped node \
@@ -561,6 +588,7 @@ impl AuthorizedKeyError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Expired { .. } => "grant_expired",
+            Self::Revoked { .. } => "grant_revoked",
             Self::StaleSchema { .. } => "grant_schema_stale",
             Self::StaleClass { .. } => "grant_class_stale",
             Self::NeverExpiresNotOperator { .. } => "grant_never_expires_not_operator",
@@ -761,10 +789,42 @@ pub fn load_verified_authorized_key_unjudged(
     let Some(directory) = lillux::PinnedDirectory::open(auth_dir)? else {
         return Ok(None);
     };
-    load_verified_authorized_key_from_directory(fingerprint, &directory, node_identity)
+    load_verified_authorized_key_from_directory(fingerprint, auth_dir, &directory, node_identity)
 }
 
+/// The funnel every grant read passes through: the verified grant, unless its
+/// digest has a revocation tombstone, which refuses it with
+/// [`AuthorizedKeyError::Revoked`] whatever the file's own signature says.
 fn load_verified_authorized_key_from_directory(
+    fingerprint: &str,
+    auth_dir: &Path,
+    directory: &lillux::PinnedDirectory,
+    node_identity: &NodeIdentity,
+) -> Result<Option<VerifiedAuthorizedKeyGrant>> {
+    let Some(grant) = load_grant_ignoring_revocation(fingerprint, directory, node_identity)? else {
+        return Ok(None);
+    };
+    if let Some(tombstone) = crate::grant_revocation::read_tombstone(
+        &crate::grant_revocation::revocations_dir(auth_dir),
+        &grant.source_file_hash,
+        node_identity,
+    )? {
+        return Err(AuthorizedKeyError::Revoked {
+            fingerprint: fingerprint.to_owned(),
+            grant_digest: tombstone.grant_digest,
+            revoked_at: tombstone.revoked_at,
+            revoked_by: tombstone.revoked_by,
+            reason: tombstone.reason,
+        }
+        .into());
+    }
+    Ok(Some(grant))
+}
+
+/// Read and verify one grant file without consulting the revocation ledger.
+/// Only the funnel above and revocation itself (which must read a grant it
+/// already tombstoned, to finish removing it) may call this.
+fn load_grant_ignoring_revocation(
     fingerprint: &str,
     directory: &lillux::PinnedDirectory,
     node_identity: &NodeIdentity,
@@ -994,8 +1054,41 @@ pub fn write_authorized_remote_node_key_toml(
     origin_site_id: &str,
     node_signing_key: &lillux::crypto::SigningKey,
 ) -> Result<std::path::PathBuf> {
-    validate_canonical_site_id(origin_site_id)
-        .context("remote-node origin_site_id is not canonical")?;
+    create_authorized_key_toml_for_subject(
+        auth_dir,
+        fingerprint,
+        public_key_b64,
+        scopes,
+        label,
+        granted_by,
+        created_at,
+        terms,
+        node_signing_key,
+        AuthorizedKeySubject::RemoteNode { origin_site_id },
+    )
+}
+
+/// Create a node-signed grant of any class without replacing an incumbent.
+/// A remote subject's origin site must be canonical. Admission redeems a
+/// token through this writer, so the class and origin come from the token.
+pub fn create_authorized_key_toml_for_subject(
+    auth_dir: &Path,
+    fingerprint: &str,
+    public_key_b64: &str,
+    scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    terms: &GrantTerms,
+    node_signing_key: &lillux::crypto::SigningKey,
+    subject: AuthorizedKeySubject<'_>,
+) -> Result<std::path::PathBuf> {
+    if let AuthorizedKeySubject::RemoteNode { origin_site_id }
+    | AuthorizedKeySubject::RemotePrincipal { origin_site_id } = subject
+    {
+        validate_canonical_site_id(origin_site_id)
+            .context("remote grant origin_site_id is not canonical")?;
+    }
     let signed = render_authorized_key_toml_for_subject(
         fingerprint,
         public_key_b64,
@@ -1006,7 +1099,7 @@ pub fn write_authorized_remote_node_key_toml(
         terms,
         node_signing_key,
         WildcardPolicy::Reject,
-        AuthorizedKeySubject::RemoteNode { origin_site_id },
+        subject,
     )?;
     let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
     let _lock = directory.lock_exclusive()?;
@@ -1242,8 +1335,12 @@ pub fn reconcile_authorized_key_toml_scopes_for_subject(
     let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
     let _lock = directory.lock_exclusive()?;
     directory.ensure_path_binding()?;
-    let existing =
-        load_verified_authorized_key_from_directory(fingerprint, &directory, node_identity)?;
+    let existing = load_verified_authorized_key_from_directory(
+        fingerprint,
+        auth_dir,
+        &directory,
+        node_identity,
+    )?;
     let requested_class = match subject {
         AuthorizedKeySubject::LocalClient => AuthorizedKeyPrincipalClass::LocalClient,
         AuthorizedKeySubject::RemoteNode { .. } => AuthorizedKeyPrincipalClass::RemoteNode,
@@ -1369,6 +1466,10 @@ pub fn reconcile_authorized_key_toml_scopes(
 /// A grant that was re-signed with a new expiry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenewedAuthorizedKey {
+    /// Digest of the grant generation the renewal superseded.
+    pub previous_grant_digest: String,
+    /// Digest of the renewed grant file.
+    pub grant_digest: String,
     pub previous_expires_at: GrantExpiry,
     pub expires_at: GrantExpiry,
     pub principal_class: AuthorizedKeyPrincipalClass,
@@ -1393,11 +1494,15 @@ pub fn renew_authorized_key_toml(
     let directory = lillux::PinnedDirectory::open_or_create(auth_dir)?;
     let _lock = directory.lock_exclusive()?;
     directory.ensure_path_binding()?;
-    let existing =
-        load_verified_authorized_key_from_directory(fingerprint, &directory, node_identity)?
-            .ok_or_else(|| AuthorizedKeyRenewError::NotFound {
-                fingerprint: fingerprint.to_owned(),
-            })?;
+    let existing = load_verified_authorized_key_from_directory(
+        fingerprint,
+        auth_dir,
+        &directory,
+        node_identity,
+    )?
+    .ok_or_else(|| AuthorizedKeyRenewError::NotFound {
+        fingerprint: fingerprint.to_owned(),
+    })?;
     if existing.expires_at == GrantExpiry::Never {
         return Err(AuthorizedKeyRenewError::NeverExpires.into());
     }
@@ -1442,12 +1547,245 @@ pub fn renew_authorized_key_toml(
         Some(Some(existing.source_file_hash.as_str())),
     )?;
     Ok(RenewedAuthorizedKey {
+        previous_grant_digest: existing.source_file_hash.clone(),
+        grant_digest: lillux::sha256_hex(signed.as_bytes()),
         previous_expires_at: existing.expires_at,
         expires_at: terms.expires_at,
         principal_class: existing.principal_class,
         scopes: existing.scopes,
         label: existing.owner,
     })
+}
+
+/// A revocation this node refuses.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorizedKeyRevokeError {
+    #[error(
+        "no authorized-key grant exists for fingerprint {fingerprint}, and the revocation ledger \
+         holds no tombstone for it; list grants with `ryeos doctor` and name the fingerprint \
+         exactly"
+    )]
+    NotFound { fingerprint: String },
+    #[error("only the principal that granted {fingerprint} or the node operator may revoke it")]
+    NotGranterOrOperator { fingerprint: String },
+    #[error(
+        "the configured operator's grant is revoked only offline: stop the node and run \
+         `ryeos node authorization revoke --fingerprint <fingerprint> --reason <reason>`"
+    )]
+    OperatorGrantIsOfflineOnly,
+    #[error("a revocation needs a reason of 1 to {MAX_REVOCATION_REASON_BYTES} bytes")]
+    BadReason,
+}
+
+impl AuthorizedKeyRevokeError {
+    /// Stable machine-readable code of the refusal.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "grant_not_found",
+            Self::NotGranterOrOperator { .. } => "grant_revocation_not_permitted",
+            Self::OperatorGrantIsOfflineOnly => "grant_is_operator",
+            Self::BadReason => "grant_revocation_reason_invalid",
+        }
+    }
+}
+
+/// One grant a revocation withdrew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedAuthorizedKey {
+    pub fingerprint: String,
+    /// Digest of the revoked grant file; live work is found by it.
+    pub grant_digest: String,
+    pub revoked_at: String,
+    pub revoked_by: String,
+    pub reason: String,
+    /// The grant file was already gone and its tombstone already written:
+    /// this call only confirmed an earlier revocation.
+    pub already_revoked: bool,
+    /// Fingerprint of the key whose revocation cascaded to this grant.
+    pub cascaded_from: Option<String>,
+}
+
+fn trimmed_reason(reason: &str) -> Result<&str> {
+    let reason = reason.trim();
+    if reason.is_empty() || reason.len() > MAX_REVOCATION_REASON_BYTES {
+        return Err(AuthorizedKeyRevokeError::BadReason.into());
+    }
+    Ok(reason)
+}
+
+/// Revoke one grant: write its tombstone, then remove the grant file. A crash
+/// between the two leaves a tombstoned grant that is already refused, and
+/// rerunning finishes the removal. When the grant file is gone and the ledger
+/// holds a tombstone for the fingerprint, the call returns that tombstone
+/// as `already_revoked`; with neither it fails with
+/// [`AuthorizedKeyRevokeError::NotFound`].
+pub fn revoke_authorized_key(
+    auth_dir: &Path,
+    fingerprint: &str,
+    reason: &str,
+    revoked_by: &str,
+    node_identity: &NodeIdentity,
+) -> Result<RevokedAuthorizedKey> {
+    let reason = trimmed_reason(reason)?;
+    let revocations = crate::grant_revocation::revocations_dir(auth_dir);
+    let not_found = || AuthorizedKeyRevokeError::NotFound {
+        fingerprint: fingerprint.to_owned(),
+    };
+    let Some(directory) = lillux::PinnedDirectory::open(auth_dir)? else {
+        return Err(not_found().into());
+    };
+    let _lock = directory.lock_exclusive()?;
+    directory.ensure_path_binding()?;
+    let Some(grant) = load_grant_ignoring_revocation(fingerprint, &directory, node_identity)?
+    else {
+        let earlier = crate::grant_revocation::inspect_tombstones(&revocations, node_identity)?
+            .into_iter()
+            .find_map(|entry| match entry.state {
+                crate::grant_revocation::TombstoneState::Sound(tombstone)
+                    if tombstone.fingerprint == fingerprint =>
+                {
+                    Some(*tombstone)
+                }
+                _ => None,
+            })
+            .ok_or_else(not_found)?;
+        return Ok(RevokedAuthorizedKey {
+            fingerprint: earlier.fingerprint,
+            grant_digest: earlier.grant_digest,
+            revoked_at: earlier.revoked_at,
+            revoked_by: earlier.revoked_by,
+            reason: earlier.reason,
+            already_revoked: true,
+            cascaded_from: None,
+        });
+    };
+    let tombstone = crate::grant_revocation::write_tombstone(
+        &revocations,
+        fingerprint,
+        &grant.source_file_hash,
+        revoked_by,
+        reason,
+        node_identity,
+    )?;
+    let name = format!("{fingerprint}.toml");
+    let file = directory
+        .open_pinned_regular(std::ffi::OsStr::new(&name), false)?
+        .ok_or_else(|| anyhow::anyhow!("authorized-key grant disappeared during revocation"))?;
+    directory.remove_pinned_regular_if_same(&file)?;
+    directory.sync()?;
+    Ok(RevokedAuthorizedKey {
+        fingerprint: tombstone.fingerprint,
+        grant_digest: tombstone.grant_digest,
+        revoked_at: tombstone.revoked_at,
+        revoked_by: tombstone.revoked_by,
+        reason: tombstone.reason,
+        already_revoked: false,
+        cascaded_from: None,
+    })
+}
+
+/// One grant a cascading revocation will withdraw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedRevocation {
+    pub fingerprint: String,
+    /// Digest of the grant file on disk now; `None` when the grant is already
+    /// gone (a rerun).
+    pub grant_digest: Option<String>,
+    /// The revoked key this grant is cascaded from; `None` for the target.
+    pub cascaded_from: Option<String>,
+}
+
+/// The grants revoking `fingerprint` withdraws: the target first, then, unless
+/// `keep_delegates`, every grant it (transitively) granted, in the order they
+/// are found. Fingerprints in `protected` are never cascaded to. Reads only.
+pub fn plan_revocation_cascade(
+    auth_dir: &Path,
+    fingerprint: &str,
+    keep_delegates: bool,
+    protected: &[String],
+    node_identity: &NodeIdentity,
+) -> Result<Vec<PlannedRevocation>> {
+    let inspected = inspect_authorized_keys(auth_dir, node_identity)?;
+    let digest_of = |fingerprint: &str| {
+        inspected.iter().find_map(|entry| match &entry.state {
+            GrantFileState::Current(grant) if grant.fingerprint == fingerprint => {
+                Some(grant.source_file_hash.clone())
+            }
+            _ => None,
+        })
+    };
+    let mut planned = vec![PlannedRevocation {
+        fingerprint: fingerprint.to_owned(),
+        grant_digest: digest_of(fingerprint),
+        cascaded_from: None,
+    }];
+    if keep_delegates {
+        return Ok(planned);
+    }
+    let mut frontier = vec![fingerprint.to_owned()];
+    while let Some(granter) = frontier.pop() {
+        for entry in &inspected {
+            let GrantFileState::Current(grant) = &entry.state else {
+                continue;
+            };
+            if !grant.was_granted_by(&granter)
+                || protected.contains(&grant.fingerprint)
+                || planned
+                    .iter()
+                    .any(|done| done.fingerprint == grant.fingerprint)
+            {
+                continue;
+            }
+            planned.push(PlannedRevocation {
+                fingerprint: grant.fingerprint.clone(),
+                grant_digest: Some(grant.source_file_hash.clone()),
+                cascaded_from: Some(granter.clone()),
+            });
+            frontier.push(grant.fingerprint.clone());
+        }
+    }
+    Ok(planned)
+}
+
+/// Revoke `fingerprint` and, unless `keep_delegates`, every grant it
+/// (transitively) granted: delegation was bounded by the granter, so the
+/// granter's revocation withdraws it. See [`plan_revocation_cascade`] for the
+/// order and `protected`. Rerunning converges: delegates still on disk are
+/// revoked even when the target was already revoked.
+pub fn revoke_authorized_key_cascade(
+    auth_dir: &Path,
+    fingerprint: &str,
+    reason: &str,
+    revoked_by: &str,
+    keep_delegates: bool,
+    protected: &[String],
+    node_identity: &NodeIdentity,
+) -> Result<Vec<RevokedAuthorizedKey>> {
+    let planned = plan_revocation_cascade(
+        auth_dir,
+        fingerprint,
+        keep_delegates,
+        protected,
+        node_identity,
+    )?;
+    let mut revoked = Vec::with_capacity(planned.len());
+    for step in planned {
+        let stated: String = reason.trim().chars().take(512).collect();
+        let reason = match &step.cascaded_from {
+            None => reason.to_owned(),
+            Some(granter) => format!("{stated} (delegate of revoked key {granter})"),
+        };
+        let mut receipt = revoke_authorized_key(
+            auth_dir,
+            &step.fingerprint,
+            &reason,
+            revoked_by,
+            node_identity,
+        )?;
+        receipt.cascaded_from = step.cascaded_from;
+        revoked.push(receipt);
+    }
+    Ok(revoked)
 }
 
 /// What reading one grant file found.
@@ -1495,15 +1833,19 @@ pub fn inspect_authorized_keys(
             });
             continue;
         };
-        let state =
-            match load_verified_authorized_key_from_directory(name, &directory, node_identity) {
-                Ok(Some(grant)) => GrantFileState::Current(Box::new(grant)),
-                Ok(None) => GrantFileState::Invalid("the grant file vanished while listing".into()),
-                Err(error) => match error.downcast::<AuthorizedKeyError>() {
-                    Ok(stale) => GrantFileState::Stale(stale),
-                    Err(error) => GrantFileState::Invalid(format!("{error:#}")),
-                },
-            };
+        let state = match load_verified_authorized_key_from_directory(
+            name,
+            auth_dir,
+            &directory,
+            node_identity,
+        ) {
+            Ok(Some(grant)) => GrantFileState::Current(Box::new(grant)),
+            Ok(None) => GrantFileState::Invalid("the grant file vanished while listing".into()),
+            Err(error) => match error.downcast::<AuthorizedKeyError>() {
+                Ok(stale) => GrantFileState::Stale(stale),
+                Err(error) => GrantFileState::Invalid(format!("{error:#}")),
+            },
+        };
         inspections.push(GrantFileInspection {
             name: name.to_owned(),
             state,
@@ -2277,6 +2619,42 @@ mod tests {
     }
 
     #[test]
+    fn label_is_not_identity() {
+        let fx = grant_fixture();
+        let other = SigningKey::from_bytes(&[63; 32]);
+        let other_fp = lillux::signature::compute_fingerprint(&other.verifying_key());
+        let other_key =
+            base64::engine::general_purpose::STANDARD.encode(other.verifying_key().as_bytes());
+        for (fp, key) in [(&fx.fingerprint, &fx.public_key), (&other_fp, &other_key)] {
+            create_authorized_key_toml(
+                &fx.auth_dir,
+                fp,
+                key,
+                &["ryeos.execute.service.vault/list".to_owned()],
+                "shared label",
+                &granter_fingerprint(),
+                "2026-01-01T00:00:00Z",
+                &terms_expiring(4_000_000_000),
+                fx.node.signing_key(),
+            )
+            .unwrap();
+        }
+        let first = load_verified_authorized_key_unjudged(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        let second = load_verified_authorized_key_unjudged(&other_fp, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.owner, second.owner);
+        assert_ne!(first.fingerprint, second.fingerprint);
+        assert_ne!(first.public_key, second.public_key);
+        assert_eq!(
+            cross_node_principal_display(&first.fingerprint, Some("site:a")),
+            format!("fp:{}@site:a", first.fingerprint.trim_start_matches("fp:"))
+        );
+    }
+
+    #[test]
     fn a_schema_2_grant_is_refused_as_stale_naming_the_cure() {
         let fx = grant_fixture();
         fx.write_raw(&format!(
@@ -2471,5 +2849,188 @@ mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    // ── Revocation ──────────────────────────────────────────────────────────
+
+    fn grant_path(fx: &GrantFixture) -> std::path::PathBuf {
+        fx.auth_dir.join(format!("{}.toml", fx.fingerprint))
+    }
+
+    fn revoke(fx: &GrantFixture, reason: &str) -> Result<RevokedAuthorizedKey> {
+        revoke_authorized_key(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            reason,
+            &granter_fingerprint(),
+            &fx.node,
+        )
+    }
+
+    #[test]
+    fn restored_revoked_grant_is_refused() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(2_000_000_000));
+        let saved = std::fs::read(grant_path(&fx)).unwrap();
+        let receipt = revoke(&fx, "laptop lost").unwrap();
+        assert!(!receipt.already_revoked);
+        assert!(!grant_path(&fx).exists());
+        assert!(
+            load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(grant_path(&fx), saved).unwrap();
+        let error =
+            load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node).unwrap_err();
+        let typed = error.downcast_ref::<AuthorizedKeyError>().unwrap();
+        assert_eq!(typed.code(), "grant_revoked");
+        assert!(typed.to_string().contains("laptop lost"), "{typed}");
+        assert!(typed.to_string().contains("authorize-client"), "{typed}");
+        assert!(
+            load_verified_authorized_key_unjudged(&fx.fingerprint, &fx.auth_dir, &fx.node).is_err(),
+            "the unjudged loader refuses a revoked grant too"
+        );
+    }
+
+    #[test]
+    fn regrant_after_revoke_is_a_new_generation() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(2_000_000_000));
+        let first = load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap()
+            .source_file_hash;
+        revoke(&fx, "rotated").unwrap();
+        fx.issue(&terms_expiring(2_000_000_001));
+        let second = load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .expect("a fresh grant authenticates")
+            .source_file_hash;
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn tombstone_written_before_grant_removed() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(2_000_000_000));
+        // Simulate a crash after the tombstone and before the removal.
+        let digest = lillux::sha256_hex(&std::fs::read(grant_path(&fx)).unwrap());
+        crate::grant_revocation::write_tombstone(
+            &crate::grant_revocation::revocations_dir(&fx.auth_dir),
+            &fx.fingerprint,
+            &digest,
+            &granter_fingerprint(),
+            "half done",
+            &fx.node,
+        )
+        .unwrap();
+        assert!(grant_path(&fx).exists());
+        let error =
+            load_verified_authorized_key(&fx.fingerprint, &fx.auth_dir, &fx.node).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<AuthorizedKeyError>().unwrap().code(),
+            "grant_revoked",
+            "a tombstoned grant is refused before its file is removed"
+        );
+        // Rerunning finishes the removal and keeps the first tombstone.
+        let receipt = revoke(&fx, "second attempt").unwrap();
+        assert_eq!(receipt.reason, "half done");
+        assert!(!grant_path(&fx).exists());
+    }
+
+    #[test]
+    fn revoke_converges_on_rerun_and_names_an_unknown_fingerprint() {
+        let fx = grant_fixture();
+        fx.issue(&terms_expiring(2_000_000_000));
+        let first = revoke(&fx, "compromised").unwrap();
+        let again = revoke(&fx, "compromised").unwrap();
+        assert!(again.already_revoked);
+        assert_eq!(again.grant_digest, first.grant_digest);
+        let other = revoke_authorized_key(
+            &fx.auth_dir,
+            &"f".repeat(64),
+            "x",
+            &granter_fingerprint(),
+            &fx.node,
+        )
+        .unwrap_err();
+        assert_eq!(
+            other
+                .downcast_ref::<AuthorizedKeyRevokeError>()
+                .unwrap()
+                .code(),
+            "grant_not_found"
+        );
+        let blank = revoke(&fx, "  ").unwrap_err();
+        assert_eq!(
+            blank
+                .downcast_ref::<AuthorizedKeyRevokeError>()
+                .unwrap()
+                .code(),
+            "grant_revocation_reason_invalid"
+        );
+    }
+
+    #[test]
+    fn cascade_revokes_delegates_transitively_and_honours_keep_and_protected() {
+        let fx = grant_fixture();
+        let issue_for = |seed: u8, granted_by: &str| {
+            let key = SigningKey::from_bytes(&[seed; 32]);
+            let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+            create_authorized_key_toml(
+                &fx.auth_dir,
+                &fingerprint,
+                &base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes()),
+                &["ryeos.execute.service.vault/list".to_owned()],
+                "delegate",
+                granted_by,
+                "2026-01-01T00:00:00Z",
+                &terms_expiring(2_000_000_000),
+                fx.node.signing_key(),
+            )
+            .unwrap();
+            fingerprint
+        };
+        fx.issue(&terms_expiring(2_000_000_000));
+        let child = issue_for(71, &format!("fp:{}", fx.fingerprint));
+        let grandchild = issue_for(72, &format!("fp:{child}"));
+        let kept = issue_for(73, &format!("fp:{}", fx.fingerprint));
+        let unrelated = issue_for(74, &granter_fingerprint());
+        let receipts = revoke_authorized_key_cascade(
+            &fx.auth_dir,
+            &fx.fingerprint,
+            "compromised",
+            &granter_fingerprint(),
+            false,
+            std::slice::from_ref(&kept),
+            &fx.node,
+        )
+        .unwrap();
+        let revoked: Vec<&str> = receipts.iter().map(|r| r.fingerprint.as_str()).collect();
+        assert_eq!(revoked[0], fx.fingerprint);
+        assert!(revoked.contains(&child.as_str()));
+        assert!(revoked.contains(&grandchild.as_str()));
+        assert!(!revoked.contains(&kept.as_str()), "protected stays");
+        assert!(!revoked.contains(&unrelated.as_str()), "unrelated stays");
+        let cascaded = receipts
+            .iter()
+            .find(|r| r.fingerprint == grandchild)
+            .unwrap();
+        assert_eq!(cascaded.cascaded_from.as_deref(), Some(child.as_str()));
+
+        let fx2 = grant_fixture();
+        fx2.issue(&terms_expiring(2_000_000_000));
+        let receipts = revoke_authorized_key_cascade(
+            &fx2.auth_dir,
+            &fx2.fingerprint,
+            "rotated",
+            &granter_fingerprint(),
+            true,
+            &[],
+            &fx2.node,
+        )
+        .unwrap();
+        assert_eq!(receipts.len(), 1);
     }
 }

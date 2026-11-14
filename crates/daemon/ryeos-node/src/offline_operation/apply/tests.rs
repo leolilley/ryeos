@@ -14,7 +14,9 @@ use super::*;
 use crate::offline_operation::contract::genesis_ledger_head;
 use crate::offline_operation::contract::{MAX_REQUEST_BYTES, SignedRefusal};
 use crate::offline_operation::envelope::authorized_keys_dir;
-use crate::offline_operation::facts::{FACT_POLICY_GENERATION, FACT_RESTART_INHIBITION};
+use crate::offline_operation::facts::{
+    FACT_POLICY_GENERATION, FACT_RESTART_INHIBITION, FACT_TRUST_REGISTRY,
+};
 use crate::offline_operation::host::BareHost;
 
 struct Fixture {
@@ -780,6 +782,66 @@ fn a_changed_fact_refuses_the_request() {
     fx.run();
     assert_eq!(fx.only_refusal(), RefusalReason::PreconditionFailed);
     assert_eq!(fx.ledger().last_sequence, 0);
+}
+
+/// A `node.trust.pin` body for `key`, pinned to the node's present facts, and
+/// the trust document it names as its `signer` input.
+fn trust_pin_body(fx: &Fixture, key: &SigningKey) -> (RequestBody, Vec<u8>) {
+    let document = ryeos_engine::trust::PublisherTrustDoc {
+        public_key: format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes())
+        ),
+        fingerprint: fingerprint(key),
+        owner: "stale-registry-test".to_owned(),
+    }
+    .to_toml()
+    .into_bytes();
+    let mut body = fx.body(
+        "node.trust.pin",
+        json!({ "role": "project_author", "spaces": [], "kinds": [], "projects": ["/srv/p"] }),
+    );
+    body.inputs
+        .insert("signer".into(), lillux::sha256_hex(&document));
+    (body, document)
+}
+
+#[test]
+fn a_trust_request_pinned_to_an_older_registry_is_refused() {
+    let fx = fixture();
+    fx.node
+        .write_public_identity(&ryeos_engine::trust::node_public_identity_path(fx.path()))
+        .unwrap();
+    let first = SigningKey::generate(&mut rand::rngs::OsRng);
+    let second = SigningKey::generate(&mut rand::rngs::OsRng);
+    let before = fx.facts()[FACT_TRUST_REGISTRY].clone();
+
+    let (body, document) = trust_pin_body(&fx, &first);
+    fx.drop_input(&document);
+    fx.drop_request(&fx.sign(body));
+    assert_eq!(fx.run().applied.len(), 1, "the first pin applies");
+    assert_ne!(
+        fx.facts()[FACT_TRUST_REGISTRY],
+        before,
+        "pinning changes the registry digest"
+    );
+
+    // A request that still pins the registry as it was before that change.
+    let (mut stale, document) = trust_pin_body(&fx, &second);
+    stale
+        .precondition
+        .insert(FACT_TRUST_REGISTRY.into(), before);
+    fx.drop_input(&document);
+    fx.drop_request(&fx.sign(stale));
+    fx.run();
+
+    assert_eq!(fx.only_refusal(), RefusalReason::PreconditionFailed);
+    let registry = ryeos_engine::trust::TrustStore::load_node_registry(fx.path()).unwrap();
+    assert!(registry.signer(&fingerprint(&first)).is_some());
+    assert!(
+        registry.signer(&fingerprint(&second)).is_none(),
+        "a stale request must not change the registry"
+    );
 }
 
 #[test]
@@ -1905,4 +1967,74 @@ fn a_host_without_the_cores_refuses_remote_pin_and_bundle_replace() {
     let report = fx.run();
     assert!(report.applied.is_empty());
     assert!(fx.ledger().last_sequence == 0);
+}
+
+// ── The authorization revocation ─────────────────────────────────────────
+
+fn revoke_request(fx: &Fixture, fingerprint: &str, reason: &str) -> SignedRequest {
+    fx.sign(fx.body(
+        "node.authorization.revoke",
+        json!({ "fingerprint": fingerprint, "reason": reason }),
+    ))
+}
+
+#[test]
+fn revoke_converges_on_rerun() {
+    let fx = fixture();
+    let (key, digest) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let target = fingerprint(&key);
+    let directory = authorized_keys_dir(fx.path());
+
+    let first = revoke_request(&fx, &target, "key compromised");
+    let first_digest = first.digest().unwrap();
+    fx.drop_request(&first);
+    let report = fx.run();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+    let receipt = Ledger::new(&fx.store, &fx.node)
+        .find_receipt(&fx.ledger(), &first_digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.body.discarded_grant_digests, vec![digest.clone()]);
+    assert!(!directory.join(format!("{target}.toml")).exists());
+    let tombstone = ryeos_node_runtime::grant_revocation::read_tombstone(
+        &ryeos_node_runtime::grant_revocation::revocations_dir(&directory),
+        &digest,
+        &fx.node,
+    )
+    .unwrap()
+    .expect("the revocation left a tombstone");
+    assert_eq!(tombstone.fingerprint, target);
+    assert_eq!(tombstone.reason, "key compromised");
+
+    // A second request for the same, now revoked, fingerprint applies and
+    // changes nothing: the first tombstone stands.
+    let second = revoke_request(&fx, &target, "asked again");
+    fx.drop_request(&second);
+    let report = fx.run();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+    let tombstone = ryeos_node_runtime::grant_revocation::read_tombstone(
+        &ryeos_node_runtime::grant_revocation::revocations_dir(&directory),
+        &digest,
+        &fx.node,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(tombstone.reason, "key compromised");
+}
+
+#[test]
+fn revoke_refuses_unknown_fingerprint_typed() {
+    let fx = fixture();
+    let unknown = "f".repeat(64);
+    fx.drop_request(&revoke_request(&fx, &unknown, "never granted"));
+    let report = fx.run();
+    assert!(report.applied.is_empty(), "{:?}", report.stopped);
+    let Some(StopReason::HandlerFailed { .. }) = &report.stopped else {
+        panic!("expected a handler refusal, got {:?}", report.stopped);
+    };
+    assert!(
+        format!("{:?}", report.stopped).contains("grant_not_found"),
+        "{:?}",
+        report.stopped
+    );
 }

@@ -278,6 +278,49 @@ fn scoped_signer_out_of_scope_is_untrusted_in_a_project_and_refused_elsewhere() 
 }
 
 #[test]
+fn pinned_publisher_verifies_bundle_items_and_not_project_items() {
+    let node = StoppedNode::new();
+    let key = author_key();
+    let (content, header) = signed_by(&key);
+
+    // Before the pin the signer is unknown, so its items are untrusted.
+    assert_eq!(
+        verify(
+            &node.registry(),
+            &content,
+            &header,
+            &SignerContext::bundle("tool")
+        )
+        .unwrap(),
+        TrustClass::Untrusted
+    );
+
+    node.pin(&key, "publisher", &[], &[]).expect("pin");
+
+    // A fresh load of the registry, as every verification site does, admits
+    // the publisher for bundle items only.
+    let store = node.registry();
+    assert_eq!(
+        store.signer(&fingerprint(&key)).unwrap().role,
+        SignerRole::Publisher
+    );
+    assert_eq!(
+        verify(&store, &content, &header, &SignerContext::bundle("tool")).unwrap(),
+        TrustClass::Trusted
+    );
+    assert_eq!(
+        verify(
+            &store,
+            &content,
+            &header,
+            &SignerContext::project("tool", Some(Path::new(PROJECT)))
+        )
+        .unwrap(),
+        TrustClass::Untrusted
+    );
+}
+
+#[test]
 fn retired_signer_still_verifies_existing_items() {
     let node = StoppedNode::new();
     let key = author_key();

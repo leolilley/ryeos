@@ -26,7 +26,9 @@ use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, ProjectContext};
-use ryeos_engine::protocol_vocabulary::{CallbackChannel, EnvInjectionSource, produce_env_value};
+use ryeos_engine::protocol_vocabulary::{
+    CallbackChannel, EnvInjectionSource, produce_optional_env_value,
+};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::launch_token_ttl;
@@ -3414,6 +3416,7 @@ fn build_protocol_launch_env(
         item_ref,
         thread_id: thread_id.to_string(),
         project_path: project_path.to_path_buf(),
+        bundle_state_home: None,
         runtime_state_root: callback_project_path.to_path_buf(),
         acting_principal: acting_principal.to_string(),
         cas_root,
@@ -3427,8 +3430,10 @@ fn build_protocol_launch_env(
 
     let mut bindings = Vec::with_capacity(protocol.descriptor.env_injections.len());
     for injection in &protocol.descriptor.env_injections {
-        let value = match produce_env_value(injection.source, &request) {
-            Ok(value) => value,
+        // A launch without a bundle state home sets no state-home variable.
+        let value = match produce_optional_env_value(injection.source, &request) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
             Err(error) => {
                 if let Some(token) = callback_token.as_deref() {
                     state.callback_tokens.invalidate(token);
@@ -4035,6 +4040,16 @@ fn restore_process_workspace_output_generation(
         budget,
         Some(&state.state_store),
     )
+}
+
+/// A large object scrub quarantined surfaces here, at store redemption after
+/// thread birth. Keep it the typed operator-correctable refusal rather than an
+/// internal failure; the thread is still failed by the caller.
+pub(crate) fn classify_prepared_input_error(error: anyhow::Error) -> anyhow::Error {
+    match super::external_content::classify_quarantined_large_object(&error) {
+        Some(typed) => anyhow::Error::new(typed),
+        None => error,
+    }
 }
 
 pub(crate) fn prepare_process_inputs(
@@ -5374,7 +5389,7 @@ pub async fn run_and_wait(
             wait_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
     let wait_bound_source = wait_bound_source.map(Arc::new);
     effective_path = process_path;
@@ -6439,7 +6454,7 @@ pub async fn run_detached(
             bg_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     effective_path = process_path;
     if let Some(lifeline) = process_input_lifeline {
         guard.track_process_input_dir(lifeline);
@@ -9186,7 +9201,9 @@ async fn run_existing_recovered_thread(
         recovered_private_view_realizations,
     )
     .map_err(|error| {
-        guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
+        guard.fail_before_spawn(
+            classify_prepared_input_error(error).context("recovery_input_materialization_failed"),
+        )
     })?;
     if effective_project_root.is_some() {
         prepared_plan
@@ -9329,7 +9346,8 @@ async fn run_existing_recovered_thread(
                         ),
                     )
                 }
-                error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                error @ (ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+                | ryeos_app::vault::VaultReadError::NameRefused(_)) => {
                     guard.fail_thread("vault_read_failed");
                     ResumeError::VaultRead(guard.fail_before_spawn(error.into()))
                 }
