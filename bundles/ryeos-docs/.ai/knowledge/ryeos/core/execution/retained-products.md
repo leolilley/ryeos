@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:de5f6dd4263a69d236a19664d8fcacf52f604a7a5ba766a69cc48c4067eb2f82:KyLouVjQtfxVt0r3gQQt5+U1BNliD2w4bBzEPpbPJDKbsQzbNcb+jr68OHAgDEUf+woY1eDvYpoIVrJLPdYUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:51:10Z:88adaae22aec7a8813f7a0275e1dd261bcbbcf7e8a77d8587c50204507bbdb2d:7gfAvOehJe/KBOMkmgX3nfxj+Nb4/g3pQiaH9tHOkUREwHEm+sHWGtHl4DkVEdcPB6oEDfIgzXV0W8kJLqn+Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -100,7 +100,11 @@ ryeos external-content export-qualification-testimony <remote> <qualification-ha
 ```
 
 The origin re-verifies the qualification the way it would select it now and
-refuses a stale one or one without an expiry. It signs the testimony, posts it
+refuses a stale one or one without an expiry. The node holds no operator key,
+so the command works in two steps: the node returns the exact unsigned
+testimony, the CLI checks it names the qualification and acceptance policy you
+asked for and signs it with your operator key (never leaving the CLI), and the
+node verifies that signature against the operator it pins, posts the testimony
 to the pinned remote's `POST /external-content/accept-qualification-testimony`
 route, and prints `testimony_hash`, `acceptance_hash`, `coordinate_id` and
 `reused_existing`. Keep `acceptance_hash`; selections name it.

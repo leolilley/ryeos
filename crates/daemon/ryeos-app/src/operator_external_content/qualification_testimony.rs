@@ -19,8 +19,9 @@
 //! field and its fix.
 
 use anyhow::{Context as _, bail, ensure};
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy;
+use ryeos_node_runtime::operator_identity::OperatorPublicIdentity;
 use ryeos_state::external_content::products::composition::{
     AdmittedProductQualification, ProductRelationship, ProductRelationshipQualification,
     ProductSelection,
@@ -73,6 +74,16 @@ use crate::node_config::sections::external_execution::{
 use crate::state::AppState;
 
 const ACCEPTANCE_POLICY_FIELD: &str = "remote_qualification_acceptance_policy";
+
+/// A testimony the origin has derived and the operator has yet to sign. The
+/// daemon holds no operator key: the operator signs
+/// [`Attestation::signing_bytes`] of `unsigned` where the key lives and
+/// submits the result, which [`finish_testimony_export`] verifies.
+#[derive(Debug, Clone)]
+pub struct TestimonyPreparation {
+    pub unsigned: Attestation,
+    pub coordinate_id: String,
+}
 
 /// The origin's exported, operator-signed testimony.
 #[derive(Debug, Clone)]
@@ -314,17 +325,17 @@ fn content_acceptance_refusal(error: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Origin side, blocking. The origin signs only what it would itself launch
+/// Origin side, blocking. The origin prepares only what it would itself launch
 /// on now: the exact local qualification must pass the origin's full current
-/// verification, so a stale proof is refused rather than exported.
-pub fn export_testimony_blocking(
+/// verification, so a stale proof is refused rather than prepared.
+pub fn prepare_testimony_blocking(
     state: &AppState,
     context: &HandlerContext,
-    operator: &NodeIdentity,
+    operator: &OperatorPublicIdentity,
     qualification_hash: &str,
     acceptance_policy_ref: &str,
     now: &str,
-) -> anyhow::Result<TestimonyExport> {
+) -> anyhow::Result<TestimonyPreparation> {
     require_unguarded_resolution("remote qualification testimony export")?;
     ensure!(
         lillux::valid_hash(qualification_hash),
@@ -390,16 +401,8 @@ pub fn export_testimony_blocking(
         state.threads.site_id().to_owned(),
         acceptance_policy_ref.to_owned(),
     )?;
-    let signer = crate::state_store::NodeIdentitySigner::from_identity(operator);
-    let testimony = body.sign(
-        &signer,
-        state.identity.verifying_key(),
-        now.to_owned(),
-        expires_at,
-    )?;
-    Ok(TestimonyExport {
-        testimony_hash: canonical_value_digest(&testimony.to_value())?,
-        testimony,
+    Ok(TestimonyPreparation {
+        unsigned: body.prepare(operator.fingerprint(), now.to_owned(), expires_at)?,
         coordinate_id: witness.coordinate_id,
     })
 }
@@ -416,18 +419,18 @@ pub struct ContentExportSelection {
 
 /// Origin side for the content lane, blocking. The exact published content
 /// qualification must pass the origin's full current verification, as a launch
-/// requires, so a stale proof is refused rather than exported. A content
+/// requires, so a stale proof is refused rather than prepared. A content
 /// qualification carries no expiry of its own, so the testimony lives for the
 /// maximum testimony age, or less when the qualification expires sooner.
-pub fn export_content_testimony_blocking(
+pub fn prepare_content_testimony_blocking(
     state: &AppState,
     context: &HandlerContext,
-    operator: &NodeIdentity,
+    operator: &OperatorPublicIdentity,
     selection: &ContentExportSelection,
     qualification_hash: &str,
     acceptance_policy_ref: &str,
     now: &str,
-) -> anyhow::Result<TestimonyExport> {
+) -> anyhow::Result<TestimonyPreparation> {
     require_unguarded_resolution("remote content qualification testimony export")?;
     for (label, hash) in [
         ("qualification hash", qualification_hash),
@@ -465,17 +468,96 @@ pub fn export_content_testimony_blocking(
         selection.activation_ref.clone(),
         acceptance_policy_ref.to_owned(),
     )?;
-    let signer = crate::state_store::NodeIdentitySigner::from_identity(operator);
-    let testimony = body.sign(
-        &signer,
+    Ok(TestimonyPreparation {
+        unsigned: body.prepare(operator.fingerprint(), now.to_owned(), expires_at)?,
+        coordinate_id: published.coordinate_id,
+    })
+}
+
+/// A signed testimony the origin refuses to take for what it prepared, with
+/// the cure each refusal names.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TestimonySubmissionRefusal {
+    #[error(
+        "qualification_testimony_unsigned: the submitted testimony carries no signature; the \
+         operator signs the prepared testimony with its own key, which `ryeos external-content \
+         export-qualification-testimony` does"
+    )]
+    Unsigned,
+    #[error(
+        "qualification_testimony_stale: the testimony was issued at {issued_at}, outside the \
+         {window_secs} second window this node accepts a signature in; export again"
+    )]
+    Stale { issued_at: String, window_secs: i64 },
+    #[error(
+        "qualification_testimony_differs: the submitted testimony is not what this node derives \
+         from the qualification now; export again so the operator signs the current statement"
+    )]
+    Differs,
+    #[error(
+        "qualification_testimony_signature_invalid: the testimony is not signed by the configured \
+         operator {operator}: {reason}; sign it with the operator key this node was initialized \
+         with"
+    )]
+    BadSignature { operator: String, reason: String },
+}
+
+/// How long after issue a signed testimony may be submitted.
+pub const TESTIMONY_SUBMISSION_WINDOW_SECS: i64 = 600;
+
+/// The time a submitted testimony was issued at, which the origin re-derives
+/// its own statement with, refused when outside the submission window.
+pub fn testimony_issue_time(signed: &Attestation, now_unix: i64) -> anyhow::Result<String> {
+    let stale = || TestimonySubmissionRefusal::Stale {
+        issued_at: signed.issued_at.clone(),
+        window_secs: TESTIMONY_SUBMISSION_WINDOW_SECS,
+    };
+    let issued = chrono::DateTime::parse_from_rfc3339(&signed.issued_at)
+        .map_err(|_| stale())?
+        .timestamp();
+    if issued > now_unix + 60 || now_unix - issued > TESTIMONY_SUBMISSION_WINDOW_SECS {
+        return Err(stale().into());
+    }
+    Ok(signed.issued_at.clone())
+}
+
+/// Accept the operator's signature over a prepared testimony. The submitted
+/// attestation must be exactly the prepared statement plus a signature that
+/// verifies under the operator's key, as the genesis and signer registry pin
+/// it, and the origin node's own qualification.
+pub fn finish_testimony_export(
+    state: &AppState,
+    operator: &OperatorPublicIdentity,
+    prepared: TestimonyPreparation,
+    signed: &Attestation,
+) -> anyhow::Result<TestimonyExport> {
+    use base64::Engine as _;
+    if signed.signature.is_empty() {
+        return Err(TestimonySubmissionRefusal::Unsigned.into());
+    }
+    let mut stripped = signed.clone();
+    stripped.signature.clear();
+    if stripped != prepared.unsigned {
+        return Err(TestimonySubmissionRefusal::Differs.into());
+    }
+    let bad_signature = |reason: String| TestimonySubmissionRefusal::BadSignature {
+        operator: operator.principal_id(),
+        reason,
+    };
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(&signed.signature)
+        .map_err(|error| bad_signature(format!("the signature is not base64: {error}")))?;
+    let testimony = RemoteQualificationTestimonyBody::finish(
+        prepared.unsigned,
+        &signature,
+        operator.verifying_key(),
         state.identity.verifying_key(),
-        now.to_owned(),
-        expires_at,
-    )?;
+    )
+    .map_err(|error| bad_signature(format!("{error:#}")))?;
     Ok(TestimonyExport {
         testimony_hash: canonical_value_digest(&testimony.to_value())?,
         testimony,
-        coordinate_id: published.coordinate_id,
+        coordinate_id: prepared.coordinate_id,
     })
 }
 
@@ -2057,5 +2139,33 @@ mod tests {
         let error =
             require_testimony_consumer_content(verified.evidence.product().unwrap()).unwrap_err();
         assert!(error.to_string().contains("no consumer content"));
+    }
+
+    #[test]
+    fn a_signed_testimony_is_accepted_only_inside_the_submission_window() {
+        let issued = |at: &str| {
+            Attestation::unsigned(
+                "a".repeat(64),
+                "qualification_testimony".into(),
+                "policy".into(),
+                at.to_owned(),
+                None,
+                serde_json::json!({}),
+            )
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-15T00:10:00Z")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            testimony_issue_time(&issued("2026-11-15T00:05:00Z"), now).unwrap(),
+            "2026-11-15T00:05:00Z"
+        );
+        for at in ["2026-11-15T00:00:00Z", "2026-11-15T00:20:00Z", "yesterday"] {
+            let error = testimony_issue_time(&issued(at), now).unwrap_err();
+            assert!(
+                error.to_string().contains("qualification_testimony_stale"),
+                "{at}: {error}"
+            );
+        }
     }
 }

@@ -44,7 +44,7 @@ use ryeos_app::operator_external_content::candidate_program::{
 };
 use ryeos_app::operator_external_content::qualification_testimony::{
     ContentExportSelection, RemoteContentTestimonyRefusal, accept_testimony_for_owner,
-    export_content_testimony_blocking,
+    finish_testimony_export, prepare_content_testimony_blocking,
 };
 use ryeos_state::external_content::qualification_subject::ContentQualificationSubject;
 
@@ -360,13 +360,16 @@ fn run_origin(release: Arc<Release>, session_tree: PathBuf) -> Origin {
                 CONTENT_RUNTIME_CLAIMS,
             )
             .await;
-            let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-                &state.config.operator_signing_key_path,
+            // The test plays the CLI: it holds the operator key, signs the
+            // statement the node prepared, and the node verifies it against
+            // the operator identity it pins.
+            let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+                &state.config.app_root,
             )
             .unwrap();
             let export = {
                 let state = Arc::clone(&state);
-                let operator = operator.clone();
+                let operator_key = operator.clone();
                 let selection = ContentExportSelection {
                     activation_ref: CONTENT_ACTIVATION_REF.to_owned(),
                     coordinate_id: qualification.coordinate_id.clone(),
@@ -374,15 +377,27 @@ fn run_origin(release: Arc<Release>, session_tree: PathBuf) -> Origin {
                 };
                 let attestation_hash = qualification.attestation_hash.clone();
                 tokio::task::spawn_blocking(move || {
-                    export_content_testimony_blocking(
+                    let public =
+                        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                            &state.config.app_root,
+                        )?;
+                    let prepared = prepare_content_testimony_blocking(
                         &state,
                         &operator_context(&state),
-                        &operator,
+                        &public,
                         &selection,
                         &attestation_hash,
                         ACCEPTANCE_POLICY_REF,
                         &lillux::time::iso8601_now(),
-                    )
+                    )?;
+                    let signed = prepared.unsigned.clone().with_signature(
+                        &lillux::crypto::Signer::sign(
+                            operator_key.signing_key(),
+                            &prepared.unsigned.signing_bytes()?,
+                        )
+                        .to_bytes(),
+                    )?;
+                    finish_testimony_export(&state, &public, prepared, &signed)
                 })
                 .await
                 .unwrap()

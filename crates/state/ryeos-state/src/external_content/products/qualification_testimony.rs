@@ -426,6 +426,41 @@ impl RemoteQualificationTestimonyBody {
         Ok(())
     }
 
+    /// The unsigned testimony the origin operator is asked to sign: the body
+    /// wrapped in an attestation that names the operator as issuer. The
+    /// operator signs [`Attestation::signing_bytes`] of it wherever the key is
+    /// held and the result is finished with [`Self::finish`].
+    pub fn prepare(
+        &self,
+        operator_fingerprint: &str,
+        issued_at: String,
+        expires_at: String,
+    ) -> anyhow::Result<Attestation> {
+        self.validate()?;
+        Attestation::unsigned(
+            self.qualification_attestation.subject_hash.clone(),
+            REMOTE_QUALIFICATION_TESTIMONY_CLAIM.into(),
+            REMOTE_QUALIFICATION_TESTIMONY_POLICY.into(),
+            issued_at,
+            Some(expires_at),
+            serde_json::to_value(self)?,
+        )
+        .for_issuer(operator_fingerprint)
+    }
+
+    /// Attach the operator's signature to a prepared testimony and verify the
+    /// result under the operator's key and the origin node key.
+    pub fn finish(
+        prepared: Attestation,
+        signature: &[u8],
+        operator_key: &lillux::crypto::VerifyingKey,
+        origin_node_key: &lillux::crypto::VerifyingKey,
+    ) -> anyhow::Result<Attestation> {
+        let testimony = prepared.with_signature(signature)?;
+        verify_remote_qualification_testimony(&testimony, operator_key, origin_node_key)?;
+        Ok(testimony)
+    }
+
     /// Sign the testimony with the origin operator's key. The operator
     /// fingerprint must own the qualification, and the embedded
     /// attestation must verify under the origin node key.
@@ -436,22 +471,14 @@ impl RemoteQualificationTestimonyBody {
         issued_at: String,
         expires_at: String,
     ) -> anyhow::Result<Attestation> {
-        self.validate()?;
-        let testimony = Attestation::unsigned(
-            self.qualification_attestation.subject_hash.clone(),
-            REMOTE_QUALIFICATION_TESTIMONY_CLAIM.into(),
-            REMOTE_QUALIFICATION_TESTIMONY_POLICY.into(),
-            issued_at,
-            Some(expires_at),
-            serde_json::to_value(self)?,
-        )
-        .sign(signer)?;
-        verify_remote_qualification_testimony(
-            &testimony,
+        let prepared = self.prepare(signer.fingerprint(), issued_at, expires_at)?;
+        let signature = signer.sign(&prepared.signing_bytes()?);
+        Self::finish(
+            prepared,
+            &signature,
             &signer.verifying_key(),
             origin_node_key,
-        )?;
-        Ok(testimony)
+        )
     }
 }
 
@@ -1195,6 +1222,53 @@ pub(crate) mod tests {
                 &f.node.verifying_key(),
                 "2026-10-21T00:00:00Z".into(),
                 "2026-10-25T00:00:00Z".into()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_testimony_signed_elsewhere_equals_one_signed_in_place() {
+        let f = fixture();
+        let issued = "2026-10-21T00:00:00Z".to_string();
+        let expires = "2026-10-25T00:00:00Z".to_string();
+        let prepared = f
+            .body
+            .prepare(f.attester.fingerprint(), issued, expires)
+            .unwrap();
+        assert!(prepared.signature.is_empty());
+        // The key holder signs only the bytes of the prepared statement.
+        let signature = f.attester.sign(&prepared.signing_bytes().unwrap());
+        let finished = RemoteQualificationTestimonyBody::finish(
+            prepared.clone(),
+            &signature,
+            &f.attester.verifying_key(),
+            &f.node.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(finished, f.testimony);
+
+        // A signature by any other key is refused.
+        let stranger = KeySigner::new(11);
+        let forged = stranger.sign(&prepared.signing_bytes().unwrap());
+        assert!(
+            RemoteQualificationTestimonyBody::finish(
+                prepared.clone(),
+                &forged,
+                &f.attester.verifying_key(),
+                &f.node.verifying_key(),
+            )
+            .is_err()
+        );
+        // A statement the key holder did not sign is refused.
+        let mut altered = prepared;
+        altered.expires_at = Some("2026-10-26T00:00:00Z".into());
+        assert!(
+            RemoteQualificationTestimonyBody::finish(
+                altered,
+                &signature,
+                &f.attester.verifying_key(),
+                &f.node.verifying_key(),
             )
             .is_err()
         );
