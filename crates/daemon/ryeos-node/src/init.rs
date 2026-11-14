@@ -397,6 +397,18 @@ fn publish_substrate_identity(
     Ok(None)
 }
 
+/// Remove the substrate identity record a first-time init wrote, when that
+/// init's definition admission fails. Does nothing unless `created_here`, so
+/// a record that predates the invocation is never touched.
+fn retire_first_init_identity(app_root: &Path, created_here: bool) -> Result<()> {
+    if !created_here {
+        return Ok(());
+    }
+    let path = substrate_identity_path(app_root);
+    lillux::remove_file_durable(&path)
+        .map_err(|error| anyhow!("remove substrate identity {}: {error}", path.display()))
+}
+
 /// Replace the recorded substrate identity with the authorized offered one.
 fn replace_substrate_identity_record(app_root: &Path, identity: &SubstrateIdentity) -> Result<()> {
     identity.validate()?;
@@ -751,6 +763,10 @@ fn run_init_under_lock_on_storage(
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
     let mut pending_substrate_replacement: Option<(SubstrateIdentity, SubstrateIdentity)> = None;
+    // True only when this invocation is about to write the identity record.
+    // An app root that already holds one is never rolled back.
+    let identity_created_here =
+        opts.substrate_identity.is_some() && !substrate_identity_path(&opts.app_root).exists();
     match &opts.substrate_identity {
         Some(identity) => {
             identity.validate()?;
@@ -1134,6 +1150,11 @@ fn run_init_under_lock_on_storage(
         prospective_policy.generation_digest(),
     )
     .map_err(|error| {
+        // Admission needs the node key and trust registry, which exist only
+        // after the identity record, so it cannot run first. A first-time init
+        // that fails it retires the record it wrote: the app root stays
+        // uninitialized and a retry may choose another host class.
+        let retired = retire_first_init_identity(&opts.app_root, identity_created_here);
         let declared = opts
             .node_profile
             .as_deref()
@@ -1142,15 +1163,25 @@ fn run_init_under_lock_on_storage(
             })
             .and_then(|profile| profile.host_classes().ok())
             .unwrap_or_default();
-        let recorded_host_class = load_substrate_identity_record(&opts.app_root)
-            .ok()
-            .and_then(|identity| identity.host_class);
-        enforced_admission_refusal(
+        let recorded_host_class = if identity_created_here {
+            None
+        } else {
+            load_substrate_identity_record(&opts.app_root)
+                .ok()
+                .and_then(|identity| identity.host_class)
+        };
+        let refusal = enforced_admission_refusal(
             isolation_policy,
             &declared,
             recorded_host_class.as_deref(),
             error,
-        )
+        );
+        match retired {
+            Ok(()) => refusal,
+            Err(retire_error) => refusal.context(format!(
+                "also failed to retire the substrate identity this init wrote: {retire_error:#}"
+            )),
+        }
     })?;
 
     // Re-init inherits the existing immutable node policy, but resolves its
@@ -3262,6 +3293,38 @@ mod tests {
         );
         assert!(!text.contains("local_unconfined"), "{text}");
         assert!(text.contains("bad bundle"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_first_init_retires_its_identity_and_never_an_existing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = SubstrateIdentity::new(
+            format!("sha256:{}", "a".repeat(64)),
+            1,
+            Some("core".to_owned()),
+            Some("local".to_owned()),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join(ryeos_engine::AI_DIR)).unwrap();
+        publish_substrate_identity(dir.path(), &identity, false).unwrap();
+        let path = substrate_identity_path(dir.path());
+        assert!(path.exists());
+        // A record that predates the invocation stays.
+        retire_first_init_identity(dir.path(), false).unwrap();
+        assert!(path.exists());
+        // The record this invocation wrote is removed, so a retry may name
+        // another host class.
+        retire_first_init_identity(dir.path(), true).unwrap();
+        assert!(!path.exists());
+        let retry = SubstrateIdentity {
+            host_class: Some(UNCONFINED_HOST_CLASS.to_owned()),
+            ..identity
+        };
+        assert!(
+            publish_substrate_identity(dir.path(), &retry, false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
