@@ -3620,6 +3620,14 @@ fn apply_root_admission(
 fn state_home_launch_error(
     refusal: ryeos_bundle::runtime_authority::StateHomeRefusal,
 ) -> BuildAndLaunchError {
+    BuildAndLaunchError::LaunchPreparation(Box::new(state_home_dispatch_error(&refusal)))
+}
+
+/// The typed dispatch refusal for a state home refusal: its code, its message
+/// naming the fix, and the class a caller maps to a status.
+pub(crate) fn state_home_dispatch_error(
+    refusal: &ryeos_bundle::runtime_authority::StateHomeRefusal,
+) -> DispatchError {
     use ryeos_bundle::runtime_authority::StateHomeRefusal;
 
     let code = refusal.code().to_owned();
@@ -3631,7 +3639,7 @@ fn state_home_launch_error(
         binding: None,
         details: Box::default(),
     };
-    BuildAndLaunchError::LaunchPreparation(Box::new(match &refusal {
+    match refusal {
         StateHomeRefusal::Undeclared { .. } => prepared("configuration"),
         StateHomeRefusal::NamespaceInvalid { .. } => prepared("caller"),
         StateHomeRefusal::NamespaceDenied { .. } => DispatchError::LaunchPolicyForbidden {
@@ -3640,44 +3648,22 @@ fn state_home_launch_error(
             binding: None,
         },
         StateHomeRefusal::Unavailable { .. } => prepared("unavailable"),
-    }))
+    }
 }
 
 /// Open the one bundle state namespace a launch's sealed capabilities name.
-/// The access cap is minted only after the manifest backed it and the caller's
-/// grant carried the `use` cap, and the sealed set is what a recovered launch
-/// reads, so this is the single place a launch turns that authority into a
-/// directory. Two distinct namespaces on one launch are refused.
 fn open_launch_bundle_state_home(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,
     effective_caps: &[String],
 ) -> Result<Option<ryeos_engine::isolation::IsolationBundleStateHome>, BuildAndLaunchError> {
-    let grants = effective_caps
-        .iter()
-        .filter_map(|cap| ryeos_bundle::runtime_authority::parse_bundle_state_access_cap(cap))
-        .collect::<BTreeSet<_>>();
-    let mut grants = grants.into_iter();
-    let Some((bundle_id, namespace, access)) = grants.next() else {
-        return Ok(None);
-    };
-    if grants.next().is_some() {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "a launch carries more than one bundle state access capability"
-        )));
-    }
-    let opened = ryeos_app::bundle_state_home::open_or_create(
+    ryeos_app::bundle_state_home::open_for_sealed_caps(
         &state.config.app_root,
-        &bundle_id,
-        &namespace,
         &state.identity,
         &engine.registered_bundle_generation_fingerprint(),
+        effective_caps,
     )
-    .map_err(state_home_launch_error)?;
-    Ok(Some(ryeos_engine::isolation::IsolationBundleStateHome {
-        namespace_dir: opened.path,
-        writable: access == ryeos_bundle::runtime_authority::StateHomeAccess::ReadWrite,
-    }))
+    .map_err(state_home_launch_error)
 }
 
 /// Operator follow-up gate: the sender must cover every sealed cap the
@@ -5591,9 +5577,14 @@ async fn prepare_managed_launch_authority(
             item_ref: params.resolved.item_ref.clone(),
             secrets: missing_secrets_from_requirements(&names, &secret_requirements),
         },
-        VaultReadError::NameRefused(refusal) => BuildAndLaunchError::CapabilityRejected {
-            reason: refusal.to_string(),
-        },
+        // An authorization refusal carrying the ceiling's own code.
+        VaultReadError::NameRefused(refusal) => {
+            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+                code: refusal.code().to_owned(),
+                message: refusal.to_string(),
+                binding: None,
+            }))
+        }
         error @ VaultReadError::AuthorityViolation(_) => {
             BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
         }

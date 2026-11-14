@@ -554,6 +554,7 @@ async fn revoke_cancels_live_threads_of_principal() {
     let sleeper_caps = [
         "ryeos.execute.tool.sleeper/sleeper",
         "ryeos.read.project.live",
+        "ryeos.write.project.live",
         "ryeos.execute.service.threads/get",
     ];
     let project = tempfile::tempdir().expect("project tempdir");
@@ -585,7 +586,14 @@ async fn revoke_cancels_live_threads_of_principal() {
     plant_sleeper_tool(project.path(), &fixture.publisher).expect("plant the sleeper tool");
     let project_path = project.path().canonicalize().unwrap();
 
-    // The grantee starts the sleeper without waiting for it.
+    // The grantee starts the sleeper without waiting for it. Its launch is a
+    // live project launch, which needs live write access (read-only access is
+    // not enforceable on a host without confinement), and it holds no
+    // operator-vault capability, so the launch does not overlay the vault.
+    let sleeper_policy = ryeos_app::execution_policy::ExecutionPolicy::local_live(
+        ryeos_app::execution_policy::ExecutionResponse::Accepted,
+    )
+    .exclude_operator_vault();
     let (status, json) = call(
         &harness,
         &fixture,
@@ -593,12 +601,11 @@ async fn revoke_cancels_live_threads_of_principal() {
         "/execute/launch",
         serde_json::json!({
             "item_ref": "tool:sleeper/sleeper",
+            "launch_id": "L-0123456789abcdef0123456789abcdef",
             "ref_bindings": {},
             "project_path": project_path.display().to_string(),
             "parameters": {},
-            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
-                ryeos_app::execution_policy::ExecutionResponse::Accepted,
-            ),
+            "execution_policy": sleeper_policy,
         }),
     )
     .await;

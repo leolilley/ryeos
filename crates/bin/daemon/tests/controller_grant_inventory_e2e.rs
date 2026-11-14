@@ -153,7 +153,11 @@ fn is_capability_refusal(status: reqwest::StatusCode, body: &Value) -> bool {
     if status != reqwest::StatusCode::FORBIDDEN {
         return false;
     }
-    let code = body.get("code").and_then(Value::as_str).unwrap_or_default();
+    let code = body
+        .get("code")
+        .or_else(|| body.get("error_code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     matches!(
         code,
         "caller_capability_not_covered"
@@ -355,6 +359,7 @@ fn delegation_ceiling() -> Vec<String> {
     lent.extend(PROJECT_SCAFFOLD.map(str::to_owned));
     lent.push(OPERATOR_VAULT_CAP.to_owned());
     lent.push(LIVE_PROJECT_WRITE.to_owned());
+    lent.push(service_cap(PUBLISH_SERVICE));
     lent.sort();
     lent.dedup();
     lent
@@ -411,10 +416,15 @@ impl Controller {
             }
         };
         let (harness, fixture) = started.expect("start the controller daemon");
+        // A live project is a directory holding `.ai`; without it the launch
+        // is refused as a malformed request before any capability is judged.
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::create_dir_all(project.path().join(ryeos_engine::AI_DIR))
+            .expect("create the project .ai directory");
         Self {
             harness,
             fixture,
-            project: tempfile::tempdir().expect("project tempdir"),
+            project,
             lane,
             lent: std::sync::Mutex::new(delegation_ceiling()),
         }
@@ -456,7 +466,15 @@ impl Controller {
         self.grant_exact(&all);
     }
 
-    async fn post(&self, body: Value) -> (reqwest::StatusCode, Value) {
+    async fn post(&self, mut body: Value) -> (reqwest::StatusCode, Value) {
+        // A remote principal's request names the origin site it arrives from,
+        // exactly as the origin node's remote client stamps every forwarded
+        // execute body; the receiver refuses a remote principal without it.
+        if let Lane::Forwarded { origin_node, .. } | Lane::Delegated { origin_node, .. } =
+            &self.lane
+        {
+            body["required_origin_site_id"] = Value::String(site_of(origin_node));
+        }
         match &self.lane {
             Lane::Local => self.harness.post_json("/execute", body).await,
             Lane::Forwarded {
@@ -708,7 +726,7 @@ async fn a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy
             .await;
         assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{item}: {body:#}");
         assert_eq!(
-            body.get("code").and_then(Value::as_str),
+            body.get("error_code").and_then(Value::as_str),
             Some(OPERATOR_VAULT_REFUSAL),
             "a vault overlay without {OPERATOR_VAULT_CAP} must be refused for {item}: {body:#}"
         );
@@ -720,7 +738,7 @@ async fn a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy
             .launch_worker_with_policy(item, bindings, true)
             .await;
         assert!(
-            body.get("code").and_then(Value::as_str) != Some(OPERATOR_VAULT_REFUSAL),
+            body.get("error_code").and_then(Value::as_str) != Some(OPERATOR_VAULT_REFUSAL),
             "holding {OPERATOR_VAULT_CAP} admits the vault overlay for {item}: {status} {body:#}"
         );
     }
@@ -732,7 +750,9 @@ async fn the_publication_service_also_needs_live_project_write(lane: Lane) {
     let grant = derived_grant();
 
     // The operator grant does not publish: its own execute cap alone is refused.
-    controller.grant_exact(&grant);
+    let mut with_execute = grant.clone();
+    with_execute.push(service_cap(PUBLISH_SERVICE));
+    controller.grant_exact(&with_execute);
     let (status, body) = controller.call_service(&service).await;
     assert!(
         is_capability_refusal(status, &body) && body.to_string().contains(LIVE_PROJECT_WRITE),
@@ -740,7 +760,7 @@ async fn the_publication_service_also_needs_live_project_write(lane: Lane) {
     );
 
     // Adding live-project write, outside the operator set, is the only change needed.
-    let mut with_write = grant.clone();
+    let mut with_write = with_execute.clone();
     with_write.push(LIVE_PROJECT_WRITE.to_owned());
     controller.grant_exact(&with_write);
     let (status, body) = controller.call_service(&service).await;
