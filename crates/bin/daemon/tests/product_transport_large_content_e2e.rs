@@ -513,6 +513,14 @@ async fn start_pair() -> Result<Pair> {
             &origin_site,
         ),
     )?;
+    common::remote_delegation::store_operator_delegation(
+        origin.harness.bind,
+        &common::fast_fixture::node_signing_key(),
+        &common::fast_fixture::user_signing_key(),
+        HOSTED_REMOTE,
+        PUSH_SCOPES,
+    )
+    .await?;
     Ok(Pair {
         origin,
         hosted,
@@ -1573,6 +1581,14 @@ async fn a_hosted_node_wired_by_delegated_offline_operations_takes_a_push() -> R
             &hosted_fixture.site_id(),
         ),
     )?;
+    common::remote_delegation::store_operator_delegation(
+        origin.harness.bind,
+        &origin_node,
+        &origin_operator,
+        HOSTED_REMOTE,
+        PUSH_SCOPES,
+    )
+    .await?;
     let pair = Pair {
         origin,
         hosted,
