@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::handlers::remote_push::named_remote_client;
 use crate::registry::ServiceDescriptor;
-use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -39,8 +39,12 @@ fn default_remote() -> String {
     "default".to_string()
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let client = named_remote_client(&state, &req.remote, &ctx)?;
     let resp = client
         .authorize_key(&req.public_key, &req.label, &req.scopes)
         .await?;
@@ -52,10 +56,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.authorize",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/admin"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

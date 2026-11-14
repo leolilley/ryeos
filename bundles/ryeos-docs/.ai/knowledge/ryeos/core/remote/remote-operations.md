@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:17:08Z:eb004e3d1e114d83c9a600606207c429cf562c70f41f1a98707240d5ce505862:LzwRryAQbuOUCdQu1PrTIWYlPS9JnUcaRFqkvmDoD8xEpz2vLpOtg6y9siGtJ57LCQzVdzBTFBKY/EYlAndIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:30:21Z:0aff0604592874adefd6cfa54aaf0ef205f5eb01a7b8906f1dfa8156b7347eca:1wUY2E3lDLzH1F2/BT6ncLviW0oz3a6JwhtuwLNXYO8sopLwXPj/go/mGlfua0eHU2RAzNY5Rei1G53uqJh5AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -328,6 +328,12 @@ forwarded `remote_principal` principal.
    | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires; `ryeos.use.vault.operator` only if the policy exposes the target's operator vault (not by default, see below) |
    | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
+
+   `remote authorize`, `remote pull` and `remote bundle-install` go out as the
+   caller under its stored delegation (`ryeos remote delegate`), so the
+   scopes above must be in both the caller's grant on the target and the
+   delegation; a caller that is the node itself acts as the node key. With no
+   delegation they are refused with `remote_delegation_missing`.
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
    | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_principal` principal) |

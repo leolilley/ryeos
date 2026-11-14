@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T05:54:19Z:9651df2673592a4cbb1e822a8d1cb3137680bc0ddc01a43d70d57648d995e2c9:trTVkBw8qEgWUj6F7wDIZHEqqjvhAtkIWlebIe0rDZ99LWBkGn7XO2EF+YFHUABekjSm/C53ind4H8KtfLsvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:30:21Z:6cad414b5769ca16d7ea628f121ee4b8ff7f9282bc56018b7e883d1cad38cc14:wUJooaUcSwIBr48KJbMY9kLO6AzXL2x5ZYrswQ2N/xoOb2z8mg/YpBIoBmZq78zo73JkKJz7pVOwmBHL1vjjCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -33,7 +33,8 @@ with `ryeos.attest.request.forwarded-operator`; each delegated request is
 co-signed by that key. The principal's grant is an allowed-source constraint;
 the co-signature is the transit proof. Sign a delegation with
 `ryeos remote delegate` (below). `remote/push`, `remote/reconcile-project-head`,
-`remote/run` and the other outbound commands act as the caller under that
+`remote/run`, `remote/authorize`, `remote/pull`, `remote/bundle-install`
+and the other outbound commands act as the caller under that
 delegation by default; the operator is one more principal that signs one. A
 call made by the node itself is signed by the node key alone.
 
@@ -99,6 +100,13 @@ Notes:
   with a HEAD previously pushed under the node principal. With no stored
   delegation the call is refused with `remote_delegation_missing`, naming
   `ryeos remote delegate --remote <name>`.
+- `remote authorize`, `remote pull` and `remote bundle-install` take no
+  `outbound_principal`: they always go out as the caller under its stored
+  delegation, or as the node key alone when the caller is the node itself.
+  The delegation must carry the scopes in the Authority Matrix row for the
+  command (`identity/authorize-key`; `objects/has` and `objects/get`;
+  `bundle/export` and `objects/get`), and the delegator's grant on the target
+  must hold them too, since the effective scopes are the intersection.
 
 ## `ryeos remote pin`
 
@@ -380,8 +388,11 @@ ryeos remote authorize \
   --scopes "ryeos.execute.service.objects/get"
 ```
 
-This is a remote administrative operation. Your caller node must already
-be authorized on the target for `ryeos.execute.service.identity/authorize-key`.
+This is a remote administrative operation. The call goes out as you, under
+your stored delegation for the remote (`ryeos remote delegate`), so your grant
+on the target and the delegation must both carry
+`ryeos.execute.service.identity/authorize-key`, and the delegation must carry
+every scope you hand out (a granter can only grant scopes it holds).
 For initial bootstrap, the remote operator can run `ryeos authorize-key`
 locally on the remote node instead.
 
@@ -702,6 +713,12 @@ Install a bundle from a remote node into the local system space.
 ```bash
 ryeos remote bundle-install --remote prod --bundle-name knowledge
 ```
+
+The call goes out as the caller under its stored delegation for the remote
+(`ryeos remote delegate`); the delegation and the caller's grant on the target
+must carry `ryeos.execute.service.bundle/export` and
+`ryeos.execute.service.objects/get`. With no delegation it is refused with
+`remote_delegation_missing`.
 
 The remote exports bundle files as CAS object hashes. The caller fetches
 all required blobs, materializes the local bundle directory, runs
