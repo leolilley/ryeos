@@ -105,10 +105,15 @@ fn synth_project_with_bundle_local_imports() -> PathBuf {
         std::process::id(),
         nanos
     ));
-    let bundle_root = project_dir.join(".ai").join("tools").join("example");
+    // A tool's source closure is its own directory, `lib/` included, so the
+    // helpers it imports live beside it.
+    let bundle_root = project_dir
+        .join(".ai")
+        .join("tools")
+        .join("example")
+        .join("system");
     fs::create_dir_all(bundle_root.join("lib")).unwrap();
     fs::create_dir_all(bundle_root.join("campaign")).unwrap();
-    fs::create_dir_all(bundle_root.join("system")).unwrap();
     fs::write(
         project_dir.join("json.py"),
         "raise RuntimeError('project-root json.py should not be importable')\n",
@@ -139,7 +144,7 @@ from campaign._lifecycle import suffix
 
 print(json.dumps({"message": message(), "suffix": suffix()}))
 "#;
-    fs::write(bundle_root.join("system").join("health.py"), body).unwrap();
+    fs::write(bundle_root.join("health.py"), body).unwrap();
     project_dir
 }
 
@@ -153,9 +158,12 @@ fn synth_project_with_function_bundle_local_imports() -> PathBuf {
         std::process::id(),
         nanos
     ));
-    let bundle_root = project_dir.join(".ai").join("tools").join("example");
+    let bundle_root = project_dir
+        .join(".ai")
+        .join("tools")
+        .join("example")
+        .join("function");
     fs::create_dir_all(bundle_root.join("lib")).unwrap();
-    fs::create_dir_all(bundle_root.join("function")).unwrap();
     fs::write(
         project_dir.join("json.py"),
         "raise RuntimeError('project-root json.py should not be importable')\n",
@@ -180,7 +188,7 @@ from lib.util import message
 def execute(params, project_path):
     return {"message": message(), "project_path_seen": bool(project_path)}
 "#;
-    fs::write(bundle_root.join("function").join("health.py"), body).unwrap();
+    fs::write(bundle_root.join("health.py"), body).unwrap();
     project_dir
 }
 

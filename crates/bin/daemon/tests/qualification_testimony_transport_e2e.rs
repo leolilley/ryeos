@@ -856,6 +856,14 @@ async fn start_pair() -> Result<Pair> {
             &origin_site,
         ),
     )?;
+    common::remote_delegation::store_operator_delegation(
+        origin.harness.bind,
+        &common::fast_fixture::node_signing_key(),
+        &common::fast_fixture::user_signing_key(),
+        HOSTED_REMOTE,
+        OPERATOR_SCOPES,
+    )
+    .await?;
     // The node's engine is built over a stopped node; it keeps its endpoint
     // across the restart.
     hosted.kill_daemon().await?;
