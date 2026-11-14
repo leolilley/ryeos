@@ -48,15 +48,15 @@ pub(crate) const MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES: usize = 1;
 /// One main Operational source plus its current-schema reference source.
 pub const MAX_LIVE_OPERATIONAL_PACKET_SOURCES: usize = MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES + 1;
 // Dispatch-effect records retain complete launch and caller authority, so each
-// launch-capsule schema change needs its own replay-index epoch. Epoch 15 pairs
-// with launch-capsule schema 36. Rows of any earlier epoch cannot prove current
+// launch-capsule schema change needs its own replay-index epoch. Epoch 16 pairs
+// with launch-capsule schema 37. Rows of any earlier epoch cannot prove current
 // authority; the explicit replay-index reset discards every replay row.
 //
 // The epoch literal lives only in this macro so the fresh-schema marker in
 // `SCHEMA_SQL` and the Rust constant cannot drift apart.
 macro_rules! replay_index_epoch_literal {
     () => {
-        15
+        16
     };
 }
 const REPLAY_INDEX_EPOCH: i32 = replay_index_epoch_literal!();
@@ -3733,7 +3733,7 @@ mod tests {
         // until the replay-index epoch is bumped and this pair re-reviewed.
         assert_eq!(
             (REPLAY_INDEX_EPOCH, DISPATCH_EFFECT_REPLAY_CAPSULE_SCHEMA),
-            (15, 36),
+            (16, 37),
             "a launch-capsule schema change requires an explicit replay-index epoch decision",
         );
     }

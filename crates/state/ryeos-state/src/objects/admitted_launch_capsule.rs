@@ -43,10 +43,12 @@ use super::{
 // moving the exact program identity. V34 seals the consumer runtime
 // realization and admitted qualification use. V35 requires the closed,
 // byte-bounded member-source proof and exact runtime-definition owner on every
-// BundleExecutor identity. Every schema change here requires a matching
+// BundleExecutor identity. V37 seals the admitted recipient principal and its
+// own scopes into every vault-reading environment authority (project overlay
+// and vault namespace), as provider environments already did. Every schema change here requires a matching
 // Operational dispatch-effect replay-index epoch bump, which retires effects
 // sealed under predecessor capsule contracts.
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 36;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 37;
 pub const MAX_ADMITTED_LAUNCH_CAPSULE_BYTES: usize = 16 * 1024 * 1024;
 pub const ADMITTED_DIRECT_COMMAND_ROOT: &str = "/ryeos/admitted-direct-command";
 pub const ADMITTED_DIRECT_PROJECT_ROOT: &str = "/ryeos/admitted-project";
@@ -3482,6 +3484,8 @@ mod tests {
         capsule.project_authority =
             ExecutionProjectAuthority::projectless(crate::objects::EnvironmentAuthority::Vault {
                 namespace: "test".to_string(),
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: crate::objects::EnvironmentNameAuthority::DeclaredRequired,
             })
             .unwrap();
