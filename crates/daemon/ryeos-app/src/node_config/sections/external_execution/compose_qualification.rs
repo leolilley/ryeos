@@ -579,8 +579,6 @@ mod tests {
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
-        .unwrap()
-        .write_public_identity(&root.path().join(".ai/node/identity/public-identity.json"))
         .unwrap();
         ryeos_engine::test_support::write_node_public_identity(
             root.path(),

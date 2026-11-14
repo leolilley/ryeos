@@ -4333,14 +4333,8 @@ mod tests {
         let issued = installed_native_capacity(state);
         let operator_body = operator_capacity_body(&issued);
         operator_applies_native_capacity(state, lock, operator_body.clone());
-        let (operator, _, _) = load_or_create_operator_key(
-            &state.join(".ai/node/operator/signing/private_key.pem"),
-            None,
-        )
-        .expect("operator key");
         let in_force = crate::native_capacity::load_existing_capacity_binding(
             state,
-            &compute_fingerprint(&operator.verifying_key()),
             &ryeos_node_runtime::identity::node_identity_fingerprint(state).unwrap(),
             &as_capacity_policy(&operator_body),
         )
