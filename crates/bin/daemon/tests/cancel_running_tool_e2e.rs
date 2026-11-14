@@ -286,9 +286,14 @@ async fn run_probe(emit_frames: bool) {
             register_workflow_bundles(state_path, fixture)?;
             register_mock_provider_bundle(state_path, &mock_url, fixture)
         };
-    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
-        .await
-        .expect("start daemon with mock + workflow bundles");
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with mock + workflow bundles");
 
     let project = tempfile::tempdir().expect("project tempdir");
     let pid_dir = tempfile::tempdir().expect("pid tempdir");
@@ -343,11 +348,23 @@ async fn run_probe(emit_frames: bool) {
             if n >= 3 {
                 break n;
             }
-            assert!(
-                Instant::now() < deadline,
-                "streamed frames never became events (saw {n}); thread status={}",
-                thread_status(&h, &thread_id).await
-            );
+            if Instant::now() >= deadline {
+                let events = h.chain_events(&thread_id).await;
+                let summary = match &events {
+                    Ok(Some(events)) => events
+                        .iter()
+                        .map(|(t, ty, _)| format!("{t}:{ty}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    other => format!("{other:?}"),
+                };
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
+                    "streamed frames never became events (saw {n}); thread status={}; \
+                     chain events=[{summary}]\n--- daemon stderr ---\n{stderr}",
+                    thread_status(&h, &thread_id).await
+                );
+            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     } else {
