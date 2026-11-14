@@ -111,6 +111,7 @@ config:
     write:
       action:
         item_id: "tool:advance/write"
+        ref_bindings: {}
         params:
           gate: "${inputs.gate}"
       next:

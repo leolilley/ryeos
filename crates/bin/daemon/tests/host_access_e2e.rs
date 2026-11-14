@@ -247,7 +247,7 @@ async fn an_exact_operator_grant_runs_the_tool_and_records_what_ran() {
         .expect("thread exists");
     assert_eq!(
         thread
-            .pointer("/project_authority/live_access/confinement/kind")
+            .pointer("/thread/project_authority/live_access/confinement/kind")
             .and_then(Value::as_str),
         Some("unconfined_host"),
         "the live project authority records what ran: {thread:#}"
@@ -332,7 +332,7 @@ fn daemon_pid_namespace() -> String {
 
 fn confinement_kind(thread: &Value) -> Option<&str> {
     thread
-        .pointer("/project_authority/live_access/confinement/kind")
+        .pointer("/thread/project_authority/live_access/confinement/kind")
         .and_then(Value::as_str)
 }
 
