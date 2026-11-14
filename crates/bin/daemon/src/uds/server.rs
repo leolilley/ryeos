@@ -2837,7 +2837,7 @@ mod tests {
     /// Runtime worker stack of a live daemon. Launch and recovery futures are
     /// built for that floor; unoptimized builds exceed the 2 MiB default of
     /// a test thread while driving them.
-    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
+    const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
     /// Drive one test body to completion on a current-thread runtime owned by
     /// a dedicated thread with the daemon's worker stack. The body is built

@@ -49,6 +49,7 @@ pub mod callback_probe;
 pub mod dedicated_command_cut;
 pub mod fast_fixture;
 pub mod mock_provider;
+pub mod remote_delegation;
 #[cfg(all(unix, feature = "crash-qualification-test-support"))]
 pub mod runtime_phase_cut;
 
