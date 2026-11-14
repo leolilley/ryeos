@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T05:54:19Z:ec4e5db5e9cc8580ecb4f3d8e2a7c20b5241387cc9b4905291ac7d954f2d0b92:pyHbF4mlSA9st2njze3LkYR5e/DTD+6SiKhhme3E+ESAr5owlf61+BBrifBEU7pBXp4UKYT3pEDPphRiyvxeBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:37:06Z:0b47cb77d386988cc288365c5f4e7ac7ae6bb3fef1a551ab46f19a99f51aa79f:/pMmFkKHtYajyPdYLu21YwD4BU1nSNYLanZXP101AEZn8++DllIvcAMN6BZc90wZiV6vHdCgn7zLcPaASZ+GBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -232,6 +232,25 @@ retired `remote_operator` class is refused as `grant_class_stale`: re-admit the
 key as `remote_principal`. There is no upgrade or reclassify operation.
 `ryeos node doctor` lists expired, soon-expiring, stale and unreadable grants
 in its `authorized_keys` row.
+
+### Naming principals across nodes
+
+A principal is its key fingerprint, `fp:<64 lowercase hex>`, on every node:
+request authentication, grants, thread records and per-principal storage keys
+all use that one spelling, and a handler that takes a principal from input
+accepts nothing else (`principal_storage_key` refuses any other form). A site
+is `site:<name>`. A principal that arrives from another site is shown as
+`fp:<hex>@site:<origin>` when its grant records an origin; that string is for
+display and is never parsed back into authority.
+
+A grant's `label` is free text for people. Two grants may share a label and
+stay distinct, and code never matches on a label. The configured operator's
+grant is labelled `operator`.
+
+`ryeos node doctor` lists every readable grant in its `authorized_keys` row:
+the principal as above, class, origin site, label, scope count and
+`authorized_by`. The row warns when any key other than the configured operator
+holds a wildcard scope.
 
 ### Revocation
 
