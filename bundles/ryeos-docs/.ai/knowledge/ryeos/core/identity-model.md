@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T21:33:48Z:176af8cc36bf84d3b472006c877730437a1074c2eaae10a0ba01a16f520f5f26:uVhGAO8B7AvP5L+L+nblhaG9wa19kOC/508iaW2iUSL94YnD7w/6+GY4sb8ZrOp6qArKXe4muQnu5rRc4FHnBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:ec4e5db5e9cc8580ecb4f3d8e2a7c20b5241387cc9b4905291ac7d954f2d0b92:pyHbF4mlSA9st2njze3LkYR5e/DTD+6SiKhhme3E+ESAr5owlf61+BBrifBEU7pBXp4UKYT3pEDPphRiyvxeBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
-version: "2.1.1"
+version: "2.2.0"
 description: >
   The four identity layers in ryEOS: publisher trust, user key, node key,
   and vault key; what each signs and who owns each artifact.
@@ -232,6 +232,44 @@ retired `remote_operator` class is refused as `grant_class_stale`: re-admit the
 key as `remote_principal`. There is no upgrade or reclassify operation.
 `ryeos node doctor` lists expired, soon-expiring, stale and unreadable grants
 in its `authorized_keys` row.
+
+### Revocation
+
+Revoking a grant is an operator-signed action that leaves evidence. `ryeos
+revoke-key --fingerprint <fp> --reason <text> [--leave-running] [--keep-delegates]`
+writes a node-signed tombstone `.ai/node/auth/revoked/<grant digest>.toml`
+(`fingerprint`, `grant_digest`, `revoked_at`, `revoked_by`, `reason`) and only
+then removes the grant file. The grant digest is the sha256 of the exact signed
+grant file, so a saved copy put back is refused with `grant_revoked` (the
+tombstone is looked up on every read of the grant, including by the scheduler);
+authorizing the key again writes a new grant with a new digest, which the
+ledger does not block. Re-granting is an explicit act.
+
+Only the principal that granted the key or the configured operator may revoke
+it (`grant_revocation_not_permitted`, HTTP 403, otherwise). The configured
+operator's own grant is revoked only offline, with `ryeos node authorization
+revoke --fingerprint <fp> --reason <text>` on the stopped node (`grant_is_operator`,
+HTTP 409, online). The offline operation converges on a rerun and refuses an
+unknown fingerprint with `grant_not_found`.
+
+Revocation is the compromise response, so by default it also:
+
+- revokes every grant the revoked key granted, transitively, because
+  delegation was bounded by the granter (`--keep-delegates` leaves them; the
+  receipt lists the delegates it left);
+- pauses every schedule pinned to a revoked grant with `authority_revoked`;
+- cancels every live thread whose covering authority is a revoked grant, by
+  the thread cancel path without its ownership check (`--leave-running` opts
+  out). A thread that cannot be cancelled is listed with its error; the
+  revocation itself stands.
+
+The receipt lists every revoked grant (digest, time, reason, what it cascaded
+from), the paused schedules and the cancelled threads. Expiry is different: a
+lapsed grant leaves running work alone, and the scheduler pauses its schedules
+at their next fire with `authority_expired`. `ryeos remote revoke` calls the
+same service on a pinned remote. The doctor's `authorized_keys` row verifies
+the ledger: an unsigned or tampered tombstone fails it, and a tombstoned grant
+file still on disk warns.
 
 A `remote_principal` grant admits a principal whose home is another RyeOS
 node. The principal signs, with its own key, a bounded delegation that lets its

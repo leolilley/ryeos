@@ -614,6 +614,30 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.authorization.revoke",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_AUTHORIZED_KEYS],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::AuthorizationRevokeArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::ReceiptThenEffect {
+            prepare: handlers::authorization_revoke_prepare,
+            effect: handlers::authorization_revoke_effect,
+        },
+        recovery: Recovery {
+            record: "the ledger receipt, appended before the effect and listing every revoked grant digest, and the node-signed tombstones the effect writes",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a tombstone is written before its grant file is removed and an existing tombstone is kept, so a rerun finishes any removal an interruption left and confirms the rest; an unknown fingerprint is refused with a typed error before any receipt",
+        },
+    },
+    OperationSpec {
         id: "node.trust.pin",
         authority_bearing: true,
         local_signer_only: true,
@@ -854,6 +878,7 @@ mod tests {
             "node.remote.pin",
             "node.bundle.replace",
             "node.reset.authorization",
+            "node.authorization.revoke",
             "node.trust.pin",
             "node.trust.scope",
             "node.trust.retire",
@@ -864,7 +889,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 26);
+        assert_eq!(operations().len(), 27);
     }
 
     #[test]
@@ -904,6 +929,7 @@ mod tests {
                 "node.remote.pin",
                 "node.bundle.replace",
                 "node.reset.authorization",
+                "node.authorization.revoke",
                 "node.trust.pin",
                 "node.trust.scope",
                 "node.trust.retire",
@@ -951,7 +977,7 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 8);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 9);
     }
 
     #[test]

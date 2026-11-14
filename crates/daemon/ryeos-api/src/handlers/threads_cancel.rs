@@ -88,7 +88,36 @@ pub async fn handle(
 
     // Ownership check: callers can only cancel their own threads.
     ctx.require_owner(thread.requested_by.as_deref())?;
+    cancel_loaded_thread(req, thread, state).await
+}
 
+/// Cancel a thread on the node's own authority, with no ownership check: the
+/// caller is an operator action (a grant revocation) that has already decided
+/// the thread must stop. Everything else is `threads.cancel` exactly.
+pub(crate) async fn cancel_as_node_action(
+    thread_id: &str,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    let thread = state
+        .state_store
+        .get_thread(thread_id)
+        .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
+        .ok_or(HandlerError::NotFound)?;
+    cancel_loaded_thread(
+        Request {
+            thread_id: thread_id.to_owned(),
+        },
+        thread,
+        state,
+    )
+    .await
+}
+
+async fn cancel_loaded_thread(
+    req: Request,
+    thread: ryeos_app::state_store::ThreadDetail,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
     if is_terminal_status(current_status) {

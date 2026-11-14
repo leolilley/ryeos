@@ -1968,3 +1968,73 @@ fn a_host_without_the_cores_refuses_remote_pin_and_bundle_replace() {
     assert!(report.applied.is_empty());
     assert!(fx.ledger().last_sequence == 0);
 }
+
+// ── The authorization revocation ─────────────────────────────────────────
+
+fn revoke_request(fx: &Fixture, fingerprint: &str, reason: &str) -> SignedRequest {
+    fx.sign(fx.body(
+        "node.authorization.revoke",
+        json!({ "fingerprint": fingerprint, "reason": reason }),
+    ))
+}
+
+#[test]
+fn revoke_converges_on_rerun() {
+    let fx = fixture();
+    let (key, digest) = fx.remote_principal(&[RESTART_SCOPE], SITE, WildcardPolicy::Reject);
+    let target = fingerprint(&key);
+    let directory = authorized_keys_dir(fx.path());
+
+    let first = revoke_request(&fx, &target, "key compromised");
+    let first_digest = first.digest().unwrap();
+    fx.drop_request(&first);
+    let report = fx.run();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+    let receipt = Ledger::new(&fx.store, &fx.node)
+        .find_receipt(&fx.ledger(), &first_digest)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.body.discarded_grant_digests, vec![digest.clone()]);
+    assert!(!directory.join(format!("{target}.toml")).exists());
+    let tombstone = ryeos_node_runtime::grant_revocation::read_tombstone(
+        &ryeos_node_runtime::grant_revocation::revocations_dir(&directory),
+        &digest,
+        &fx.node,
+    )
+    .unwrap()
+    .expect("the revocation left a tombstone");
+    assert_eq!(tombstone.fingerprint, target);
+    assert_eq!(tombstone.reason, "key compromised");
+
+    // A second request for the same, now revoked, fingerprint applies and
+    // changes nothing: the first tombstone stands.
+    let second = revoke_request(&fx, &target, "asked again");
+    fx.drop_request(&second);
+    let report = fx.run();
+    assert_eq!(report.applied.len(), 1, "{:?}", report.stopped);
+    let tombstone = ryeos_node_runtime::grant_revocation::read_tombstone(
+        &ryeos_node_runtime::grant_revocation::revocations_dir(&directory),
+        &digest,
+        &fx.node,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(tombstone.reason, "key compromised");
+}
+
+#[test]
+fn revoke_refuses_unknown_fingerprint_typed() {
+    let fx = fixture();
+    let unknown = "f".repeat(64);
+    fx.drop_request(&revoke_request(&fx, &unknown, "never granted"));
+    let report = fx.run();
+    assert!(report.applied.is_empty(), "{:?}", report.stopped);
+    let Some(StopReason::HandlerFailed { .. }) = &report.stopped else {
+        panic!("expected a handler refusal, got {:?}", report.stopped);
+    };
+    assert!(
+        format!("{:?}", report.stopped).contains("grant_not_found"),
+        "{:?}",
+        report.stopped
+    );
+}

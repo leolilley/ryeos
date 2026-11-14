@@ -6,6 +6,11 @@
 //! replaces the expiry and the recorded provenance with the renewing request.
 //! A lapsed grant can be renewed; the configured operator's grant never lapses
 //! and is refused.
+//!
+//! Renewal supersedes the grant generation that schedules pin, so the same
+//! operation re-seals every schedule pinned to the superseded generation whose
+//! capabilities the renewed grant still covers, and pauses the ones it no
+//! longer covers with `authority_narrowed`. The receipt lists both.
 
 use std::sync::Arc;
 
@@ -38,6 +43,9 @@ pub struct Response {
     pub previous_expires_at: String,
     pub expires_at: String,
     pub authorized_by: ryeos_node_runtime::identity::AuthorizedBy,
+    /// Schedules re-sealed to the renewed generation, and schedules paused
+    /// because the renewed grant no longer covers them.
+    pub schedules: super::grant_schedules::ScheduleAuthorityChanges,
 }
 
 pub async fn handle(
@@ -123,6 +131,30 @@ pub async fn handle(
         },
     )?;
 
+    let schedules = super::grant_schedules::reseal_for_renewal(
+        &state,
+        &super::grant_schedules::Renewal {
+            fingerprint: &fingerprint,
+            previous_digest: &renewed.previous_grant_digest,
+            renewed_digest: &renewed.grant_digest,
+            scopes: &renewed.scopes,
+        },
+    )
+    .await
+    .map_err(|error| HandlerError::Structured {
+        code: "grant_renewed_schedules_not_resealed".to_owned(),
+        status: 500,
+        body: serde_json::json!({
+            "error": format!(
+                "grant {fingerprint} was renewed (expires {}), but schedules pinned to the \
+                 superseded generation could not be re-sealed: {error:#}. They pause at their \
+                 next fire; re-seal each with `ryeos scheduler reauthorize --schedule-id <id>`",
+                super::grant_terms::expiry_text(renewed.expires_at),
+            ),
+            "error_code": "grant_renewed_schedules_not_resealed",
+        }),
+    })?;
+
     let response = Response {
         fingerprint,
         label: renewed.label,
@@ -131,6 +163,7 @@ pub async fn handle(
         previous_expires_at: super::grant_terms::expiry_text(renewed.previous_expires_at),
         expires_at: super::grant_terms::expiry_text(renewed.expires_at),
         authorized_by: terms.authorized_by,
+        schedules,
     };
     serde_json::to_value(response).map_err(|error| HandlerError::Internal(error.to_string()))
 }

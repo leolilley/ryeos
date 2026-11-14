@@ -199,6 +199,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "authorization", "revoke"],
+        summary: "Revoke an authorized-key grant on a stopped node, leaving a tombstone",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "reset", "replay-indexes"],
         summary: "Discard predecessor graph/provider replay indexes",
         category: "maintenance",
@@ -460,6 +465,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("authorization") => {
             run_node_auth_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("authorization")) if argv.get(2).map(String::as_str) == Some("revoke") => {
+            run_node_auth_revoke_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("replay-indexes") => {
@@ -1266,6 +1275,85 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
             crate::tty::Row::key_value("operator", operator),
             crate::tty::Row::key_value("remote nodes", "re-admission required"),
         ];
+        console.success(&status)?;
+    }
+    Ok(())
+}
+
+// ── ryeos node authorization revoke ──────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node authorization revoke",
+    about = "Revoke an authorized-key grant on a stopped node, leaving a node-signed tombstone",
+    long_about = "Revoke one authorized-key grant while the daemon is stopped, for example after a key compromise found while the node is down. The grant digest gets a node-signed tombstone before the grant file is removed, so a restored copy stays refused; a new grant for the same key is allowed. Grants the revoked key granted are revoked too unless --keep-delegates is given. Rerunning converges; an unknown fingerprint is refused. This is the only way to revoke the configured operator's own grant. Live threads and schedules are handled by the running node: use `ryeos revoke-key` for those.",
+    no_binary_name = true
+)]
+struct NodeAuthRevokeArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Fingerprint (64 lowercase hex) of the grant to revoke.
+    #[arg(long)]
+    fingerprint: String,
+
+    /// Why the grant is revoked, recorded in the tombstone.
+    #[arg(long)]
+    reason: String,
+
+    /// Revoke only the named grant, not the grants it granted.
+    #[arg(long)]
+    keep_delegates: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_auth_revoke_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeAuthRevokeArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.authorization.revoke",
+        serde_json::json!({
+            "fingerprint": args.fingerprint,
+            "reason": args.reason,
+            "keep_delegates": args.keep_delegates,
+        }),
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    )?;
+    let revoked = applied.result["revoked"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "revoked": revoked,
+            "receipt": applied.receipt.digest()?,
+        }))?;
+    } else {
+        let mut status = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "GRANT REVOKED");
+        status.rows = revoked
+            .iter()
+            .map(|grant| {
+                crate::tty::Row::key_value(
+                    grant["fingerprint"].as_str().unwrap_or_default(),
+                    if grant["already_revoked"].as_bool().unwrap_or(false) {
+                        "already revoked".to_owned()
+                    } else if let Some(from) = grant["cascaded_from"].as_str() {
+                        format!("revoked (delegate of {from})")
+                    } else {
+                        "revoked".to_owned()
+                    },
+                )
+            })
+            .collect();
         console.success(&status)?;
     }
     Ok(())
@@ -3361,18 +3449,29 @@ fn authorized_keys_check(
             &root.authorized_keys_dir(),
             &node,
         )?;
-        Ok((inspections, warn_before_secs))
+        let tombstones = ryeos_node_runtime::grant_revocation::inspect_tombstones(
+            &ryeos_node_runtime::grant_revocation::revocations_dir(&root.authorized_keys_dir()),
+            &node,
+        )?;
+        Ok((inspections, tombstones, warn_before_secs))
     };
     match inspect() {
-        Ok((inspections, warn_before_secs)) => {
-            let report = grant_report(
+        Ok((inspections, tombstones, warn_before_secs)) => {
+            let mut report = grant_report(
                 &inspections,
                 warn_before_secs,
                 lillux::time::unix_secs_now(),
             );
-            let status = if !report.stale.is_empty() || !report.invalid.is_empty() {
+            report.add_tombstones(&tombstones);
+            let status = if !report.stale.is_empty()
+                || !report.invalid.is_empty()
+                || !report.invalid_tombstones.is_empty()
+            {
                 FAIL
-            } else if !report.expired.is_empty() || !report.expiring.is_empty() {
+            } else if !report.expired.is_empty()
+                || !report.expiring.is_empty()
+                || !report.revoked_on_disk.is_empty()
+            {
                 WARN
             } else {
                 OK
@@ -3443,9 +3542,33 @@ struct GrantReport {
     expiring: Vec<serde_json::Value>,
     stale: Vec<serde_json::Value>,
     invalid: Vec<serde_json::Value>,
+    /// Grant files whose digest has a revocation tombstone: refused, but the
+    /// file is still on disk.
+    revoked_on_disk: Vec<serde_json::Value>,
+    /// Revocation tombstones that are unsigned, tampered, signed by another
+    /// key or malformed: the ledger cannot be trusted.
+    invalid_tombstones: Vec<serde_json::Value>,
+    tombstones: usize,
 }
 
 impl GrantReport {
+    fn add_tombstones(
+        &mut self,
+        tombstones: &[ryeos_node_runtime::grant_revocation::TombstoneInspection],
+    ) {
+        use ryeos_node_runtime::grant_revocation::TombstoneState;
+        self.tombstones = tombstones.len();
+        for entry in tombstones {
+            if let TombstoneState::Invalid(reason) = &entry.state {
+                self.invalid_tombstones.push(serde_json::json!({
+                    "tombstone": entry.name,
+                    "problem": reason,
+                    "fix": "the revocation ledger is node-signed evidence: restore the tombstone from a backup, or revoke the grant again with `ryeos node authorization revoke` on the stopped node",
+                }));
+            }
+        }
+    }
+
     fn into_detail(self) -> serde_json::Value {
         serde_json::json!({
             "grants": self.grants,
@@ -3453,6 +3576,9 @@ impl GrantReport {
             "expiring": self.expiring,
             "stale": self.stale,
             "invalid": self.invalid,
+            "revoked_on_disk": self.revoked_on_disk,
+            "tombstones": self.tombstones,
+            "invalid_tombstones": self.invalid_tombstones,
         })
     }
 }
@@ -3492,6 +3618,13 @@ fn grant_report(
                 } else if expires.saturating_sub(now) <= warn_before_secs {
                     report.expiring.push(row(fix));
                 }
+            }
+            GrantFileState::Stale(error @ ryeos_node_runtime::identity::AuthorizedKeyError::Revoked { .. }) => {
+                report.revoked_on_disk.push(serde_json::json!({
+                    "file": inspection.name,
+                    "error_code": error.code(),
+                    "fix": "the grant is already refused; remove the file, or rerun `ryeos node authorization revoke` for it on the stopped node",
+                }))
             }
             GrantFileState::Stale(error) => report.stale.push(serde_json::json!({
                 "file": inspection.name,
@@ -3633,16 +3766,19 @@ fn schedule_authority_check(
         );
     }
     match inspect_schedule_grant_generations(app_root) {
-        Ok(superseded) if superseded.is_empty() => {
-            check("schedule_authority", OK, serde_json::json!({}))
-        }
-        Ok(superseded) => check(
+        Ok(report) if report.is_empty() => check("schedule_authority", OK, serde_json::json!({})),
+        Ok(report) => check(
             "schedule_authority",
             WARN,
             serde_json::json!({
-                "superseded": superseded,
-                "note": "these schedules pin a grant generation that no longer holds; each refuses its next fire and pauses itself",
-                "fix": "as each schedule's owner: ryeos scheduler reauthorize <schedule_id>, then ryeos scheduler resume <schedule_id> if it was paused",
+                "superseded": report.superseded,
+                "expiring": report.expiring,
+                "paused_by_authority": report.paused_by_authority,
+                "note": "`superseded` schedules pin a grant generation that no longer holds (revoked, lapsed or replaced): each refuses its next fire and pauses itself. `expiring` schedules pin a grant that lapses soon. `paused_by_authority` schedules were paused because their authority was withdrawn.",
+                "fix": {
+                    "superseded or paused": "as each schedule's owner: ryeos scheduler reauthorize --schedule-id <schedule_id>, then ryeos scheduler resume --schedule-id <schedule_id>. A revoked grant is not revived by authorizing the key again: re-register the schedule",
+                    "expiring or lapsed": "as the grant's granter or the node operator: ryeos renew-key --fingerprint <grant-fingerprint>; renewal re-seals every schedule the renewed grant still covers",
+                },
             }),
         ),
         Err(error) => check(
@@ -3656,16 +3792,21 @@ fn schedule_authority_check(
 #[cfg(feature = "scheduling")]
 fn inspect_schedule_grant_generations(
     app_root: &std::path::Path,
-) -> anyhow::Result<Vec<ryeos_scheduler_service::SupersededScheduleGrant>> {
+) -> anyhow::Result<ryeos_scheduler_service::ScheduleAuthorityReport> {
     let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
     let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
     let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .map_err(|error| anyhow::anyhow!("load trust store: {error}"))?;
-    ryeos_scheduler_service::superseded_schedule_grants(
+    let warn_before_secs =
+        ryeos_core_tools::actions::hosted_policy::load_authorization_policy(app_root)?
+            .warn_before_secs;
+    ryeos_scheduler_service::schedule_authority_report(
         app_root,
         &root.authorized_keys_dir(),
         &identity,
         &trust_store,
+        warn_before_secs,
+        lillux::time::unix_secs_now(),
     )
 }
 
@@ -5958,6 +6099,22 @@ mod tests {
         assert_eq!(report.stale.len(), 1);
         assert_eq!(report.invalid.len(), 1);
         assert_eq!(report.stale[0]["error_code"], "grant_schema_stale");
+        let revoked = grant_report(
+            &[GrantFileInspection {
+                name: "gone".to_owned(),
+                state: GrantFileState::Stale(AuthorizedKeyError::Revoked {
+                    fingerprint: "gone".to_owned(),
+                    grant_digest: "a".repeat(64),
+                    revoked_at: "2026-11-14T00:00:00Z".to_owned(),
+                    revoked_by: "fp:op".to_owned(),
+                    reason: "lost".to_owned(),
+                }),
+            }],
+            3_600,
+            now,
+        );
+        assert!(revoked.stale.is_empty(), "a tombstoned file is not stale");
+        assert_eq!(revoked.revoked_on_disk.len(), 1);
         assert!(
             report.expired[0]["fix"]
                 .as_str()

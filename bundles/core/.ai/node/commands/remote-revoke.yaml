@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-14T05:54:19Z:daa8a989ddea3f43ef056467df37b440074b5ce1d27321d3905b76a0e5e46b12:RbxNsaQpwfzFYwWo+hNWJfl6Aw/dCNq3D7giTvuQWrL9p77wKx9UWaOebh+vofzsSD2Ix62x2qoEu6o+DhpNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- remote
+- revoke
+description: Revoke an authorized-key grant on a remote node
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:remote/revoke

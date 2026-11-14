@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:18e0f41f919715464362bea0f7d08c0c23bf963f97499ec89de85e85bd15750b:lRybPMvu06WDv6DHtFQO1YTuSs0BWklNi+Ao3Baz2RJ6r4nCyTsWH03lIP3vh8QKwxZpwxKzcdEDcj+xex04Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:9651df2673592a4cbb1e822a8d1cb3137680bc0ddc01a43d70d57648d995e2c9:trTVkBw8qEgWUj6F7wDIZHEqqjvhAtkIWlebIe0rDZ99LWBkGn7XO2EF+YFHUABekjSm/C53ind4H8KtfLsvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
-version: "1.0.4"
+version: "1.1.0"
 description: >
   Manpage-style reference for ryeos remote commands, including local
   capabilities, remote authorized-key scopes, routes, examples, and
@@ -50,6 +50,7 @@ call made by the node itself is signed by the node key alone.
 | `ryeos remote status` | `ryeos.execute.service.remote/status` | signed auth probe only after the complete configured identity matches | `GET /health`, `GET /public-key`, then `GET /threads?limit=1` only on an exact identity match |
 | `ryeos remote doctor` | `ryeos.execute.service.remote/doctor` | signed auth probe; project status if `--project` is supplied, both only after the complete configured identity matches | `GET /health`, `GET /public-key`, then `GET /threads?limit=1` and optionally `POST /project/status` only on an exact identity match |
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
+| `ryeos remote revoke` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/revoke-key` | `POST /revoke-key` |
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
 | `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | the delegating operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
 | `ryeos remote pull` | `ryeos.execute.service.remote/pull` | `ryeos.execute.service.objects/get` (reads are scoped to the `root` the command names; `objects/get-any` is operator-only and never granted to a peer) | `POST /objects/has`, `POST /objects/get` |
@@ -347,6 +348,25 @@ contact is skipped. The report is useful for confirming URL reachability,
 identity coordinates, local node identity, current authorization status,
 project bindings, and the bootstrap `authorize-client` command to run on the
 remote host.
+
+## `ryeos remote revoke`
+
+Ask a remote node to revoke a grant.
+
+```bash
+ryeos remote revoke \
+  --remote prod \
+  --fingerprint "<grant fingerprint>" \
+  --reason "key compromised" \
+  [--leave-running] [--keep-delegates]
+```
+
+The remote leaves a node-signed tombstone for the grant, so a restored copy
+stays refused, and by default also revokes the grants that key granted, pauses
+its schedules and cancels the live threads running under the revoked grants.
+Only the principal that granted the key, or the remote's operator, may revoke
+it; the remote's operator grant is revoked offline only. The remote's receipt
+is printed as sent. See [Identity model](../identity-model.md#revocation).
 
 ## `ryeos remote authorize`
 

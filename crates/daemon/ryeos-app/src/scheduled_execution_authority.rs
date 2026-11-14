@@ -20,12 +20,38 @@ use ryeos_scheduler_contract::{
 use crate::handler_context::HandlerContext;
 use crate::state::AppState;
 use ryeos_node_runtime::identity::{
-    AuthorizedKeyPrincipalClass, FORWARDED_OPERATOR_ATTESTATION_SCOPE, NodeIdentity,
-    VerifiedAuthorizedKeyGrant, load_verified_authorized_key,
+    AuthorizedKeyError, AuthorizedKeyPrincipalClass, FORWARDED_OPERATOR_ATTESTATION_SCOPE,
+    NodeIdentity, VerifiedAuthorizedKeyGrant, load_verified_authorized_key,
 };
 
 fn refused(kind: ScheduledAuthorityRefusalKind, detail: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(ScheduledAuthorityRefusal::new(kind, detail))
+}
+
+/// Read a pinned grant, turning a lapsed or tombstoned grant into the typed
+/// refusal the fire records. Other failures stay untyped.
+fn load_pinned_grant(
+    fingerprint: &str,
+    authorized_keys_dir: &Path,
+    node_identity: &NodeIdentity,
+    what: &str,
+    revoked: ScheduledAuthorityRefusalKind,
+) -> anyhow::Result<Option<VerifiedAuthorizedKeyGrant>> {
+    load_verified_authorized_key(fingerprint, authorized_keys_dir, node_identity).map_err(|error| {
+        match error.downcast_ref::<AuthorizedKeyError>() {
+            Some(AuthorizedKeyError::Expired { expired_at, .. }) => refused(
+                ScheduledAuthorityRefusalKind::GrantExpired,
+                format!("the {what} expired at {expired_at}; renew it with `ryeos renew-key`"),
+            ),
+            Some(AuthorizedKeyError::Revoked {
+                revoked_at, reason, ..
+            }) => refused(
+                revoked,
+                format!("the {what} was revoked at {revoked_at} ({reason})"),
+            ),
+            _ => error,
+        }
+    })
 }
 
 pub fn revalidate_scheduled_execution(
@@ -112,13 +138,19 @@ pub fn pinned_schedule_grants(
     let fingerprint = principal_id
         .strip_prefix("fp:")
         .context("scheduled principal is not canonical")?;
-    let grant = load_verified_authorized_key(fingerprint, authorized_keys_dir, node_identity)?
-        .ok_or_else(|| {
-            refused(
-                ScheduledAuthorityRefusalKind::GrantRevoked,
-                format!("the authorized-key grant for {principal_id} no longer exists"),
-            )
-        })?;
+    let grant = load_pinned_grant(
+        fingerprint,
+        authorized_keys_dir,
+        node_identity,
+        &format!("authorized-key grant for {principal_id}"),
+        ScheduledAuthorityRefusalKind::GrantRevoked,
+    )?
+    .ok_or_else(|| {
+        refused(
+            ScheduledAuthorityRefusalKind::GrantRevoked,
+            format!("the authorized-key grant for {principal_id} no longer exists"),
+        )
+    })?;
     if grant.source_file_hash != grant_authority.principal_grant_hash {
         return Err(refused(
             ScheduledAuthorityRefusalKind::GrantGenerationChanged,
@@ -140,10 +172,15 @@ pub fn pinned_schedule_grants(
     let Some(forwarding) = &grant_authority.forwarding else {
         return Ok(Some((grant, None)));
     };
-    let source = load_verified_authorized_key(
+    let source = load_pinned_grant(
         &forwarding.source_node_fingerprint,
         authorized_keys_dir,
         node_identity,
+        &format!(
+            "forwarding node grant fp:{}",
+            forwarding.source_node_fingerprint
+        ),
+        ScheduledAuthorityRefusalKind::ForwardingGrantRevoked,
     )?
     .ok_or_else(|| {
         refused(
@@ -406,5 +443,66 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn expired_grant_is_typed_grant_expired_with_its_own_outcome() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let execution = fixture.pinned_execution();
+        // Re-sign the same key's grant as already lapsed.
+        fixture.revoke();
+        ryeos_node_runtime::identity::create_authorized_key_toml(
+            &fixture.auth_dir,
+            &fixture.principal_fp,
+            &fixture.principal_key_b64,
+            &[CAPABILITY.to_owned()],
+            "scheduled principal",
+            &format!("fp:{}", "99".repeat(32)),
+            "2026-11-13T00:00:00Z",
+            &ryeos_node_runtime::identity::GrantTerms {
+                expires_at: ryeos_node_runtime::identity::GrantExpiry::At(1_000),
+                authorized_by: ryeos_node_runtime::identity::AuthorizedBy::principal_request(
+                    &format!("fp:{}", "99".repeat(32)),
+                    None,
+                ),
+            },
+            fixture.node.signing_key(),
+        )
+        .unwrap();
+        let kind = refusal_kind(fixture.check_on(&execution, SITE));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::GrantExpired);
+        assert_eq!(kind.fire_outcome(), "authority_expired");
+    }
+
+    #[test]
+    fn tombstoned_grant_file_is_typed_grant_revoked() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let execution = fixture.pinned_execution();
+        let saved = std::fs::read(
+            fixture
+                .auth_dir
+                .join(format!("{}.toml", fixture.principal_fp)),
+        )
+        .unwrap();
+        ryeos_node_runtime::identity::revoke_authorized_key(
+            &fixture.auth_dir,
+            &fixture.principal_fp,
+            "stolen",
+            &format!("fp:{}", "99".repeat(32)),
+            &fixture.node,
+        )
+        .unwrap();
+        // The pinned generation is put back: the tombstone still refuses it.
+        std::fs::write(
+            fixture
+                .auth_dir
+                .join(format!("{}.toml", fixture.principal_fp)),
+            saved,
+        )
+        .unwrap();
+        let kind = refusal_kind(fixture.check_on(&execution, SITE));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::GrantRevoked);
     }
 }

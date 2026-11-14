@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:22:04Z:f098c4c02b8b82b5bb1fbf7ee81324c3980a31cfbdd07fd947352dea54cf42af:jL9QjaUo+4xj8YoUlgHVznfVCgiePpqOczJ98XIxzPzGloOnzbaoFCvo/gOoKE6CXQz4mvRE4M4YVv+u0uCiCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:c0e67f4362ad1ff365c05f6df806b06ed33ab356159636d208cdae408cec5e61:UDUGH2qrHH4P/SXyOkIeFc2MwFy+B4BvH3Xcm1RqrQKPOAmSKf/dwkbgaJ8WFOtX4A3MBOwfPIiwy3kYNlEdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, scheduler, scheduling]
@@ -34,7 +34,8 @@ Registration seals the authenticated principal's current grant generation
 into the schedule authority. Every fire revalidates that exact grant and the
 declared capability subset before launching. A fire refused because that
 authority no longer holds is recorded as `failed` with a typed outcome:
-`authority_revoked` (the grant, or a forwarding node's grant, is gone),
+`authority_revoked` (the grant, or a forwarding node's grant, is gone or
+carries a revocation tombstone), `authority_expired` (the grant lapsed),
 `authority_changed` (a different grant generation, class or origin) or
 `authority_narrowed` (the grant no longer covers a declared capability). The
 first such refusal pauses the schedule through the ordinary signed pause write
@@ -48,7 +49,21 @@ its class, origin and scopes still cover the schedule, and otherwise refuses
 with `schedule_reauthorize_not_covered`,
 `schedule_reauthorize_class_or_origin_changed` or `schedule_not_grant_bound`.
 `ryeos node doctor` reports schedules whose pinned generation no longer
-matches under `schedule_authority`. A `live_direct` fire intentionally
+matches, schedules whose grant lapses within the policy's warning window, and
+schedules paused for want of authority under `schedule_authority`, each with
+its fix. `scheduler/explain`'s `authority` block also carries `expires_at`,
+the earlier of the pinned grant's expiry and the schedule's own `expires_at`.
+
+Grant lifecycle and schedules: `identity/renew-key` supersedes the pinned
+generation, so in the same operation it re-seals every schedule pinned to the
+superseded generation whose declared capabilities the renewed grant still
+covers, and pauses the ones it no longer covers with `authority_narrowed`; its
+receipt lists both. `identity/revoke-key` pauses every schedule pinned to a
+revoked grant at once with `authority_revoked` (the tombstoned digest is what
+the schedule names, so authorizing the same key again does not revive it:
+re-register the schedule, or re-seal it with `scheduler/reauthorize` as its
+owner, then resume). A lapsed grant pauses its schedules at their next fire
+with `authority_expired`; renewing the grant re-seals them. A `live_direct` fire intentionally
 resolves the live project again at each fire and recovery and is never
 implicitly snapshotted. A `pinned` fire binds one durable
 `current_head` or explicit `snapshot` authority and retains it through recovery;

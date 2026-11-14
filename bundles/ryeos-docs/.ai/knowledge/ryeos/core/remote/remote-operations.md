@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:f95e97c05555282c7578e95049f180cc697660b5397d3749f06842ad536a546e:yxGwRvYjkaYf09Kjp/PZrEmHtLjVSv6VIT3VCgL6obzDmIkDWA/VrcJ9Nk64EmWsWXmdySY8RO1BlRtzNL5gDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:bb56275bfff8816d984b42942e1e958a22dfb4e2858b869819e7d5c1a33fad06:wBBEdK/U97P61jG6QbohJ/eJdrx3q3AKgYISHxZUP61i+afXnp9vRXPAeE03DcBOOWvQTK4/IK3Y3IvXJ7NnAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -262,7 +262,9 @@ principal's grant ends all of them, and `not_after` bounds the rest.
    profiles). When it lapses the key holder receives HTTP 401
    `grant_expired`; the principal that granted it (or the target's operator)
    renews it with `ryeos renew-key --fingerprint <fp>`. The grantee cannot
-   renew its own grant. See [Identity model](../identity-model.md).
+   renew its own grant. A grant is withdrawn early with `ryeos revoke-key`
+   (or `ryeos remote revoke`), which leaves a tombstone. See
+   [Identity model](../identity-model.md).
 
 3. **Choose scopes by operation**. Do not mix local remote-service caps
    with remote authorized-key scopes. The complete matrix is in
@@ -645,8 +647,12 @@ authorize the new node key.
 2. On the remote: `ryeos authorize-key` with the new node public key.
 3. On the caller: `ryeos remote configure` with the caller's existing
    `--descriptor` or `--expect-fingerprint` pin to pick up changes.
-4. On the remote: remove any superseded authorized-key TOML from
-   `.ai/node/auth/authorized_keys/`.
+4. On the remote: revoke the superseded grant with `ryeos revoke-key
+   --fingerprint <old fingerprint> --reason "rotated"` (run `ryeos remote
+   revoke` from the caller, or `ryeos node authorization revoke` on the
+   stopped remote). Do not delete the file by hand: a revocation leaves a
+   node-signed tombstone, so a restored copy of the old grant stays refused,
+   and it stops the old key's live work and schedules.
 
 ## Remote Ignore Cache
 

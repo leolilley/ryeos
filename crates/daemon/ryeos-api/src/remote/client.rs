@@ -1871,6 +1871,25 @@ impl RemoteClient {
         })
     }
 
+    /// Revoke a grant on the remote node. The remote decides whether the
+    /// caller may (its granter or its operator) and what live work stops;
+    /// its receipt is returned as sent.
+    pub async fn revoke_key(
+        &self,
+        fingerprint: &str,
+        reason: &str,
+        leave_running: bool,
+        keep_delegates: bool,
+    ) -> Result<Value> {
+        let body = serde_json::json!({
+            "fingerprint": fingerprint,
+            "reason": reason,
+            "leave_running": leave_running,
+            "keep_delegates": keep_delegates,
+        });
+        self.signed_post("/revoke-key", &body).await
+    }
+
     /// POST /admission/claim (unauthenticated route; claim is self-signed).
     pub async fn admission_claim(
         &self,
