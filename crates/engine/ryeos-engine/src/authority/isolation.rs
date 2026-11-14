@@ -935,6 +935,10 @@ struct CodeNamespace<'a> {
     project_destination: &'a Path,
     canonical_project: &'a Path,
     bundle_roots: &'a [PathBuf],
+    /// False when the live project is served through a fixed-parent view:
+    /// mirroring the whole project root as readable code authority would
+    /// reintroduce the paths the view withholds.
+    project_mirror: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -3863,6 +3867,7 @@ impl IsolationRuntime {
             project_destination: &project_destination,
             canonical_project: &canonical_project,
             bundle_roots: context.bundle_roots,
+            project_mirror: fixed_parent_views.is_empty(),
         };
         let mut verified_code = context.verified_code.iter().collect::<Vec<_>>();
         if let Some(command) =
@@ -6158,6 +6163,7 @@ impl IsolationRuntime {
             namespace.project_destination,
             namespace.canonical_project,
             namespace.bundle_roots,
+            namespace.project_mirror,
         )?;
         let artifact = ReadableMount {
             source_handle: artifact.handle,
@@ -6917,11 +6923,15 @@ fn code_namespace_layout(
     project_destination: &Path,
     canonical_project: &Path,
     bundle_roots: &[PathBuf],
+    project_mirror: bool,
 ) -> Result<(Option<ReadableMount>, PathBuf), EngineError> {
-    let mut candidates = vec![(
-        canonical_project.to_path_buf(),
-        project_destination.to_path_buf(),
-    )];
+    let mut candidates = Vec::new();
+    if project_mirror {
+        candidates.push((
+            canonical_project.to_path_buf(),
+            project_destination.to_path_buf(),
+        ));
+    }
     for bundle_root in bundle_roots {
         candidates.push((
             canonicalize_context_mount("bundle root", bundle_root)?,
@@ -8151,6 +8161,7 @@ mod tests {
             project_destination: project.path(),
             canonical_project: project.path(),
             bundle_roots: &[],
+            project_mirror: true,
         };
         runtime
             .prepare_verified_code(&verified, namespace, true)

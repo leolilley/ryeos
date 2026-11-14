@@ -1565,8 +1565,14 @@ impl DaemonHarness {
             .context("observe daemon exit after orderly stop request")?;
         anyhow::ensure!(
             status.success(),
-            "daemon orderly stop exited with {status}; stderr log {}",
-            self.stderr_log_path.display()
+            "daemon orderly stop exited with {status}; stderr log {}\n--- stderr tail ---\n{}",
+            self.stderr_log_path.display(),
+            std::fs::read_to_string(&self.stderr_log_path)
+                .map(|log| {
+                    let lines: Vec<&str> = log.lines().collect();
+                    lines[lines.len().saturating_sub(40)..].join("\n")
+                })
+                .unwrap_or_default()
         );
         Ok(())
     }
