@@ -37,8 +37,11 @@ use serde_json::{Value, json};
 
 const IMPORT_ROOT: &str = "quarantine-inputs";
 const PAYLOAD_NAME: &str = "weights.bin";
-const PAYLOAD_BYTES: usize = 256 * 1024 + 17;
-const MAXIMUM_BYTES: u64 = 1024 * 1024;
+// Past the CAS-blob ceiling (`MAX_EXTERNAL_CONTENT_FILE_BYTES`, 32 MiB); a
+// smaller file imported as large content lands in CAS, not the large-object
+// store this test damages.
+const PAYLOAD_BYTES: usize = 32 * 1024 * 1024 + 17;
+const MAXIMUM_BYTES: u64 = 64 * 1024 * 1024;
 const TOOL_REF: &str = "tool:test/weights-reader";
 const QUARANTINED_CODE: &str = "large_object_quarantined";
 

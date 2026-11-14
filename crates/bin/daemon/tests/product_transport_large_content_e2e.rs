@@ -1405,7 +1405,8 @@ fn delegate_wiring(state_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// ORIGIN's descriptor, as `ryeos remote-descriptor` exports it.
+/// ORIGIN's descriptor, as `ryeos remote-descriptor` exports it: version 2,
+/// signed by the node key it pins.
 fn origin_descriptor(origin_state: &Path, url: &str) -> Result<Vec<u8>> {
     let node = common::fast_fixture::node_signing_key();
     let fingerprint = fingerprint(&node);
@@ -1415,22 +1416,25 @@ fn origin_descriptor(origin_state: &Path, url: &str) -> Result<Vec<u8>> {
             .join("node/vault/public_key.pem"),
     )?
     .fingerprint();
-    Ok(serde_yaml::to_string(&json!({
-        "version": 1,
-        "name": ORIGIN_REMOTE,
-        "url": url,
-        "node": {
-            "public_key": format!(
+    let descriptor = ryeos_api::remote::config::RemoteDescriptor {
+        version: 2,
+        name: ORIGIN_REMOTE.to_owned(),
+        url: Some(url.to_owned()),
+        site_id: format!("site:{fingerprint}"),
+        vault_fingerprint: vault,
+        node: ryeos_api::remote::config::RemoteDescriptorNode {
+            public_key: format!(
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(node.verifying_key().as_bytes())
             ),
-            "fingerprint": fingerprint,
-            "site_id": format!("site:{fingerprint}"),
-            "vault_fingerprint": vault,
+            fingerprint,
         },
-        "ingest_ignore": { "patterns": [] },
-    }))?
-    .into_bytes())
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
+        capabilities: Vec::new(),
+        admission: None,
+        provider: None,
+    };
+    Ok(descriptor.render_signed(&node)?.into_bytes())
 }
 
 /// Sign `operation` as ORIGIN's operator against the stopped HOSTED's facts
