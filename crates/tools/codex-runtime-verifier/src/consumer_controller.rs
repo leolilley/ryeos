@@ -539,6 +539,10 @@ pub(crate) mod tests {
             environment_binding: "environment".into(),
         };
         purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+        purpose
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = None;
         purpose.policy_source.policy.producer_scenarios.insert(
             "direct_codex".into(),
             ProductQualificationProducerScenario {
@@ -766,6 +770,7 @@ pub(crate) mod tests {
             .policy
             .consumer_execution_context
             .clone();
+        policy.policy.minimum_verifier_process_settlement = None;
         policy.policy.allowed_claims = vec![
             "independent_candidate_diagnostic".into(),
             "qualification_worker_command".into(),
