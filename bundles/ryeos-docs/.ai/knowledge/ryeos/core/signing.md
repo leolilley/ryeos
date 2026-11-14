@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T20:02:48Z:4bc3d2e5b2682863d2fed4c05a1c2446b8e05f671b01f13f7becb68bc646c221:Qm0zITcKjF/uhHwsEmZ5gyqmzSGQ3ICqGxjdj+Ce+p6hFNIfUpjhJ2YgBY0B+AnUOzZ6FVz7MxQYNkpoxovQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T14:32:55Z:bf95773651a626adb7cf3f8e20f430c7393b1a21dd7b47c0c1d21645fcae7d3b:IVU3VupZuu767B69JwEOaAyIuCxEfOr+zA2P18a+KQGqGbwAtXR3MgdrQm2kSfYZFvcfRR9oh9VqpPMjuw7cCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -234,7 +234,8 @@ During `ryeos init` the publisher key (hardcoded official key, or each
 verification accepts any pinned key within its scope, but node state does
 not: node policy, schedules, bundle registrations and app-root node config
 verify only under the node key, and the init completion record only under
-the local operator key. Anything else is refused as
+the operator key (in the operator's own process) or, when the node reseals it,
+the node key under the operator's signed request. Anything else is refused as
 `node_document_wrong_signer`. See [Identity Model](identity-model.md#who-signs-node-state).
 
 **Bundles do NOT ship trust records.** The operator must pin publisher

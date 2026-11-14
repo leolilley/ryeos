@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:37:06Z:b08b11ef72d634973d8038c5466d2988d79781b60c22e1db67ea3a2966b07b1b:i5121BVidvMiLmnXZ8Hc9XG634Vn7dXMrORL2zW4qXnPZf4Q/Oz7DfgjwpRaWzjo7atxxMbAmw6vvDswyuGAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T14:32:56Z:0b572ac8c06ce1af61bf783ee8c1f45826818f43706fb758a41e97f016e031dd:aam8/a0fF+3ZmZS0+jVemnUE0nTgGIksygUtG2LA6kOSRelxwNuywuq8/t1e8AzIwzMoPrd3d24z4dkD6aukDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -735,7 +735,7 @@ Each change appends a node-signed, hash-chained key event under
 
 | Verb | Effect |
 |---|---|
-| `ryeos node operator rotate [--json]` | Stage a new operator key, record the succession from the old key, re-issue the operator grant, replace the genesis and reseal the init completion; the old key is retired |
+| `ryeos node operator rotate [--json]` | Stage a new operator key, record the succession from the old key, re-issue the operator grant, install the genesis signed by the new key and reseal the init completion; the command then installs the new private key and the old key is retired |
 | `ryeos node authoring rotate [--json]` | Stage a new authoring key and record the succession; the new key keeps the old key's scope |
 
 Both are signed offline operations (`node.operator.rotate`,
