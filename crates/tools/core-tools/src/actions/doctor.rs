@@ -649,4 +649,80 @@ mod tests {
         assert_eq!(r.detail["name_matches_directory"], false);
         assert!(r.detail["note"].is_string());
     }
+
+    /// A purely mechanical bundle source: a manifest source and no kind
+    /// schemas, so preflight loads the node trust and then fails later on the
+    /// unsigned manifest.
+    fn mechanical_bundle(root: &Path) -> PathBuf {
+        let source = root.join("arc");
+        write(
+            &source.join(".ai/manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\n",
+        );
+        source
+    }
+
+    fn app_root_with_signer_registry(root: &Path) -> PathBuf {
+        let app_root = root.join("app");
+        let key = lillux::crypto::SigningKey::from_bytes(&[7u8; 32]);
+        ryeos_engine::test_support::pin_signer(
+            &app_root,
+            &key.verifying_key(),
+            "doctor-test",
+            ryeos_engine::trust::SignerRole::Publisher,
+            ryeos_engine::trust::SignerScope::everywhere(),
+        );
+        app_root
+    }
+
+    fn verify_error(source: &Path, app_root: &Path) -> String {
+        let result = check_verify(
+            source,
+            &[],
+            app_root,
+            Ok(Arc::new(IsolationRuntime::disabled_for_authoring())),
+        );
+        assert_eq!(result.status, FAIL, "{:?}", result.detail);
+        result.detail["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("verify failure carries an error: {:?}", result.detail))
+            .to_owned()
+    }
+
+    #[test]
+    fn verify_loads_node_trust_from_the_app_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = mechanical_bundle(tmp.path());
+        let app_root = app_root_with_signer_registry(tmp.path());
+
+        let error = verify_error(&source, &app_root);
+        // The signer registry under `<app_root>/.ai/node` was found and
+        // non-empty, so preflight went on to judge the bundle itself.
+        assert!(
+            !error.contains("load node trust store") && !error.contains("trust registry is empty"),
+            "trust must load from the app root: {error}"
+        );
+        assert!(!error.contains(".ai/.ai"), "doubled .ai path: {error}");
+    }
+
+    #[test]
+    fn verify_given_the_config_directory_fails_on_a_doubled_ai_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = mechanical_bundle(tmp.path());
+        let app_root = app_root_with_signer_registry(tmp.path());
+        let config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
+
+        let error = verify_error(&source, &config_root);
+        assert!(
+            error.contains("load node trust store"),
+            "a config directory is not an app root: {error}"
+        );
+        assert!(
+            error.contains(&format!(
+                "{}/.ai/node",
+                config_root.display()
+            )),
+            "the trust path is joined under whatever root is passed: {error}"
+        );
+    }
 }
