@@ -10,6 +10,7 @@ mod control;
 pub mod host_runtime;
 pub mod init;
 pub mod init_check;
+pub mod key_rotation;
 pub mod lifecycle_marker;
 pub mod lifecycle_wire;
 pub mod metadata;

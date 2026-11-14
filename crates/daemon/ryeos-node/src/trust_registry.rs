@@ -194,6 +194,8 @@ fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
 struct Step {
     kind: TrustEventKind,
     record: SignerRecord,
+    /// The key a `succeeded` step replaces.
+    predecessor: Option<String>,
 }
 
 fn replaced(
@@ -252,6 +254,7 @@ fn plan(
             }
             match find(records, &candidate.fingerprint) {
                 None => Ok(vec![Step {
+                    predecessor: None,
                     kind: TrustEventKind::Pinned,
                     record: candidate,
                 }]),
@@ -283,6 +286,7 @@ fn plan(
                 return Ok(vec![]);
             }
             Ok(vec![Step {
+                predecessor: None,
                 kind: TrustEventKind::ScopeChanged,
                 record: replaced(existing, Some(scope.clone()), None),
             }])
@@ -295,6 +299,7 @@ fn plan(
                 SignerStatus::Revoked => Err(revoked(existing)),
                 SignerStatus::Retired => Ok(vec![]),
                 SignerStatus::Active => Ok(vec![Step {
+                    predecessor: None,
                     kind: TrustEventKind::Retired,
                     record: replaced(existing, None, Some(SignerStatus::Retired)),
                 }]),
@@ -308,6 +313,7 @@ fn plan(
                 return Ok(vec![]);
             }
             Ok(vec![Step {
+                predecessor: None,
                 kind: TrustEventKind::Revoked,
                 record: replaced(existing, None, Some(SignerStatus::Revoked)),
             }])
@@ -343,6 +349,7 @@ fn plan(
             let mut steps = Vec::new();
             match find(records, &new_record.fingerprint) {
                 None => steps.push(Step {
+                    predecessor: Some(old.fingerprint.clone()),
                     kind: TrustEventKind::Succeeded,
                     record: new_record,
                 }),
@@ -353,6 +360,7 @@ fn plan(
             }
             if old.status == SignerStatus::Active {
                 steps.push(Step {
+                    predecessor: None,
                     kind: TrustEventKind::Retired,
                     record: replaced(old, None, Some(SignerStatus::Retired)),
                 });
@@ -469,6 +477,7 @@ fn write_steps(
                     record_digest: content_digest,
                     request_digest: actor.request_digest.to_string(),
                     operator: actor.operator.to_string(),
+                    predecessor: step.predecessor.clone(),
                 };
                 write_file(
                     &events,
@@ -693,6 +702,7 @@ mod tests {
             record_digest: step.record.content_digest(),
             request_digest: "r2".into(),
             operator: "op".into(),
+            predecessor: None,
         };
         write_file(
             &events_dir(root.path()),

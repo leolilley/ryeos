@@ -189,6 +189,8 @@ pub enum SignerRole {
     Publisher,
     Operator,
     ProjectAuthor,
+    /// The node-owned key the daemon signs runtime-authored items with.
+    Authoring,
 }
 
 impl SignerRole {
@@ -197,6 +199,7 @@ impl SignerRole {
             SignerRole::Publisher => "publisher",
             SignerRole::Operator => "operator",
             SignerRole::ProjectAuthor => "project_author",
+            SignerRole::Authoring => "authoring",
         }
     }
 
@@ -205,6 +208,7 @@ impl SignerRole {
             "publisher" => Some(SignerRole::Publisher),
             "operator" => Some(SignerRole::Operator),
             "project_author" => Some(SignerRole::ProjectAuthor),
+            "authoring" => Some(SignerRole::Authoring),
             _ => None,
         }
     }
@@ -274,7 +278,7 @@ impl SignerStatus {
 pub struct SignerScope {
     /// Spaces the signer may sign in. Never empty.
     pub spaces: Vec<SignerSpace>,
-    /// `["*"]` or an explicit list of item kinds. Never empty.
+    /// `["*"]` or an explicit list of item kinds. Empty admits no kind.
     pub kinds: Vec<String>,
     /// Project roots the signer may sign for; empty means every project.
     /// Only meaningful when `spaces` contains `project`.
@@ -297,6 +301,17 @@ impl SignerScope {
         Self {
             spaces: vec![SignerSpace::Project, SignerSpace::Node],
             kinds: vec![ALL_KINDS.to_string()],
+            projects: Vec::new(),
+        }
+    }
+
+    /// Default scope of the node's authoring key: project space and no
+    /// kind. Items it signs are machine drafts until the operator widens the
+    /// scope for a kind or re-signs the item.
+    pub fn authoring_default() -> Self {
+        Self {
+            spaces: vec![SignerSpace::Project],
+            kinds: Vec::new(),
             projects: Vec::new(),
         }
     }
@@ -354,9 +369,6 @@ impl SignerScope {
             if !seen.insert(*space) {
                 return Err(format!("scope.spaces lists `{}` twice", space.as_str()));
             }
-        }
-        if self.kinds.is_empty() {
-            return Err("scope.kinds must be [\"*\"] or list at least one kind".to_string());
         }
         if self.kinds.iter().any(|k| k == ALL_KINDS) && self.kinds.len() != 1 {
             return Err("scope.kinds mixes \"*\" with named kinds".to_string());
@@ -795,6 +807,10 @@ pub struct TrustEvent {
     pub request_digest: String,
     /// Fingerprint of the operator who signed the request.
     pub operator: String,
+    /// For a `succeeded` event, the fingerprint of the key whose succession
+    /// statement admitted `signer`. Absent on every other event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predecessor: Option<String>,
 }
 
 impl TrustEvent {
@@ -864,6 +880,18 @@ pub fn load_event_chain(
     events_dir: &Path,
     node_key: &VerifyingKey,
 ) -> Result<Vec<TrustEvent>, TrustError> {
+    Ok(load_event_chain_timed(events_dir, node_key)?
+        .into_iter()
+        .map(|(event, _)| event)
+        .collect())
+}
+
+/// [`load_event_chain`] with the time each event was signed, as written in
+/// its signature line.
+pub fn load_event_chain_timed(
+    events_dir: &Path,
+    node_key: &VerifyingKey,
+) -> Result<Vec<(TrustEvent, String)>, TrustError> {
     let mut files: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     let mut count = 0_usize;
     lillux::visit_regular_files_no_follow_bounded(
@@ -888,9 +916,14 @@ pub fn load_event_chain(
         reason: format!("{e:#}"),
     })?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut chain: Vec<TrustEvent> = Vec::with_capacity(files.len());
+    let mut chain: Vec<(TrustEvent, String)> = Vec::with_capacity(files.len());
     for (path, bytes) in files {
         let event = parse_trust_event(&path, &bytes, node_key)?;
+        let signed_at = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| crate::item_resolution::parse_signature_header(text, &envelope()))
+            .map(|header| header.timestamp)
+            .unwrap_or_default();
         let expected_seq = chain.len() as u64 + 1;
         if event.seq != expected_seq {
             return Err(TrustError::EventChainBroken {
@@ -901,16 +934,33 @@ pub fn load_event_chain(
                 ),
             });
         }
-        let expected_previous = chain.last().map(TrustEvent::digest);
+        let expected_previous = chain.last().map(|(event, _)| event.digest());
         if event.previous != expected_previous {
             return Err(TrustError::EventChainBroken {
                 path,
                 reason: "does not link to the digest of the previous event".to_string(),
             });
         }
-        chain.push(event);
+        chain.push((event, signed_at));
     }
     Ok(chain)
+}
+
+/// When a signer's key entered the registry: the signing time of the first
+/// `init`, `pinned` or `succeeded` event about it. `None` when the chain holds
+/// no such event.
+pub fn key_pinned_at(chain: &[(TrustEvent, String)], fingerprint: &str) -> Option<String> {
+    chain
+        .iter()
+        .find(|(event, _)| {
+            event.signer == fingerprint
+                && matches!(
+                    event.kind,
+                    TrustEventKind::Init | TrustEventKind::Pinned | TrustEventKind::Succeeded
+                )
+        })
+        .map(|(_, at)| at.clone())
+        .filter(|at| !at.is_empty())
 }
 
 /// Cross-check records against the event chain: every record must name an
@@ -971,6 +1021,14 @@ impl SuccessionStatement {
     pub fn render_signed(&self, old_key: &SigningKey) -> Result<String, String> {
         let body = serde_yaml::to_string(self).map_err(|e| e.to_string())?;
         Ok(lillux::signature::sign_content(&body, old_key, "#", None))
+    }
+
+    /// Read a statement's fields without verifying its signature. Only for
+    /// finding which record to verify it against; trust nothing it says until
+    /// [`Self::parse_and_verify`] accepts it.
+    pub fn parse_unverified(text: &str) -> Result<Self, String> {
+        let body = lillux::signature::strip_signature_lines_with_envelope(text, "#", None);
+        serde_yaml::from_str(&body).map_err(|e| format!("invalid succession statement: {e}"))
     }
 
     /// Parse a statement and verify it was signed by `old_record`'s key.

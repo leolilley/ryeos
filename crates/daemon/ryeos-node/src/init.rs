@@ -51,7 +51,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::Engine as _;
 use lillux::crypto::{
     DecodePrivateKey, EncodePrivateKey, Signature, Signer, SigningKey, Verifier, VerifyingKey,
@@ -183,6 +183,9 @@ pub struct InitReport {
     pub app_root: PathBuf,
     pub user_key_fingerprint: String,
     pub node_key_fingerprint: String,
+    /// Fingerprint of the authoring key the daemon signs runtime-authored
+    /// items with.
+    pub authoring_key_fingerprint: String,
     pub official_publisher_pinned: String,
     /// SHA-256 fingerprint of the X25519 vault public key. Surfaced
     /// so operators can sanity-check that subsequent vault writes are
@@ -543,6 +546,8 @@ pub struct InitProgress {
 ///      its capability floor needs durable app-root storage the host lacks
 ///   4. Operator key (load-or-create at `<app_root>/.ai/node/operator/signing/private_key.pem`)
 ///   5. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
+///      and authoring key (load-or-create at
+///      `<app_root>/.ai/node/authoring/signing/private_key.pem`)
 ///   6. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
 ///   7. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
 ///   8. Install each discovered bundle + write registration record
@@ -879,6 +884,16 @@ fn run_init_under_lock_on_storage(
             )
         })?;
 
+    // ── 5a. Authoring key ──
+    // The daemon signs runtime-authored items with this key, never with the
+    // node key or the operator key. It lives in its own key home and is
+    // pinned below with a scope that admits no kind.
+    let authoring_key_path =
+        ryeos_engine::roots::RuntimeRoot::new(opts.app_root.clone()).authoring_signing_key_path();
+    let authoring_key = load_or_create_key(&authoring_key_path, false)
+        .with_context(|| format!("authoring key at {}", authoring_key_path.display()))?;
+    let authoring_fp = compute_fingerprint(&authoring_key.verifying_key());
+
     // ── 5b. Record the signers in the node-signed registry ──
     // The node key is the implicit root and gets no record. Publishers (the
     // official key and each --trust-file) are pinned for bundle space; the
@@ -904,6 +919,12 @@ fn run_init_under_lock_on_storage(
         "user".to_owned(),
         ryeos_engine::trust::SignerRole::Operator,
         ryeos_engine::trust::SignerScope::operator_default(),
+    ));
+    registry_pins.push((
+        authoring_key.verifying_key(),
+        "authoring".to_owned(),
+        ryeos_engine::trust::SignerRole::Authoring,
+        ryeos_engine::trust::SignerScope::authoring_default(),
     ));
     let init_request_digest =
         lillux::sha256_hex(format!("ryeos/init-trust/v1:{user_fp}:{node_fp}").as_bytes());
@@ -1519,6 +1540,7 @@ fn run_init_under_lock_on_storage(
         app_root: opts.app_root.clone(),
         user_key_fingerprint: user_fp,
         node_key_fingerprint: node_fp,
+        authoring_key_fingerprint: authoring_fp,
         official_publisher_pinned: OFFICIAL_PUBLISHER_FP.to_string(),
         vault_pubkey_fingerprint,
         bundles_installed,
@@ -1672,7 +1694,6 @@ fn write_init_completion(
     }
     let capacity_account = crate::native_capacity::load_existing_capacity_binding(
         app_root,
-        operator_fingerprint,
         node_fingerprint,
         snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
     )?;
@@ -1848,6 +1869,17 @@ pub(crate) fn seal_current_init_completion(
         lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
     )?);
     let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
+    seal_current_init_completion_as(app_root, expected_policy_generation_digest, &operator_key)
+}
+
+/// [`seal_current_init_completion`] signed by an operator key the caller
+/// holds, which an operator rotation installs only after the completion
+/// naming it is sealed.
+pub(crate) fn seal_current_init_completion_as(
+    app_root: &Path,
+    expected_policy_generation_digest: Option<&str>,
+    operator_key: &SigningKey,
+) -> Result<()> {
     let operator_fingerprint = compute_fingerprint(&operator_key.verifying_key());
 
     let node_key_path = app_root
@@ -1880,13 +1912,12 @@ pub(crate) fn seal_current_init_completion(
     )?;
     let capacity_account = crate::native_capacity::load_existing_capacity_binding(
         app_root,
-        &operator_fingerprint,
         &node_fingerprint,
         snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
     )?;
     write_init_completion(
         app_root,
-        &operator_key,
+        operator_key,
         &operator_fingerprint,
         &node_fingerprint,
         &vault_fingerprint,
@@ -2109,11 +2140,12 @@ fn verify_init_completion_checking_capacity(
     if snapshot.generation_digest() != document.body.policy_generation_digest {
         bail!("capacity policy generation changed during completion verification");
     }
-    document.body.capacity_account.require_reanchor_document(
-        app_root,
-        operator_key,
-        &operator_fingerprint,
-    )?;
+    let capacity_lineage = crate::native_capacity::OperatorLineage::load(app_root)?;
+    document
+        .body
+        .capacity_account
+        .require_reanchor_document(app_root, &capacity_lineage)?;
+
     if require_capacity_installed {
         document.body.capacity_account.require_installed(
             app_root,
@@ -2718,6 +2750,8 @@ fn ensure_operator_genesis_locked(
                 "display_name",
                 "identity_statement",
                 "contribution_digest",
+                "predecessor_fingerprint",
+                "predecessor_created_at",
                 "signature",
             ];
             if object.keys().any(|key| !allowed.contains(&key.as_str()))
@@ -2819,6 +2853,65 @@ fn ensure_operator_genesis_locked(
     lillux::atomic_write(path, &bytes)
         .map_err(|error| anyhow!("write operator genesis {}: {error}", path.display()))?;
     Ok(())
+}
+
+/// Replace the operator genesis of a node whose operator key is rotating.
+/// The new genesis is signed by the new key, carries the old display fields
+/// and names the predecessor key and its creation time. A genesis that already
+/// names the new key is left as it is.
+pub(crate) fn rotate_operator_genesis(
+    app_root: &Path,
+    new_key: &SigningKey,
+    predecessor_fingerprint: &str,
+) -> Result<()> {
+    let path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
+    let new_fingerprint = compute_fingerprint(&new_key.verifying_key());
+    lillux::with_exclusive_file_lock(&path, || {
+        let source = String::from_utf8(lillux::read_regular_file_bounded_no_follow(
+            &path,
+            64 * 1024,
+        )?)
+        .with_context(|| format!("read operator genesis {}", path.display()))?;
+        let previous: serde_json::Value = serde_json::from_str(&source)
+            .with_context(|| format!("parse operator genesis {}", path.display()))?;
+        let previous_fingerprint = previous
+            .get("operator_fingerprint")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("operator genesis missing operator_fingerprint"))?;
+        if previous_fingerprint == new_fingerprint {
+            return Ok(());
+        }
+        ensure!(
+            previous_fingerprint == predecessor_fingerprint,
+            "operator genesis names {previous_fingerprint}, not the rotating operator \
+             {predecessor_fingerprint}"
+        );
+        let mut document = serde_json::json!({
+            "schema": "ryeos/operator-genesis/v1",
+            "operator_fingerprint": new_fingerprint,
+            "created_at": lillux::time::iso8601_now(),
+            "ceremony_version": "1",
+            "predecessor_fingerprint": predecessor_fingerprint,
+        });
+        if let Some(created) = previous.get("created_at") {
+            document["predecessor_created_at"] = created.clone();
+        }
+        for field in ["display_name", "identity_statement"] {
+            if let Some(value) = previous.get(field) {
+                document[field] = value.clone();
+            }
+        }
+        let canonical = lillux::canonical_json(&document)
+            .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
+        let signature = new_key.sign(canonical.as_bytes());
+        document["signature"] = serde_json::Value::String(format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        ));
+        lillux::atomic_write(&path, &serde_json::to_vec_pretty(&document)?)
+            .map_err(|error| anyhow!("write operator genesis {}: {error}", path.display()))
+    })
 }
 
 fn validate_operator_ceremony(ceremony: &InitOperatorCeremony) -> Result<()> {
@@ -3401,6 +3494,189 @@ mod tests {
             .expect("load init-owned bootstrap config");
         assert_eq!(config.app_root, state);
         assert!(state.join(".ai/node/config.yaml").is_file());
+    }
+
+    #[test]
+    fn init_creates_a_separate_authoring_key_pinned_with_no_kinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let first = run_init(&make_opts(&state, &user)).expect("init");
+        let root = ryeos_engine::roots::RuntimeRoot::new(state.clone());
+        let key_path = root.authoring_signing_key_path();
+        assert_eq!(
+            key_path,
+            state.join(".ai/node/authoring/signing/private_key.pem")
+        );
+        let authoring = lillux::crypto::load_signing_key(&key_path).expect("authoring key");
+        let fingerprint = compute_fingerprint(&authoring.verifying_key());
+        assert_eq!(first.authoring_key_fingerprint, fingerprint);
+        assert_ne!(first.authoring_key_fingerprint, first.node_key_fingerprint);
+        assert_ne!(first.authoring_key_fingerprint, first.user_key_fingerprint);
+
+        let registry = TrustStore::load_node_registry(&state).expect("registry");
+        let record = registry.signer(&fingerprint).expect("authoring record");
+        assert_eq!(record.role, ryeos_engine::trust::SignerRole::Authoring);
+        assert_eq!(record.status, ryeos_engine::trust::SignerStatus::Active);
+        assert_eq!(
+            record.scope,
+            ryeos_engine::trust::SignerScope::authoring_default()
+        );
+        assert!(record.scope.kinds.is_empty(), "no kind is admitted");
+
+        let second = run_init(&make_opts(&state, &user)).expect("init again");
+        assert_eq!(second.authoring_key_fingerprint, fingerprint);
+    }
+
+    #[test]
+    fn operator_rotation_replaces_the_operator_and_the_node_still_verifies() {
+        use crate::key_rotation::{RotatedKey, RotationRequest, prepare_rotation, rotate};
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let first = run_init(&make_opts(&state, &user)).expect("init");
+        let old_fp = first.user_key_fingerprint.clone();
+        let root = ryeos_engine::roots::RuntimeRoot::new(state.clone());
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())
+            .unwrap();
+        let grants = crate::offline_operation::authorized_keys_dir(&state);
+        let old_grant = grants.join(format!("{old_fp}.toml"));
+        // Init does not write the operator's grant; daemon bootstrap does.
+        // Write it as bootstrap would so the rotation has one to replace.
+        let old_key = lillux::crypto::load_signing_key(&root.operator_signing_key_path()).unwrap();
+        ryeos_node_runtime::identity::write_authorized_key_toml(
+            &grants,
+            &old_fp,
+            &base64::engine::general_purpose::STANDARD.encode(old_key.verifying_key().as_bytes()),
+            &["*".to_string()],
+            "operator",
+            &old_fp,
+            &lillux::time::iso8601_now(),
+            &ryeos_node_runtime::identity::GrantTerms::operator(
+                ryeos_node_runtime::identity::AuthorizedBy::principal_request(&old_fp, None),
+            ),
+            node.signing_key(),
+            ryeos_node_runtime::identity::WildcardPolicy::AllowBootstrap,
+        )
+        .unwrap();
+        assert!(old_grant.exists());
+
+        let prepared = prepare_rotation(&state, RotatedKey::Operator).expect("prepare");
+        assert_eq!(prepared.old_fingerprint, old_fp);
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        let statement = String::from_utf8(prepared.statement.clone()).unwrap();
+        let request_digest = "c".repeat(64);
+        let result = rotate(
+            RotatedKey::Operator,
+            RotationRequest {
+                app_root: &state,
+                state_lock: &lock,
+                node_key: node.signing_key(),
+                request_digest: &request_digest,
+                signer_fingerprint: &old_fp,
+                statement: &statement,
+            },
+        )
+        .expect("rotate");
+        drop(lock);
+        assert_eq!(result["already_rotated"], false);
+
+        // The new key is installed and is not the old one.
+        let installed = lillux::crypto::load_signing_key(&root.operator_signing_key_path())
+            .expect("installed operator");
+        let new_fp = compute_fingerprint(&installed.verifying_key());
+        assert_eq!(new_fp, prepared.new_fingerprint);
+        assert_ne!(new_fp, old_fp);
+        assert!(!root.operator_dir().join("rotation").exists());
+
+        // The registry retires the old key and activates the new one.
+        let registry = TrustStore::load_node_registry(&state).expect("registry");
+        let old = registry.signer(&old_fp).expect("old record");
+        let new = registry.signer(&new_fp).expect("new record");
+        assert_eq!(old.status, ryeos_engine::trust::SignerStatus::Retired);
+        assert_eq!(new.status, ryeos_engine::trust::SignerStatus::Active);
+        assert_eq!(new.role, ryeos_engine::trust::SignerRole::Operator);
+        assert!(registry.is_trusted(&old_fp), "a retired key still verifies");
+
+        // The init completion names the new operator and still verifies.
+        let completion = verify_init_completion(&state)
+            .expect("completion verifies")
+            .expect("completion present");
+        assert_eq!(completion.operator_fingerprint, new_fp);
+
+        // The grant is re-issued under the new key and the old one is gone.
+        assert!(!old_grant.exists(), "the retired key's grant is removed");
+        let grant =
+            ryeos_node_runtime::identity::load_verified_authorized_key(&new_fp, &grants, &node)
+                .unwrap()
+                .expect("new operator grant");
+        assert_eq!(
+            grant.expires_at,
+            ryeos_node_runtime::identity::GrantExpiry::Never
+        );
+        assert_eq!(grant.authorized_by.principal, format!("fp:{old_fp}"));
+        assert_eq!(
+            grant.authorized_by.request_digest.as_deref(),
+            Some(request_digest.as_str())
+        );
+
+        // Running the same request again changes nothing.
+        let again = rotate(
+            RotatedKey::Operator,
+            RotationRequest {
+                app_root: &state,
+                state_lock: &ryeos_node_runtime::state_lock::StateLock::acquire(
+                    &ryeos_node_runtime::state_lock::default_lock_path(&state),
+                )
+                .unwrap(),
+                node_key: node.signing_key(),
+                request_digest: &request_digest,
+                signer_fingerprint: &old_fp,
+                statement: &statement,
+            },
+        )
+        .expect("rerun");
+        assert_eq!(again["already_rotated"], true);
+
+        // A later init keeps the rotated operator.
+        let later = run_init(&make_opts(&state, &user)).expect("init after rotation");
+        assert_eq!(later.user_key_fingerprint, new_fp);
+    }
+
+    #[test]
+    fn operator_genesis_rotation_names_the_predecessor_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path();
+        let old = SigningKey::from_bytes(&[1u8; 32]);
+        let new = SigningKey::from_bytes(&[2u8; 32]);
+        let old_fp = compute_fingerprint(&old.verifying_key());
+        let new_fp = compute_fingerprint(&new.verifying_key());
+        ensure_operator_genesis(app_root, &old, &old_fp, None, true, None).unwrap();
+        let path =
+            ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        rotate_operator_genesis(app_root, &new, &old_fp).unwrap();
+        let rotated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(rotated["operator_fingerprint"], new_fp);
+        assert_eq!(rotated["predecessor_fingerprint"], old_fp);
+        assert_eq!(rotated["predecessor_created_at"], original["created_at"]);
+        // The new genesis is accepted for the new key and refused for the old.
+        ensure_operator_genesis(app_root, &new, &new_fp, None, false, None).unwrap();
+        assert!(ensure_operator_genesis(app_root, &old, &old_fp, None, false, None).is_err());
+
+        let bytes = std::fs::read(&path).unwrap();
+        rotate_operator_genesis(app_root, &new, &old_fp).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "rerun changes nothing"
+        );
     }
 
     #[test]

@@ -638,14 +638,18 @@ async fn root_authorship(h: &DaemonHarness, project: &std::path::Path, item_ref:
         .get("authorship")
         .and_then(Value::as_array)
         .unwrap_or_else(|| panic!("items.effective must report authorship: {result}"));
-    rows.iter()
+    let mut root = rows
+        .iter()
         .find(|row| row["position"] == "root")
         .cloned()
-        .unwrap_or_else(|| panic!("authorship must include the root: {result}"))
+        .unwrap_or_else(|| panic!("authorship must include the root: {result}"));
+    // The launch trust class the signer's registry scope gives the root.
+    root["trust_class"] = result["trust_class"].clone();
+    root
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn items_effective_reports_a_node_signed_authored_item_as_runtime_authored() {
+async fn items_effective_reports_an_authoring_signed_item_as_runtime_authored() {
     let (h, fixture) = DaemonHarness::start_fast_with(
         |state, _, fixture| common::fast_fixture::register_workflow_bundles(state, fixture),
         |_| {},
@@ -653,15 +657,25 @@ async fn items_effective_reports_a_node_signed_authored_item_as_runtime_authored
     .await
     .expect("start daemon with the workflow bundles");
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_knowledge_with_provenance(project.path(), "authored", &fixture.node);
+    plant_knowledge_with_provenance(project.path(), "authored", &fixture.authoring);
     plant_knowledge_with_provenance(project.path(), "operator", &fixture.user);
+    plant_knowledge_with_provenance(project.path(), "node", &fixture.node);
 
     let authored = root_authorship(&h, project.path(), "knowledge:notes/authored").await;
-    assert_eq!(authored["signer_role"], "node", "{authored}");
+    assert_eq!(authored["signer_role"], "authoring", "{authored}");
     assert_eq!(authored["runtime_authored"], true, "{authored}");
+    // The authoring key is pinned with no kind: its items are machine drafts.
+    assert_eq!(authored["trust_class"], "untrusted_project", "{authored}");
 
     // The same line under the operator's key is not runtime authorship.
     let operator = root_authorship(&h, project.path(), "knowledge:notes/operator").await;
     assert_eq!(operator["signer_role"], "other", "{operator}");
     assert_eq!(operator["runtime_authored"], false, "{operator}");
+    assert_eq!(operator["trust_class"], "trusted_project", "{operator}");
+
+    // Nor is it under the node key, which no longer authors project items.
+    let node = root_authorship(&h, project.path(), "knowledge:notes/node").await;
+    assert_eq!(node["signer_role"], "node", "{node}");
+    assert_eq!(node["runtime_authored"], false, "{node}");
+    assert_eq!(node["trust_class"], "untrusted_project", "{node}");
 }

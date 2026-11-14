@@ -380,12 +380,16 @@ pub const NODE_OWNED: &[&str] = &[
     NODE_BUNDLES_ROOT,
 ];
 
-/// Node-owned trust registry, operator key material and remote pins. Live
+/// Node-owned trust registry, operator and authoring key material and remote pins. Live
 /// execution must never read or write them. They are not part of the project
 /// snapshot floor: the floor identity is stored in every snapshot policy, so
 /// widening it would invalidate existing policies.
-pub const LIVE_EXECUTION_DENIED_ONLY: &[&str] =
-    &[".ai/node/trust", ".ai/node/operator", ".ai/node/remotes"];
+pub const LIVE_EXECUTION_DENIED_ONLY: &[&str] = &[
+    ".ai/node/trust",
+    ".ai/node/operator",
+    ".ai/node/authoring",
+    ".ai/node/remotes",
+];
 
 /// True when a `.ai/`-relative path is inside one of the node-owned roots that
 /// only the live-execution floor covers.

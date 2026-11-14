@@ -3,8 +3,10 @@
 //! Runtimes may propose bytes for a project item, but they never receive an
 //! item-signing key. The daemon authenticates the runtime callback, authorizes
 //! the target with `ryeos.author.<kind>.<bare_id>`, derives the path from the
-//! kind schema, injects signed provenance, and signs with the daemon's trusted
-//! identity. Ordinary execution writes its admitted live project root; an
+//! kind schema, injects signed provenance, and signs with the node's authoring
+//! key. That key is neither the node key nor the operator key: its registry
+//! scope admits no kind until the operator widens it, so authored items are
+//! machine drafts until the operator reviews and re-signs them. Ordinary execution writes its admitted live project root; an
 //! explicitly sealed candidate-integration operation writes only its private
 //! retained CoW workspace.
 
@@ -79,6 +81,11 @@ pub enum AuthorItemRefusal {
         item_ref: String,
         thread_id: String,
     },
+    #[error(
+        "author_item refused: this node's authoring key at {path} cannot be loaded ({reason}); \
+         run `ryeos init` on the stopped node to create and pin it"
+    )]
+    AuthoringKeyUnavailable { path: String, reason: String },
 }
 
 impl AuthorItemRefusal {
@@ -89,6 +96,7 @@ impl AuthorItemRefusal {
                 "author_item_expected_digest_required"
             }
             Self::AuthoredCapabilityNotCovered { .. } => "authored_capability_not_covered",
+            Self::AuthoringKeyUnavailable { .. } => "author_item_authoring_key_unavailable",
         }
     }
 }
@@ -114,8 +122,21 @@ pub struct RuntimeAuthorItemResponse {
 pub struct RuntimeItemAuthorService;
 
 impl RuntimeItemAuthorService {
+    /// Load the node's authoring key from its key home under `app_root`.
+    pub fn load_authoring_identity(app_root: &Path) -> Result<NodeIdentity> {
+        let path = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
+            .authoring_signing_key_path();
+        NodeIdentity::load(&path).map_err(|error| {
+            anyhow::Error::new(AuthorItemRefusal::AuthoringKeyUnavailable {
+                path: path.display().to_string(),
+                reason: format!("{error:#}"),
+            })
+        })
+    }
+
+    /// Author one item, signed by `authoring`, the node's authoring key.
     pub fn author(
-        identity: &NodeIdentity,
+        authoring: &NodeIdentity,
         authorizer: &Authorizer,
         cap: &CallbackCapability,
         thread_auth: &ThreadAuthState,
@@ -276,7 +297,7 @@ impl RuntimeItemAuthorService {
         );
         let signed = lillux::signature::sign_content(
             &body,
-            identity.signing_key(),
+            authoring.signing_key(),
             &source_format.signature.prefix,
             source_format.signature.suffix.as_deref(),
         );
@@ -342,7 +363,7 @@ impl RuntimeItemAuthorService {
             item_ref: canonical.to_string(),
             path: target.display().to_string(),
             mode: params.mode,
-            signer_fingerprint: identity.fingerprint().to_string(),
+            signer_fingerprint: authoring.fingerprint().to_string(),
             content_digest,
             required_capability: required_cap,
         })

@@ -722,6 +722,48 @@ static OPERATIONS: &[OperationSpec] = &[
             why: "events carrying this request's digest mean those records were changed; a rerun writes only records that events name but the volume lacks and the events still missing",
         },
     },
+    OperationSpec {
+        id: "node.operator.rotate",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: true,
+        inputs: &[InputSlot {
+            name: "succession",
+            max_bytes: 16 * KIB,
+            required: true,
+        }],
+        preconditions: &[FACT_TRUST_REGISTRY, FACT_AUTHORIZED_KEYS],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: arguments_of::<handlers::EmptyArguments>,
+        handler: Handler::EffectThenReceipt(handlers::operator_rotate),
+        recovery: Recovery {
+            record: "the key event whose request digest is the request's, and the operator key at its canonical path",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "the succession event is recognised by the request digest, the genesis, grant and completion are rewritten to the same new key, and the new key is installed last, so a request that stopped earlier finishes and one that stopped after installing it finds the new key in place",
+        },
+    },
+    OperationSpec {
+        id: "node.authoring.rotate",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: &[InputSlot {
+            name: "succession",
+            max_bytes: 16 * KIB,
+            required: true,
+        }],
+        preconditions: &[FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: arguments_of::<handlers::EmptyArguments>,
+        handler: Handler::EffectThenReceipt(handlers::authoring_rotate),
+        recovery: Recovery {
+            record: "the key event whose request digest is the request's, and the authoring key at its canonical path",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "the succession event is recognised by the request digest and the new key is installed last, so a request that stopped earlier finishes and one that stopped after installing it finds the new key in place",
+        },
+    },
 ];
 
 /// Every operation this binary can apply.
@@ -817,10 +859,12 @@ mod tests {
             "node.trust.retire",
             "node.trust.revoke",
             "node.trust.succeed",
+            "node.operator.rotate",
+            "node.authoring.rotate",
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 24);
+        assert_eq!(operations().len(), 25);
     }
 
     #[test]
@@ -865,6 +909,8 @@ mod tests {
                 "node.trust.retire",
                 "node.trust.revoke",
                 "node.trust.succeed",
+                "node.operator.rotate",
+                "node.authoring.rotate",
             ]
         );
     }
@@ -885,10 +931,27 @@ mod tests {
     }
 
     #[test]
+    fn key_rotations_are_local_signer_only_and_the_operator_one_is_alone() {
+        for id in ["node.operator.rotate", "node.authoring.rotate"] {
+            let spec = lookup(id).unwrap();
+            assert!(spec.local_signer_only && spec.authority_bearing, "{id}");
+            assert!(spec.slot("succession").is_some_and(|s| s.required), "{id}");
+            assert!(spec.preconditions.contains(&FACT_TRUST_REGISTRY), "{id}");
+        }
+        assert!(lookup("node.operator.rotate").unwrap().alone);
+        assert!(
+            lookup("node.operator.rotate")
+                .unwrap()
+                .preconditions
+                .contains(&FACT_AUTHORIZED_KEYS)
+        );
+    }
+
+    #[test]
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 6);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 8);
     }
 
     #[test]

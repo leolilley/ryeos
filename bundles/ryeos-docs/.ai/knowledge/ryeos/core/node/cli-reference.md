@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T00:21:02Z:88d9e3f6569fbd04974d71d53de8ebdd1e21750d007cdb3ece54ff4539750c7e:EyMWURQNTRsU2FIPWV7DNtXUIPU4f0f+odMbZZUuu3XE6JZqe5mXd7Pl3raQCfyx2PyuHgm594jjTYhUIIQRDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T03:56:24Z:b4c4a3a7130ab706770b861959cf1727a990da2e84316e6cdb8f39a3d13b57ca:Wav3X9Go2rZfzI0PLJh63NeGRieF8nD1bFl0h/mohme6rTdb9CQdZJLE28HuRtq+uaT3+rof8uukDvSLRF5EDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -255,6 +255,11 @@ The `service_window` row reports the running node's service window (see
 `seconds_until_rollover`, `work_steps_until_rollover` and `rolls_at` while the
 node runs, and `n/a` while it is stopped or reports no window. It judges
 nothing; the caller compares it with what it is about to run.
+
+The `key_age` row lists the node, operator, authoring and publisher keys with
+when each entered service and its age in days. It reports age only and warns
+when the node has no active operator or authoring key (`ryeos init` creates
+both). Node key rotation is not offered.
 
 The `authorized_keys` row reads every node-signed grant without starting the
 node. It fails for a grant of a retired schema or class (`grant_schema_stale`,
@@ -665,7 +670,7 @@ The signer registry lives in `<app_root>/.ai/node/trust/`. See
 
 | Verb | Effect |
 |---|---|
-| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
+| `ryeos trust pin --from <PUBLISHER_TRUST.toml> --role publisher\|project_author\|authoring [--project <root>]... [--space <space>] [--kind <kind>]` | Pin a signer with the given role and scope |
 | `ryeos trust scope <fp> [--space <space>] [--kind <kind>] [--project <root>]...` | Replace a signer's scope |
 | `ryeos trust retire <fp>` | Retire a signer; it still verifies existing items |
 | `ryeos trust revoke <fp>` | Revoke a signer; it verifies nothing and cannot be pinned again |
@@ -680,6 +685,19 @@ only). On a running node they refuse with `node_running_trust_change`; cure
 by stopping the node, or by `ryeos node offline-operation submit --stop`.
 Each change appends a node-signed, hash-chained key event under
 `<app_root>/.ai/node/trust/events/`.
+
+### Key rotation
+
+| Verb | Effect |
+|---|---|
+| `ryeos node operator rotate [--json]` | Stage a new operator key, record the succession from the old key, re-issue the operator grant, replace the genesis and reseal the init completion; the old key is retired |
+| `ryeos node authoring rotate [--json]` | Stage a new authoring key and record the succession; the new key keeps the old key's scope |
+
+Both are signed offline operations (`node.operator.rotate`,
+`node.authoring.rotate`; local signer only; the operator one is applied alone).
+They refuse on a running node with `node_running_trust_change`. See
+[Identity Model](../identity-model.md#key-lifecycle) for what each does and the
+refusal codes.
 
 ## Core daemon-backed verbs
 

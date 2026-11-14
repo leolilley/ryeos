@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:64518cf8f57797dd96e0fd3d2e0afd020e5cac81a954fa41913b4af90220c0a4:hl+GzO60L1SdPw3XbN3YActSZ6Y8ZMZkh4BBeSaFR3GLw7cmfzsk2czLcHI/yB5qSpySqddeOm5vPZfs2A4VCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:33:48Z:176af8cc36bf84d3b472006c877730437a1074c2eaae10a0ba01a16f520f5f26:uVhGAO8B7AvP5L+L+nblhaG9wa19kOC/508iaW2iUSL94YnD7w/6+GY4sb8ZrOp6qArKXe4muQnu5rRc4FHnBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -33,13 +33,14 @@ See [Mental model](mental-model.md) for the relationship to directives and work.
 
 ## Identity and trust roles
 
-ryeOS has four distinct identity/trust layers:
+ryeOS has five distinct identity/trust layers:
 
 | Layer | Purpose | Storage | Created by |
 |---|---|---|---|
 | Signer registry | Verify signed items; node-signed signer records with role, scope and status | `<system>/.ai/node/trust/signers/<fp>.yaml` | `ryeos init` / `ryeos trust pin` |
 | User (CLI) key | Sign local CLI HTTP requests | `<user>/.ai/node/operator/signing/private_key.pem` | `ryeos init` |
 | Node (daemon) key | Sign outbound daemon requests and authorized-key TOMLs | `<system>/.ai/node/identity/private_key.pem` | `ryeos init` |
+| Authoring key | Sign items the runtime authors (`runtime.author_item`); machine drafts | `<system>/.ai/node/authoring/signing/private_key.pem` | `ryeos init` |
 | Vault X25519 | Seal/unseal vault secrets | `<system>/.ai/node/vault/private_key.pem` | `ryeos init`, repaired if missing after init |
 
 ## Publisher trust
@@ -59,12 +60,89 @@ The CLI resolves it from `RYEOS_CLI_KEY_PATH` when set, otherwise from
 `<user>/.ai/node/operator/signing/private_key.pem`. It must not fall back
 to the node key.
 
+## Authoring key
+
+The authoring key signs the items a runtime authors through the daemon. It is
+neither the node key nor the operator key, so authored items can be admitted or
+refused as a class without touching either. `ryeos init` creates it and pins it
+in the signer registry with role `authoring`, spaces `[project]` and no kinds:
+authored items are machine drafts until the operator widens the scope for a kind
+(`ryeos trust scope <fp> --kind <kind>`) or reviews and re-signs them. The key
+home `.ai/node/authoring` is in the live-execution floor.
+
+## Key lifecycle
+
+Each key has one lifecycle verb, all offline and local-operator-only. A running
+node refuses with `node_running_trust_change`; stop it first.
+
+| Key | Rotate | Retire / revoke |
+|---|---|---|
+| Operator | `ryeos node operator rotate` | after rotation the old key is `retired`; `ryeos trust revoke <fp>` makes it verify nothing |
+| Authoring | `ryeos node authoring rotate` | same |
+| Publisher | `ryeos trust succeed --from <statement> --old <fp>` | `ryeos trust retire` / `revoke` |
+| Node | not rotatable (see below) | not applicable |
+| Vault | `ryeos-core-tools vault rewrap` | not applicable |
+
+A rotation generates the new key in a staging path inside the key's home, has
+the old key sign a succession statement naming it, and applies one signed
+offline operation (`node.operator.rotate`, `node.authoring.rotate`). The
+operation records the succession in the registry (the new key becomes active
+with the old key's role and scope, the old key is retired and **keeps verifying
+what it signed**) and installs the new key last. Installing replaces the old
+private key, so no retired private key stays on disk. A rotation that stopped
+part way is finished by running the same request again.
+
+An operator rotation also:
+
+- replaces `operator/genesis.json` with a genesis signed by the new key that
+  records `predecessor_fingerprint` and `predecessor_created_at`;
+- issues the new operator's grant (schema 3, `expires_at = "never"`) with
+  `authorized_by` naming the old operator and the rotation request's digest, and
+  removes the retired key's grant;
+- reseals the init completion under the new key.
+
+Refusals name their cure: `key_rotation_no_current_key`, `key_rotation_not_pinned`
+and `key_rotation_not_active` (run `ryeos init`, or inspect the record with
+`ryeos trust show`), `key_rotation_staged_key_missing`,
+`key_rotation_staged_key_mismatch` and `key_rotation_old_key_mismatch` (run the
+rotate command again instead of submitting the operation by hand), and
+`key_rotation_signer_not_old_operator` (an operator rotation must be signed by
+the key being rotated out).
+
+Native-capacity documents (the issuance, re-issuances, re-anchors and policy
+amendments) are signed by the operator and chain to the operator that issued the
+capacity account. After an operator rotation the account keeps working: a
+document signed by a successor operator verifies when the signer registry holds
+a `succeeded` key event, node-signed, that links the issuing operator to the
+signer, directly or through earlier rotations. The links are read from the
+registry's event log (each `succeeded` event records its `predecessor`), never
+from a capacity document, and re-issue, re-anchor and policy amendment are
+signed by the current operator. A revoked operator breaks the chain at its
+link: it and every operator after it are refused with
+`capacity_operator_chain_broken`, naming the revoked link. The same code covers
+an issuing operator missing from the registry, and a document signed by an
+operator the registry does not link to the issuer. Revocation is terminal; the
+cure is a fresh app root.
+
+`ryeos node doctor` reports each key's age in its `key_age` row: the node,
+operator, authoring and publisher keys, each with the time it entered service
+(from the operator genesis for the operator, from the signing time of the
+registry event that pinned the others, from the public identity for the node)
+and its age in days. Age is reported, not judged: no signed policy sets a
+rotation threshold.
+
 ## Node (daemon) key
 
 The node key normally signs outbound remote requests, signs authorized-key
 TOMLs, produces the node public identity document, and signs every signer record
 in the registry; it is the implicit trust root. Daemon startup never auto-regenerates it, because doing so
 would invalidate operator trust and remote authorizations.
+
+Node key rotation is out of scope. The node key is the root of every node
+document, so rotating it means re-signing the policy generation, grants, trust
+records, remote pins and head refs, and re-pinning the node on every remote that
+pinned it. The doctor's `key_age` row shows how old it is. The node key is
+trusted for the node space only; it no longer signs project items.
 
 ### Who signs node state
 

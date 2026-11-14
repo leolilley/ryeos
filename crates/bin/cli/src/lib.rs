@@ -21,6 +21,7 @@ mod lifecycle_external_qualification_compose;
 mod lifecycle_external_recompose;
 mod lifecycle_external_snapshot_compose;
 mod lifecycle_host_access;
+mod lifecycle_key_rotation;
 mod lifecycle_offline_operation;
 mod lifecycle_trust;
 pub mod node_descriptors;

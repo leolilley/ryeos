@@ -550,6 +550,7 @@ fn trust_scope(
     let mut scope = match role {
         SignerRole::Publisher => SignerScope::publisher_default(),
         SignerRole::Operator => SignerScope::operator_default(),
+        SignerRole::Authoring => SignerScope::authoring_default(),
         SignerRole::ProjectAuthor => SignerScope {
             spaces: vec![SignerSpace::Project],
             kinds: vec![ryeos_engine::trust::ALL_KINDS.to_string()],
@@ -745,6 +746,32 @@ pub(super) fn trust_succeed(ctx: &HandlerContext<'_>) -> Result<Value> {
             statement,
         },
     )
+}
+
+// ── Key rotation ─────────────────────────────────────────────────────────
+
+fn rotate_key(ctx: &HandlerContext<'_>, key: crate::key_rotation::RotatedKey) -> Result<Value> {
+    let _: EmptyArguments = ctx.arguments()?;
+    let statement = utf8(ctx.inputs.require("succession")?, "succession statement")?;
+    crate::key_rotation::rotate(
+        key,
+        crate::key_rotation::RotationRequest {
+            app_root: ctx.app_root,
+            state_lock: ctx.state_lock,
+            node_key: ctx.node.signing_key(),
+            request_digest: ctx.request_digest,
+            signer_fingerprint: &ctx.request.signer_fingerprint,
+            statement,
+        },
+    )
+}
+
+pub(super) fn operator_rotate(ctx: &HandlerContext<'_>) -> Result<Value> {
+    rotate_key(ctx, crate::key_rotation::RotatedKey::Operator)
+}
+
+pub(super) fn authoring_rotate(ctx: &HandlerContext<'_>) -> Result<Value> {
+    rotate_key(ctx, crate::key_rotation::RotatedKey::Authoring)
 }
 
 // ── Policy ───────────────────────────────────────────────────────────────

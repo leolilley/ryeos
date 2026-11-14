@@ -239,6 +239,16 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "operator", "rotate"],
+        summary: "Rotate the operator key on a stopped node: the old key is retired and the new key takes over its grant",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "authoring", "rotate"],
+        summary: "Rotate the authoring key on a stopped node: the new key keeps the old key's scope",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["trust", "pin"],
         summary: "Pin a signer key from a PUBLISHER_TRUST.toml on a stopped node",
         category: "maintenance",
@@ -475,6 +485,16 @@ pub async fn try_dispatch(
         }
         ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
             crate::lifecycle_trust::run(verb, &argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("operator")) if argv.get(2).map(String::as_str) == Some("rotate") => {
+            crate::lifecycle_key_rotation::run_operator(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("authoring")) if argv.get(2).map(String::as_str) == Some("rotate") => {
+            crate::lifecycle_key_rotation::run_authoring(&argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("policy-apply")) => {
@@ -1952,6 +1972,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
             crate::tty::Row::key_value("app root", report.app_root.display().to_string()),
             crate::tty::Row::key_value("operator", report.user_key_fingerprint),
             crate::tty::Row::key_value("node", report.node_key_fingerprint),
+            crate::tty::Row::key_value("authoring", report.authoring_key_fingerprint),
             crate::tty::Row::key_value("vault", report.vault_pubkey_fingerprint),
             crate::tty::Row::key_value("bundles", report.bundles_installed.join(", ")),
         ];
@@ -2801,9 +2822,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // class. Reading them needs only the node key and the signed policy.
     if initialized {
         checks.push(authorized_keys_check(&config.app_root));
+        checks.push(key_age_check(
+            &config.app_root,
+            lillux::time::unix_secs_now(),
+        ));
     } else {
         checks.push(check(
             "authorized_keys",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+        checks.push(check(
+            "key_age",
             NA,
             serde_json::json!({ "note": "not initialized" }),
         ));
@@ -3351,6 +3381,54 @@ fn authorized_keys_check(
         }
         Err(error) => check(
             "authorized_keys",
+            FAIL,
+            serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
+/// Doctor row for key age: the node, operator, authoring and publisher keys,
+/// each with the time it entered service and its age in days. Age is a
+/// report, never a failure. The row warns when the node has no active
+/// operator or authoring key, because `ryeos init` creates both.
+fn key_age_check(
+    app_root: &std::path::Path,
+    now_unix: u64,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    match ryeos_node::key_rotation::key_ages(app_root, now_unix) {
+        Ok(keys) => {
+            let has_active = |role: &str| {
+                keys.iter()
+                    .any(|key| key.role == role && key.status == "active")
+            };
+            let mut missing = Vec::new();
+            for role in ["operator", "authoring"] {
+                if !has_active(role) {
+                    missing.push(serde_json::json!({
+                        "role": role,
+                        "fix": "run `ryeos init` on the stopped node to create and pin the key",
+                    }));
+                }
+            }
+            let status = if missing.is_empty() { OK } else { WARN };
+            check(
+                "key_age",
+                status,
+                serde_json::json!({
+                    "keys": keys,
+                    "missing": missing,
+                    "note": "age is reported, not judged: no signed policy sets a rotation threshold",
+                    "rotate": {
+                        "operator": "ryeos node operator rotate",
+                        "authoring": "ryeos node authoring rotate",
+                        "node": "not rotatable: the node key is the root of every node document",
+                    },
+                }),
+            )
+        }
+        Err(error) => check(
+            "key_age",
             FAIL,
             serde_json::json!({ "error": format!("{error:#}") }),
         ),
