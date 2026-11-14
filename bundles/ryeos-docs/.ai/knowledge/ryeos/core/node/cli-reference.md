@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:17:08Z:1f82590016b2f474326249ad4175f0c1f9bf858c492b32d093bb6906960b7d80:mArK6PkUuddDmSNnafnA/kWxOzN1HCnclTB9hYxQ3rhLGBPaQk0xvYjgRrKZ8KA0oy618mpvaYTHjS5U9m4pBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:37:06Z:b08b11ef72d634973d8038c5466d2988d79781b60c22e1db67ea3a2966b07b1b:i5121BVidvMiLmnXZ8Hc9XG634Vn7dXMrORL2zW4qXnPZf4Q/Oz7DfgjwpRaWzjo7atxxMbAmw6vvDswyuGAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -271,6 +271,8 @@ granted it, or the node operator); re-issue a stale one. The row also
 verifies the revocation ledger (`.ai/node/auth/revoked/`): it fails for a
 tombstone that is unsigned, tampered or signed by another key, and warns for a
 grant file that a tombstone already refuses but that is still on disk.
+
+It also lists every readable grant under `inventory` (principal as `fp:<hex>@site:<origin>` when the grant has an origin, class, origin site, label, scope count and `authorized_by`), and warns when a key other than the configured operator holds a wildcard scope (`wildcard_holders`, each with its cure).
 
 Revoke a grant on a running node with `ryeos revoke-key --fingerprint <fp>
 --reason <text> [--leave-running] [--keep-delegates]` (the principal that

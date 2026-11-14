@@ -342,6 +342,19 @@ pub fn validate_canonical_site_id(site_id: &str) -> Result<()> {
     ryeos_engine::principal_contract::validate_canonical_site_id(site_id)
 }
 
+/// How a principal is written when it is shown across nodes: its fingerprint
+/// (`fp:<64 hex>`, accepted with or without the prefix), then `@site:<origin>`
+/// when the grant records the site it arrives from. This is display only: a
+/// principal is its fingerprint, and no code may match on a label or on this
+/// string.
+pub fn cross_node_principal_display(fingerprint: &str, origin_site_id: Option<&str>) -> String {
+    let bare = fingerprint.strip_prefix("fp:").unwrap_or(fingerprint);
+    match origin_site_id {
+        Some(site) => format!("fp:{bare}@{site}"),
+        None => format!("fp:{bare}"),
+    }
+}
+
 /// Check a caller-signed forwarding-origin assertion against origin verified
 /// from the source-node co-signature and both target-signed grants. The
 /// assertion can only narrow and never creates origin authority.
@@ -2603,6 +2616,42 @@ mod tests {
             .unwrap();
         assert_eq!(grant.expires_at, GrantExpiry::Never);
         assert!(grant.ensure_unexpired(u64::MAX).is_ok());
+    }
+
+    #[test]
+    fn label_is_not_identity() {
+        let fx = grant_fixture();
+        let other = SigningKey::from_bytes(&[63; 32]);
+        let other_fp = lillux::signature::compute_fingerprint(&other.verifying_key());
+        let other_key =
+            base64::engine::general_purpose::STANDARD.encode(other.verifying_key().as_bytes());
+        for (fp, key) in [(&fx.fingerprint, &fx.public_key), (&other_fp, &other_key)] {
+            create_authorized_key_toml(
+                &fx.auth_dir,
+                fp,
+                key,
+                &["ryeos.execute.service.vault/list".to_owned()],
+                "shared label",
+                &granter_fingerprint(),
+                "2026-01-01T00:00:00Z",
+                &terms_expiring(4_000_000_000),
+                fx.node.signing_key(),
+            )
+            .unwrap();
+        }
+        let first = load_verified_authorized_key_unjudged(&fx.fingerprint, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        let second = load_verified_authorized_key_unjudged(&other_fp, &fx.auth_dir, &fx.node)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.owner, second.owner);
+        assert_ne!(first.fingerprint, second.fingerprint);
+        assert_ne!(first.public_key, second.public_key);
+        assert_eq!(
+            cross_node_principal_display(&first.fingerprint, Some("site:a")),
+            format!("fp:{}@site:a", first.fingerprint.trim_start_matches("fp:"))
+        );
     }
 
     #[test]

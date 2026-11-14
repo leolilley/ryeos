@@ -3514,6 +3514,7 @@ fn authorized_keys_check(
             } else if !report.expired.is_empty()
                 || !report.expiring.is_empty()
                 || !report.revoked_on_disk.is_empty()
+                || !report.wildcard_holders.is_empty()
             {
                 WARN
             } else {
@@ -3592,6 +3593,12 @@ struct GrantReport {
     /// key or malformed: the ledger cannot be trusted.
     invalid_tombstones: Vec<serde_json::Value>,
     tombstones: usize,
+    /// Every readable grant: who it names, where it came from and who asked
+    /// for it. Identity is the fingerprint; the label is display only.
+    inventory: Vec<serde_json::Value>,
+    /// Grants other than the configured operator's that carry a wildcard
+    /// scope.
+    wildcard_holders: Vec<serde_json::Value>,
 }
 
 impl GrantReport {
@@ -3615,6 +3622,8 @@ impl GrantReport {
     fn into_detail(self) -> serde_json::Value {
         serde_json::json!({
             "grants": self.grants,
+            "inventory": self.inventory,
+            "wildcard_holders": self.wildcard_holders,
             "expired": self.expired,
             "expiring": self.expiring,
             "stale": self.stale,
@@ -3639,6 +3648,34 @@ fn grant_report(
     for inspection in inspections {
         match &inspection.state {
             GrantFileState::Current(grant) => {
+                report.inventory.push(serde_json::json!({
+                    "principal": ryeos_node_runtime::identity::cross_node_principal_display(
+                        &grant.fingerprint,
+                        grant.configured_origin_site_id.as_deref(),
+                    ),
+                    "class": grant.principal_class.as_str(),
+                    "origin_site_id": grant.configured_origin_site_id,
+                    "label": grant.owner,
+                    "scope_count": grant.scopes.len(),
+                    "authorized_by": {
+                        "principal": grant.authorized_by.principal,
+                        "request_digest": grant.authorized_by.request_digest,
+                    },
+                }));
+                let is_operator = grant.principal_class
+                    == ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
+                    && grant.expires_at == GrantExpiry::Never;
+                if !is_operator && grant.scopes.iter().any(|scope| scope.contains('*')) {
+                    report.wildcard_holders.push(serde_json::json!({
+                        "fingerprint": grant.fingerprint,
+                        "class": grant.principal_class.as_str(),
+                        "label": grant.owner,
+                        "fix": format!(
+                            "re-authorize the key with an enumerated scope list: `ryeos authorize-key` for {} without a wildcard",
+                            grant.fingerprint
+                        ),
+                    }));
+                }
                 let GrantExpiry::At(expires) = grant.expires_at else {
                     continue;
                 };
@@ -6429,6 +6466,16 @@ mod tests {
         assert_eq!(report.expiring.len(), 1);
         assert_eq!(report.stale.len(), 1);
         assert_eq!(report.invalid.len(), 1);
+        assert_eq!(report.inventory.len(), 4);
+        assert_eq!(report.inventory[0]["scope_count"], 1);
+        assert_eq!(report.inventory[0]["label"], "grant-1");
+        assert!(
+            report.inventory[0]["principal"]
+                .as_str()
+                .unwrap()
+                .ends_with("@site:source")
+        );
+        assert!(report.wildcard_holders.is_empty());
         assert_eq!(report.stale[0]["error_code"], "grant_schema_stale");
         let revoked = grant_report(
             &[GrantFileInspection {
