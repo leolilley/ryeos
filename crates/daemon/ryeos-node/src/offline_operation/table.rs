@@ -864,7 +864,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 25);
+        assert_eq!(operations().len(), 26);
     }
 
     #[test]
