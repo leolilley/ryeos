@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T04:15:23Z:4d33333de333c38aa5d30ef60c392b4cd680c61f342441641deca54a09fbd91b:qL4MwAsFkZHWKMuN4qXHNarkXRSDdjEHWcI7dzTsy8V2lwtIv2HMxxxtYQW9BVxPT1HQlF6XKyzOd7ma4ApRAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:73419ca4b33dcb6263ed40a6203d277db202efb418815244e3f54db65d20bb3c:+jBV/RQFx/wP8jG/deLkEdkLU0qPokCeiJWuMJk+FdYRELPLNxRKBiHf9wnBrHY39EeV6AA5+Z1mG1vqrn4OBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   Daemon-runtime callback authentication contract: callback capability
   tokens, thread-auth tokens, env injection, TTLs, caps enforcement, and
@@ -53,6 +53,12 @@ composition as typed protocol bindings. `runtime`, `method_runtime`, and
   schedule's principal). `tool_callback` and `tool_streaming` declare it. It
   tells a tool who called it; it is information, not proof. To record who did
   something, read the `attribution.actor` the daemon stamps on a bundle event.
+
+- `RYEOSD_BUNDLE_STATE_HOME` — the one node-owned bundle state namespace this
+  launch opened: `/run/ryeos/bundle-state` under enforced isolation, the real
+  directory otherwise. `tool_callback` and `tool_streaming` declare it; it is
+  absent when the item declared no `runtime_authority.state_home`. It names a
+  directory, it is not authority (see `ryeos/standard/bundle-state-home`).
 
 The callback token and thread identity bind the durable project/state
 authority server-side. A subprocess does not receive or submit the canonical

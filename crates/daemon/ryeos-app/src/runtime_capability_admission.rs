@@ -54,63 +54,10 @@ pub fn mint_runtime_capability_caps(
     }
 
     // (2) Authority upper bound comes from the signed manifest at the exact
-    // provenance boundary that supplied the item. Installed bundle authority
-    // remains node-trusted. A live project may use its own signed manifest,
-    // but only for a TrustedProject item physically below that exact project's
-    // `.ai/` root and only with the request engine's effective project trust
-    // store. Mixed-trust composition of an installed item therefore remains
-    // unable to acquire project authority.
-    let manifest = match resolved_item.source_space {
-        ryeos_engine::contracts::ItemSpace::Bundle => {
-            if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle {
-                return Err(format!(
-                    "installed runtime capability requirements need TrustedBundle provenance; \
-                     effective trust class is {effective_trust_class:?}"
-                ));
-            }
-            let ai_dir = authoritative_runtime_authority_ai_dir(
-                resolved_item,
-                &effective_bundle_id,
-                engine,
-                &engine.node_trust_store,
-            )?;
-            ryeos_bundle::manifest::load_verified_manifest(
-                &ai_dir,
-                &effective_bundle_id,
-                &engine.node_trust_store,
-            )
-            .map_err(|err| format!("{err:#}"))?
-            .manifest
-        }
-        ryeos_engine::contracts::ItemSpace::Project => {
-            if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedProject {
-                return Err(format!(
-                    "project runtime capability requirements need TrustedProject provenance; \
-                     effective trust class is {effective_trust_class:?}"
-                ));
-            }
-            let project_root = resolved_item
-                .materialized_project_root
-                .as_deref()
-                .ok_or_else(|| {
-                    "project runtime capability item has no materialized project root".to_string()
-                })?;
-            let ai_dir =
-                authoritative_project_runtime_authority_ai_dir(resolved_item, project_root)?;
-            ryeos_bundle::manifest::load_verified_manifest(
-                &ai_dir,
-                &effective_bundle_id,
-                &engine.trust_store,
-            )
-            .map_err(|err| format!("{err:#}"))?
-            .manifest
-        }
-        ryeos_engine::contracts::ItemSpace::Node => {
-            return Err(
-                "node-local configuration cannot supply runtime capability authority".to_string(),
-            );
-        }
-    };
+    // provenance boundary that supplied the item (see
+    // `authoritative_manifest`).
+    let manifest =
+        authoritative_manifest(resolved_item, effective_trust_class, engine, &effective_bundle_id)?;
     manifest.runtime_authority.validate()?;
 
     // Manifest-declared caps form the upper bound. Cap strings come from the
@@ -144,6 +91,137 @@ pub fn mint_runtime_capability_caps(
     }
 
     Ok(requested.into_iter().collect())
+}
+
+/// The bundle state access capability this launch is entitled to, or `None`
+/// when the item requests no state home. Only an item of an installed bundle
+/// may open one: the bundle id names the home, and a project-space item can
+/// name any bundle id it likes, so it never derives one. The namespace is
+/// resolved from `launch_params` (when the requirement takes it from a launch
+/// parameter), and the installed bundle's signed manifest must back it.
+///
+/// This judges the manifest side only. Whether the *caller* may open the
+/// namespace is decided against the caller's own grant at root admission.
+pub fn mint_state_home_cap(
+    requires_value: Option<&Value>,
+    resolved_item: &ResolvedItem,
+    effective_trust_class: ryeos_engine::resolution::TrustClass,
+    engine: &ryeos_engine::engine::Engine,
+    launch_params: &Value,
+) -> Result<Option<String>, ryeos_bundle::runtime_authority::StateHomeRefusal> {
+    use ryeos_bundle::runtime_authority::StateHomeRefusal;
+
+    let Some(requires_value) = requires_value else {
+        return Ok(None);
+    };
+    let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
+        .map_err(|detail| StateHomeRefusal::NamespaceInvalid {
+            detail: format!("invalid `requires.capabilities`: {detail}"),
+        })?;
+    let Some(requirement) = reqs.manifest.runtime_authority.state_home.as_ref() else {
+        return Ok(None);
+    };
+    let bundle_id = crate::callback_token::effective_bundle_id_from_item_ref(
+        &resolved_item.canonical_ref.to_string(),
+    )
+    .unwrap_or_else(|| resolved_item.canonical_ref.to_string());
+    let undeclared = |detail: String| StateHomeRefusal::Undeclared {
+        bundle_id: bundle_id.clone(),
+        detail,
+    };
+    if resolved_item.source_space != ryeos_engine::contracts::ItemSpace::Bundle {
+        return Err(undeclared(
+            "only an item shipped by an installed bundle may open that bundle's state home"
+                .to_owned(),
+        ));
+    }
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", &bundle_id)
+        .map_err(|error| undeclared(format!("{error:#}")))?;
+    let namespace = requirement.resolve_namespace(launch_params)?;
+    let manifest = authoritative_manifest(resolved_item, effective_trust_class, engine, &bundle_id)
+        .map_err(undeclared)?;
+    manifest.runtime_authority.validate().map_err(undeclared)?;
+    let requested = requirement.requested_cap(&bundle_id, &namespace);
+    let backed = ryeos_bundle::runtime_authority::manifest_backs_requested_cap(
+        &manifest.runtime_authority.declared_caps(&bundle_id),
+        &requested,
+    );
+    if !backed {
+        return Err(undeclared(format!(
+            "its signed manifest declares no `runtime_authority.state_home` backing namespace \
+             `{namespace}`"
+        )));
+    }
+    Ok(Some(requested))
+}
+
+/// The signed manifest that bounds the runtime authority of `resolved_item`,
+/// loaded from the exact provenance boundary that supplied it.
+fn authoritative_manifest(
+    resolved_item: &ResolvedItem,
+    effective_trust_class: ryeos_engine::resolution::TrustClass,
+    engine: &ryeos_engine::engine::Engine,
+    effective_bundle_id: &str,
+) -> Result<ryeos_bundle::manifest::BundleManifest, String> {
+    // (2) Authority upper bound comes from the signed manifest at the exact
+    // provenance boundary that supplied the item. Installed bundle authority
+    // remains node-trusted. A live project may use its own signed manifest,
+    // but only for a TrustedProject item physically below that exact project's
+    // `.ai/` root and only with the request engine's effective project trust
+    // store. Mixed-trust composition of an installed item therefore remains
+    // unable to acquire project authority.
+    let manifest = match resolved_item.source_space {
+        ryeos_engine::contracts::ItemSpace::Bundle => {
+            if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle {
+                return Err(format!(
+                    "installed runtime capability requirements need TrustedBundle provenance; \
+                     effective trust class is {effective_trust_class:?}"
+                ));
+            }
+            let ai_dir = authoritative_runtime_authority_ai_dir(
+                resolved_item,
+                effective_bundle_id,
+                engine,
+                &engine.node_trust_store,
+            )?;
+            ryeos_bundle::manifest::load_verified_manifest(
+                &ai_dir,
+                effective_bundle_id,
+                &engine.node_trust_store,
+            )
+            .map_err(|err| format!("{err:#}"))?
+            .manifest
+        }
+        ryeos_engine::contracts::ItemSpace::Project => {
+            if effective_trust_class != ryeos_engine::resolution::TrustClass::TrustedProject {
+                return Err(format!(
+                    "project runtime capability requirements need TrustedProject provenance; \
+                     effective trust class is {effective_trust_class:?}"
+                ));
+            }
+            let project_root = resolved_item
+                .materialized_project_root
+                .as_deref()
+                .ok_or_else(|| {
+                    "project runtime capability item has no materialized project root".to_string()
+                })?;
+            let ai_dir =
+                authoritative_project_runtime_authority_ai_dir(resolved_item, project_root)?;
+            ryeos_bundle::manifest::load_verified_manifest(
+                &ai_dir,
+                effective_bundle_id,
+                &engine.trust_store,
+            )
+            .map_err(|err| format!("{err:#}"))?
+            .manifest
+        }
+        ryeos_engine::contracts::ItemSpace::Node => {
+            return Err(
+                "node-local configuration cannot supply runtime capability authority".to_string(),
+            );
+        }
+    };
+    Ok(manifest)
 }
 
 /// Bind project runtime authority to the exact live project resolution root.

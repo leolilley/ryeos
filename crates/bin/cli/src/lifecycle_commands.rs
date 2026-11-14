@@ -249,6 +249,21 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "maintenance",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "bundle-state", "export"],
+        summary: "Write a node-signed archive of a bundle's state home from a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "bundle-state", "import"],
+        summary: "Install a verified bundle state archive into a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "bundle-state", "remove"],
+        summary: "Delete a bundle's state home, or one namespace, from a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
         tokens: &["trust", "pin"],
         summary: "Pin a signer key from a PUBLISHER_TRUST.toml on a stopped node",
         category: "maintenance",
@@ -481,6 +496,20 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
             run_node_policy_generation_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("bundle-state"))
+            if matches!(
+                argv.get(2).map(String::as_str),
+                Some("export" | "import" | "remove")
+            ) =>
+        {
+            crate::lifecycle_bundle_state::run(
+                argv[2].as_str(),
+                &argv[3..],
+                console,
+            )
+            .map_err(map_local_err)?;
             Ok(true)
         }
         ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
@@ -3097,6 +3126,18 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     &snapshot,
                 ));
                 checks.push(remote_content_testimonies_check(&config.app_root));
+                checks.extend(bundle_state_checks(
+                    &config.app_root,
+                    &snapshot
+                        .bundles
+                        .iter()
+                        .map(|record| record.name.clone())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    isolation
+                        .as_ref()
+                        .ok()
+                        .map(|runtime| runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce),
+                ));
                 if !args.no_bundles {
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification
@@ -4533,6 +4574,115 @@ fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::Chec
             )
         }
     }
+}
+
+/// The three bundle state rows: the inventory of node-owned homes and whether
+/// each verifies, the homes kept after their bundle was removed, and whether
+/// the node can enforce the mount that confines a home to its bundle.
+fn bundle_state_checks(
+    app_root: &std::path::Path,
+    installed: &std::collections::BTreeSet<String>,
+    isolation_enforced: Option<bool>,
+) -> Vec<ryeos_core_tools::actions::doctor::CheckResult> {
+    use ryeos_app::bundle_state_home::{RecordState, inventory, orphaned};
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+
+    let key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("identity")
+        .join("private_key.pem");
+    let homes = ryeos_node_runtime::identity::NodeIdentity::load(&key_path)
+        .map_err(|error| format!("{error:#}"))
+        .and_then(|identity| {
+            inventory(app_root, identity.verifying_key()).map_err(|error| format!("{error:#}"))
+        });
+    let homes = match homes {
+        Ok(homes) => homes,
+        Err(error) => {
+            return vec![check(
+                "bundle_state_homes",
+                FAIL,
+                serde_json::json!({
+                    "error": error,
+                    "fix": "the node's bundle state directory could not be read; check its permissions",
+                }),
+            )];
+        }
+    };
+    if homes.is_empty() {
+        return vec![check(
+            "bundle_state_homes",
+            OK,
+            serde_json::json!({ "homes": [], "note": "no bundle has opened a state home" }),
+        )];
+    }
+    let describe = |home: &ryeos_app::bundle_state_home::HomeInventory| {
+        serde_json::json!({
+            "bundle": home.bundle_id,
+            "record": match &home.record {
+                RecordState::Verified => "verified".to_owned(),
+                RecordState::Missing => "missing".to_owned(),
+                RecordState::Invalid(reason) => format!("invalid: {reason}"),
+            },
+            "namespaces": home.namespaces.iter().map(|namespace| serde_json::json!({
+                "name": namespace.name,
+                "bytes": namespace.bytes,
+                "problems": namespace.problems,
+            })).collect::<Vec<_>>(),
+            "bytes": home.total_bytes(),
+            "problems": home.problems,
+        })
+    };
+    let unsound: Vec<_> = homes.iter().filter(|home| !home.is_sound()).collect();
+    let mut checks = vec![if unsound.is_empty() {
+        check(
+            "bundle_state_homes",
+            OK,
+            serde_json::json!({ "homes": homes.iter().map(describe).collect::<Vec<_>>() }),
+        )
+    } else {
+        check(
+            "bundle_state_homes",
+            FAIL,
+            serde_json::json!({
+                "homes": homes.iter().map(describe).collect::<Vec<_>>(),
+                "unsound": unsound.iter().map(|home| home.bundle_id.clone()).collect::<Vec<_>>(),
+                "fix": "a home whose record is missing, foreign or tampered, whose namespace name is invalid, or whose directory is wider than 0700 was not made by this node or was changed; move it out of .ai/state/bundle-state, or restore it from a verified `ryeos node bundle-state export`",
+            }),
+        )
+    }];
+    let orphans = orphaned(&homes, installed);
+    checks.push(if orphans.is_empty() {
+        check("bundle_state_orphaned", OK, serde_json::json!({}))
+    } else {
+        check(
+            "bundle_state_orphaned",
+            WARN,
+            serde_json::json!({
+                "homes": orphans.iter().map(|home| serde_json::json!({
+                    "bundle": home.bundle_id,
+                    "bytes": home.total_bytes(),
+                    "namespaces": home.namespaces.iter().map(|ns| ns.name.clone()).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "note": "removing a bundle keeps its state; these homes belong to bundles that are not installed",
+                "fix": "reinstall the bundle to use the state again, or delete it with `ryeos node bundle-state remove --bundle <id> --confirm`",
+            }),
+        )
+    });
+    checks.push(match isolation_enforced {
+        Some(true) => check("bundle_state_home_unenforced", OK, serde_json::json!({})),
+        _ => check(
+            "bundle_state_home_unenforced",
+            WARN,
+            serde_json::json!({
+                "bundles": homes.iter().map(|home| home.bundle_id.clone()).collect::<Vec<_>>(),
+                "note": "isolation is not enforced on this node, so a bundle's state home is a convention, not a boundary: a process running as the same user can read every bundle's state",
+                "fix": "enforce isolation in the signed node policy (`.ai/node/policies/isolation.yaml`)",
+            }),
+        ),
+    });
+    checks
 }
 
 fn check(

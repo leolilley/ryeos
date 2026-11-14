@@ -2521,6 +2521,7 @@ pub(crate) async fn dispatch_method(
             item_ref: runtime_item_ref.clone(),
             thread_id: thread_id.clone(),
             project_path: request.project_path.to_path_buf(),
+            bundle_state_home: None,
             runtime_state_root: request
                 .provenance
                 .state_root_override()
@@ -2562,7 +2563,7 @@ pub(crate) async fn dispatch_method(
             .env_injections
             .iter()
             .map(|injection| {
-                let value = ryeos_engine::protocol_vocabulary::produce_env_value(
+                let value = ryeos_engine::protocol_vocabulary::produce_optional_env_value(
                     injection.source,
                     &env_request,
                 )
@@ -2573,15 +2574,18 @@ pub(crate) async fn dispatch_method(
                         runtime_protocol.canonical_ref, injection.name, runtime_item_ref,
                     ),
                 })?;
-                Ok(ryeos_app::env_contract::EnvBinding::new(
+                Ok(value.map(|value| ryeos_app::env_contract::EnvBinding::new(
                     injection.name.clone(),
                     value,
                     ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection {
                         source: injection.source,
                     },
-                ))
+                )))
             })
-            .collect::<Result<Vec<_>, DispatchError>>()?;
+            .collect::<Result<Vec<_>, DispatchError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let envs = ryeos_app::env_contract::EnvContractBuilder::new()
             .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
@@ -2650,6 +2654,7 @@ pub(crate) async fn dispatch_method(
                     network_authority_ceiling,
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     captured_callback_socket: false,

@@ -36,7 +36,8 @@ pub const HOME_RECORD_NAME: &str = ".home.json";
 pub const HOME_RECORD_SCHEMA: u32 = 1;
 /// Where isolation mounts the launch's one namespace, so the path a workload
 /// sees does not depend on where the node keeps its app root.
-pub const BUNDLE_STATE_MOUNT_DESTINATION: &str = "/run/ryeos/bundle-state";
+pub const BUNDLE_STATE_MOUNT_DESTINATION: &str =
+    ryeos_engine::isolation::BUNDLE_STATE_ISOLATION_DESTINATION;
 
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 /// Most entries and deepest nesting the doctor will walk in one namespace.
@@ -470,7 +471,9 @@ mod tests {
             lillux::PinnedDirectory::open(&root_path(app.path()))
                 .unwrap()
                 .unwrap(),
-            bundle_dir.clone(),
+            lillux::PinnedDirectory::open(&root_path(app.path()).join("central-auth"))
+                .unwrap()
+                .unwrap(),
             lillux::PinnedDirectory::open(&opened.path).unwrap().unwrap(),
         ] {
             dir.require_owner_private_directory().unwrap();

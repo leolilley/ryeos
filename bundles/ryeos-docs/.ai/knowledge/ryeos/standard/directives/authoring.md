@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T04:43:16Z:2601934de69584ee8f7b4680e1f2c532e0e83d719b49dd502562728f9973e346:m3Gc2GkXJYQiCBbavMx8+J7UWFkb3Qr4IC85varyE8TUY4gj+G5KhnK8I9ZA7RjodJNi+ssMgPruD86RPzKFBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:d7423beedffd535db84268a92444238a330a97dbc26ff967bdcdd57f83a2ca30:9VwppGvEbr9Bml6zEGY5AWreZjW4DU4RHBg4/F96i7yrWtHuE4SJzBELnMiCP+FLl2xqH9sR2AeqjD+1zbhIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -45,7 +45,7 @@ Instructions for the runtime.
 
 - `extends`: parent directive ref. Children inherit through `extends-chain`.
 - `requires.capabilities.declared`: a flat list of the capability strings the directive needs (the cap encodes its own verb, e.g. `ryeos.execute.tool.echo`). Declaring is asking, not granting: the caller launching the directive must hold every declared cap, otherwise the launch is refused with `caller_capability_not_covered`. Declare the narrowest set the body really uses; a broad wildcard can only be launched by a caller holding it. Children may narrow but not widen the parent's declared set.
-- `requires.capabilities.manifest.runtime_authority`: runtime callback authority (bundle events / vault / item authoring / project snapshots) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
+- `requires.capabilities.manifest.runtime_authority`: runtime callback authority (bundle events / vault / item authoring / project snapshots / bundle state home) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
 - `context`: knowledge refs grouped by position (`system`, `before`, `after`).
 - `model`: optional explicit provider/model/context window; otherwise routing tiers apply.
 - `limits`: runtime limits such as turn/tool/token/spend budgets.

@@ -185,6 +185,7 @@ fn run_tool_with_hints(
             },
         ),
         isolation_state_root: None,
+        isolation_bundle_state_home: None,
         isolation_checkpoint_dir: None,
         isolation_checkpoint_authority: None,
         isolation_daemon_socket_path: None,

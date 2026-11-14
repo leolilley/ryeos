@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:65f192bc6bb94243cd1ebb338bd90788ed688cf373e90c1f33d5135cb787e1be:QOqUcB31PTRYctKo9CBxPH/mw9dcp2J15PfelH+LoY6rEFkwjL/qDW+Y5tRFUUl6QNlgW9s4aTSSV+nqWkaZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:599c3e353dc7e4e61c75ad1d7f5967a583d1a3b91fce25fd0d26a1dbf03a3d9a:FzML2EuglNZ0EA0Ix7p80DhCwQXvsSM27YhXKRHL40nwhjp0XeJ1rBw0VOLXVMhGXKh9HHGKI82vi2huo606Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.6.0"
+version: "3.7.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -328,6 +328,15 @@ Every listed row carries an `attention` and a `fix`:
 
 `ryeos external-execution status` prints the same view as JSON.
 
+The bundle state rows read the node-owned homes under
+`.ai/state/bundle-state` without writing: `bundle_state_homes` inventories each
+home (namespaces, bytes) and fails when a `.home.json` is missing, foreign or
+tampered, a namespace name is invalid, or a directory is wider than 0700;
+`bundle_state_orphaned` warns about homes whose bundle is not installed (removing
+a bundle keeps its state); `bundle_state_home_unenforced` warns while homes exist
+and isolation is not enforced, because then a home is a convention rather than a
+boundary.
+
 The `remote_content_testimonies` row reads this node's accepted remote
 qualification testimonies from its signed heads, offline and without
 resolving bundles. For each content-lane acceptance it checks whether this
@@ -398,6 +407,23 @@ ryeos node reset policy-generation --node-profile <name> --host-class <class> --
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
 shortcut, and none broadens into another reset scope implicitly.
+
+A bundle's node-owned state (see `ryeos/standard/bundle-state-home`) moves
+and is deleted only through three signed offline operations, local operator
+only, with the daemon stopped:
+
+```bash
+ryeos node bundle-state export --bundle <id> [--namespace <ns>] --output <abs path> [--json]
+ryeos node bundle-state import --archive <file> [--replace-namespace <ns>]... [--json]
+ryeos node bundle-state remove --bundle <id> [--namespace <ns>] --confirm [--json]
+```
+
+`export` writes a tar with a node-signed manifest and refuses an existing output
+path. `import` verifies the manifest under this node's key or a pinned peer node
+key, requires the bundle to be installed with a state home backing each
+namespace, and replaces an existing different namespace only under
+`--replace-namespace`. `remove` appends a ledger receipt naming the digest of
+the listing before it deletes. Removing a bundle never deletes its state.
 
 Large objects that `ryeos external-content scrub` quarantined for byte damage
 stay on disk as evidence, counted against the large-object budget, until an

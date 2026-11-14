@@ -280,6 +280,7 @@ impl LaunchPreparerRunner {
                     crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,

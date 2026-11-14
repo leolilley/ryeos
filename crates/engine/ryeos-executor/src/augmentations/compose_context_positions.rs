@@ -732,6 +732,7 @@ pub async fn run(
             item_ref: runtime_item_ref.clone(),
             thread_id: child_thread_id.clone(),
             project_path: project_path.to_path_buf(),
+            bundle_state_home: None,
             runtime_state_root: cap
                 .provenance
                 .state_root_override()
@@ -773,7 +774,7 @@ pub async fn run(
             .env_injections
             .iter()
             .map(|injection| {
-                let value = ryeos_engine::protocol_vocabulary::produce_env_value(
+                let value = ryeos_engine::protocol_vocabulary::produce_optional_env_value(
                     injection.source,
                     &env_request,
                 )
@@ -785,15 +786,18 @@ pub async fn run(
                         runtime_item_ref,
                     ))
                 })?;
-                Ok(ryeos_app::env_contract::EnvBinding::new(
+                Ok(value.map(|value| ryeos_app::env_contract::EnvBinding::new(
                     injection.name.clone(),
                     value,
                     ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection {
                         source: injection.source,
                     },
-                ))
+                )))
             })
-            .collect::<Result<Vec<_>, LaunchAugmentationError>>()?;
+            .collect::<Result<Vec<_>, LaunchAugmentationError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let envs = ryeos_app::env_contract::EnvContractBuilder::new()
             .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
@@ -839,6 +843,7 @@ pub async fn run(
                 network_authority_ceiling: ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: provenance.state_root_override(),
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     captured_callback_socket: false,
