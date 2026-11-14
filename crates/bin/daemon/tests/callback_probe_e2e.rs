@@ -236,8 +236,9 @@ async fn an_alias_extends_parent_is_refused() {
     .await
     .expect("author_item callback");
 
+    assert_eq!(outcome.refusal_code(), "author_item_aliased_extends_parent");
     let ProbeOutcome::Refused { message, .. } = &outcome else {
-        panic!("an `@alias` extends parent must be refused: {outcome:?}");
+        unreachable!("refusal_code returned for a refusal")
     };
     assert!(
         message.contains("aliased parent"),
