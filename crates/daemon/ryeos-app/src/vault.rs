@@ -535,6 +535,37 @@ fn read_authorized_secret_values(
             unauthorized.join(", ")
         )));
     }
+    // An operator-vault source is judged against the recipient sealed at
+    // admission: the admitted caller and its own scopes. A launch under any
+    // other principal, such as a child acting for someone else under an
+    // inherited authority, receives no operator-vault name, and a launch's
+    // narrowed or item-declared capabilities never widen or narrow what the
+    // admission was granted.
+    let vault_recipient = match authority {
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+            include_operator_vault: true,
+            recipient_principal,
+            recipient_scopes,
+            ..
+        }
+        | ryeos_state::objects::EnvironmentAuthority::Vault {
+            recipient_principal,
+            recipient_scopes,
+            ..
+        } => Some((recipient_principal, recipient_scopes)),
+        _ => None,
+    };
+    if let Some((recipient_principal, _)) = vault_recipient
+        && principal != recipient_principal
+    {
+        return Err(VaultReadError::AuthorityViolation(format!(
+            "operator-vault name(s) [{}] are not delivered to principal `{principal}`: the \
+             admitted vault authority was sealed for principal `{recipient_principal}`; \
+             launch under that principal, or admit this launch's own vault authority under \
+             `{principal}`",
+            required_secrets.join(", ")
+        )));
+    }
     if let ryeos_state::objects::EnvironmentAuthority::ProviderEnvironment {
         declared_names,
         recipient_principal,
@@ -609,7 +640,9 @@ fn read_authorized_secret_values(
             project_authority_id,
             source_identity,
             include_operator_vault,
-            ..
+            recipient_principal: _,
+            recipient_scopes,
+            name_authority: _,
         } => {
             let root = project_authority.open_environment_root()?.ok_or_else(|| {
                 VaultReadError::Internal(anyhow!(
@@ -661,11 +694,9 @@ fn read_authorized_secret_values(
                     .iter()
                     .filter(|name| stored.contains_key(name.as_str()))
                     .try_for_each(|name| {
-                        sources.ceilings.judge_receive(
-                            name,
-                            principal,
-                            project_authority.capability_ceiling(),
-                        )
+                        sources
+                            .ceilings
+                            .judge_receive(name, principal, recipient_scopes)
                     });
                 if let Err(refusal) = judged {
                     zeroize_secret_values(&mut stored);
@@ -694,7 +725,12 @@ fn read_authorized_secret_values(
             }
             upstream
         }
-        ryeos_state::objects::EnvironmentAuthority::Vault { namespace, .. } => {
+        ryeos_state::objects::EnvironmentAuthority::Vault {
+            namespace,
+            recipient_principal: _,
+            recipient_scopes,
+            name_authority: _,
+        } => {
             if namespace != "operator" {
                 return Err(VaultReadError::Internal(anyhow!(
                     "unsupported vault namespace {namespace:?}; this node exposes only the explicit operator namespace"
@@ -703,7 +739,7 @@ fn read_authorized_secret_values(
             for name in &requested {
                 sources
                     .ceilings
-                    .judge_receive(name, principal, project_authority.capability_ceiling())
+                    .judge_receive(name, principal, recipient_scopes)
                     .map_err(VaultReadError::NameRefused)?;
             }
             vault.read_all()?
@@ -1585,9 +1621,20 @@ mod tests {
         namespace: &str,
         name_authority: ryeos_state::objects::EnvironmentNameAuthority,
     ) -> ryeos_state::objects::ExecutionProjectAuthority {
+        sealed_vault_authority(namespace, name_authority, OP.principal, &[])
+    }
+
+    fn sealed_vault_authority(
+        namespace: &str,
+        name_authority: ryeos_state::objects::EnvironmentNameAuthority,
+        recipient_principal: &str,
+        recipient_scopes: &[&str],
+    ) -> ryeos_state::objects::ExecutionProjectAuthority {
         ryeos_state::objects::ExecutionProjectAuthority::projectless(
             ryeos_state::objects::EnvironmentAuthority::Vault {
                 namespace: namespace.to_string(),
+                recipient_principal: recipient_principal.to_string(),
+                recipient_scopes: names(recipient_scopes),
                 name_authority,
             },
         )
@@ -1669,7 +1716,12 @@ mod tests {
                 &sources,
                 SecretRecipient { principal },
                 &names(&[name]),
-                &operator_authority(),
+                &sealed_vault_authority(
+                    "operator",
+                    ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+                    principal,
+                    &[],
+                ),
             )
         };
         // The listed principal receives its name.
@@ -1790,6 +1842,7 @@ mod tests {
             project.path(),
             ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost,
             Vec::new(),
+            Some(OP.principal),
         )
         .unwrap();
         let ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
@@ -2022,6 +2075,135 @@ mod tests {
             authorize_secret_delivery(&sources, OP, &names(&["OPENAI_API_KEY"]), &inherited)
                 .unwrap();
         assert_eq!(delivered.get("OPENAI_API_KEY"), Some("sk-parent"));
+    }
+
+    fn capability_ceilings() -> VaultCeilings {
+        use ryeos_node_runtime::node_policy::sections::{
+            recipients::NameRecipients,
+            sealed_vault_names::{SealedVaultName, SealedVaultNamesPolicy},
+        };
+        VaultCeilings::new(
+            SealedVaultNamesPolicy {
+                schema: 1,
+                names: vec![SealedVaultName {
+                    name: "API_KEY".to_owned(),
+                    recipients: NameRecipients {
+                        principals: Vec::new(),
+                        capabilities: names(&["ryeos.receive.vault.api_key"]),
+                    },
+                    writers: NameRecipients {
+                        principals: names(&["op"]),
+                        capabilities: Vec::new(),
+                    },
+                }],
+            },
+            "op".to_owned(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn projectless_vault_recipient_is_judged_by_its_sealed_scopes() {
+        let vault = fixed_vault(&[("API_KEY", "sk-1")]);
+        let environment = ProviderEnvironment::none();
+        let ceilings = capability_ceilings();
+        let sources = SecretSources {
+            vault: &vault,
+            provider_env: &environment,
+            ceilings: &ceilings,
+        };
+        let sealed = |principal: &str, scopes: &[&str]| {
+            sealed_vault_authority(
+                "operator",
+                ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+                principal,
+                scopes,
+            )
+        };
+        let deliver = |principal: &str, authority: &_| {
+            authorize_secret_delivery(
+                &sources,
+                SecretRecipient { principal },
+                &names(&["API_KEY"]),
+                authority,
+            )
+        };
+        // The projectless launch carries no project ceiling; the sealed
+        // scopes of the recipient alone admit the name.
+        let granted = sealed("fp:c", &["ryeos.receive.vault.api_key"]);
+        assert_eq!(
+            deliver("fp:c", &granted).unwrap().get("API_KEY"),
+            Some("sk-1")
+        );
+        // The same recipient sealed without the capability is refused by name.
+        let error = deliver("fp:c", &sealed("fp:c", &[])).unwrap_err();
+        assert!(matches!(error, VaultReadError::NameRefused(_)), "{error}");
+        // A child or continuation acting for another principal receives
+        // nothing under the inherited authority, even holding the capability.
+        let error = deliver("fp:d", &granted).unwrap_err();
+        let VaultReadError::AuthorityViolation(message) = &error else {
+            panic!("expected an authority violation, got {error}");
+        };
+        assert!(
+            message.contains("fp:c") && message.contains("fp:d"),
+            "{message}"
+        );
+        assert!(!message.contains("sk-1"), "{message}");
+    }
+
+    #[test]
+    fn project_overlay_vault_recipient_is_sealed_and_other_principals_are_refused() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(".env"), "").unwrap();
+        use crate::execution_policy::ExecutionPolicyResolution as _;
+        let authority = crate::execution_policy::ExecutionPolicy::local_live(
+            crate::execution_policy::ExecutionResponse::Wait,
+        )
+        .resolve_live_project_authority(
+            project.path(),
+            ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost,
+            names(&["ryeos.receive.vault.api_key"]),
+            Some("fp:c"),
+        )
+        .unwrap();
+        let ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+            recipient_principal,
+            recipient_scopes,
+            ..
+        } = authority.environment()
+        else {
+            panic!("local live policy must admit a project overlay");
+        };
+        assert_eq!(recipient_principal, "fp:c");
+        assert_eq!(recipient_scopes, &names(&["ryeos.receive.vault.api_key"]));
+
+        let vault = fixed_vault(&[("API_KEY", "sk-1")]);
+        let environment = ProviderEnvironment::none();
+        let ceilings = capability_ceilings();
+        let sources = SecretSources {
+            vault: &vault,
+            provider_env: &environment,
+            ceilings: &ceilings,
+        };
+        let delivered = authorize_secret_delivery(
+            &sources,
+            SecretRecipient { principal: "fp:c" },
+            &names(&["API_KEY"]),
+            &authority,
+        )
+        .unwrap();
+        assert_eq!(delivered.get("API_KEY"), Some("sk-1"));
+        let error = authorize_secret_delivery(
+            &sources,
+            SecretRecipient { principal: "fp:d" },
+            &names(&["API_KEY"]),
+            &authority,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VaultReadError::AuthorityViolation(_)),
+            "{error}"
+        );
     }
 
     #[test]

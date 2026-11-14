@@ -1133,6 +1133,8 @@ pub(super) fn continuation_resume_context(
             ),
             source_identity: "dotenv:/work/project/.env".to_string(),
             include_operator_vault: true,
+            recipient_principal: "operator".to_string(),
+            recipient_scopes: Vec::new(),
             name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
         },
         Vec::new(),

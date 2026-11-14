@@ -1819,6 +1819,8 @@ mod tests {
                 project_authority_id,
                 source_identity: format!("dotenv:{}/.env", original_path.display()),
                 include_operator_vault: true,
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
             },
             vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
@@ -1868,6 +1870,7 @@ mod tests {
                 project.path(),
                 ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
                 vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+                Some("fp:test"),
             )
             .unwrap();
 
@@ -1916,6 +1919,7 @@ mod tests {
                 &project,
                 ryeos_state::objects::LiveFilesystemConfinement::standard_fixed_parents(),
                 vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+                Some("fp:test"),
             )
             .unwrap();
         let live_access = isolation_live_access_authority_for_project(&project_authority)

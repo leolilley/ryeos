@@ -351,6 +351,10 @@ pub fn resolve_execution_project_authority(
             }
         };
 
+    // The vault-reading environments seal the admitted caller and its own
+    // canonical scopes the same way, so delivery judges the recipient and
+    // never the project's access ceiling (empty for a projectless launch).
+    //
     // A project-overlay environment is part of the exact project authority,
     // not an independently authored path setting. Resolve it only after the
     // live or pinned project identity is known so remote pinned generations
@@ -377,6 +381,8 @@ pub fn resolve_execution_project_authority(
                         ),
                         source_identity: format!("dotenv:{}", root.join(".env").display()),
                         include_operator_vault: *include_operator_vault,
+                        recipient_principal: provider_environment.principal.to_owned(),
+                        recipient_scopes: capability_ceiling.clone(),
                         name_authority: resolve_name_authority(name_policy),
                     }
                 }
@@ -385,6 +391,8 @@ pub fn resolve_execution_project_authority(
                     name_policy,
                 } => EnvironmentAuthority::Vault {
                     namespace: namespace.clone(),
+                    recipient_principal: provider_environment.principal.to_owned(),
+                    recipient_scopes: capability_ceiling.clone(),
                     name_authority: resolve_name_authority(name_policy),
                 },
                 ExecutionEnvironmentPolicy::Delegated {
@@ -2868,6 +2876,45 @@ mod tests {
             environment: &NO_PROVIDER_ENVIRONMENT,
             principal: "fp:test",
         }
+    }
+
+    #[test]
+    fn vault_namespace_admission_seals_the_callers_principal_and_canonical_scopes() {
+        // A projectless launch has an empty project ceiling; the recipient
+        // sealed here is the caller and its own scopes, in canonical form.
+        let authority = resolve_execution_project_authority(
+            &operator_vault_namespace_policy(),
+            None,
+            None,
+            None,
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &scopes(&[
+                "ryeos.receive.vault.b",
+                "ryeos.receive.vault.a",
+                "ryeos.receive.vault.b",
+            ]),
+            ProviderEnvironmentRecipient {
+                environment: &NO_PROVIDER_ENVIRONMENT,
+                principal: "fp:caller",
+            },
+        )
+        .unwrap();
+        let ryeos_state::objects::EnvironmentAuthority::Vault {
+            recipient_principal,
+            recipient_scopes,
+            ..
+        } = authority.environment()
+        else {
+            panic!("expected a vault authority");
+        };
+        assert_eq!(recipient_principal, "fp:caller");
+        assert_eq!(
+            recipient_scopes,
+            &scopes(&["ryeos.receive.vault.a", "ryeos.receive.vault.b"])
+        );
+        assert!(authority.capability_ceiling().is_empty());
+        authority.validate().unwrap();
     }
 
     const OPENAI_VALUE: &str = "sk-node-provider-value";
