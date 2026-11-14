@@ -1046,6 +1046,38 @@ fn plant_operator_vault_secret(state: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// List the fixture's vault name in the node's signed `sealed_vault_names`
+/// policy with the declared route's handler principal as its recipient. A name
+/// with no entry reaches only the node's configured operator, and a route's
+/// fixed handler principal is a different principal than the operator, so the
+/// declared route receives the secret only through this entry.
+fn plant_vault_name_recipient(
+    state: &Path,
+    node: &lillux::crypto::SigningKey,
+    recipient_principal: &str,
+) -> anyhow::Result<()> {
+    let list = serde_json::json!({
+        "principals": [recipient_principal],
+        "capabilities": [],
+    });
+    let body = serde_yaml::to_string(&serde_json::json!({
+        "schema": 1,
+        "names": [{
+            "name": VAULT_SECRET_NAME,
+            "recipients": list,
+            "writers": list,
+        }],
+    }))?;
+    let signed = lillux::signature::sign_content(&body, node, "#", None);
+    std::fs::write(
+        state
+            .join(ryeos_engine::AI_DIR)
+            .join("node/policies/sealed_vault_names.yaml"),
+        signed,
+    )?;
+    Ok(())
+}
+
 fn assert_operator_vault_refusal(
     status: reqwest::StatusCode,
     body: &serde_json::Value,
@@ -1079,6 +1111,11 @@ async fn handler_route_operator_vault_requires_route_declaration_and_manifest_bo
     let (h, _fixture) = DaemonHarness::start_fast_with(
         |state, _user, fixture| {
             plant_operator_vault_secret(state)?;
+            plant_vault_name_recipient(
+                state,
+                &fixture.node,
+                "route-handler:vault-allowed-fixture:vault-allowed-fixture/declared",
+            )?;
             plant_vault_route_bundle(state, "vault-allowed-fixture", true, fixture)?;
             plant_vault_route_bundle(state, "vault-denied-fixture", false, fixture)
         },

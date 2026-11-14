@@ -1151,6 +1151,7 @@ async fn dispatch_tool_subprocess(
             root_class,
             &resolved.item_ref,
             ctx,
+            &request.params,
         )?;
         let admission_ready = source
             .as_ref()
@@ -1177,6 +1178,7 @@ async fn dispatch_tool_subprocess(
         root_class,
         &resolved.item_ref,
         ctx,
+        &request.params,
     )?;
 
     let parent_thread_id = request
@@ -1388,9 +1390,12 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
                     remediation: crate::dispatch_error::required_secret_remediation(&env_var),
                 }
             }
+            // An authorization refusal carrying the ceiling's own code.
             ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
-                DispatchError::CapabilityRejected {
-                    reason: refusal.to_string(),
+                DispatchError::LaunchPolicyForbidden {
+                    code: refusal.code().to_owned(),
+                    message: refusal.to_string(),
+                    binding: None,
                 }
             }
             error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {

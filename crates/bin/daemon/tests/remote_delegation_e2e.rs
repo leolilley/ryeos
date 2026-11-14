@@ -171,6 +171,9 @@ async fn start_pair() -> Result<Pair> {
                     "ryeos.execute.service.remote/authorize",
                     "ryeos.execute.service.remote/pull",
                     "ryeos.execute.service.remote/bundle-install",
+                    // The remote bundle-install service also requires the
+                    // local bundle-install capability before it goes out.
+                    "ryeos.execute.service.bundle/install",
                     THREADS_CAP,
                     "ryeos.execute.service.remote/delegation-revoke",
                 ],
