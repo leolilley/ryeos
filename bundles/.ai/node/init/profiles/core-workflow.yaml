@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T18:15:39Z:e616ec5faf757fc1598135af489e76927007d82ab2d568ea57a5c4df86a778c3:Ln8EPPoh+Lk+0toQRsVu2h2853EHeG6vVTuU1qdtx5kngD3EKbjz3/CbJuruQQEPMs2be798dRKe4+arf4zBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:ca65c4e139967879140bddb4bb34b8a64843d55f79f860fc4926de6018d8bdbf:aaBeiMc0ogLwPbt1tFDiuAxtg6WpX5NbLKpf6D35h8IDaIY6tjClpoqYRiKjRAnHVGmJ+qOi9zC4hMdBF3xfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -403,6 +403,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T18:15:40Z:e4f8229320bd8177a2c206dfdb9b6cb293df51c861e0cab75825e81a51a25632:w+p8H0abjgX6vbNWhBZQUFwIEOFg19yzHubt/1jsbZ+1huKfycenh8IV8R/be87CVvxbEo2IDCdcxpqrPMKmDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:c60f26d149dc020587988972811ffea82d3c7d3ff7b7f9ec3a9591e9a03874fe:hKHDUg2dzddyUZ16OL10Zf8Biw8EjleMO3nigyvyMe0J3flAMJycmHQBLLDHQ4es8fAkNw1ESV25Wg52IYB1DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -434,6 +434,9 @@ policies:
           # a recipient capability.
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
+  sealed_vault_names:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 5
     session_ttl_secs: 28800

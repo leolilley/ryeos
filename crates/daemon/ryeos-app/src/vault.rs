@@ -5,7 +5,8 @@
 //! The daemon owns a single shared secret store. Delivering launches read
 //! declared secrets only through [`authorize_secret_delivery`], after their
 //! admission was verified and under the sealed environment authority of that
-//! admission. The authorized values travel as a names-only contract into the
+//! admission. Every name read from the store is also judged against its
+//! per-name recipient ceiling ([`VaultCeilings`]). The authorized values travel as a names-only contract into the
 //! plan and join only the final process request.
 //!
 //! Subprocesses (e.g. `ryeos-directive-runtime`) just call
@@ -57,6 +58,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
 
+pub mod ceilings;
 pub mod external_channel;
 pub mod external_connector;
 pub mod external_relay_bootstrap;
@@ -72,6 +74,7 @@ use placement::PlacementCredentialAccess;
 // `ryeos vault {put,list,remove,rewrap}` verbs without a circular
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
+pub use ceilings::{VaultCeilings, VaultNameAction, VaultNameRefusal, VaultNameRefusalKind};
 pub use provider_env::{ProviderEnvironment, RecipientRefusal};
 pub use ryeos_vault::paths::default_sealed_store_path;
 pub use ryeos_vault::policy::{
@@ -97,12 +100,16 @@ pub struct SecretRecipient<'a> {
 pub struct SecretSources<'a> {
     pub vault: &'a dyn NodeVault,
     pub provider_env: &'a ProviderEnvironment,
+    /// The per-name ceilings judged on every delivery from the vault.
+    pub ceilings: &'a VaultCeilings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VaultScope {
-    /// The operator's sealed secrets: one store shared by every principal
-    /// holding the vault service caps, not a per-principal namespace.
+    /// The operator's sealed secrets: one store, not a per-principal
+    /// namespace. Each name carries its own receive and write ceiling in the
+    /// node's signed `sealed_vault_names` policy; a name without one is
+    /// operator-only.
     OperatorEnv,
     RuntimeBundle {
         bundle_id: String,
@@ -305,8 +312,9 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
     -> Result<HashMap<String, String>>;
 
     /// Set a secret. Server-side sealing: the daemon re-encrypts the
-    /// entire store. There is one shared store per node: a secret set by
-    /// one principal is listed, replaced and delivered for every other.
+    /// entire store. There is one shared store per node; which principals may
+    /// replace or receive a name is decided by that name's ceiling
+    /// ([`VaultCeilings`]), not by this trait.
     fn set_secret(&self, name: &str, value: &str) -> Result<()>;
 
     /// List secret key names (never values).
@@ -392,6 +400,11 @@ pub enum VaultReadError {
     /// transient IO/config faults.
     #[error("vault authority violation: {0}")]
     AuthorityViolation(String),
+    /// The node's per-name ceiling refuses the recipient. The refusal carries
+    /// the stable code and names the fix; it is final for the admitted
+    /// authority.
+    #[error("{0}")]
+    NameRefused(VaultNameRefusal),
     #[error("vault read error: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -640,7 +653,25 @@ fn read_authorized_secret_values(
                 )));
             }
             let mut upstream = if *include_operator_vault {
-                vault.read_all()?
+                let mut stored = vault.read_all()?;
+                // A requested name the store holds is judged before it can be
+                // delivered; a name only the project's `.env` supplies is
+                // not a vault name.
+                let judged = requested
+                    .iter()
+                    .filter(|name| stored.contains_key(name.as_str()))
+                    .try_for_each(|name| {
+                        sources.ceilings.judge_receive(
+                            name,
+                            principal,
+                            project_authority.capability_ceiling(),
+                        )
+                    });
+                if let Err(refusal) = judged {
+                    zeroize_secret_values(&mut stored);
+                    return Err(VaultReadError::NameRefused(refusal));
+                }
+                stored
             } else {
                 HashMap::new()
             };
@@ -668,6 +699,12 @@ fn read_authorized_secret_values(
                 return Err(VaultReadError::Internal(anyhow!(
                     "unsupported vault namespace {namespace:?}; this node exposes only the explicit operator namespace"
                 )));
+            }
+            for name in &requested {
+                sources
+                    .ceilings
+                    .judge_receive(name, principal, project_authority.capability_ceiling())
+                    .map_err(VaultReadError::NameRefused)?;
             }
             vault.read_all()?
         }
@@ -1413,6 +1450,44 @@ impl ReadOnlySealedVault {
         self.rewrap_pending
     }
 
+    /// The operator-visible secret names the store holds, sorted. Internal
+    /// runtime and credential entries are not names an operator sets and are
+    /// left out. The decrypted map is zeroized before this returns; only
+    /// names leave.
+    pub fn operator_secret_names(&self) -> Result<Vec<String>> {
+        if self.rewrap_pending {
+            bail!("vault rewrap is pending; the next daemon start or vault operation recovers it");
+        }
+        if !self.store_path.exists() {
+            return Ok(Vec::new());
+        }
+        with_store_lock(&self.store_path, || {
+            let secret_key = lillux::vault::read_secret_key(&self.secret_path).map_err(|e| {
+                anyhow!(
+                    "vault: load secret key {}: {e:#}",
+                    self.secret_path.display()
+                )
+            })?;
+            let mut entries =
+                ryeos_vault::sealed::read_sealed_secrets(&self.store_path, &secret_key).map_err(
+                    |error| {
+                        anyhow!(
+                            "vault: read sealed store {}: {error:#}",
+                            self.store_path.display()
+                        )
+                    },
+                )?;
+            let mut names: Vec<String> = entries
+                .keys()
+                .filter(|name| !is_internal_vault_key(name))
+                .cloned()
+                .collect();
+            names.sort();
+            zeroize_secret_values(&mut entries);
+            Ok(names)
+        })
+    }
+
     /// Whether the store holds this exact placement credential generation.
     /// The decrypted map, the matched value included, is zeroized before
     /// this returns; only presence leaves.
@@ -1468,9 +1543,12 @@ pub fn read_named_secret(
 #[cfg(test)]
 pub(crate) fn vault_only_sources(vault: &dyn NodeVault) -> SecretSources<'_> {
     static NO_PROVIDER_ENVIRONMENT: ProviderEnvironment = ProviderEnvironment::none();
+    static OPERATOR_ONLY: std::sync::LazyLock<VaultCeilings> =
+        std::sync::LazyLock::new(|| VaultCeilings::operator_only("op"));
     SecretSources {
         vault,
         provider_env: &NO_PROVIDER_ENVIRONMENT,
+        ceilings: &OPERATOR_ONLY,
     }
 }
 
@@ -1555,6 +1633,68 @@ mod tests {
                 .unwrap();
         assert!(delivered.is_empty());
         assert_eq!(reads(&vault), 0);
+    }
+
+    #[test]
+    fn vault_delivery_judges_each_name_against_its_ceiling_before_reading() {
+        use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
+        use ryeos_node_runtime::node_policy::sections::sealed_vault_names::{
+            SealedVaultName, SealedVaultNamesPolicy,
+        };
+        let listed = |principal: &str| NameRecipients {
+            principals: vec![principal.to_owned()],
+            capabilities: Vec::new(),
+        };
+        let ceilings = VaultCeilings::new(
+            SealedVaultNamesPolicy {
+                schema: 1,
+                names: vec![SealedVaultName {
+                    name: "API_KEY".to_owned(),
+                    recipients: listed("fp:b"),
+                    writers: listed("op"),
+                }],
+            },
+            "op".to_owned(),
+        )
+        .unwrap();
+        let vault = fixed_vault(&[("API_KEY", "sk-1"), ("OLD_KEY", "sk-old")]);
+        let environment = ProviderEnvironment::none();
+        let sources = SecretSources {
+            vault: &vault,
+            provider_env: &environment,
+            ceilings: &ceilings,
+        };
+        let deliver = |principal: &str, name: &str| {
+            authorize_secret_delivery(
+                &sources,
+                SecretRecipient { principal },
+                &names(&[name]),
+                &operator_authority(),
+            )
+        };
+        // The listed principal receives its name.
+        assert_eq!(
+            deliver("fp:b", "API_KEY").unwrap().get("API_KEY"),
+            Some("sk-1")
+        );
+        // A listed name is refused to everyone else, the operator included,
+        // before the store is read for it.
+        let reads_before = reads(&vault);
+        let VaultReadError::NameRefused(refusal) = deliver("op", "API_KEY").unwrap_err() else {
+            panic!("a name the ceiling does not list the operator for is refused");
+        };
+        assert_eq!(refusal.code(), "vault_name_not_delivered");
+        assert_eq!(reads(&vault), reads_before);
+        // A name with no ceiling is the operator's alone.
+        assert_eq!(
+            deliver("op", "OLD_KEY").unwrap().get("OLD_KEY"),
+            Some("sk-old")
+        );
+        let VaultReadError::NameRefused(refusal) = deliver("fp:b", "OLD_KEY").unwrap_err() else {
+            panic!("a name with no ceiling is refused to a non-operator");
+        };
+        assert_eq!(refusal.code(), "vault_name_has_no_ceiling");
+        assert!(!refusal.to_string().contains("sk-old"));
     }
 
     #[test]
@@ -1739,6 +1879,7 @@ mod tests {
         let sources = SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &VaultCeilings::operator_only("op"),
         };
         let authority = provider_authority(
             &["OPENAI_API_KEY"],
@@ -1766,6 +1907,7 @@ mod tests {
         let sources = SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &VaultCeilings::operator_only("op"),
         };
         let authority = provider_authority(
             &["A_KEY", "B_KEY"],
@@ -1797,6 +1939,7 @@ mod tests {
         let sources = SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &VaultCeilings::operator_only("op"),
         };
         let narrowed = provider_authority(
             &["ALLOWED", "OTHER"],
@@ -1837,6 +1980,7 @@ mod tests {
         let sources = SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &VaultCeilings::operator_only("op"),
         };
         // The authority admitted for `op` reaches a child launch acting for
         // another principal unchanged; that launch receives nothing.
@@ -1887,7 +2031,7 @@ mod tests {
             vec![
                 ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName {
                     name: "B_KEY".to_string(),
-                    recipients: ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentRecipients {
+                    recipients: ryeos_node_runtime::node_policy::sections::recipients::NameRecipients {
                         principals: Vec::new(),
                         capabilities: names(&["ryeos.receive.provider_env.b_key"]),
                     },
@@ -1899,6 +2043,7 @@ mod tests {
         let sources = SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &VaultCeilings::operator_only("op"),
         };
         let sealed = |scopes: &[&str]| {
             ryeos_state::objects::ExecutionProjectAuthority::projectless(
@@ -1952,6 +2097,7 @@ mod tests {
         let sources = SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &VaultCeilings::operator_only("op"),
         };
         let authority = provider_authority(
             &["EARLY_KEY", "LATER_KEY"],
@@ -1986,6 +2132,7 @@ mod tests {
         let sources = SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &VaultCeilings::operator_only("op"),
         };
         let authority = provider_authority(
             &[name.as_str()],

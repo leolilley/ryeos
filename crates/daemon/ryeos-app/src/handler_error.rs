@@ -115,6 +115,22 @@ pub fn delegation_handler_error(
     }
 }
 
+/// The structured response for a refused sealed-vault name: the stable
+/// code, the message naming the cure, and 403 because the caller is known
+/// but the name's ceiling does not admit it.
+pub fn vault_name_handler_error(refusal: &crate::vault::VaultNameRefusal) -> HandlerError {
+    HandlerError::Structured {
+        code: refusal.code().to_owned(),
+        status: 403,
+        body: serde_json::json!({
+            "code": refusal.code(),
+            "error": refusal.message(),
+            "name": refusal.name,
+            "principal": refusal.principal,
+        }),
+    }
+}
+
 /// Operator-correctable refusals raised deep in app code keep their own
 /// type (and their full message for non-HTTP callers); this is the single
 /// place they become a structured response.

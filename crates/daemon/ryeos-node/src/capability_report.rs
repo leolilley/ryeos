@@ -1678,7 +1678,7 @@ mod tests {
                 .map(|name| {
                     ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName {
                         name: (*name).to_owned(),
-                        recipients: ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentRecipients {
+                        recipients: ryeos_node_runtime::node_policy::sections::recipients::NameRecipients {
                             principals: vec!["fp:operator".to_owned()],
                             capabilities: Vec::new(),
                         },

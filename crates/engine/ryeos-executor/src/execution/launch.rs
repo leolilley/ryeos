@@ -5591,6 +5591,9 @@ async fn prepare_managed_launch_authority(
             item_ref: params.resolved.item_ref.clone(),
             secrets: missing_secrets_from_requirements(&names, &secret_requirements),
         },
+        VaultReadError::NameRefused(refusal) => BuildAndLaunchError::CapabilityRejected {
+            reason: refusal.to_string(),
+        },
         error @ VaultReadError::AuthorityViolation(_) => {
             BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
         }

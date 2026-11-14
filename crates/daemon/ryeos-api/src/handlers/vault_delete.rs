@@ -1,6 +1,8 @@
 //! `vault/delete` — delete a secret from the node's vault.
 //!
-//! Idempotent: deleting a missing key returns `{ deleted: false }`.
+//! Idempotent: deleting a missing key returns `{ deleted: false }`. The
+//! caller must be a writer of the name under the node's `sealed_vault_names`
+//! policy.
 
 use std::sync::Arc;
 
@@ -24,6 +26,10 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
+    state
+        .vault_ceilings
+        .judge_write(&req.name, &ctx.fingerprint, &ctx.scopes)
+        .map_err(|refusal| crate::handler_error::vault_name_handler_error(&refusal))?;
 
     let deleted = state.vault.delete_secret(&req.name).map_err(|e| {
         let msg = format!("{e:#}");

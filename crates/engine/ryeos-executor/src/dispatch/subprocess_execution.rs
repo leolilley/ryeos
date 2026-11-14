@@ -1378,6 +1378,11 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
                     remediation: crate::dispatch_error::required_secret_remediation(&env_var),
                 }
             }
+            ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+                DispatchError::CapabilityRejected {
+                    reason: refusal.to_string(),
+                }
+            }
             error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
                 DispatchError::Internal(anyhow::anyhow!("vault read refused: {error:#}"))
             }

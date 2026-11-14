@@ -1,7 +1,8 @@
 //! `vault/set` — set a secret on the node's vault.
 //!
 //! Server-side sealing: the daemon re-encrypts the store after inserting
-//! the new key. TLS protects the plaintext in transit.
+//! the new key. TLS protects the plaintext in transit. The caller must be
+//! a writer of the name under the node's `sealed_vault_names` policy.
 
 use std::sync::Arc;
 
@@ -29,10 +30,15 @@ pub async fn handle(
     let Request { name, value } = req;
     let value = Zeroizing::new(value);
 
-    // The caller must be verified. The write is not scoped to the caller:
-    // the node has one shared operator store, guarded only by the
-    // `vault/set` capability.
+    // The caller must be verified. The node has one shared store; what this
+    // caller may write is bounded per name by the node's signed
+    // `sealed_vault_names` policy, on top of the `vault/set` capability. A
+    // name with no ceiling is writable only by the configured local operator.
     ctx.require_verified()?;
+    state
+        .vault_ceilings
+        .judge_write(&name, &ctx.fingerprint, &ctx.scopes)
+        .map_err(|refusal| crate::handler_error::vault_name_handler_error(&refusal))?;
 
     state.vault.set_secret(&name, value.as_str()).map_err(|e| {
         // Vault validation errors (key name, blocked names) are user

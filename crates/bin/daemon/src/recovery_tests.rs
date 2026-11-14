@@ -821,6 +821,9 @@ fn build_test_state() -> (
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+        vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+            "fp:test-operator",
+        )),
         command_registry: Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         ),
