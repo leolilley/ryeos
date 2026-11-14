@@ -590,7 +590,7 @@ async fn revoke_cancels_live_threads_of_principal() {
         &harness,
         &fixture,
         &grantee,
-        "/execute",
+        "/execute/launch",
         serde_json::json!({
             "item_ref": "tool:sleeper/sleeper",
             "ref_bindings": {},
