@@ -593,6 +593,7 @@ async fn revoke_cancels_live_threads_of_principal() {
         "/execute/launch",
         serde_json::json!({
             "item_ref": "tool:sleeper/sleeper",
+            "launch_id": "L-0123456789abcdef0123456789abcdef",
             "ref_bindings": {},
             "project_path": project_path.display().to_string(),
             "parameters": {},
