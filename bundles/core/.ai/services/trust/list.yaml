@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T05:09:06Z:9563a6938a9f4cdc7ff45b765e12e0133f8de56334c030bc5d169b19ada260d9:3HAOgqojcAgYiZgx2nCNmrGdTMaEsD++lk3+dXINpecju0GuhvGPRejY6VoUTyitt377oVnj2YgsDdixL2B4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: trust.list
+availability: both
+state_access: read_only_existing
+record_thread: false
+required_caps: ["ryeos.execute.service.trust/list"]
+description: "List the node's signer registry: every pinned signer with role, scope and status, the registry digest and the key-event chain head"

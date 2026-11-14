@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:09:46Z:b1929b73655e1cdd9ffc4e1fc0f0076a0cb6b19c588425fe7458a65bfa1d6fcc:8Doa/Xhbax5tzx1vfWi9ATHWmFbLaRM424KGbHFVs/D9MY5zOf8MZgA6H15Y8ZqFCC1oHCxmfa+o1TTlkNjXDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T11:09:13Z:92998b892328cca234c6860e513457dd42fc84688a4aff644ffd11c2473d7dd5:0TtYp1W6mA7/ZBhfn14Nt8hoo45m0lrRR88dZMYkIUbCNJZP5B82SpS2HNi1V7F08RjpG1KAFYj32E/nPEBcCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -336,7 +336,7 @@ only `bundles/bundle-source`, using the already-published byte-identical
 `bundles/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools` and
 `bundles/core` as registry. `--owner` is a display/trust label, not key
 selection: the publisher reads the signing key from
-`$RYEOS_APP_ROOT/.ai/config/keys/signing/private_key.pem`. Therefore a build
+`$RYEOS_APP_ROOT/.ai/node/operator/signing/private_key.pem`. Therefore a build
 must use an explicitly isolated signing-only app root containing the
 authorized Development key and verify its derived fingerprint against source
 trust before invocation. This temporary key context is not a node home or a

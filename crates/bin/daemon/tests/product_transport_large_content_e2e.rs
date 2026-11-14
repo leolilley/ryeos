@@ -140,7 +140,8 @@ fn remote_config(
         base64::engine::general_purpose::STANDARD.encode(node_key.verifying_key().as_bytes());
     ryeos_api::remote::config::RemoteConfig {
         name: name.to_owned(),
-        url,
+        url: Some(url),
+        reachability: Default::default(),
         principal_id: format!("fp:{}", fingerprint(node_key)),
         signing_key: format!("ed25519:{public_key}"),
         site_id: site_id.to_owned(),
@@ -154,10 +155,17 @@ fn install_single_remote(
     state_path: &Path,
     remote: ryeos_api::remote::config::RemoteConfig,
 ) -> Result<()> {
-    ryeos_api::remote::config::save_remotes(
+    let node = ryeos_node_runtime::identity::NodeIdentity::load(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf()).node_signing_key_path(),
+    )?;
+    ryeos_api::remote::config::write_remote_pin(
         state_path,
-        &HashMap::from([(remote.name.clone(), remote)]),
-    )
+        node.signing_key(),
+        &remote,
+        ryeos_api::remote::config::PinSource::ExpectedFingerprint,
+        None,
+    )?;
+    Ok(())
 }
 
 fn authorized_keys_dir(state_path: &Path) -> std::path::PathBuf {
@@ -505,6 +513,14 @@ async fn start_pair() -> Result<Pair> {
             &origin_site,
         ),
     )?;
+    common::remote_delegation::store_operator_delegation(
+        origin.harness.bind,
+        &common::fast_fixture::node_signing_key(),
+        &common::fast_fixture::user_signing_key(),
+        HOSTED_REMOTE,
+        PUSH_SCOPES,
+    )
+    .await?;
     Ok(Pair {
         origin,
         hosted,
@@ -620,19 +636,20 @@ impl Pair {
             .context("origin does not list its own admission of the witness")
     }
 
-    /// Canonical objects of the product closure, read from ORIGIN.
+    /// Canonical objects of the product closure, read from ORIGIN by its
+    /// operator through the unscoped read.
     async fn origin_objects(&self, hashes: &[String]) -> Result<Vec<Value>> {
         let (status, body) = self
             .origin
             .harness
             .post_json(
-                "/objects/get",
+                "/objects/get-any",
                 json!({"object_hashes": hashes, "blob_hashes": []}),
             )
             .await?;
         ensure!(
             status.is_success(),
-            "origin objects/get returned {status}: {body}"
+            "origin objects/get-any returned {status}: {body}"
         );
         let entries = body["entries"]
             .as_array()
@@ -803,14 +820,14 @@ impl Pair {
     }
 }
 
-/// The product's file as a node serves it through `objects/get`, reassembled
-/// from wire chunks.
+/// The product's file as a node's operator reads it through the unscoped
+/// `objects/get-any`, reassembled from wire chunks.
 async fn read_resident_file(node: &DaemonHarness, product: &Published) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     loop {
         let (status, body) = node
             .post_json(
-                "/objects/get",
+                "/objects/get-any",
                 json!({
                     "object_hashes": [],
                     "blob_hashes": [],
@@ -1118,6 +1135,173 @@ async fn transport_refuses_forged_misowned_and_incomplete_offers() -> Result<()>
 /// Pull form. HOSTED's counterpart is a node whose local operator is ORIGIN's
 /// operator, since a pulled acceptance is owned by the local configured
 /// operator.
+/// POST to `origin` signed by the pulling node's key.
+async fn post_as_puller(
+    origin: &Origin,
+    key: &SigningKey,
+    path: &str,
+    body: Value,
+) -> Result<(reqwest::StatusCode, String)> {
+    let bytes = serde_json::to_vec(&body)?;
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{}{path}", origin.harness.bind))
+        .header("content-type", "application/json")
+        .body(bytes.clone());
+    for (name, value) in common::build_signed_headers_for_bytes(
+        key,
+        &common::fast_fixture::node_signing_key(),
+        "POST",
+        path,
+        &bytes,
+    ) {
+        request = request.header(name, value);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    Ok((status, response.text().await?))
+}
+
+/// The pulling node reads the product under its admission, and nothing else:
+/// the origin's other objects (here its own admission record, which exists on
+/// the node but is outside the witness closure) are refused exactly as a hash
+/// that does not exist is, and `has` reports them absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pulling_node_reads_an_admitted_product_and_nothing_else() -> Result<()> {
+    let puller_key = puller_node_key();
+    let origin = start_origin(Some(&puller_key)).await?;
+    let product = &origin.product;
+    let root = json!({"kind": "admitted_subject", "subject_hash": product.witness_hash});
+
+    // Under the admission the witness closure and the large object read.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/closure/get",
+        json!({
+            "root": root,
+            "roots": [product.witness_hash],
+            "allow_untransported_large_objects": true,
+        }),
+    )
+    .await?;
+    ensure!(
+        status.is_success(),
+        "closure get under the admission: {status} {text}"
+    );
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({
+            "root": root,
+            "object_hashes": [],
+            "blob_hashes": [],
+            "large_object_chunk": {"hash": product.file_sha256, "offset": 0, "length": 1024},
+        }),
+    )
+    .await?;
+    ensure!(
+        status.is_success(),
+        "large-object read under the admission: {status} {text}"
+    );
+    assert!(text.contains("large_object_chunk"), "{text}");
+
+    // A hash outside the witness closure is refused whether or not it exists.
+    let absent = "ef".repeat(32);
+    let (status_exists, text_exists) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({"root": root, "object_hashes": [product.admission_hash], "blob_hashes": []}),
+    )
+    .await?;
+    let (status_absent, text_absent) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({"root": root, "object_hashes": [absent], "blob_hashes": []}),
+    )
+    .await?;
+    assert_eq!(
+        status_exists,
+        reqwest::StatusCode::FORBIDDEN,
+        "{text_exists}"
+    );
+    assert_eq!(
+        status_absent,
+        reqwest::StatusCode::FORBIDDEN,
+        "{text_absent}"
+    );
+    assert!(text_exists.contains("object_not_in_scope"), "{text_exists}");
+    assert_eq!(
+        text_exists.replace(&product.admission_hash, "H"),
+        text_absent.replace(&absent, "H"),
+        "an existing out-of-scope hash must answer exactly like an absent one"
+    );
+
+    // A rootless read, and a closure rooted outside the admission, are refused.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get",
+        json!({"object_hashes": [product.witness_hash], "blob_hashes": []}),
+    )
+    .await?;
+    assert!(
+        status == reqwest::StatusCode::FORBIDDEN && text.contains("object_not_in_scope"),
+        "rootless get: {status} {text}"
+    );
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/closure/get",
+        json!({"root": root, "roots": [product.admission_hash]}),
+    )
+    .await?;
+    assert!(
+        status == reqwest::StatusCode::FORBIDDEN && text.contains("object_not_in_scope"),
+        "closure rooted outside the admission: {status} {text}"
+    );
+
+    // Presence is answered only inside the root.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/has",
+        json!({
+            "root": root,
+            "object_hashes": [product.witness_hash, product.admission_hash],
+            "blob_hashes": [],
+        }),
+    )
+    .await?;
+    ensure!(
+        status.is_success(),
+        "has under the admission: {status} {text}"
+    );
+    let has: Value = serde_json::from_str(&text)?;
+    assert_eq!(has["found_object_hashes"], json!([product.witness_hash]));
+    assert_eq!(
+        has["missing_object_hashes"],
+        json!([product.admission_hash])
+    );
+
+    // The pulling node holds the object-read capabilities but not the
+    // operator: the unscoped read is refused.
+    let (status, text) = post_as_puller(
+        &origin,
+        &puller_key,
+        "/objects/get-any",
+        json!({"object_hashes": [product.witness_hash], "blob_hashes": []}),
+    )
+    .await?;
+    assert!(
+        !status.is_success(),
+        "get-any by a pulling node: {status} {text}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn receive_product_pulls_the_large_object() -> Result<()> {
     let puller_key = puller_node_key();
@@ -1221,7 +1405,8 @@ fn delegate_wiring(state_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// ORIGIN's descriptor, as `ryeos remote-descriptor` exports it.
+/// ORIGIN's descriptor, as `ryeos remote-descriptor` exports it: version 2,
+/// signed by the node key it pins.
 fn origin_descriptor(origin_state: &Path, url: &str) -> Result<Vec<u8>> {
     let node = common::fast_fixture::node_signing_key();
     let fingerprint = fingerprint(&node);
@@ -1231,22 +1416,25 @@ fn origin_descriptor(origin_state: &Path, url: &str) -> Result<Vec<u8>> {
             .join("node/vault/public_key.pem"),
     )?
     .fingerprint();
-    Ok(serde_yaml::to_string(&json!({
-        "version": 1,
-        "name": ORIGIN_REMOTE,
-        "url": url,
-        "node": {
-            "public_key": format!(
+    let descriptor = ryeos_api::remote::config::RemoteDescriptor {
+        version: 2,
+        name: ORIGIN_REMOTE.to_owned(),
+        url: Some(url.to_owned()),
+        site_id: format!("site:{fingerprint}"),
+        vault_fingerprint: vault,
+        node: ryeos_api::remote::config::RemoteDescriptorNode {
+            public_key: format!(
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(node.verifying_key().as_bytes())
             ),
-            "fingerprint": fingerprint,
-            "site_id": format!("site:{fingerprint}"),
-            "vault_fingerprint": vault,
+            fingerprint,
         },
-        "ingest_ignore": { "patterns": [] },
-    }))?
-    .into_bytes())
+        ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
+        capabilities: Vec::new(),
+        admission: None,
+        provider: None,
+    };
+    Ok(descriptor.render_signed(&node)?.into_bytes())
 }
 
 /// Sign `operation` as ORIGIN's operator against the stopped HOSTED's facts
@@ -1397,6 +1585,14 @@ async fn a_hosted_node_wired_by_delegated_offline_operations_takes_a_push() -> R
             &hosted_fixture.site_id(),
         ),
     )?;
+    common::remote_delegation::store_operator_delegation(
+        origin.harness.bind,
+        &origin_node,
+        &origin_operator,
+        HOSTED_REMOTE,
+        PUSH_SCOPES,
+    )
+    .await?;
     let pair = Pair {
         origin,
         hosted,

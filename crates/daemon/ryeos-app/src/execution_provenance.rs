@@ -862,6 +862,12 @@ impl ExecutionProvenance {
         })
     }
 
+    /// The logical project of this execution for signer project scopes (see
+    /// `ExecutionProjectAuthority::logical_project_root`).
+    pub fn logical_project_root(&self) -> Option<PathBuf> {
+        self.project_authority().logical_project_root()
+    }
+
     pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {
         match self {
             Self::Projectless {
@@ -2017,6 +2023,7 @@ mod tests {
         };
         let base = provenance("base", &base_hash);
         let context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: owner.clone(),
                 scopes: Vec::new(),

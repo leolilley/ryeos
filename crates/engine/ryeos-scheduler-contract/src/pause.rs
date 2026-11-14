@@ -16,6 +16,8 @@ pub enum ScheduleAutoPauseReason {
     Expired,
     /// A fire was refused because the pinned grant was revoked.
     AuthorityRevoked,
+    /// A fire was refused because the pinned grant has lapsed.
+    AuthorityExpired,
     /// A fire was refused because the pinned grant generation, class or
     /// origin changed.
     AuthorityChanged,
@@ -30,6 +32,7 @@ impl ScheduleAutoPauseReason {
             Self::MaxFiresReached => "max_fires_reached",
             Self::Expired => "expired",
             Self::AuthorityRevoked => "authority_revoked",
+            Self::AuthorityExpired => "authority_expired",
             Self::AuthorityChanged => "authority_changed",
             Self::AuthorityNarrowed => "authority_narrowed",
         }
@@ -52,6 +55,7 @@ mod tests {
             ScheduleAutoPauseReason::MaxFiresReached,
             ScheduleAutoPauseReason::Expired,
             ScheduleAutoPauseReason::AuthorityRevoked,
+            ScheduleAutoPauseReason::AuthorityExpired,
             ScheduleAutoPauseReason::AuthorityChanged,
             ScheduleAutoPauseReason::AuthorityNarrowed,
         ] {

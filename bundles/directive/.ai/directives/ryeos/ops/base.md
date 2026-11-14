@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T04:34:21Z:f80937723e73d82eb355e6cb325a6d605a47701b70253004e552ffd1e8b6ee09:zj9N70gAXPQ0FhiHCRMq2XJW6afq0SyNoX/p/qQ/7DRMCOIhg+eZlyaGbpkrEoe+eOtZNv9U1mCovwex2+wZCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:47:54Z:cda3608570f105593d8d3198cd55fa0f613b19537b16b068ece8e7aae0852459:4rBzsPd47qI6nFDbGsBWhNPt93WmJNt964d6bx2E61tuK3Zs92dbVTXozZShNJpU5BPqKMlWUEvcMOwTGj64Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Base operations directive for ryeos — runs a single operator turn in a thread."
 version: "1.0.0"
@@ -15,7 +15,9 @@ requires:
       - ryeos.execute.tool.ryeos/core/verify
       - ryeos.execute.tool.ryeos/core/node/doctor
       - ryeos.execute.tool.ryeos/knowledge/compose
-      - ryeos.execute.knowledge.*
+      - ryeos.execute.knowledge.ryeos/core/*
+      - ryeos.execute.knowledge.ryeos/standard/*
+      - ryeos.execute.knowledge.ryeos/ui/*
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log

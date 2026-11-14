@@ -51,6 +51,7 @@ ryeos-directive-definition = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-engine = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

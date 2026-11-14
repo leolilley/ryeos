@@ -5,6 +5,11 @@
 //! token files on the target node; the claimant proves possession of the
 //! private key for the public key being admitted; the node then writes the
 //! normal node-signed authorized-key grant.
+//!
+//! A token names the class of grant it admits. A `remote_principal` token
+//! also names the origin site, and its claim must carry a co-signature from
+//! an admitted node of that site over the claimant's signed claim, the same
+//! attestation a forwarded request carries.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
+use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, AuthorizedKeySubject};
 use serde_json::Value;
 
 use crate::handler_error::{HandlerError, HandlerResult};
@@ -20,23 +26,40 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 const CLAIM_MAX_AGE_SECS: u64 = 300;
-const ADMISSION_CLAIM_PROTOCOL_VERSION: u32 = 2;
+const ADMISSION_CLAIM_PROTOCOL_VERSION: u32 = 3;
+/// Admission token format this node reads. Any other version is refused as
+/// stale, because the class of a token's grant is part of the stored format.
+const ADMISSION_TOKEN_FORMAT_VERSION: u32 =
+    ryeos_core_tools::actions::authorize::ADMISSION_TOKEN_FORMAT_VERSION;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    /// Exact admission claim protocol. Version 2 binds the claimant's site
-    /// identity into both the self-signature and the resulting node grant.
+    /// Exact admission claim protocol. Version 3 binds the grant class and
+    /// the claimant's site identity into the self-signature.
     pub protocol_version: u32,
     /// Opaque one-time admission token delivered out-of-band by the
     /// target node operator or provider/provisioner.
     pub token: String,
     /// Ed25519 public key in `ed25519:<base64>` format. This is the key
-    /// that future signed requests from the admitted node will use.
+    /// that future signed requests from the admitted key will use.
     pub public_key: String,
-    /// Site identity asserted by the admitted node and covered by its claim
+    /// Class of grant the claimant asks for. Must equal the class the token
+    /// admits; it is covered by the claim signature.
+    pub principal_class: AuthorizedKeyPrincipalClass,
+    /// Site identity asserted by the claimant and covered by its claim
     /// signature. The destination re-signs this binding into the grant.
-    pub origin_site_id: String,
+    /// Required for remote classes, and absent for `local_client`.
+    #[serde(default)]
+    pub origin_site_id: Option<String>,
+    /// `fp:<hex>` of the origin node that co-signed a `remote_principal`
+    /// claim. Absent for other classes.
+    #[serde(default)]
+    pub forwarding_key_id: Option<String>,
+    /// Base64 co-signature by that node, made over the hash built by
+    /// `cosignature_content_hash`. Absent for other classes.
+    #[serde(default)]
+    pub forwarding_signature: Option<String>,
     /// Human-readable label for the resulting authorized-key grant.
     #[serde(default)]
     pub label: Option<String>,
@@ -56,7 +79,8 @@ pub struct Request {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AdmissionTokenFile {
-    version: u32,
+    #[serde(rename = "version")]
+    _version: u32,
     token_hash: String,
     #[serde(default)]
     label: Option<String>,
@@ -66,6 +90,34 @@ struct AdmissionTokenFile {
     #[serde(default)]
     ttl_secs: Option<u64>,
     expires_at_unix: u64,
+    /// Class of the grant redeeming this token writes.
+    class: AuthorizedKeyPrincipalClass,
+    /// Site a `remote_principal` token is bound to.
+    #[serde(default)]
+    origin_site_id: Option<String>,
+    /// Lifetime requested for the admitted grant; the node's authorization
+    /// policy bounds it when the token is redeemed.
+    #[serde(default)]
+    grant_lifetime_secs: Option<u64>,
+}
+
+/// Just the version of a stored token, whatever else it holds, so a token of
+/// a retired format is named stale instead of failing to parse.
+#[derive(serde::Deserialize)]
+struct AdmissionTokenVersion {
+    version: u32,
+}
+
+/// A typed refusal that names its cure.
+fn refusal(code: &str, status: u16, message: String) -> HandlerError {
+    HandlerError::Structured {
+        code: code.to_owned(),
+        status,
+        body: serde_json::json!({
+            "error": message,
+            "error_code": code,
+        }),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -76,7 +128,8 @@ pub struct Response {
     pub scopes: Vec<String>,
     pub granted_by: String,
     pub created_at: String,
-    pub origin_site_id: String,
+    pub principal_class: AuthorizedKeyPrincipalClass,
+    pub origin_site_id: Option<String>,
     /// RFC 3339 UTC time at which the admitted grant stops authenticating.
     pub expires_at: String,
 }
@@ -88,7 +141,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             ADMISSION_CLAIM_PROTOCOL_VERSION, req.protocol_version
         )));
     }
-    if ryeos_node_runtime::identity::validate_canonical_site_id(&req.origin_site_id).is_err() {
+    if let Some(origin_site_id) = req.origin_site_id.as_deref()
+        && ryeos_node_runtime::identity::validate_canonical_site_id(origin_site_id).is_err()
+    {
         return Err(HandlerError::BadRequest(
             "origin_site_id must use the canonical `site:<name>` form".to_string(),
         ));
@@ -98,12 +153,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     let token_path = admission_token_path(&state.config.app_root, &token_hash);
     let token = read_token_file(&token_path)?;
 
-    if token.version != 1 {
-        return Err(HandlerError::BadRequest(format!(
-            "unsupported admission token version {}; expected 1",
-            token.version
-        )));
-    }
     if token.token_hash != token_hash {
         return Err(HandlerError::BadRequest(
             "admission token hash mismatch".to_string(),
@@ -117,6 +166,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         ));
     }
     enforce_hosted_policy_token_ttl(maximum_token_ttl_secs, &token, now)?;
+    let origin_site_id = check_claim_matches_token(&req, &token)?;
     if now.abs_diff(req.signed_at) > CLAIM_MAX_AGE_SECS {
         return Err(HandlerError::Forbidden(
             "admission claim signature timestamp expired".to_string(),
@@ -133,7 +183,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(HandlerError::Forbidden(
-            "configured operator cannot be admitted as remote_node; use the stopped-daemon offline conversion path"
+            "the configured operator cannot be admitted by token; its grant is managed by init and the stopped-daemon offline conversion path"
                 .to_string(),
         ));
     }
@@ -141,6 +191,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     let allowed_scopes = normalize_scopes(&token.scopes, "admission token files")?;
     ensure_scope_subset(&scopes, &allowed_scopes, &state)?;
     let claim_digest = verify_claim_signature(&req, &token_hash, &scopes, &verifying_key, &state)?;
+    if token.class == AuthorizedKeyPrincipalClass::RemotePrincipal {
+        verify_origin_cosignature(
+            &req,
+            &claim_digest,
+            &fingerprint,
+            origin_site_id.unwrap_or_default(),
+            &state,
+        )?;
+    }
 
     let label = req
         .label
@@ -157,12 +216,13 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }
 
     // The admitted key asked for this grant by signing its claim; the token it
-    // redeemed is the authority that lets the claim through. A remote node's
-    // grant lives for the remote_node class maximum.
+    // redeemed is the authority that lets the claim through. The grant takes
+    // the token's class, and lives for the token's requested lifetime or the
+    // class maximum, whichever the node's authorization policy allows.
     let terms = super::grant_terms::issuance_terms(
         &state,
-        ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
-        None,
+        token.class,
+        token.grant_lifetime_secs,
         ryeos_node_runtime::identity::AuthorizedBy::principal_request(
             &fingerprint,
             Some(claim_digest),
@@ -173,7 +233,21 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
 
     let created_at = lillux::time::iso8601_now();
     let auth_dir = state.config.authorized_keys_dir.clone();
-    let write_result = ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
+    let subject = match (token.class, origin_site_id) {
+        (AuthorizedKeyPrincipalClass::LocalClient, _) => AuthorizedKeySubject::LocalClient,
+        (AuthorizedKeyPrincipalClass::RemoteNode, Some(origin_site_id)) => {
+            AuthorizedKeySubject::RemoteNode { origin_site_id }
+        }
+        (AuthorizedKeyPrincipalClass::RemotePrincipal, Some(origin_site_id)) => {
+            AuthorizedKeySubject::RemotePrincipal { origin_site_id }
+        }
+        (_, None) => {
+            return Err(HandlerError::Internal(
+                "remote admission reached the grant write without an origin site".to_string(),
+            ));
+        }
+    };
+    let write_result = ryeos_node_runtime::identity::create_authorized_key_toml_for_subject(
         &auth_dir,
         &fingerprint,
         &key_b64,
@@ -185,8 +259,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         ),
         &created_at,
         &terms,
-        &req.origin_site_id,
         state.identity.signing_key(),
+        subject,
     );
     // The token rename above is the single-winner point and must stay first.
     // If the grant was not written, give the token back so the claim can be
@@ -219,7 +293,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             token_hash.chars().take(12).collect::<String>()
         ),
         created_at,
-        origin_site_id: req.origin_site_id,
+        principal_class: token.class,
+        origin_site_id: origin_site_id.map(str::to_owned),
         expires_at: super::grant_terms::expiry_text(terms.expires_at),
     };
     serde_json::to_value(response).map_err(|e| HandlerError::Internal(e.to_string()))
@@ -238,7 +313,189 @@ fn read_token_file(path: &Path) -> HandlerResult<AdmissionTokenFile> {
     let raw = std::fs::read_to_string(path).map_err(|_| {
         HandlerError::Forbidden("invalid or already-used admission token".to_string())
     })?;
+    let stored: AdmissionTokenVersion = toml::from_str(&raw)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid token file: {e}")))?;
+    if stored.version != ADMISSION_TOKEN_FORMAT_VERSION {
+        return Err(refusal(
+            "admission_token_stale",
+            400,
+            format!(
+                "admission token is format version {}, but this node reads version {}; \
+                 tokens are not converted, so mint a new one with `ryeos admission-token`",
+                stored.version, ADMISSION_TOKEN_FORMAT_VERSION
+            ),
+        ));
+    }
     toml::from_str(&raw).map_err(|e| HandlerError::BadRequest(format!("invalid token file: {e}")))
+}
+
+/// Check that the claim is the one the token admits and return the origin
+/// site the grant is bound to: none for `local_client`, the claim's site for
+/// `remote_node`, and the token's site for `remote_principal`.
+fn check_claim_matches_token<'a>(
+    req: &'a Request,
+    token: &'a AdmissionTokenFile,
+) -> HandlerResult<Option<&'a str>> {
+    let has_cosignature = req.forwarding_key_id.is_some() || req.forwarding_signature.is_some();
+    if req.principal_class != token.class {
+        return Err(refusal(
+            "admission_class_mismatch",
+            403,
+            format!(
+                "this token admits class {}, but the claim asks for class {}; claim with \
+                 principal_class {}, or mint a token for class {}",
+                token.class.as_str(),
+                req.principal_class.as_str(),
+                token.class.as_str(),
+                req.principal_class.as_str(),
+            ),
+        ));
+    }
+    if token.class != AuthorizedKeyPrincipalClass::RemotePrincipal && has_cosignature {
+        return Err(refusal(
+            "admission_class_mismatch",
+            403,
+            format!(
+                "a {} claim carries no origin-node co-signature; only a remote_principal \
+                 claim does, so drop the forwarding fields or mint a remote_principal token",
+                token.class.as_str()
+            ),
+        ));
+    }
+    match token.class {
+        AuthorizedKeyPrincipalClass::LocalClient => {
+            if token.origin_site_id.is_some() || req.origin_site_id.is_some() {
+                return Err(refusal(
+                    "admission_origin_site_mismatch",
+                    403,
+                    "a local_client grant has no origin site; omit origin_site_id from the claim"
+                        .to_string(),
+                ));
+            }
+            Ok(None)
+        }
+        AuthorizedKeyPrincipalClass::RemoteNode => {
+            if token.origin_site_id.is_some() {
+                return Err(malformed_token(token.class));
+            }
+            let origin = req.origin_site_id.as_deref().ok_or_else(|| {
+                HandlerError::BadRequest(
+                    "a remote_node claim must carry its origin_site_id".to_string(),
+                )
+            })?;
+            Ok(Some(origin))
+        }
+        AuthorizedKeyPrincipalClass::RemotePrincipal => {
+            let bound = token
+                .origin_site_id
+                .as_deref()
+                .ok_or_else(|| malformed_token(token.class))?;
+            if req.origin_site_id.as_deref() != Some(bound) {
+                return Err(refusal(
+                    "admission_origin_site_mismatch",
+                    403,
+                    format!(
+                        "this token is bound to origin site {bound}, but the claim names {}; \
+                         claim through a node of {bound}, or mint a token for the claimant's site",
+                        req.origin_site_id.as_deref().unwrap_or("no origin site"),
+                    ),
+                ));
+            }
+            Ok(Some(bound))
+        }
+    }
+}
+
+fn malformed_token(class: AuthorizedKeyPrincipalClass) -> HandlerError {
+    refusal(
+        "admission_token_invalid",
+        400,
+        format!(
+            "the stored {} admission token has an inconsistent origin site; \
+             mint a new one with `ryeos admission-token`",
+            class.as_str()
+        ),
+    )
+}
+
+/// The hash the origin node co-signs for a `remote_principal` claim: the
+/// forwarded-request construction applied to the claimant's signed claim, so
+/// the node attests to this exact principal signature and no other.
+pub fn cosignature_content_hash(
+    audience: &str,
+    claim_digest: &str,
+    signed_at: u64,
+    nonce: &str,
+    principal_fingerprint: &str,
+    claim_signature: &str,
+    forwarding_key_id: &str,
+    origin_site_id: &str,
+) -> String {
+    crate::auth::forwarding_request_content_hash(
+        "POST",
+        "/admission/claim",
+        claim_digest,
+        &signed_at.to_string(),
+        nonce,
+        audience,
+        &format!("fp:{principal_fingerprint}"),
+        claim_signature,
+        forwarding_key_id,
+        origin_site_id,
+    )
+}
+
+/// Verify the origin node's co-signature on a `remote_principal` claim.
+fn verify_origin_cosignature(
+    req: &Request,
+    claim_digest: &str,
+    principal_fingerprint: &str,
+    origin_site_id: &str,
+    state: &AppState,
+) -> HandlerResult<()> {
+    let (Some(forwarding_key_id), Some(forwarding_signature)) = (
+        req.forwarding_key_id.as_deref(),
+        req.forwarding_signature.as_deref(),
+    ) else {
+        return Err(refusal(
+            "admission_cosignature_missing",
+            403,
+            format!(
+                "a remote_principal claim must carry the co-signature of an admitted node of \
+                 {origin_site_id}; have that node co-sign the claim (forwarding_key_id and \
+                 forwarding_signature) and claim again"
+            ),
+        ));
+    };
+    let content_hash = cosignature_content_hash(
+        &state.identity.principal_id(),
+        claim_digest,
+        req.signed_at,
+        &req.nonce,
+        principal_fingerprint,
+        &req.signature,
+        forwarding_key_id,
+        origin_site_id,
+    );
+    crate::auth::verify_source_node_cosignature(
+        state,
+        forwarding_key_id,
+        origin_site_id,
+        forwarding_signature,
+        &content_hash,
+    )
+    .map(|_| ())
+    .map_err(|reason| {
+        refusal(
+            "admission_cosignature_invalid",
+            403,
+            format!(
+                "the origin-node co-signature is refused: {reason}; the co-signing node must be \
+                 admitted here as a remote_node of {origin_site_id} holding the \
+                 forwarded-operator attestation scope"
+            ),
+        )
+    })
 }
 
 fn consume_token_file(path: &Path) -> HandlerResult<()> {
@@ -403,8 +660,9 @@ fn verify_claim_signature(
     let claim = claim_string(
         &state.identity.principal_id(),
         token_hash,
+        req.principal_class,
         &req.public_key,
-        &req.origin_site_id,
+        req.origin_site_id.as_deref(),
         scopes,
         req.signed_at,
         &req.nonce,
@@ -421,21 +679,24 @@ fn verify_claim_signature(
     Ok(content_hash)
 }
 
-fn claim_string(
+/// The exact string a claimant signs.
+pub fn claim_string(
     audience: &str,
     token_hash: &str,
+    principal_class: AuthorizedKeyPrincipalClass,
     public_key: &str,
-    origin_site_id: &str,
+    origin_site_id: Option<&str>,
     scopes: &[String],
     signed_at: u64,
     nonce: &str,
 ) -> String {
     format!(
-        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "ryeos-admission-claim-v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         audience,
         token_hash,
+        principal_class.as_str(),
         public_key,
-        origin_site_id,
+        origin_site_id.unwrap_or(""),
         scopes.join(","),
         signed_at,
         nonce,

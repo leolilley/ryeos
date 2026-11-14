@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T13:04:03Z:397c1648e417fc29e1323b4e0e7d7c9b9ed586bd2ab0a7c7444e4d6b9b9daa53:jrSKfDYMH8cuDnqpkYiKG75Yax3hwN8KgQf1YAl6bJqThfcIlE4Ps4h8JG6BjDViJjv2pvd9VY8C2xvib9wIDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:6cbda97ee985248091c06361d17dff49ab8d3a79b0530af7acf0bcb491cc3880:cJPKcoYB0RDbqkBz0EqJRbRaLGwSk+XAoXtJ0HUn34DkLaXvcOtS6iiF8ZIExNkYC1WFxHugyxTnyJTHO/7oBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
-version: "1.23.0"
+version: "1.24.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -261,7 +261,6 @@ policy:
       - "{node_public_identity}"
       - "{daemon_socket}"
       - "{bundle_roots}"
-      - "{node_trusted_keys}"
       - "{verified_code}"
     writable:
       - "{project}"
@@ -358,7 +357,7 @@ refusal is not an executed workload's nonzero exit result.
   intersection of the signed declaration and live inspection.
 - `filesystem.readable` accepts absolute paths plus `{project}`, `{cwd}`,
   `{node_public_identity}`, `{daemon_socket}`, `{bundle_roots}`,
-  `{node_trusted_keys}`, and `{verified_code}`.
+  and `{verified_code}`.
 - `filesystem.writable` accepts absolute paths plus `{project}`, `{cwd}`, and
   `{checkpoint_dir}`.
 - A retained immutable-input or live-project authority intersects an explicit
@@ -509,8 +508,6 @@ The narrow readable placeholders mean:
   socket (for example its parent directory) is refused at launch by name, so
   no entry can hand a sandbox the control socket.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
-- `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
-  directory. The placeholder name matches the existing launch-envelope root.
 - `{verified_code}` is mandatory for executable-item launches. RyeOS rechecks
   the verified whole-file SHA-256, writes those exact bytes to node-owned
   content-addressed storage, mirrors the code's project or bundle authority at
@@ -545,11 +542,23 @@ and be contained by `{project}` or an absolute writable root chosen in this
 policy. This prevents a request from turning a path parameter into new host
 write authority.
 
+A launch that opened a bundle state home gets one more exact mount: the
+namespace directory `<app_root>/.ai/state/bundle-state/<bundle_id>/<namespace>`
+appears at the fixed destination `/run/ryeos/bundle-state`, writable or
+read-only by the declared access, pinned by descriptor. Isolation refuses any
+other path: the state-home root, a bundle's whole home, a deeper descendant, a
+path outside, or one that reaches there through a link. The mount is separate
+from the runtime state root, so a launch may carry both. Sibling namespaces and
+other bundles' homes are not mounted, and a broader policy mount that would
+contain them is dropped for the launch. Under disabled isolation no mount
+exists. See `ryeos/standard/bundle-state-home`.
+
 Writable roots may not overlap `/`, protected system roots, the app root, the
 selected backend artifacts, or the daemon socket. The resolved host home itself and
 its ancestors are also rejected. The only app-root exceptions are a
 daemon-provenance execution workspace directly beneath
-`.ai/state/cache/executions` and the exact daemon-owned checkpoint directory.
+`.ai/state/cache/executions`, the exact daemon-owned checkpoint directory, and
+the one bundle state namespace a launch opened.
 Absolute paths in this file are node-owner authority and should be kept narrow.
 
 ## Process boundary

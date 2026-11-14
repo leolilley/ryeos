@@ -18,6 +18,12 @@ path = "src/main.rs"
 name = "ryeos-bundle-publisher"
 path = "src/bin/ryeos-bundle-publisher.rs"
 
+# Test-only tool executable behind `ryeosd::test_support::callback_probe`.
+[[bin]]
+name = "ryeos-callback-probe"
+path = "src/bin/ryeos-callback-probe.rs"
+required-features = ["test-support"]
+
 [features]
 default = []
 scheduling = ["dep:ryeos-scheduler", "dep:ryeos-scheduler-service", "ryeos-api/scheduling", "ryeos-node/scheduling", "ryeos-ui/scheduling"]

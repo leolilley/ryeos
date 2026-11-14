@@ -445,6 +445,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &parent.origin_site_id,
     )?;
     let child_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: admission_provenance.logical_project_root(),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: thread_auth.acting_principal.clone(),

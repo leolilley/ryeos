@@ -487,6 +487,7 @@ impl SchedulerContext for AppSchedulerContext {
             }
         };
         let plan_ctx = PlanContext {
+            logical_project_root: provenance.logical_project_root(),
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: spec.execution.principal_id().to_owned(),
                 scopes: spec.execution.capabilities.clone(),

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:39:38Z:2edd21a662fce546d0e7d4ca4bbce899dabdc53fd52804b4224e1e172acfd965:dZz4ca54CfAq0RbrDGdSnuxA9Hm10E3wll38F17eehYIosU4eKb9QCZ/UD0soA5k9xzIBct7nMBSMqXbPuJCAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:943c6b9b989676be0f107265af1aa827c295f4c9f93229968c2516c63afe554d:grWIU84YwsfVGUgID481hvrr3yDEVh5+p8MksDP0XVycpS6RGNrcv2N4hMjxWaLw35j1BxoxMC/mux4XUxAPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, vault, secrets, remote]
@@ -14,11 +14,27 @@ Vault services mutate or read sealed node secrets:
 - `vault/list`
 - `vault/delete`
 
-In v1, the vault is a **single node-level store** protected by service
-capabilities and daemon vault key material. It is not a per-principal
+The vault is a **single node-level store** protected by service capabilities,
+daemon vault key material and per-name ceilings. It is not a per-principal
 namespace. Remote vault commands proxy to these same routes on the target
-node, so granting `ryeos.execute.service.vault.*` to a remote caller is
-operator-level access to the target node vault.
+node, where the ceilings judge the principal the remote admitted (the
+delegated user, or the calling node when no delegation is held).
+
+Per-name ceilings come from the node's signed `sealed_vault_names` policy:
+
+- `vault/set` and `vault/delete` require the caller to be a **writer** of the
+  name; otherwise they refuse with 403 `vault_name_not_writable`.
+- `vault/list` returns only the names the caller may receive or write.
+- A name with no entry in the policy is **operator-only**: only the configured
+  local operator may receive or write it, and any other caller is refused with
+  403 `vault_name_has_no_ceiling`. `ryeos node doctor` warns
+  (`vault_names_without_ceiling`) for each stored name in this state.
+- Delivery into a launch requires the principal to be a **recipient**, refused
+  with 403 `vault_name_not_delivered`.
+
+Each refusal names the fix, `ryeos node policy-apply sealed_vault_names
+<source.yaml>` on a stopped node. See
+[Secrets & credentials](../../standard/secrets.md#per-name-vault-ceilings).
 
 The current sealed backend is one bounded encrypted envelope. Every read,
 runtime-vault get/list, and read-modify-write operation opens and validates the

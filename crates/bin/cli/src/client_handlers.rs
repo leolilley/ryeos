@@ -60,6 +60,8 @@ pub(crate) async fn export_artifact(
         let mut declared_total = None;
         let mut digest = Sha256::new();
         loop {
+            // The artifact export is the node operator reading their own
+            // node, so it uses the operator-only unscoped read.
             let body = json!({
                 "object_hashes": [],
                 "blob_hashes": [],
@@ -72,19 +74,19 @@ pub(crate) async fn export_artifact(
             let body_bytes = serde_json::to_vec(&body).expect("JSON value serialization");
             let headers = signer.sign(
                 "POST",
-                "/objects/get",
+                "/objects/get-any",
                 &body_bytes,
                 &discovered.principal_id,
             )?;
             let url = format!(
-                "{}/objects/get",
+                "{}/objects/get-any",
                 discovered.base_url.trim_end_matches('/')
             );
             let response = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
             let chunk = response
                 .get("blob_chunk")
                 .and_then(Value::as_object)
-                .ok_or_else(|| local("objects/get omitted the artifact blob chunk"))?;
+                .ok_or_else(|| local("objects/get-any omitted the artifact blob chunk"))?;
             let kind = chunk.get("kind").and_then(Value::as_str).unwrap_or("");
             if kind == "missing" {
                 return Err(local("artifact blob is not present on this node"));
@@ -93,12 +95,12 @@ pub(crate) async fn export_artifact(
                 || chunk.get("hash").and_then(Value::as_str) != Some(blob_hash)
                 || chunk.get("offset").and_then(Value::as_u64) != Some(offset)
             {
-                return Err(local("objects/get returned a contradictory artifact chunk"));
+                return Err(local("objects/get-any returned a contradictory artifact chunk"));
             }
             let total = chunk
                 .get("total_size")
                 .and_then(Value::as_u64)
-                .ok_or_else(|| local("objects/get artifact chunk omitted total_size"))?;
+                .ok_or_else(|| local("objects/get-any artifact chunk omitted total_size"))?;
             if declared_total
                 .replace(total)
                 .is_some_and(|prior| prior != total)
@@ -108,13 +110,13 @@ pub(crate) async fn export_artifact(
             let encoded = chunk
                 .get("data")
                 .and_then(Value::as_str)
-                .ok_or_else(|| local("objects/get artifact chunk omitted data"))?;
+                .ok_or_else(|| local("objects/get-any artifact chunk omitted data"))?;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|error| local(format!("decode artifact chunk: {error}")))?;
             if bytes.len() > ARTIFACT_EXPORT_CHUNK_BYTES {
                 return Err(local(
-                    "objects/get artifact chunk exceeded its requested bound",
+                    "objects/get-any artifact chunk exceeded its requested bound",
                 ));
             }
             let end = offset
@@ -122,7 +124,7 @@ pub(crate) async fn export_artifact(
                 .ok_or_else(|| local("artifact export byte count overflow"))?;
             let eof = chunk.get("eof").and_then(Value::as_bool) == Some(true);
             if end > total || eof != (end == total) || (bytes.is_empty() && !eof) {
-                return Err(local("objects/get returned an invalid artifact byte range"));
+                return Err(local("objects/get-any returned an invalid artifact byte range"));
             }
             staging.write_all(&bytes).map_err(local_error)?;
             digest.update(&bytes);
@@ -169,6 +171,257 @@ pub(crate) async fn export_artifact(
         "bytes": bytes,
         "destination": destination,
     }))
+}
+
+/// Default lifetime of a delegation signed without `--lifetime-secs`.
+const DEFAULT_DELEGATION_LIFETIME_SECS: u64 = 8 * 60 * 60;
+
+/// Sign a bounded delegation with the caller's own key and hand it to the
+/// node. The node supplies the identities of both parties; the key never
+/// leaves this process.
+pub(crate) async fn remote_delegate(
+    app_root: &Path,
+    parameters: &Value,
+) -> Result<Value, CliError> {
+    let remote = parameters
+        .get("remote")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let scopes = delegation_scopes(parameters.get("scopes"))?;
+    let lifetime_secs = match parameters.get("lifetime_secs") {
+        None => DEFAULT_DELEGATION_LIFETIME_SECS,
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .ok_or_else(|| local("--lifetime-secs must be a positive whole number"))?,
+        Some(Value::String(text)) => text
+            .parse::<u64>()
+            .map_err(|_| local("--lifetime-secs must be a positive whole number"))?,
+        Some(_) => return Err(local("--lifetime-secs must be a positive whole number")),
+    };
+    if lifetime_secs == 0 {
+        return Err(local("--lifetime-secs must be greater than zero"));
+    }
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let template = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:remote/delegate",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "remote": remote },
+        }),
+    )
+    .await?;
+    let facts = template
+        .get("template")
+        .ok_or_else(|| local("the node did not return delegation facts"))?;
+    let field = |name: &str| {
+        facts
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| local(format!("delegation facts omit {name}")))
+    };
+    let delegator = field("delegator")?;
+    if delegator != format!("fp:{}", signer.fingerprint) {
+        return Err(local(
+            "the node names another principal as the delegator than the key this CLI signs with",
+        ));
+    }
+    let (delegate_site, delegate_node) = (field("delegate_site")?, field("delegate_node")?);
+    let (audience_site, audience_node) = (field("audience_site")?, field("audience_node")?);
+    let not_after = lillux::time::unix_secs_now().saturating_add(lifetime_secs);
+    let body = ryeos_node_runtime::remote_delegation::DelegationBody::new(
+        &delegator,
+        ryeos_node_runtime::remote_delegation::DelegationParties {
+            delegate_site: &delegate_site,
+            delegate_node: &delegate_node,
+            audience_site: &audience_site,
+            audience_node: &audience_node,
+        },
+        &scopes,
+        not_after,
+    );
+    let signature = signer.sign_bytes_base64(&body.signing_bytes().map_err(local_error)?);
+    let signed =
+        ryeos_node_runtime::remote_delegation::SignedDelegation::with_signature(body, signature);
+    execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:remote/delegate",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "remote": remote, "delegation": signed },
+        }),
+    )
+    .await
+}
+
+/// Claim an admission token on a remote. Without `--as-principal` the claim
+/// is the node's own, made by the node-owned `remote/admit` service. With it,
+/// the claim is a `remote_principal` claim signed here with the caller's own
+/// key and handed to the caller's node, which co-signs and forwards it.
+pub(crate) async fn remote_admit(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+    let remote = parameters
+        .get("remote")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let token = parameters
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or_else(|| local("remote admit needs --token, the one-time admission token"))?;
+    let label = parameters.get("label").and_then(Value::as_str);
+    let mut scopes = delegation_scopes(parameters.get("scopes"))?;
+    let as_principal = match parameters.get("as_principal") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(text)) => text == "true",
+        Some(_) => return Err(local("--as-principal takes no value")),
+    };
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    if !as_principal {
+        let mut params = json!({ "remote": remote, "token": token, "scopes": scopes });
+        if let Some(label) = label {
+            params["label"] = json!(label);
+        }
+        return execute_service(
+            app_root,
+            &signer,
+            json!({
+                "item_ref": "service:remote/admit",
+                "ref_bindings": {},
+                "product_selections": [],
+                "parameters": params,
+            }),
+        )
+        .await;
+    }
+
+    // The claim is signed over sorted, unique scopes.
+    scopes.sort();
+    scopes.dedup();
+    let template = execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:remote/admit-principal",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": { "remote": remote },
+        }),
+    )
+    .await?;
+    let facts = template
+        .get("template")
+        .ok_or_else(|| local("the node did not return admission facts"))?;
+    let field = |name: &str| {
+        facts
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| local(format!("admission facts omit {name}")))
+    };
+    let (audience, origin_site_id, public_key) = (
+        field("audience")?,
+        field("origin_site_id")?,
+        field("public_key")?,
+    );
+    let signed_at = lillux::time::unix_secs_now();
+    let mut nonce_bytes = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_bytes);
+    let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
+    let claim = ryeos_api::handlers::admission_claim::claim_string(
+        &audience,
+        &lillux::cas::sha256_hex(token.as_bytes()),
+        ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
+        &public_key,
+        Some(&origin_site_id),
+        &scopes,
+        signed_at,
+        &nonce,
+    );
+    let digest = lillux::cas::sha256_hex(claim.as_bytes());
+    let signature = signer.sign_bytes_base64(digest.as_bytes());
+    let mut params = json!({
+        "remote": remote,
+        "token": token,
+        "scopes": scopes,
+        "signed_at": signed_at,
+        "nonce": nonce,
+        "signature": signature,
+    });
+    if let Some(label) = label {
+        params["label"] = json!(label);
+    }
+    execute_service(
+        app_root,
+        &signer,
+        json!({
+            "item_ref": "service:remote/admit-principal",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": params,
+        }),
+    )
+    .await
+}
+
+/// `--scopes` is a comma-separated list, or a JSON array from a structured
+/// overlay.
+fn delegation_scopes(value: Option<&Value>) -> Result<Vec<String>, CliError> {
+    let scopes: Vec<String> = match value {
+        Some(Value::String(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| local("--scopes entries must be strings"))
+            })
+            .collect::<Result<_, _>>()?,
+        _ => Vec::new(),
+    };
+    if scopes.is_empty() {
+        return Err(local(
+            "a delegation needs --scopes: the capabilities this node may use for you on the remote, \
+             for example --scopes ryeos.execute.service.remote/run",
+        ));
+    }
+    Ok(scopes)
+}
+
+/// One signed `/execute` call for a service, returning its result.
+async fn execute_service(
+    app_root: &Path,
+    signer: &crate::transport::signing::Signer,
+    mut body: Value,
+) -> Result<Value, CliError> {
+    body["execution_policy"] =
+        serde_json::to_value(ryeos_app::execution_policy::ExecutionPolicy::projectless(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ))
+        .map_err(local_error)?;
+    let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
+    let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
+    let body_bytes = serde_json::to_vec(&body).expect("JSON value serialization");
+    let headers = signer.sign("POST", "/execute", &body_bytes, &discovered.principal_id)?;
+    let url = format!("{}/execute", discovered.base_url.trim_end_matches('/'));
+    let response = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
+    response
+        .get("result")
+        .cloned()
+        .ok_or_else(|| local(format!("the node returned no result: {response}")))
 }
 
 fn absolute_destination(raw: &str) -> Result<PathBuf, CliError> {

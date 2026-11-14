@@ -1133,15 +1133,27 @@ fn load_layer(
         ItemSpace::Bundle | ItemSpace::Node => policy.node_trust_store,
         ItemSpace::Project => policy.trust_store,
     };
-    let (contract_trust, verified_signer) =
-        verify_item_signature_with_hash(&content_digest, &header, source_trust_store).map_err(
-            |error| {
-                invalid(
-                    canonical_id,
-                    format!("signature verification failed: {error}"),
-                )
-            },
-        )?;
+    let (contract_trust, verified_signer) = verify_item_signature_with_hash(
+        &content_digest,
+        &header,
+        source_trust_store,
+        &crate::trust::SignerContext::new(
+            root.space,
+            canonical_id
+                .split_once(':')
+                .map(|(kind, _)| kind)
+                .unwrap_or("config"),
+            (root.space == ItemSpace::Project)
+                .then(|| root.ai_root.parent())
+                .flatten(),
+        ),
+    )
+    .map_err(|error| {
+        invalid(
+            canonical_id,
+            format!("signature verification failed: {error}"),
+        )
+    })?;
     let trust_class = match (contract_trust, root.space) {
         (ContractTrustClass::Trusted, ItemSpace::Bundle) => TrustClass::TrustedBundle,
         (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedProject,
@@ -1496,6 +1508,7 @@ mod tests {
 
     fn project_roots(project_root: &Path) -> ResolutionRoots {
         ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: Vec::new(),
             ordered: vec![ResolutionRoot {
                 space: ItemSpace::Project,

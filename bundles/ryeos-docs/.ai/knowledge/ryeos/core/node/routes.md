@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T15:16:10Z:c302b5ab72f3a657909eef93b785b287a096582940d98174e609f5cfd41eee81:Opxs1FTVFhu/tpyaVPOwjAQ3PNB57xWpl2ry0D3tNMoGjth3mqwTLJwhQlZj12HEIYZkb+A6axBlu/cDDKHtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:b7d8accfb6e10bfa9a9480a95e7829f3238bd1c5868b182dc7021fbb187ce817:H1p72lDxMFUsCqlHBCuM+i63CCWzH3d2167yZW3u/HLS/MAKpnn4RG1yR4L9ChFawLG4nR4K35F+BXCfKJlEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -196,6 +196,14 @@ verified), or when it is undeclared and its handler declares
 `permissions:` grant can self-assert the capability: `ryeos.use.vault.*` is
 reserved manifest runtime authority. See
 [Secrets & credentials](../../standard/secrets.md#who-may-read-the-operator-vault).
+
+Holding the capability is not enough on its own: each vault name the handler
+declares is also judged against the node's signed `sealed_vault_names`
+ceilings. The route's `route-handler:<bundle>:<route-id>` principal is not the
+configured operator, so every name must list that exact principal (or an exact
+capability it holds) as a recipient; otherwise the dispatch is refused with
+`vault_name_has_no_ceiling` or `vault_name_not_delivered`. See
+[Per-name vault ceilings](../../standard/secrets.md#per-name-vault-ceilings).
 
 The request envelope passed as tool parameters has this shape:
 

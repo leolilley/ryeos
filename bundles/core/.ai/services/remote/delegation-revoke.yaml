@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T14:29:21Z:f749adb29851c5c68ef2cf8b8e25bc7149b0a4147ca01eef72f559d346c1d65f:DDRNsDiDUSCcBr23K06ZKAkM6BzFEPpfJHcANcoDu8veBaaginhFfPWU4EACd9VKEE/+IT5LP7+9rMqzFrd8BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.delegation-revoke
+required_caps: ["ryeos.execute.service.remote/delegation-revoke"]
+schema:
+  remote: string?
+  local_only: boolean?
+description: "Revoke the caller's delegation for one remote: record a tombstone on the remote, then delete the local record. local_only skips the remote."

@@ -366,6 +366,30 @@ pub enum ExecutionProjectAuthority {
 }
 
 impl ExecutionProjectAuthority {
+    /// The project this authority belongs to, as the node knows it: the
+    /// absolute project path that signer project scopes name.
+    ///
+    /// A live project is its own logical root. A pinned generation is
+    /// materialized at a per-generation checkout, so its logical root is the
+    /// original project path, but only when the stable project identity says
+    /// the project is local to this node (`local:<path>`). A pinned
+    /// generation whose identity names another site has no logical root here,
+    /// so a signer scoped to specific projects never admits its content.
+    pub fn logical_project_root(&self) -> Option<PathBuf> {
+        match self {
+            Self::Projectless { .. } => None,
+            Self::LiveProject { canonical_root, .. } => Some(canonical_root.clone()),
+            Self::PinnedGeneration {
+                stable_project_identity,
+                display_path: Some(path),
+                ..
+            } if stable_project_identity == &format!("local:{}", path.display()) => {
+                Some(path.clone())
+            }
+            Self::PinnedGeneration { .. } => None,
+        }
+    }
+
     pub const PROJECTLESS: Self = Self::Projectless {
         environment: EnvironmentAuthority::None,
     };
@@ -1307,6 +1331,44 @@ fn validate_sorted_capabilities(label: &str, capabilities: &[String]) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pinned_for(identity: &str, display: Option<&str>) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::pinned(
+            identity.to_owned(),
+            display.map(PathBuf::from),
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn logical_project_root_is_the_local_project_path() {
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A project another site names is not a project of this node.
+        assert_eq!(
+            pinned_for(
+                "site:other:/srv/projects/alpha",
+                Some("/srv/projects/alpha")
+            )
+            .logical_project_root(),
+            None
+        );
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", None).logical_project_root(),
+            None
+        );
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS.logical_project_root(),
+            None
+        );
+    }
 
     fn output_partition() -> super::super::WorkspaceOutputPartition {
         let bounds = crate::external_content::products::ProductBounds {

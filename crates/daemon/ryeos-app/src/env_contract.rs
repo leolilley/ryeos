@@ -475,6 +475,10 @@ fn validate_protocol_injection_name(
                 EnvInjectionSource::RuntimeStateRoot,
                 "RYEOSD_RUNTIME_STATE_ROOT"
             )
+            | (
+                EnvInjectionSource::BundleStateHome,
+                "RYEOSD_BUNDLE_STATE_HOME"
+            )
             | (EnvInjectionSource::ProjectPath, "RYE_PROJECT_PATH")
             | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
             | (
@@ -929,6 +933,32 @@ mod tests {
             )])
             .unwrap_err();
         assert!(format!("{err:#}").contains("RYEOSD_RUNTIME_STATE_ROOT"));
+    }
+
+    #[test]
+    fn bundle_state_home_name_is_bound_to_its_source() {
+        EnvContractBuilder::new()
+            .with_typed_bindings(vec![EnvBinding::new(
+                "RYEOSD_BUNDLE_STATE_HOME",
+                "/run/ryeos/bundle-state",
+                EnvSourceDetail::ProtocolInjection {
+                    source: EnvInjectionSource::BundleStateHome,
+                },
+            )])
+            .unwrap();
+        for (name, source) in [
+            ("RYEOSD_BUNDLE_STATE_HOME", EnvInjectionSource::ProjectPath),
+            ("RYEOSD_STATE_HOME", EnvInjectionSource::BundleStateHome),
+        ] {
+            let err = EnvContractBuilder::new()
+                .with_typed_bindings(vec![EnvBinding::new(
+                    name,
+                    "/x",
+                    EnvSourceDetail::ProtocolInjection { source },
+                )])
+                .unwrap_err();
+            assert!(format!("{err:#}").contains(name));
+        }
     }
 
     #[test]

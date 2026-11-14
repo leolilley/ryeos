@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:9b6524b499ead45768fe18200dfd34eb836ff896e04d8f41ec9ce8ac78d66121:OSDCmWgOdT3SMq1gqneI/5njR7ICXAObzl+Robg2Mg+h9Fv3JNYgfeOR3sUo6LXEdblDUtcDdEC56aTyg679DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:2f86329c177d0480e75d98160be6a88ff8bc36e004f308ac6d92e195a4679a6c:FmKGde3Hj8rno45PvXmrAdi8QAuhVRsNI+FOKwp1m3q1JlQ5J6DjrbG50LDzLDoH1RS0hqE98FQ5TDZEos9wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -345,14 +345,15 @@ configured-operator forwarding route to inspect profiles on a remote node.
    generation, and is never automatic.
 6. Establish the configured operator's principal-scoped project HEAD through
    the standard local `commit` or an explicit full-project
-   `service:remote/push` with `outbound_principal: configured_operator`. A
+   `service:remote/push` with `outbound_principal: delegated` (the operator signs a delegation for the
+   hosted remote with `ryeos remote delegate`). A
    local launch uses `--current-head`; a client with a different absolute path
    uses `service:remote/run`, whose configured project binding supplies the
    destination path, preserves that configured-operator principal, and
    co-signs the request with the admitted source-node key. It returns the
    durable accepted thread ID. Drive projectless credential and session
    services through wait-mode `service:remote/run` with
-   `outbound_principal: configured_operator`; do not connect an operator-key
+   `outbound_principal: delegated`; do not connect an operator-key
    client directly to the hosted daemon. Start the worker with the signed
    `config:codex/environments/default` environment (the local CLI spelling is
    `codex session start <profile> --environment

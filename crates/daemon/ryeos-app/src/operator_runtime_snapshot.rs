@@ -55,7 +55,8 @@ use crate::runtime_db::runtime_snapshot_bootstrap_termination::{
     BootstrapTerminationClaim, BootstrapTerminationPhase, BootstrapTerminationRecord,
 };
 use crate::runtime_db::runtime_snapshot_qualification::{
-    SnapshotQualificationAttemptClaim, SnapshotQualificationPhase, SnapshotQualificationRecord,
+    RetainedQualificationGeneration, SnapshotQualificationAttemptClaim, SnapshotQualificationPhase,
+    SnapshotQualificationRecord,
 };
 use crate::runtime_db::runtime_snapshot_qualification_termination::{
     QualificationTerminationClaim, QualificationTerminationPhase, QualificationTerminationRecord,
@@ -957,7 +958,40 @@ fn create_qualification_occurrence_checked(
         );
     }
     intent.validate_for(&source.intent, &locator)?;
-    let reserved = state.state_store.reserve_snapshot_qualification(&intent)?;
+    // Retain the exact generation this occurrence is made under: both signed
+    // bindings and the producer's lifecycle closure. Its termination resolves
+    // through them, so a later recompose or bundle replacement cannot strand
+    // the occurrence. The shared guard keeps the published closure from a
+    // CAS sweep until the journal roots it.
+    let retention_authority = state.state_store.pinned_state_authority()?;
+    let retention_guard = retention_authority.acquire_shared_guard()?;
+    let lifecycle_capture = state
+        .external_placement_backends
+        .lifecycle_escrow_capture(producer)?;
+    let published_lifecycle = crate::external_artifacts::publish_retained_lifecycle_artifacts(
+        &state.state_store,
+        &context.fingerprint,
+        &lifecycle_capture,
+    )?;
+    let generation = RetainedQualificationGeneration {
+        production: producer.retained_generation()?,
+        qualification: qualification.retained_generation()?,
+        lifecycle_root_hash: published_lifecycle.root_hash().to_owned(),
+    };
+    let reserved = state
+        .state_store
+        .reserve_snapshot_qualification(&intent, &generation)?;
+    retention_authority.ensure_guard(&retention_guard)?;
+    drop(retention_guard);
+    // Prove the retained closure rebuilds the termination backend before the
+    // one-shot provider mutation is claimed.
+    let _termination = crate::external_artifacts::RecoveredQualificationLifecycle::from_generation(
+        state,
+        &generation,
+        producer,
+        qualification,
+        &credential,
+    )?;
     let claim = state
         .state_store
         .claim_snapshot_qualification_attempt(&intent.operation_id)?;
@@ -2149,21 +2183,14 @@ fn terminate_qualification_occurrence_under_contact_gate(
         .occurrence
         .clone()
         .context("qualification termination occurrence is absent")?;
-    let qualification = state
-        .node_config
-        .runtime_snapshot_qualification
-        .iter()
-        .find(|binding| binding.digest() == qualified.intent.qualification_profile_digest)
-        .context("current signed snapshot qualification binding is absent")?;
-    let producer = state
-        .node_config
-        .runtime_snapshot_production
-        .iter()
-        .find(|binding| {
-            binding.id() == qualification.production_binding_id()
-                && binding.digest() == qualification.production_binding_digest()
-        })
-        .context("qualification termination lost exact producer binding")?;
+    // Terminate through the generation the occurrence was created under, not
+    // whatever node config pins now: a recompose since then must not strand it.
+    let generation = state
+        .state_store
+        .retained_snapshot_qualification_generation(qualification_operation_id)?
+        .context("qualification termination lost its retained signed generation")?;
+    let qualification = &generation.qualification.recovered_binding()?;
+    let producer = &generation.production.recovered_binding()?;
     ensure!(
         qualified.intent.adapter_artifact_hash == producer.adapter_artifact_hash()
             && qualified.intent.provider_spec_digest == qualification.provider_spec_digest()
@@ -2171,11 +2198,6 @@ fn terminate_qualification_occurrence_under_contact_gate(
             && qualified.intent.provider_id == producer.backend(),
         "qualification termination differs from signed provider authority"
     );
-    let access = producer.credential_access()?;
-    let credential = access.decode(state.vault.placement_credential(&access)?)?;
-    state
-        .external_placement_backends
-        .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
     let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotQualificationTerminationIntent {
         schema: 1,
@@ -2199,8 +2221,22 @@ fn terminate_qualification_occurrence_under_contact_gate(
             intent == existing.intent,
             "retained qualification termination changed signed coordinates"
         );
+        // A settled occurrence no longer roots its lifecycle closure, which a
+        // CAS sweep may since have reclaimed: answer from the journal alone.
+        if existing.phase == QualificationTerminationPhase::Terminal {
+            return Ok(existing);
+        }
     }
     intent.validate_for(&qualified.intent, &occurrence)?;
+    let access = producer.credential_access()?;
+    let credential = access.decode(state.vault.placement_credential(&access)?)?;
+    let lifecycle = crate::external_artifacts::RecoveredQualificationLifecycle::from_generation(
+        state,
+        &generation,
+        producer,
+        qualification,
+        &credential,
+    )?;
     match invocation.authenticate_consumer(state, qualification_operation_id)? {
         Some(admission) => {
             state
@@ -2237,16 +2273,14 @@ fn terminate_qualification_occurrence_under_contact_gate(
     let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
         u64::from(qualification.contact_timeout_seconds()),
     ));
-    let attempted = state
-        .external_placement_backends
-        .terminate_snapshot_qualification_occurrence(
-            producer,
-            qualification,
-            &credential,
-            &request,
-            first_contact,
-            deadline,
-        );
+    let attempted = lifecycle.terminate(
+        producer,
+        qualification,
+        &credential,
+        &request,
+        first_contact,
+        deadline,
+    );
     match attempted {
         Ok(output) => match output.value {
             RuntimeSnapshotQualificationTerminationAdapterResponse::Terminal {

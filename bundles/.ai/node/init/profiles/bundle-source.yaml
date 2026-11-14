@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:52Z:89d928479fee5267c8677dfbea691872e0b45026ebacb6e9730439e162511e6a:RNsJw7DtJkpa9tOfelJEk+gIDUdtXNIozzYevL8k8aurhtI3gv3ONln8c1UJkEkc+X3wsvYmDu6JfH1/8sr4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:47:54Z:4dbed7ce598455b5b3fe91b2699d0a185027a390131b30b5a2f383e448f44f91:7sRj5i/KAFgXMZID50XOihmj+p7+/bbJzuwcPxTZ9SYpmLFK/QoBKfbnC89WT42BM+h6CIVJkHEHQyyG2wNgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -250,6 +250,7 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace
+          host_direct: unavailable
         local_unconfined:
           # The explicit opt-out from the sandbox: a host the operator runs
           # where jobs execute as the daemon user with no isolation backend.
@@ -282,7 +283,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -356,7 +356,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -395,6 +395,9 @@ policies:
   provider_environment:
     schema: 2
     names: []
+  sealed_vault_names:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 5
     session_ttl_secs: 28800
@@ -419,7 +422,9 @@ policies:
       - ryeos.execute.tool.ryeos/core/verify
       - ryeos.execute.tool.ryeos/core/node/doctor
       - ryeos.execute.tool.ryeos/knowledge/compose
-      - ryeos.execute.knowledge.*
+      - ryeos.execute.knowledge.ryeos/core/*
+      - ryeos.execute.knowledge.ryeos/standard/*
+      - ryeos.execute.knowledge.ryeos/ui/*
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log

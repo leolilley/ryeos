@@ -73,7 +73,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .join(ryeos_engine::AI_DIR)
         .join("bundles");
     let local_target = bundles_root.join(&req.bundle_name);
-    let node_config_root = state.config.runtime_root().config();
     let prospective_validator = state
         .extensions
         .get::<ryeos_app::prospective_admission::ProspectiveNodeConfigValidator>()
@@ -104,7 +103,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
+    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
 
     // 1. Call bundle_export on the remote.
     let export_resp: BundleExportResponse =
@@ -136,8 +135,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut staging_cleanup = RemoteStagingCleanup::new(transfer_staging.clone());
     write_remote_fetch_heartbeat(&transfer_staging)
         .context("initialize remote bundle transfer heartbeat")?;
+    let read_root = crate::objects_read_scope::ReadRoot::BundleExport {
+        bundle_name: req.bundle_name.clone(),
+    };
     let (files_installed, total_bytes) =
-        fetch_and_materialize_files(&client, &entries, &transfer_staging).await?;
+        fetch_and_materialize_files(&client, &read_root, &entries, &transfer_staging).await?;
     lillux::sync_tree_durable(&transfer_staging).with_context(|| {
         format!(
             "flush remote transfer staging {}",
@@ -198,7 +200,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         &req.bundle_name,
         &transaction_staging,
         false,
-        &node_config_root,
         &state.engine.node_trust_store,
         &prospective_validator,
         Arc::clone(&state.isolation),
@@ -613,6 +614,7 @@ impl Drop for RemoteStagingCleanup {
 /// are fetched once and may materialize at multiple declared paths.
 async fn fetch_and_materialize_files(
     client: &RemoteClient,
+    read_root: &crate::objects_read_scope::ReadRoot,
     entries: &[BundleExportEntry],
     local_target: &std::path::Path,
 ) -> Result<(usize, u64)> {
@@ -630,7 +632,7 @@ async fn fetch_and_materialize_files(
             if declared_size > crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES {
                 let mut temporary = tempfile::NamedTempFile::new_in(local_target)?;
                 let actual_size = client
-                    .stream_blob(hash, temporary.as_file_mut())
+                    .stream_blob(read_root, hash, temporary.as_file_mut())
                     .await
                     .with_context(|| format!("stream remote bundle blob {hash}"))?;
                 temporary.as_file().sync_all()?;
@@ -658,7 +660,11 @@ async fn fetch_and_materialize_files(
             }
         }
         let response = client
-            .objects_get_bundle_batch_with_response_limit(&hashes, REMOTE_OBJECT_RESPONSE_MAX_BYTES)
+            .objects_get_bundle_batch_with_response_limit(
+                read_root,
+                &hashes,
+                REMOTE_OBJECT_RESPONSE_MAX_BYTES,
+            )
             .await
             .context("fetch bounded remote bundle blob batch")?;
         let mut blob_data = HashMap::with_capacity(response.entries.len());

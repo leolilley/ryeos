@@ -37,37 +37,8 @@ fn pin_test_signing_key() -> lillux::crypto::SigningKey {
     lillux::crypto::SigningKey::from_bytes(&[0x5Au8; 32])
 }
 
-/// Write a trusted-signer TOML for `vk` into
-/// `<user_space>/.ai/config/keys/trusted/<fp>.toml`. Mirrors the
-/// `bootstrap::write_self_trust` format so the engine's `TrustStore`
-/// loader picks it up alongside the fixture trusted signers.
-fn write_trusted_signer(
-    user_space: &Path,
-    vk: &lillux::crypto::VerifyingKey,
-) -> anyhow::Result<()> {
-    use base64::engine::Engine as _;
-
-    let fp = lillux::signature::compute_fingerprint(vk);
-    let trust_dir = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trust_dir)?;
-    let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let toml = format!(
-        r#"version = "1.0.0"
-fingerprint = "{fp}"
-owner = "self"
-attestation = ""
-
-[public_key]
-pem = "ed25519:{key_b64}"
-"#
-    );
-    std::fs::write(trust_dir.join(format!("{fp}.toml")), toml)?;
-    Ok(())
-}
-
-/// Pre-init hook used by the three native-runtime pin tests: writes a
-/// trust entry for `pin_test_signing_key()` into the app root's
-/// operator trust dir, then synthesizes a minimal registered
+/// Pre-init hook used by the three native-runtime pin tests: pins
+/// `pin_test_signing_key()` in the app root's signer registry, then synthesizes a minimal registered
 /// `pin-fixture` bundle under `<app_root>/.ai/bundles/pin-fixture`
 /// carrying `.ai/runtimes/pin-fake-runtime.yaml` (`kind: runtime`,
 /// `serves: pin_fake_kind`, `binary_ref: bin/<triple>/pin-fake-runtime`)
@@ -88,7 +59,12 @@ fn install_pin_runtime(
 ) -> anyhow::Result<()> {
     let sk = pin_test_signing_key();
     let vk = sk.verifying_key();
-    write_trusted_signer(state_path, &vk)?;
+    common::pin_signer(
+        state_path,
+        &vk,
+        ryeos_engine::trust::SignerRole::Publisher,
+        ryeos_engine::trust::SignerScope::everywhere(),
+    );
 
     let bundle_root = state_path.join(".ai/bundles/pin-fixture");
     std::fs::create_dir_all(&bundle_root)?;

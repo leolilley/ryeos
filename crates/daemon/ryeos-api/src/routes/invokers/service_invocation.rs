@@ -84,6 +84,7 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
             &site_id,
         );
         let plan_ctx = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: principal_id.clone(),
                 scopes: principal_scopes.clone(),

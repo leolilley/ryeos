@@ -21,6 +21,7 @@ use ryeos_node_runtime::state_lock::StateLock;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
+use super::OperatorLineage;
 use super::anchor::RetainedAnchor;
 use super::redo::Operation;
 use super::{
@@ -94,6 +95,8 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
         operator_fingerprint == report.operator_fingerprint,
         "operator key differs from the one that initialized this node"
     );
+    let lineage = super::OperatorLineage::load(app_root)?;
+    lineage.require_member(&operator_fingerprint)?;
     let binding: NativeCapacityAccountBinding = report.capacity_account;
     let policy = binding.policy.clone();
     ensure!(
@@ -114,6 +117,7 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
     let identity = ReissueIdentity {
         operator_key,
         operator_fingerprint,
+        lineage,
         node_fingerprint: report.node_fingerprint,
         policy,
     };
@@ -147,6 +151,8 @@ pub fn read_capacity_reissuances(state_dir: &Path) -> Result<Vec<CapacityReissue
 struct ReissueIdentity<'a> {
     operator_key: &'a SigningKey,
     operator_fingerprint: String,
+    /// The operators whose earlier documents the re-issuance may follow.
+    lineage: OperatorLineage,
     node_fingerprint: String,
     policy: NodeNativeCapacityPolicy,
 }
@@ -341,8 +347,7 @@ impl StoppedCapacityAccount {
             );
             let body = verify_reissuance_document(
                 document_bytes,
-                &identity.operator_key.verifying_key(),
-                &identity.operator_fingerprint,
+                &identity.lineage,
                 &identity.node_fingerprint,
                 &self.issuance,
             )?;
@@ -675,6 +680,10 @@ mod controls {
                 operator_fingerprint: ryeos_engine::trust::compute_fingerprint(
                     &self.operator.verifying_key(),
                 ),
+                lineage: OperatorLineage::single(
+                    &ryeos_engine::trust::compute_fingerprint(&self.operator.verifying_key()),
+                    &self.operator.verifying_key(),
+                ),
                 node_fingerprint: "c".repeat(64),
                 policy: self.policy.clone(),
             }
@@ -813,8 +822,7 @@ mod controls {
         assert_eq!(report.document_digest, hex_digest(&digest));
         let body = verify_reissuance_document(
             &document,
-            &f.operator.verifying_key(),
-            &f.identity().operator_fingerprint,
+            &f.identity().lineage,
             &f.identity().node_fingerprint,
             &f.issuance,
         )
@@ -856,8 +864,7 @@ mod controls {
         );
         let body = verify_reissuance_document(
             &std::fs::read(f.document_path()).unwrap(),
-            &f.operator.verifying_key(),
-            &f.identity().operator_fingerprint,
+            &f.identity().lineage,
             &f.identity().node_fingerprint,
             &f.issuance,
         )

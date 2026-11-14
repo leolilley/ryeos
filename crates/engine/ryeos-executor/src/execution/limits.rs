@@ -844,7 +844,7 @@ mod tests {
         let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
             tmp.path().join("project"),
             vec![],
-            &tmp.path().join("operator/.ai/config/keys/trusted"),
+            &[],
         )
         .unwrap();
         let config = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap();
@@ -865,12 +865,8 @@ mod tests {
         )
         .unwrap();
 
-        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
-            project,
-            vec![],
-            &tmp.path().join("operator/.ai/config/keys/trusted"),
-        )
-        .unwrap();
+        let loader =
+            ryeos_runtime::verified_loader::VerifiedLoader::new(project, vec![], &[]).unwrap();
         let err = load_limits_config_from_loader(&loader, &runtime_declaration()).unwrap_err();
         assert!(
             err.to_string().contains("canonical decimal string"),

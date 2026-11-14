@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T16:31:53Z:13727c21f4617982e720fc316c275648036760729c35e7df437fa41b44930e34:6UnP9Ka4tMoesPP9OrogDWXAmE3XEzJF92j5LGiCzDuH7+rPHlAHw9knno3S6iwbDjOEYwJ+0fxeUCkZ/C3rCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:47:54Z:94408f4cd07bb1683b2521f6cf1ebaa37cf8948fa235438a4a31303dfca01053:OSdxEbo4OtMCaCYDj+y38Nc97wNAT/T4bJDodUMb6I2JtMVjTtAvUD1meT+pXLE+YSxbm5xcsJ3mvJyykkN0BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - core
@@ -294,6 +294,7 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace
+          host_direct: unavailable
         local_unconfined:
           # The explicit opt-out from the sandbox: a host the operator runs
           # where jobs execute as the daemon user with no isolation backend.
@@ -326,7 +327,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -400,7 +400,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -439,6 +439,9 @@ policies:
   provider_environment:
     schema: 2
     names: []
+  sealed_vault_names:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 5
     session_ttl_secs: 28800
@@ -463,7 +466,9 @@ policies:
       - ryeos.execute.tool.ryeos/core/verify
       - ryeos.execute.tool.ryeos/core/node/doctor
       - ryeos.execute.tool.ryeos/knowledge/compose
-      - ryeos.execute.knowledge.*
+      - ryeos.execute.knowledge.ryeos/core/*
+      - ryeos.execute.knowledge.ryeos/standard/*
+      - ryeos.execute.knowledge.ryeos/ui/*
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log

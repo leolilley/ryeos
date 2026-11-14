@@ -27,10 +27,6 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::resolution::run_resolution_pipeline;
 use ryeos_engine::trust::TrustStore;
 
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn workspace_root() -> PathBuf {
     ryeos_engine::test_support::workspace_root()
 }
@@ -60,13 +56,7 @@ fn live_kinds_dirs() -> Vec<PathBuf> {
 }
 
 fn fixture_trust_store() -> TrustStore {
-    let trusted_dir = manifest_dir().join("tests/fixtures/trusted_signers");
-    assert!(
-        trusted_dir.is_dir(),
-        "trusted-signers fixture missing at {}",
-        trusted_dir.display()
-    );
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load fixture trust store");
+    let trust_store = ryeosd::test_support::fixture_trust_store();
     assert!(
         !trust_store.is_empty(),
         "fixture trust store has no signers — fixture is empty"

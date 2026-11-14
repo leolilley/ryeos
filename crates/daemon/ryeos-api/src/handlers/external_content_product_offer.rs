@@ -84,7 +84,7 @@ pub(crate) struct PushAuthority {
 
 /// Authenticate a push-form caller, in order: admitted operator class, the
 /// operator's current node-signed grant, then the origin resolved solely from
-/// the authenticated origin site through the layered remotes.
+/// the authenticated origin site through the pinned remotes.
 pub(crate) fn authenticate_push_origin(
     state: &AppState,
     ctx: &HandlerContext,
@@ -104,7 +104,7 @@ pub(crate) fn authenticate_push_origin(
             authority.origin_site_id
         );
     }
-    let remotes = crate::remote::config::load_remotes_layered(&state.config.app_root, None)?;
+    let remotes = crate::remote::config::load_remotes(&state.config.app_root)?;
     let (origin_key, expected_issuer) = resolve_push_origin(&remotes, site_id)?;
     Ok(PushAuthority {
         owner_principal: ctx.fingerprint.clone(),
@@ -475,7 +475,8 @@ mod tests {
         let key = signer.key();
         RemoteConfig {
             name: name.to_owned(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&key)),
             signing_key: format!(
                 "ed25519:{}",

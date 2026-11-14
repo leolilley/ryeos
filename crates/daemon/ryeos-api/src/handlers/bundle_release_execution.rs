@@ -469,6 +469,7 @@ pub(crate) async fn execute_pinned_graph(
     let effective_path = project_ctx.effective_path.clone();
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: resolved.provenance.logical_project_root(),
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),
@@ -499,6 +500,7 @@ pub(crate) async fn execute_pinned_graph(
         let child_consumer_ref = if graph_ref.starts_with("graph:") {
             let graph = project_ctx.request_engine.effective_item(
                 ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(graph_ref)?,
                     expected_kind: None,
                     project_root: Some(effective_path.clone()),
@@ -724,6 +726,7 @@ pub(crate) async fn execute_protected_qualification(
         .context("release qualification lost its overlay snapshot")?;
     let site_id = state.threads.site_id().to_owned();
     let plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: context.fingerprint.clone(),

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-11-13T21:32:28Z:6c52dbc50c77dc25dd12cbacc6b2dcd69b50bba69146298a76da5ce0c87355f3:kBzvTRqFhr0+fB2M+0W22GUgsXl2Pt+Hay3Zasvrcitua2wu6h+ngxy7BUbHdehv1LUK6ESYMwxY3odCBFNtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.offline-operations-status
+required_caps: ["ryeos.execute.service.remote/offline-operations-status"]
+schema:
+  remote: string
+description: "Read what a remote has queued, applied and refused as offline operations, under the caller's stored delegation for that remote. The delegation must lend ryeos.execute.service.offline-operations/status"

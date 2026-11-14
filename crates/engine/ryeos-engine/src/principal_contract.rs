@@ -28,6 +28,10 @@ impl AuthorizedKeyPrincipalClass {
 pub struct ForwardingAuthorityEvidence {
     pub source_node_fingerprint: String,
     pub source_node_grant_hash: String,
+    /// Digest of the principal-signed delegation the forwarded request
+    /// carried, when the source node acted for the principal under one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_digest: Option<String>,
 }
 
 /// Stable grant-generation evidence produced by authenticated RyeOS request
@@ -53,6 +57,9 @@ impl AuthenticatedGrantAuthority {
                     "forwarding source-node grant hash",
                     &forwarding.source_node_grant_hash,
                 )?;
+                if let Some(digest) = forwarding.delegation_digest.as_deref() {
+                    validate_sha256("forwarding delegation digest", digest)?;
+                }
             }
             (AuthorizedKeyPrincipalClass::RemotePrincipal, None) => {
                 anyhow::bail!(

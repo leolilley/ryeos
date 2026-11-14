@@ -445,6 +445,7 @@ fn preflight_dispatch_launch_core(
         ProjectContext::LocalPath { path: project_path }
     };
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: request.principal_id.to_string(),
             scopes: request.principal_scopes.to_vec(),

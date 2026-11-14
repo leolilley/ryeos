@@ -3385,6 +3385,7 @@ fn build_protocol_launch_env(
         item_ref,
         thread_id: thread_id.to_string(),
         project_path: project_path.to_path_buf(),
+        bundle_state_home: None,
         runtime_state_root: callback_project_path.to_path_buf(),
         acting_principal: acting_principal.to_string(),
         cas_root,
@@ -4008,6 +4009,16 @@ fn restore_process_workspace_output_generation(
     )
 }
 
+/// A large object scrub quarantined surfaces here, at store redemption after
+/// thread birth. Keep it the typed operator-correctable refusal rather than an
+/// internal failure; the thread is still failed by the caller.
+pub(crate) fn classify_prepared_input_error(error: anyhow::Error) -> anyhow::Error {
+    match super::external_content::classify_quarantined_large_object(&error) {
+        Some(typed) => anyhow::Error::new(typed),
+        None => error,
+    }
+}
+
 pub(crate) fn prepare_process_inputs(
     state: &AppState,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
@@ -4526,11 +4537,19 @@ pub(crate) fn finalize_direct_effective_program(
     }
 
     let mut resolution = admission.resolution_output().clone();
-    let roots = engine.resolution_roots(
-        admission
-            .resolution_workspace()
-            .map(std::path::Path::to_path_buf),
-    );
+    let roots = engine
+        .resolution_roots(
+            admission
+                .resolution_workspace()
+                .map(std::path::Path::to_path_buf),
+        )
+        .with_logical_project_root(
+            admission
+                .verified_subject()
+                .resolved
+                .logical_project_root
+                .clone(),
+        );
     // A declaring kind captures here exactly as the managed path does. A
     // direct launch dispatched as a child (`parent_thread_id`) may reuse the
     // parent's outer sealed realization set under the existing inheritance
@@ -5333,7 +5352,7 @@ pub async fn run_and_wait(
             wait_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
     let wait_bound_source = wait_bound_source.map(Arc::new);
     effective_path = process_path;
@@ -5529,7 +5548,6 @@ pub async fn run_and_wait(
     } else {
         None
     };
-    let wait_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let wait_isolation_workspace =
         process_isolation_workspace(process_project_class(&params.provenance), &effective_path);
     let wait_selected_resources = state
@@ -5627,7 +5645,6 @@ pub async fn run_and_wait(
             isolation_live_access_authority: wait_isolation_live_access_authority,
             isolation_external_read_only_mounts: wait_external_mounts,
             isolation_target_channels: wait_scoped_relay_channels,
-            isolation_node_trusted_keys_dir: wait_node_trusted_keys_dir,
             isolation_workspace: wait_isolation_workspace,
             inherited_fds: Vec::new(),
             external_realizations_env: wait_external_sealed_env,
@@ -6396,7 +6413,7 @@ pub async fn run_detached(
             bg_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     effective_path = process_path;
     if let Some(lifeline) = process_input_lifeline {
         guard.track_process_input_dir(lifeline);
@@ -6907,7 +6924,6 @@ async fn dispatch_detached_bg_task(
         }
     }
 
-    let bg_node_trusted_keys_dir = bg_state.config.runtime_root().trusted_keys_dir();
     let bg_spawn_state = bg_state.clone();
     let bg_accounting_scope = admitted_launch_metadata.accounting_scope.clone();
     let bg_spawn_launch_owner = launch_owner.clone();
@@ -7069,7 +7085,6 @@ async fn dispatch_detached_bg_task(
             isolation_live_access_authority: bg_isolation_live_access_authority,
             isolation_external_read_only_mounts: bg_external_mounts,
             isolation_target_channels: bg_scoped_relay_channels,
-            isolation_node_trusted_keys_dir: bg_node_trusted_keys_dir,
             isolation_workspace: bg_isolation_workspace,
             inherited_fds: Vec::new(),
             external_realizations_env: bg_external_sealed_env,
@@ -8690,6 +8705,7 @@ pub(crate) fn candidate_evaluation_provenance_from_resume_context(
         base_authority,
     )?;
     let base_plan_context = ryeos_engine::contracts::PlanContext {
+        logical_project_root: base_provenance.logical_project_root(),
         requested_by: resume.requested_by.clone(),
         project_context: ProjectContext::LocalPath {
             path: base.effective_path.clone(),
@@ -9144,7 +9160,9 @@ async fn run_existing_recovered_thread(
         recovered_private_view_realizations,
     )
     .map_err(|error| {
-        guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
+        guard.fail_before_spawn(
+            classify_prepared_input_error(error).context("recovery_input_materialization_failed"),
+        )
     })?;
     if effective_project_root.is_some() {
         prepared_plan
@@ -9287,7 +9305,8 @@ async fn run_existing_recovered_thread(
                         ),
                     )
                 }
-                error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                error @ (ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+                | ryeos_app::vault::VaultReadError::NameRefused(_)) => {
                     guard.fail_thread("vault_read_failed");
                     ResumeError::VaultRead(guard.fail_before_spawn(error.into()))
                 }

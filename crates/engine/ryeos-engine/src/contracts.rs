@@ -3109,6 +3109,10 @@ pub struct ResolvedItem {
     /// adding any one of them can change which source wins.
     pub probed_absent: Vec<ProbedAbsence>,
     pub materialized_project_root: Option<PathBuf>,
+    /// The logical project the item belongs to (see
+    /// `PlanContext::logical_project_root`). Signer project scopes are judged
+    /// against this value.
+    pub logical_project_root: Option<PathBuf>,
     /// Engine-bound authority under which this exact item was resolved.
     /// Verification rejects a context carrying a different authority even
     /// when both happen to name the same local materialization path.

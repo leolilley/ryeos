@@ -2474,11 +2474,7 @@ impl RootExecutionAdmission {
         })
         .transpose()?;
         self.request_engine()
-            .effective_trust_store_for_current_policy(
-                project_root,
-                subject_authority,
-                resolution_binding.pinned_materialization_proof(),
-            )
+            .effective_trust_store_for_current_policy(project_root, subject_authority)
             .map_err(anyhow::Error::new)
     }
 
@@ -7141,7 +7137,9 @@ pub fn resolve_thread_history_policy(
         }
         ProjectContext::None => None,
     };
-    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
+    let roots = engine
+        .resolution_roots(project_root.map(Path::to_path_buf))
+        .with_logical_project_root(verified.resolved.logical_project_root.clone());
     let request_snapshot = engine
         .effective_request_snapshot(project_root, &resolved_item.subject_resolution_authority)
         .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
@@ -7178,7 +7176,9 @@ fn resolve_thread_history_policy_under_project_authority(
     node_history_policy: &ResolvedNodeThreadHistoryPolicy,
 ) -> Result<ResolvedThreadHistoryPolicy> {
     let resolved_item = &verified.resolved;
-    let roots = engine.resolution_roots(Some(project_root.to_path_buf()));
+    let roots = engine
+        .resolution_roots(Some(project_root.to_path_buf()))
+        .with_logical_project_root(resolved_item.logical_project_root.clone());
     let request_snapshot = engine
         .effective_request_snapshot_under_project_authority(
             project_root,
@@ -7891,6 +7891,7 @@ fn live_non_execution_root_context(
         capability_ceiling,
     )?;
     let plan_context = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: requested_by.to_string(),
             scopes: caller_scopes,
@@ -8173,6 +8174,7 @@ pub fn resolve_direct_terminator_protocol<'a>(
     let protocol_ref = match terminator {
         ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => {
             let effective = engine.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+                logical_project_root: None,
                 item_ref: resolved.resolved_item.canonical_ref.clone(),
                 expected_kind: Some(kind.clone()),
                 project_root: resolved.resolved_item.materialized_project_root.clone(),
@@ -8664,6 +8666,7 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:bundle-subject-test".to_string(),
                 scopes: Vec::new(),
@@ -8701,6 +8704,7 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:projectless-resolution-test".to_string(),
                 scopes: Vec::new(),
@@ -8820,6 +8824,7 @@ mod tests {
             current_operational_generation: generation_b,
         };
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),
@@ -8869,6 +8874,7 @@ mod tests {
             current_operational_generation: active_base,
         };
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:cow-recovery-test".to_string(),
                 scopes: Vec::new(),
@@ -8909,6 +8915,7 @@ mod tests {
         )
         .unwrap();
         let plan_context = PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:project-binding-test".to_string(),
                 scopes: Vec::new(),
@@ -9005,6 +9012,7 @@ mod tests {
     ) -> VerifiedItem {
         VerifiedItem {
             resolved: ResolvedItem {
+                logical_project_root: None,
                 canonical_ref: CanonicalRef::parse("service:items/effective").unwrap(),
                 kind: "service".to_string(),
                 source_path: PathBuf::from("/bundle/.ai/services/items/effective.yaml"),

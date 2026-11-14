@@ -32,6 +32,7 @@
 //!   - `ryeos node external-execution qualification-session-compose` — compose and install the node-signed qualification-only session binding on a stopped node
 //!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
 //!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
+//!   - `ryeos node external-execution recompose` — re-pin installed bindings to the installed bundles after a payload change on a stopped node
 //!
 //! One client composite is listed here for help but dispatched after the
 //! verified node config loads, because it sequences daemon commands:
@@ -52,7 +53,7 @@
 //! (see `offline_dispatch.rs`) or forwarded to the daemon.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -111,7 +112,7 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     },
     LocalCommandDescriptor {
         tokens: &["node", "offline-operation", "facts"],
-        summary: "Print the node facts a signed offline-operation request is signed against; works with the daemon stopped",
+        summary: "Print the node facts a signed offline-operation request is signed against; works with the daemon stopped; --remote reads a remote's through this node",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -121,7 +122,7 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     },
     LocalCommandDescriptor {
         tokens: &["node", "offline-operation", "submit"],
-        summary: "Send a signed offline-operation request to a running node's route; --stop makes the node apply it at once",
+        summary: "Send a signed offline-operation request to a running node's route, or through this node to a remote with --remote; --stop makes the node apply it at once",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -178,6 +179,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
         category: "lifecycle",
     },
     LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "recompose"],
+        summary: "Re-pin a stopped node's bindings to its installed bundles after a payload change",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
         tokens: &["node", "reset", "execution-history"],
         summary: "Retire the local execution-history epoch",
         category: "maintenance",
@@ -190,6 +196,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "reset", "authorization"],
         summary: "Discard grants and recreate the local operator authorization",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "authorization", "revoke"],
+        summary: "Revoke an authorized-key grant on a stopped node, leaving a tombstone",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -230,6 +241,56 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "host-access", "list"],
         summary: "List host_access grants and whether they match a project",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "operator", "rotate"],
+        summary: "Rotate the operator key on a stopped node: the old key is retired and the new key takes over its grant",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "authoring", "rotate"],
+        summary: "Rotate the authoring key on a stopped node: the new key keeps the old key's scope",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "bundle-state", "export"],
+        summary: "Write a node-signed archive of a bundle's state home from a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "bundle-state", "import"],
+        summary: "Install a verified bundle state archive into a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "bundle-state", "remove"],
+        summary: "Delete a bundle's state home, or one namespace, from a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "pin"],
+        summary: "Pin a signer key from a PUBLISHER_TRUST.toml on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "scope"],
+        summary: "Narrow or widen a pinned signer's scope on a stopped node",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "retire"],
+        summary: "Retire a pinned signer on a stopped node; it still verifies existing items",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "revoke"],
+        summary: "Revoke a pinned signer on a stopped node; it verifies nothing",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["trust", "succeed"],
+        summary: "Replace a pinned signer by the key a signed succession statement names",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -320,7 +381,9 @@ pub async fn try_dispatch(
             Ok(true)
         }
         ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("facts") => {
-            run_node_offline_operation_facts_command(&argv[3..], console).map_err(map_local_err)?;
+            run_node_offline_operation_facts_command(&argv[3..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("offline-operation")) if argv.get(2).map(String::as_str) == Some("sign") => {
@@ -398,6 +461,13 @@ pub async fn try_dispatch(
             .map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("recompose") =>
+        {
+            crate::lifecycle_external_recompose::run_recompose(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {
             run_execution_history_reset_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
@@ -410,6 +480,10 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("authorization") => {
             run_node_auth_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("authorization")) if argv.get(2).map(String::as_str) == Some("revoke") => {
+            run_node_auth_revoke_command(&argv[3..], console).map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("replay-indexes") => {
@@ -431,6 +505,30 @@ pub async fn try_dispatch(
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("policy-generation") => {
             run_node_policy_generation_reset_command(&argv[3..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("bundle-state"))
+            if matches!(
+                argv.get(2).map(String::as_str),
+                Some("export" | "import" | "remove")
+            ) =>
+        {
+            crate::lifecycle_bundle_state::run(argv[2].as_str(), &argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
+            crate::lifecycle_trust::run(verb, &argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("operator")) if argv.get(2).map(String::as_str) == Some("rotate") => {
+            crate::lifecycle_key_rotation::run_operator(&argv[3..], console)
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("authoring")) if argv.get(2).map(String::as_str) == Some("rotate") => {
+            crate::lifecycle_key_rotation::run_authoring(&argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("policy-apply")) => {
@@ -1207,6 +1305,85 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
     Ok(())
 }
 
+// ── ryeos node authorization revoke ──────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node authorization revoke",
+    about = "Revoke an authorized-key grant on a stopped node, leaving a node-signed tombstone",
+    long_about = "Revoke one authorized-key grant while the daemon is stopped, for example after a key compromise found while the node is down. The grant digest gets a node-signed tombstone before the grant file is removed, so a restored copy stays refused; a new grant for the same key is allowed. Grants the revoked key granted are revoked too unless --keep-delegates is given. Rerunning converges; an unknown fingerprint is refused. This is the only way to revoke the configured operator's own grant. Live threads and schedules are handled by the running node: use `ryeos revoke-key` for those.",
+    no_binary_name = true
+)]
+struct NodeAuthRevokeArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Fingerprint (64 lowercase hex) of the grant to revoke.
+    #[arg(long)]
+    fingerprint: String,
+
+    /// Why the grant is revoked, recorded in the tombstone.
+    #[arg(long)]
+    reason: String,
+
+    /// Revoke only the named grant, not the grants it granted.
+    #[arg(long)]
+    keep_delegates: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_auth_revoke_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeAuthRevokeArgs>(argv, console)? else {
+        return Ok(());
+    };
+    let app_root = ryeos_node::NodeConfig::load_local(args.app_root.clone())?.app_root;
+    let host = crate::offline_apply::CliHost::new();
+    let applied = host.apply(
+        &app_root,
+        "node.authorization.revoke",
+        serde_json::json!({
+            "fingerprint": args.fingerprint,
+            "reason": args.reason,
+            "keep_delegates": args.keep_delegates,
+        }),
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    )?;
+    let revoked = applied.result["revoked"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if args.json {
+        crate::tty::write_json(&serde_json::json!({
+            "revoked": revoked,
+            "receipt": applied.receipt.digest()?,
+        }))?;
+    } else {
+        let mut status = crate::tty::StatusBanner::new(crate::tty::Tone::Success, "GRANT REVOKED");
+        status.rows = revoked
+            .iter()
+            .map(|grant| {
+                crate::tty::Row::key_value(
+                    grant["fingerprint"].as_str().unwrap_or_default(),
+                    if grant["already_revoked"].as_bool().unwrap_or(false) {
+                        "already revoked".to_owned()
+                    } else if let Some(from) = grant["cascaded_from"].as_str() {
+                        format!("revoked (delegate of {from})")
+                    } else {
+                        "revoked".to_owned()
+                    },
+                )
+            })
+            .collect();
+        console.success(&status)?;
+    }
+    Ok(())
+}
+
 // ── ryeos node reset execution-history-scratch ───────────────────────────
 
 #[derive(Parser, Debug)]
@@ -1908,6 +2085,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
             crate::tty::Row::key_value("app root", report.app_root.display().to_string()),
             crate::tty::Row::key_value("operator", report.user_key_fingerprint),
             crate::tty::Row::key_value("node", report.node_key_fingerprint),
+            crate::tty::Row::key_value("authoring", report.authoring_key_fingerprint),
             crate::tty::Row::key_value("vault", report.vault_pubkey_fingerprint),
             crate::tty::Row::key_value("bundles", report.bundles_installed.join(", ")),
         ];
@@ -2032,7 +2210,7 @@ async fn run_status_command(argv: &[String], console: &crate::tty::Console) -> R
 #[command(
     name = "ryeos node offline-operation facts",
     about = "Print the node facts a signed offline-operation request is signed against",
-    long_about = "Read-only. Prints every precondition fact of the node and the ledger head, and the operations this build can apply with the facts each pins. Works with the daemon stopped, so an operator can sign a request for a node that cannot start. The daemon prints the same facts in its log on every start.",
+    long_about = "Read-only. Prints every precondition fact of the node and the ledger head, and the operations this build can apply with the facts each pins. Works with the daemon stopped, so an operator can sign a request for a node that cannot start. The daemon prints the same facts in its log on every start. With --remote <name> it prints a remote's facts instead, read through this operator's running node under the delegation stored for that remote; `--json` then writes the document `sign --facts` reads.",
     no_binary_name = true
 )]
 struct NodeOfflineFactsArgs {
@@ -2040,27 +2218,69 @@ struct NodeOfflineFactsArgs {
     #[arg(long)]
     app_root: Option<PathBuf>,
 
+    /// Read the facts of the remote of this name through this operator's own
+    /// node. The stored delegation for it must lend
+    /// `ryeos.execute.service.offline-operations/facts`.
+    #[arg(long)]
+    remote: Option<String>,
+
+    /// The key that will sign requests (PKCS#8 PEM): the facts name the
+    /// authority it holds on the node, and with --remote it also
+    /// authenticates the call to this operator's node. Defaults to the
+    /// operator key under the app root.
+    #[arg(long)]
+    signing_key: Option<PathBuf>,
+
     /// Emit structured JSON.
     #[arg(long)]
     json: bool,
 }
 
-fn run_node_offline_operation_facts_command(
+async fn run_node_offline_operation_facts_command(
     argv: &[String],
     console: &crate::tty::Console,
 ) -> Result<()> {
     let Some(args) = parse_or_render_help::<NodeOfflineFactsArgs>(argv, console)? else {
         return Ok(());
     };
+    if let Some(remote) = &args.remote {
+        return crate::lifecycle_offline_operation::run_remote_facts(
+            remote,
+            args.app_root,
+            args.signing_key,
+            args.json,
+            console,
+        )
+        .await;
+    }
     let app_root = ryeos_node::NodeConfig::load_local(args.app_root)?.app_root;
     let facts = ryeos_node::offline_operation::read_facts(&app_root)
         .context("measure the node's offline-operation facts")?;
+    // The authority the signing key holds here, so `sign --facts` signs under
+    // it. Without a key to name, the facts name no signer and `sign` refuses
+    // them rather than guess.
+    let key_path = args
+        .signing_key
+        .clone()
+        .unwrap_or_else(|| crate::transport::signing::operator_signing_key_path(&app_root));
+    let signer = match lillux::crypto::load_signing_key(&key_path) {
+        Ok(key) => Some(ryeos_node::offline_operation::deliver::local_signer_report(
+            &app_root,
+            &lillux::signature::compute_fingerprint(&key.verifying_key()),
+        )?),
+        Err(error) if args.signing_key.is_some() => {
+            return Err(error)
+                .with_context(|| format!("load the signing key {}", key_path.display()));
+        }
+        Err(_) => None,
+    };
     let operations = ryeos_node::offline_operation::table::operations();
     if args.json {
         crate::tty::write_json(&serde_json::json!({
             "app_root": app_root,
             "node_fingerprint": ryeos_node::offline_operation::read_node_fingerprint(&app_root)?,
             "facts": facts,
+            "signer": signer,
             "operations": operations.iter().map(|spec| serde_json::json!({
                 "operation": spec.id,
                 "scope": spec.scope(),
@@ -2673,6 +2893,34 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
         ));
     }
 
+    // Operator key material left at an old location: init refuses it and
+    // nothing reads it, so the node cannot be initialized until it is moved.
+    match ryeos_node::operator_layout::check_operator_layout(&config.app_root) {
+        Ok(()) => checks.push(check("operator_key", OK, serde_json::json!({}))),
+        Err(error) => checks.push(check(
+            "operator_key",
+            FAIL,
+            serde_json::json!({
+                "code": error.code(),
+                "error": error.to_string(),
+                "fix": error.cure(),
+            }),
+        )),
+    }
+
+    // Remote pins: node-signed records under `.ai/node/remotes`. An unsigned
+    // or edited record, or a leftover unsigned config file, is a failure with
+    // the cure named.
+    if initialized {
+        checks.push(remote_pins_check(&config.app_root));
+    } else {
+        checks.push(check(
+            "remote_pins",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    }
+
     // The wall clock the node issues external execution windows from. Always
     // reported; a node policy that requires a synchronized clock turns an
     // unsatisfied reading into a failure.
@@ -2683,13 +2931,28 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
     // node, so their count is not available here.
     checks.push(ui_browser_sessions_check(&config.app_root, initialized));
 
+    // Vault names the signed ceilings do not list are operator-only.
+    checks.push(vault_names_without_ceiling_check(
+        &config.app_root,
+        initialized,
+    ));
+
     // Grants that have lapsed, are about to, or are of a retired schema or
     // class. Reading them needs only the node key and the signed policy.
     if initialized {
         checks.push(authorized_keys_check(&config.app_root));
+        checks.push(key_age_check(
+            &config.app_root,
+            lillux::time::unix_secs_now(),
+        ));
     } else {
         checks.push(check(
             "authorized_keys",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+        checks.push(check(
+            "key_age",
             NA,
             serde_json::json!({ "note": "not initialized" }),
         ));
@@ -2953,9 +3216,19 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                     &snapshot,
                 ));
                 checks.push(remote_content_testimonies_check(&config.app_root));
+                checks.extend(bundle_state_checks(
+                    &config.app_root,
+                    &snapshot
+                        .bundles
+                        .iter()
+                        .map(|record| record.name.clone())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    isolation.as_ref().ok().map(|runtime| {
+                        runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce
+                    }),
+                ));
+                checks.extend(central_auth_state_relocated_check(&config.app_root));
                 if !args.no_bundles {
-                    let operator_config_root =
-                        ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification
                         // still uses the node's immutable isolation snapshot.
@@ -2967,7 +3240,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                                 .map_err(String::as_str),
                             &record.path,
                             &roots,
-                            &operator_config_root,
+                            &config.app_root,
                         );
                         checks.push(check(
                             &format!("bundle:{}", record.name),
@@ -3219,18 +3492,30 @@ fn authorized_keys_check(
             &root.authorized_keys_dir(),
             &node,
         )?;
-        Ok((inspections, warn_before_secs))
+        let tombstones = ryeos_node_runtime::grant_revocation::inspect_tombstones(
+            &ryeos_node_runtime::grant_revocation::revocations_dir(&root.authorized_keys_dir()),
+            &node,
+        )?;
+        Ok((inspections, tombstones, warn_before_secs))
     };
     match inspect() {
-        Ok((inspections, warn_before_secs)) => {
-            let report = grant_report(
+        Ok((inspections, tombstones, warn_before_secs)) => {
+            let mut report = grant_report(
                 &inspections,
                 warn_before_secs,
                 lillux::time::unix_secs_now(),
             );
-            let status = if !report.stale.is_empty() || !report.invalid.is_empty() {
+            report.add_tombstones(&tombstones);
+            let status = if !report.stale.is_empty()
+                || !report.invalid.is_empty()
+                || !report.invalid_tombstones.is_empty()
+            {
                 FAIL
-            } else if !report.expired.is_empty() || !report.expiring.is_empty() {
+            } else if !report.expired.is_empty()
+                || !report.expiring.is_empty()
+                || !report.revoked_on_disk.is_empty()
+                || !report.wildcard_holders.is_empty()
+            {
                 WARN
             } else {
                 OK
@@ -3245,6 +3530,54 @@ fn authorized_keys_check(
     }
 }
 
+/// Doctor row for key age: the node, operator, authoring and publisher keys,
+/// each with the time it entered service and its age in days. Age is a
+/// report, never a failure. The row warns when the node has no active
+/// operator or authoring key, because `ryeos init` creates both.
+fn key_age_check(
+    app_root: &std::path::Path,
+    now_unix: u64,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+    match ryeos_node::key_rotation::key_ages(app_root, now_unix) {
+        Ok(keys) => {
+            let has_active = |role: &str| {
+                keys.iter()
+                    .any(|key| key.role == role && key.status == "active")
+            };
+            let mut missing = Vec::new();
+            for role in ["operator", "authoring"] {
+                if !has_active(role) {
+                    missing.push(serde_json::json!({
+                        "role": role,
+                        "fix": "run `ryeos init` on the stopped node to create and pin the key",
+                    }));
+                }
+            }
+            let status = if missing.is_empty() { OK } else { WARN };
+            check(
+                "key_age",
+                status,
+                serde_json::json!({
+                    "keys": keys,
+                    "missing": missing,
+                    "note": "age is reported, not judged: no signed policy sets a rotation threshold",
+                    "rotate": {
+                        "operator": "ryeos node operator rotate",
+                        "authoring": "ryeos node authoring rotate",
+                        "node": "not rotatable: the node key is the root of every node document",
+                    },
+                }),
+            )
+        }
+        Err(error) => check(
+            "key_age",
+            FAIL,
+            serde_json::json!({ "error": format!("{error:#}") }),
+        ),
+    }
+}
+
 /// The doctor's reading of every grant file at one instant.
 #[derive(Debug, Default)]
 struct GrantReport {
@@ -3253,16 +3586,51 @@ struct GrantReport {
     expiring: Vec<serde_json::Value>,
     stale: Vec<serde_json::Value>,
     invalid: Vec<serde_json::Value>,
+    /// Grant files whose digest has a revocation tombstone: refused, but the
+    /// file is still on disk.
+    revoked_on_disk: Vec<serde_json::Value>,
+    /// Revocation tombstones that are unsigned, tampered, signed by another
+    /// key or malformed: the ledger cannot be trusted.
+    invalid_tombstones: Vec<serde_json::Value>,
+    tombstones: usize,
+    /// Every readable grant: who it names, where it came from and who asked
+    /// for it. Identity is the fingerprint; the label is display only.
+    inventory: Vec<serde_json::Value>,
+    /// Grants other than the configured operator's that carry a wildcard
+    /// scope.
+    wildcard_holders: Vec<serde_json::Value>,
 }
 
 impl GrantReport {
+    fn add_tombstones(
+        &mut self,
+        tombstones: &[ryeos_node_runtime::grant_revocation::TombstoneInspection],
+    ) {
+        use ryeos_node_runtime::grant_revocation::TombstoneState;
+        self.tombstones = tombstones.len();
+        for entry in tombstones {
+            if let TombstoneState::Invalid(reason) = &entry.state {
+                self.invalid_tombstones.push(serde_json::json!({
+                    "tombstone": entry.name,
+                    "problem": reason,
+                    "fix": "the revocation ledger is node-signed evidence: restore the tombstone from a backup, or revoke the grant again with `ryeos node authorization revoke` on the stopped node",
+                }));
+            }
+        }
+    }
+
     fn into_detail(self) -> serde_json::Value {
         serde_json::json!({
             "grants": self.grants,
+            "inventory": self.inventory,
+            "wildcard_holders": self.wildcard_holders,
             "expired": self.expired,
             "expiring": self.expiring,
             "stale": self.stale,
             "invalid": self.invalid,
+            "revoked_on_disk": self.revoked_on_disk,
+            "tombstones": self.tombstones,
+            "invalid_tombstones": self.invalid_tombstones,
         })
     }
 }
@@ -3280,6 +3648,34 @@ fn grant_report(
     for inspection in inspections {
         match &inspection.state {
             GrantFileState::Current(grant) => {
+                report.inventory.push(serde_json::json!({
+                    "principal": ryeos_node_runtime::identity::cross_node_principal_display(
+                        &grant.fingerprint,
+                        grant.configured_origin_site_id.as_deref(),
+                    ),
+                    "class": grant.principal_class.as_str(),
+                    "origin_site_id": grant.configured_origin_site_id,
+                    "label": grant.owner,
+                    "scope_count": grant.scopes.len(),
+                    "authorized_by": {
+                        "principal": grant.authorized_by.principal,
+                        "request_digest": grant.authorized_by.request_digest,
+                    },
+                }));
+                let is_operator = grant.principal_class
+                    == ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient
+                    && grant.expires_at == GrantExpiry::Never;
+                if !is_operator && grant.scopes.iter().any(|scope| scope.contains('*')) {
+                    report.wildcard_holders.push(serde_json::json!({
+                        "fingerprint": grant.fingerprint,
+                        "class": grant.principal_class.as_str(),
+                        "label": grant.owner,
+                        "fix": format!(
+                            "re-authorize the key with an enumerated scope list: `ryeos authorize-key` for {} without a wildcard",
+                            grant.fingerprint
+                        ),
+                    }));
+                }
                 let GrantExpiry::At(expires) = grant.expires_at else {
                     continue;
                 };
@@ -3302,6 +3698,13 @@ fn grant_report(
                 } else if expires.saturating_sub(now) <= warn_before_secs {
                     report.expiring.push(row(fix));
                 }
+            }
+            GrantFileState::Stale(error @ ryeos_node_runtime::identity::AuthorizedKeyError::Revoked { .. }) => {
+                report.revoked_on_disk.push(serde_json::json!({
+                    "file": inspection.name,
+                    "error_code": error.code(),
+                    "fix": "the grant is already refused; remove the file, or rerun `ryeos node authorization revoke` for it on the stopped node",
+                }))
             }
             GrantFileState::Stale(error) => report.stale.push(serde_json::json!({
                 "file": inspection.name,
@@ -3443,16 +3846,19 @@ fn schedule_authority_check(
         );
     }
     match inspect_schedule_grant_generations(app_root) {
-        Ok(superseded) if superseded.is_empty() => {
-            check("schedule_authority", OK, serde_json::json!({}))
-        }
-        Ok(superseded) => check(
+        Ok(report) if report.is_empty() => check("schedule_authority", OK, serde_json::json!({})),
+        Ok(report) => check(
             "schedule_authority",
             WARN,
             serde_json::json!({
-                "superseded": superseded,
-                "note": "these schedules pin a grant generation that no longer holds; each refuses its next fire and pauses itself",
-                "fix": "as each schedule's owner: ryeos scheduler reauthorize <schedule_id>, then ryeos scheduler resume <schedule_id> if it was paused",
+                "superseded": report.superseded,
+                "expiring": report.expiring,
+                "paused_by_authority": report.paused_by_authority,
+                "note": "`superseded` schedules pin a grant generation that no longer holds (revoked, lapsed or replaced): each refuses its next fire and pauses itself. `expiring` schedules pin a grant that lapses soon. `paused_by_authority` schedules were paused because their authority was withdrawn.",
+                "fix": {
+                    "superseded or paused": "as each schedule's owner: ryeos scheduler reauthorize --schedule-id <schedule_id>, then ryeos scheduler resume --schedule-id <schedule_id>. A revoked grant is not revived by authorizing the key again: re-register the schedule",
+                    "expiring or lapsed": "as the grant's granter or the node operator: ryeos renew-key --fingerprint <grant-fingerprint>; renewal re-seals every schedule the renewed grant still covers",
+                },
             }),
         ),
         Err(error) => check(
@@ -3466,16 +3872,21 @@ fn schedule_authority_check(
 #[cfg(feature = "scheduling")]
 fn inspect_schedule_grant_generations(
     app_root: &std::path::Path,
-) -> anyhow::Result<Vec<ryeos_scheduler_service::SupersededScheduleGrant>> {
+) -> anyhow::Result<ryeos_scheduler_service::ScheduleAuthorityReport> {
     let root = ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf());
     let identity = ryeos_node_runtime::identity::NodeIdentity::load(&root.node_signing_key_path())?;
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .map_err(|error| anyhow::anyhow!("load trust store: {error}"))?;
-    ryeos_scheduler_service::superseded_schedule_grants(
+    let warn_before_secs =
+        ryeos_core_tools::actions::hosted_policy::load_authorization_policy(app_root)?
+            .warn_before_secs;
+    ryeos_scheduler_service::schedule_authority_report(
         app_root,
         &root.authorized_keys_dir(),
         &identity,
         &trust_store,
+        warn_before_secs,
+        lillux::time::unix_secs_now(),
     )
 }
 
@@ -3558,10 +3969,7 @@ fn inspect_host_access(app_root: &std::path::Path) -> Result<HostAccessInspectio
     let lane = snapshot
         .require::<ryeos_engine::isolation::IsolationPolicy>()?
         .clone();
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
     let node_key = ryeos_node_runtime::identity::node_identity_fingerprint(app_root)?;
     Ok((policy, lane, trust_store, node_key))
 }
@@ -4225,6 +4633,96 @@ fn ui_browser_sessions_check(
     }
 }
 
+/// Doctor row `vault_names_without_ceiling`: the sealed vault names that the
+/// node's signed `sealed_vault_names` policy does not list. Such a name is
+/// operator-only, so a principal that received it before the ceilings existed
+/// no longer does until the operator lists it. Reads names only, through the
+/// read-only vault open; no value leaves the store.
+fn vault_names_without_ceiling_check(
+    app_root: &std::path::Path,
+    initialized: bool,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, NA};
+    use ryeos_node_runtime::node_policy::sections::sealed_vault_names::SealedVaultNamesPolicy;
+    const NAME: &str = "vault_names_without_ceiling";
+    if !initialized {
+        return check(NAME, NA, serde_json::json!({ "note": "not initialized" }));
+    }
+    let policy = (|| -> Result<SealedVaultNamesPolicy> {
+        let isolation =
+            ryeos_node_runtime::engine_init::load_locked_registered_definition_isolation(app_root)?;
+        let node_trust = isolation
+            .registered_generation_node_trust()
+            .context("retained isolation generation omitted node trust")?;
+        let policy = crate::node_descriptors::load_verified_policy_snapshot_with_trust(
+            app_root, node_trust,
+        )?;
+        Ok(policy.require::<SealedVaultNamesPolicy>()?.clone())
+    })();
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(error) => {
+            return check(
+                NAME,
+                FAIL,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "fix": "the node policy generation has no valid `sealed_vault_names` section; with the node stopped, run `ryeos node reset policy-generation` from a profile that carries it, then run `ryeos node doctor` again",
+                }),
+            );
+        }
+    };
+    let stored =
+        ryeos_app::vault::SealedEnvelopeVault::open_read_only(app_root).operator_secret_names();
+    vault_ceiling_row(stored, &policy)
+}
+
+/// The row for a read of the stored names against the node's policy. A store
+/// that cannot be read is a warning, not a verdict on the names.
+fn vault_ceiling_row(
+    stored: Result<Vec<String>>,
+    policy: &ryeos_node_runtime::node_policy::sections::sealed_vault_names::SealedVaultNamesPolicy,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{OK, WARN};
+    const NAME: &str = "vault_names_without_ceiling";
+    let stored = match stored {
+        Ok(stored) => stored,
+        Err(error) => {
+            return check(
+                NAME,
+                WARN,
+                serde_json::json!({
+                    "error": format!("{error:#}"),
+                    "note": "the vault names could not be read, so ceilings were not compared",
+                }),
+            );
+        }
+    };
+    let without: Vec<&String> = stored
+        .iter()
+        .filter(|name| policy.entry(name).is_none())
+        .collect();
+    if without.is_empty() {
+        return check(
+            NAME,
+            OK,
+            serde_json::json!({
+                "vault_names": stored.len(),
+                "ceilinged_names": policy.names.len(),
+            }),
+        );
+    }
+    check(
+        NAME,
+        WARN,
+        serde_json::json!({
+            "names": without,
+            "note": "these vault names have no recipient or writer ceiling, so only the configured local operator may receive or write them",
+            "fix": "to let another principal receive or write a name, add an entry for it to a sealed_vault_names source (name, recipients, writers) and apply it with the node stopped: `ryeos node policy-apply sealed_vault_names <source.yaml>`; names that only the operator uses need no entry",
+        }),
+    )
+}
+
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
 /// The `host_services` row: WARN when a RyeOS node service records an app
@@ -4291,6 +4789,216 @@ fn host_services_check(
             "fix": "run: ryeos node host retire --orphaned --confirm",
         }),
     )
+}
+
+/// The `remote_pins` doctor row.
+fn remote_pins_check(app_root: &Path) -> ryeos_core_tools::actions::doctor::CheckResult {
+    use ryeos_core_tools::actions::doctor::{FAIL, OK};
+    match ryeos_api::remote::config::load_remotes_report(app_root) {
+        Ok(report) if report.invalid.is_empty() => {
+            let mut remotes: Vec<serde_json::Value> = report
+                .remotes
+                .values()
+                .map(|loaded| {
+                    serde_json::json!({
+                        "name": loaded.config.name,
+                        "pin_source": loaded.pin_source.as_str(),
+                        "signature": "verified",
+                    })
+                })
+                .collect();
+            remotes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            check("remote_pins", OK, serde_json::json!({ "remotes": remotes }))
+        }
+        Ok(report) => {
+            let mut invalid: Vec<serde_json::Value> = report
+                .invalid
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "name": entry.name,
+                        "code": entry.code,
+                        "path": entry.config_path,
+                        "error": entry.error,
+                        "fix": entry.repair_hint,
+                    })
+                })
+                .collect();
+            invalid.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            check(
+                "remote_pins",
+                FAIL,
+                serde_json::json!({ "invalid_remotes": invalid }),
+            )
+        }
+        Err(error) => {
+            let (code, fix) =
+                match error.downcast_ref::<ryeos_api::remote::config::RemotePinError>() {
+                    Some(typed) => (Some(typed.code()), typed.to_string()),
+                    None => (None, format!("{error:#}")),
+                };
+            check(
+                "remote_pins",
+                FAIL,
+                serde_json::json!({ "code": code, "error": format!("{error:#}"), "fix": fix }),
+            )
+        }
+    }
+}
+
+/// The three bundle state rows: the inventory of node-owned homes and whether
+/// each verifies, the homes kept after their bundle was removed, and whether
+/// the node can enforce the mount that confines a home to its bundle.
+fn bundle_state_checks(
+    app_root: &std::path::Path,
+    installed: &std::collections::BTreeSet<String>,
+    isolation_enforced: Option<bool>,
+) -> Vec<ryeos_core_tools::actions::doctor::CheckResult> {
+    use ryeos_app::bundle_state_home::{RecordState, inventory, orphaned};
+    use ryeos_core_tools::actions::doctor::{FAIL, OK, WARN};
+
+    let key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("identity")
+        .join("private_key.pem");
+    let homes = ryeos_node_runtime::identity::NodeIdentity::load(&key_path)
+        .map_err(|error| format!("{error:#}"))
+        .and_then(|identity| {
+            inventory(app_root, identity.verifying_key()).map_err(|error| format!("{error:#}"))
+        });
+    let homes = match homes {
+        Ok(homes) => homes,
+        Err(error) => {
+            return vec![check(
+                "bundle_state_homes",
+                FAIL,
+                serde_json::json!({
+                    "error": error,
+                    "fix": "the node's bundle state directory could not be read; check its permissions",
+                }),
+            )];
+        }
+    };
+    if homes.is_empty() {
+        return vec![check(
+            "bundle_state_homes",
+            OK,
+            serde_json::json!({ "homes": [], "note": "no bundle has opened a state home" }),
+        )];
+    }
+    let describe = |home: &ryeos_app::bundle_state_home::HomeInventory| {
+        serde_json::json!({
+            "bundle": home.bundle_id,
+            "record": match &home.record {
+                RecordState::Verified => "verified".to_owned(),
+                RecordState::Missing => "missing".to_owned(),
+                RecordState::Invalid(reason) => format!("invalid: {reason}"),
+            },
+            "namespaces": home.namespaces.iter().map(|namespace| serde_json::json!({
+                "name": namespace.name,
+                "bytes": namespace.bytes,
+                "problems": namespace.problems,
+            })).collect::<Vec<_>>(),
+            "bytes": home.total_bytes(),
+            "problems": home.problems,
+        })
+    };
+    let unsound: Vec<_> = homes.iter().filter(|home| !home.is_sound()).collect();
+    let mut checks = vec![if unsound.is_empty() {
+        check(
+            "bundle_state_homes",
+            OK,
+            serde_json::json!({ "homes": homes.iter().map(describe).collect::<Vec<_>>() }),
+        )
+    } else {
+        check(
+            "bundle_state_homes",
+            FAIL,
+            serde_json::json!({
+                "homes": homes.iter().map(describe).collect::<Vec<_>>(),
+                "unsound": unsound.iter().map(|home| home.bundle_id.clone()).collect::<Vec<_>>(),
+                "fix": "a home whose record is missing, foreign or tampered, whose namespace name is invalid, or whose directory is wider than 0700 was not made by this node or was changed; move it out of .ai/state/bundle-state, or restore it from a verified `ryeos node bundle-state export`",
+            }),
+        )
+    }];
+    let orphans = orphaned(&homes, installed);
+    checks.push(if orphans.is_empty() {
+        check("bundle_state_orphaned", OK, serde_json::json!({}))
+    } else {
+        check(
+            "bundle_state_orphaned",
+            WARN,
+            serde_json::json!({
+                "homes": orphans.iter().map(|home| serde_json::json!({
+                    "bundle": home.bundle_id,
+                    "bytes": home.total_bytes(),
+                    "namespaces": home.namespaces.iter().map(|ns| ns.name.clone()).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "note": "removing a bundle keeps its state; these homes belong to bundles that are not installed",
+                "fix": "reinstall the bundle to use the state again, or delete it with `ryeos node bundle-state remove --bundle <id> --confirm`",
+            }),
+        )
+    });
+    checks.push(match isolation_enforced {
+        Some(true) => check("bundle_state_home_unenforced", OK, serde_json::json!({})),
+        _ => check(
+            "bundle_state_home_unenforced",
+            WARN,
+            serde_json::json!({
+                "bundles": homes.iter().map(|home| home.bundle_id.clone()).collect::<Vec<_>>(),
+                "note": "isolation is not enforced on this node, so a bundle's state home is a convention, not a boundary: a process running as the same user can read every bundle's state",
+                "fix": "enforce isolation in the signed node policy (`.ai/node/policies/isolation.yaml`)",
+            }),
+        ),
+    });
+    checks
+}
+
+/// Realm state an earlier central-auth kept directly under the app root is
+/// not read any more: the bundle's code opens only its bundle state home. Name
+/// each leftover realm with the move that puts it where the code looks.
+fn central_auth_state_relocated_check(
+    app_root: &std::path::Path,
+) -> Option<ryeos_core_tools::actions::doctor::CheckResult> {
+    let old_realms = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("central-auth")
+        .join("realms");
+    let mut realms: Vec<String> = std::fs::read_dir(&old_realms)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .collect();
+    realms.sort();
+    let new_root = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("bundle-state")
+        .join("central-auth");
+    let moves: Vec<String> = realms
+        .iter()
+        .map(|realm| {
+            format!(
+                "mv {}/* {}/",
+                old_realms.join(realm).display(),
+                new_root.join(realm).display()
+            )
+        })
+        .collect();
+    Some(check(
+        "central_auth_state_relocated",
+        ryeos_core_tools::actions::doctor::WARN,
+        serde_json::json!({
+            "realms": realms,
+            "note": "central-auth now keeps each realm in its bundle state home and no longer reads this directory",
+            "fix": format!(
+                "grant the realm's caller `ryeos.use.bundle-state.central-auth/<realm>` and run one central-auth tool for the realm (for example list-principals) so the node creates its state home, stop the node, then move the old contents in under {}: {}; finally remove the old realm directory",
+                new_root.display(),
+                moves.join("; ")
+            ),
+        }),
+    ))
 }
 
 fn check(
@@ -5397,6 +6105,49 @@ mod tests {
     }
 
     #[test]
+    fn doctor_lists_vault_names_that_have_no_ceiling() {
+        use ryeos_core_tools::actions::doctor::{NA, OK, WARN};
+        use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
+        use ryeos_node_runtime::node_policy::sections::sealed_vault_names::{
+            SEALED_VAULT_NAMES_POLICY_SCHEMA, SealedVaultName, SealedVaultNamesPolicy,
+        };
+        let listed = |principal: &str| NameRecipients {
+            principals: vec![principal.to_owned()],
+            capabilities: Vec::new(),
+        };
+        let policy = SealedVaultNamesPolicy {
+            schema: SEALED_VAULT_NAMES_POLICY_SCHEMA,
+            names: vec![SealedVaultName {
+                name: "API_KEY".to_owned(),
+                recipients: listed("fp:b"),
+                writers: listed("fp:op"),
+            }],
+        };
+        let stored = vec!["API_KEY".to_owned(), "OLD_KEY".to_owned()];
+        let row = vault_ceiling_row(Ok(stored), &policy);
+        assert_eq!(row.name, "vault_names_without_ceiling");
+        assert_eq!(row.status, WARN);
+        assert_eq!(row.detail["names"], serde_json::json!(["OLD_KEY"]));
+        assert!(
+            row.detail["fix"]
+                .as_str()
+                .unwrap()
+                .contains("policy-apply sealed_vault_names")
+        );
+        let all_listed = vault_ceiling_row(Ok(vec!["API_KEY".to_owned()]), &policy);
+        assert_eq!(all_listed.status, OK);
+        let empty = vault_ceiling_row(Ok(Vec::new()), &policy);
+        assert_eq!(empty.status, OK);
+        let unreadable = vault_ceiling_row(Err(anyhow::anyhow!("pending rewrap")), &policy);
+        assert_eq!(unreadable.status, WARN);
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            vault_names_without_ceiling_check(directory.path(), false).status,
+            NA
+        );
+    }
+
+    #[test]
     fn doctor_reports_browser_session_policy_as_not_applicable_before_init() {
         let directory = tempfile::tempdir().unwrap();
         let row = ui_browser_sessions_check(directory.path(), false);
@@ -5715,7 +6466,33 @@ mod tests {
         assert_eq!(report.expiring.len(), 1);
         assert_eq!(report.stale.len(), 1);
         assert_eq!(report.invalid.len(), 1);
+        assert_eq!(report.inventory.len(), 4);
+        assert_eq!(report.inventory[0]["scope_count"], 1);
+        assert_eq!(report.inventory[0]["label"], "grant-1");
+        assert!(
+            report.inventory[0]["principal"]
+                .as_str()
+                .unwrap()
+                .ends_with("@site:source")
+        );
+        assert!(report.wildcard_holders.is_empty());
         assert_eq!(report.stale[0]["error_code"], "grant_schema_stale");
+        let revoked = grant_report(
+            &[GrantFileInspection {
+                name: "gone".to_owned(),
+                state: GrantFileState::Stale(AuthorizedKeyError::Revoked {
+                    fingerprint: "gone".to_owned(),
+                    grant_digest: "a".repeat(64),
+                    revoked_at: "2026-11-14T00:00:00Z".to_owned(),
+                    revoked_by: "fp:op".to_owned(),
+                    reason: "lost".to_owned(),
+                }),
+            }],
+            3_600,
+            now,
+        );
+        assert!(revoked.stale.is_empty(), "a tombstoned file is not stale");
+        assert_eq!(revoked.revoked_on_disk.len(), 1);
         assert!(
             report.expired[0]["fix"]
                 .as_str()

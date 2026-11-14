@@ -11,7 +11,10 @@ mod retirement_attempt;
 mod retirement_journal;
 mod terminal;
 
-pub use authority_inspection::{SupersededScheduleGrant, superseded_schedule_grants};
+pub use authority_inspection::{
+    ExpiringScheduleGrant, PausedByAuthority, ScheduleAuthorityReport, SupersededScheduleGrant,
+    schedule_authority_report, superseded_schedule_grants,
+};
 pub use reset::SchedulerHistoryReset;
 pub use retention::SchedulerService;
 

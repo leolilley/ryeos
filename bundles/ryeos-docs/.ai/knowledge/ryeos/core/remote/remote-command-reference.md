@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:5e34132e99557e27a6fcfe9fdf150ef0e55c85c6c57e40bae489eae73de89c73:/3NL+xrmfIKtvYsVFMwYqDIrQ8xToiYD1DQYP+XkrDFA21z1bPDjG2r72PlVpmHFXSlbnBMtPDnKekCvs1iYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:9651df2673592a4cbb1e822a8d1cb3137680bc0ddc01a43d70d57648d995e2c9:trTVkBw8qEgWUj6F7wDIZHEqqjvhAtkIWlebIe0rDZ99LWBkGn7XO2EF+YFHUABekjSm/C53ind4H8KtfLsvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
-version: "1.0.4"
+version: "1.1.0"
 description: >
   Manpage-style reference for ryeos remote commands, including local
   capabilities, remote authorized-key scopes, routes, examples, and
@@ -23,20 +23,19 @@ A remote command can require authority in two places:
 2. **Remote authorized-key scopes** — the target daemon must authorize
    the caller node key for the remote routes touched by the operation.
 
-Remote HTTP requests are normally signed with the caller **node key**. Share
-`ryeos identity` output with the remote operator when requesting ordinary
-remote access. The generic `remote/push`, `remote/reconcile-project-head`, and
-`remote/run` services additionally support an explicit configured-operator
-continuity mode for durable workflows:
-the local request must already be signed by the configured operator, and the
-target must separately authorize that same operator key as `remote_principal`,
-bound by the target node to the source's canonical `site:` ID and exact scopes.
-The target must also admit the source node key as `remote_node` with
-`ryeos.attest.request.forwarded-operator`. Each forwarded operator request is
-co-signed by that source-node key over the exact operator authorization. The
-operator grant is therefore an allowed-source constraint; the co-signature is
-the transit proof. This mode is never selected implicitly and is not available
-to delegated callers.
+Remote HTTP requests are signed by this node's key. When a principal asked for
+the call, the request also carries that principal's own signed delegation
+(`x-ryeos-delegation`), and the target admits the principal, not the node: the
+principal needs a `remote_principal` grant on the target bound to the source's
+canonical `site:` ID and exact scopes, and the delegation caps what the node
+may do for it. The target must also admit the source node key as `remote_node`
+with `ryeos.attest.request.forwarded-operator`; each delegated request is
+co-signed by that key. The principal's grant is an allowed-source constraint;
+the co-signature is the transit proof. Sign a delegation with
+`ryeos remote delegate` (below). `remote/push`, `remote/reconcile-project-head`,
+`remote/run` and the other outbound commands act as the caller under that
+delegation by default; the operator is one more principal that signs one. A
+call made by the node itself is signed by the node key alone.
 
 ## Authority Matrix
 
@@ -44,20 +43,28 @@ to delegated callers.
 |---|---|---|---|
 | `ryeos remote configure` | `ryeos.execute.service.remote/configure` | none | `GET /public-key`, `GET /ingest-ignore` |
 | `ryeos remote pin` | `ryeos.execute.service.remote/pin` | none | none |
-| `ryeos remote-descriptor` | local tool execution | none | none |
+| `ryeos remote-descriptor` | daemon service (read-only) | `ryeos.execute.service.remote/descriptor` | none |
 | `ryeos admission-token` | local tool execution | none | none |
 | `ryeos remote admit` | `ryeos.execute.service.remote/admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
 | `ryeos remote list` | `ryeos.execute.service.remote/list` | none | none |
 | `ryeos remote status` | `ryeos.execute.service.remote/status` | signed auth probe only after the complete configured identity matches | `GET /health`, `GET /public-key`, then `GET /threads?limit=1` only on an exact identity match |
 | `ryeos remote doctor` | `ryeos.execute.service.remote/doctor` | signed auth probe; project status if `--project` is supplied, both only after the complete configured identity matches | `GET /health`, `GET /public-key`, then `GET /threads?limit=1` and optionally `POST /project/status` only on an exact identity match |
 | `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
+| `ryeos remote revoke` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/revoke-key` | `POST /revoke-key` |
 | `ryeos remote push` / `service:remote/push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
-| `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | configured operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
-| `ryeos remote pull` | `ryeos.execute.service.remote/pull` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
+| `ryeos remote reconcile-project-head` | `ryeos.execute.service.remote/reconcile-project-head` | the delegating operator: push scopes; peer node: `ryeos.execute.service.objects/closure/get` | `POST /objects/put`, `POST /objects/closure/get`, `POST /objects/has`, `POST /push-head` |
+| `ryeos remote pull` | `ryeos.execute.service.remote/pull` | `ryeos.execute.service.objects/get` (reads are scoped to the `root` the command names; `objects/get-any` is operator-only and never granted to a peer) | `POST /objects/has`, `POST /objects/get` |
 | `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
 | `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
 | `ryeos remote thread-status` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads/{thread_id}` |
+| `ryeos remote admit --as-principal` | `ryeos.execute.service.remote/admit-principal` | none (the remote's token and the origin node's co-signature are the authority) | `POST /admission/claim` |
+| `ryeos remote delegate` | `ryeos.execute.service.remote/delegate` | none | none (the node stores the signed delegation) |
+| `ryeos remote delegation list` | `ryeos.execute.service.remote/delegation-list` | none | none |
+| `ryeos remote delegation revoke` | `ryeos.execute.service.remote/delegation-revoke` | `ryeos.execute.service.identity/revoke-delegation` (lent by the delegation; the remote operator may instead run `ryeos delegation tombstone`) | `POST /revoke-delegation` |
+| `ryeos node offline-operation facts --remote` | `ryeos.execute.service.remote/offline-operations-facts` | `ryeos.execute.service.offline-operations/facts` (lent by the delegation) | `GET /offline-operations/facts` |
+| `ryeos node offline-operation submit --remote` | `ryeos.execute.service.remote/offline-operations-submit` | `ryeos.execute.service.offline-operations/submit` (lent by the delegation) plus the exact `ryeos.offline.<operation>` scope in the grant | `POST /offline-operations` |
+| `ryeos node offline-operation list --remote` | `ryeos.execute.service.remote/offline-operations-status` | `ryeos.execute.service.offline-operations/status` (lent by the delegation) | `GET /offline-operations` |
 | `ryeos remote bundle-install` | `ryeos.execute.service.bundle/install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` | `POST /bundle/export`, `POST /objects/get` |
 | `ryeos remote vault-set` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/set` | `POST /vault/set` |
 | `ryeos remote vault-list` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/list` | `GET /vault/list` |
@@ -82,13 +89,16 @@ Notes:
 - `remote.admin` is a **local** umbrella capability for high-impact
   remote orchestration commands. It is not automatically sent to the
   target daemon and does not replace remote authorized-key scopes.
-- `outbound_principal: configured_operator` on `service:remote/push`, and a
-  retained-current-HEAD accepted launch through `service:remote/run`, require
-  the exact configured operator locally and preserve that principal remotely.
-  The target grant and independently admitted source-node co-signature preserve
-  remote origin, so these calls do not satisfy local-only operator checks.
-  Their remote HEAD and session ownership do not interoperate with a HEAD
-  previously pushed under the default node principal.
+- `outbound_principal` on `service:remote/push` and `service:remote/run` is
+  `delegated` (the caller under its signed delegation, the default) or `node`
+  (the source node key alone, the default when the caller is the node itself).
+  A retained-current-HEAD accepted launch is always delegated. The target grant
+  and independently admitted source-node co-signature preserve remote origin,
+  so these calls do not satisfy local-only operator checks. Their remote HEAD
+  and session ownership are the delegating principal's and do not interoperate
+  with a HEAD previously pushed under the node principal. With no stored
+  delegation the call is refused with `remote_delegation_missing`, naming
+  `ryeos remote delegate --remote <name>`.
 
 ## `ryeos remote pin`
 
@@ -100,14 +110,45 @@ ryeos remote pin origin --descriptor ./origin.remote.yaml
 
 The descriptor is the trust anchor: the entry's key, principal, site and vault
 fingerprint come from it alone, so it must reach this node through a channel
-its operator trusts. It must carry `node.site_id` (the node's own
-`site:<fingerprint>`) and `node.vault_fingerprint`, or the pin is refused with
-`remote_descriptor_incomplete`. Descriptors exported by `ryeos
-remote-descriptor` carry both, plus the node's `ingest_ignore` rules. A remote
-pinned without ingest rules is one this node never pushes to: push, execute
-and project sync refuse with `remote_pinned_without_ingest_rules`. Pinning
-again replaces the entry and keeps its project bindings. A hosted node applies
-the same pin through the signed offline operation `node.remote.pin`.
+its operator trusts. It must be a signed version 2 descriptor (it always
+carries the node's `site_id` and `vault_fingerprint`); a version 1 or unsigned
+one is refused with `remote_descriptor_unsigned`. The pin is written as a
+node-signed record under `.ai/node/remotes/` with `pin_source:
+descriptor_without_contact`. Descriptors exported by `ryeos remote-descriptor`
+carry the node's `ingest_ignore` rules; a remote pinned without them is one this
+node never pushes to: push, execute and project sync refuse with
+`remote_pinned_without_ingest_rules`. A descriptor without a `url` pins an
+inbound-only remote, which every outbound command refuses with
+`remote_inbound_only`. Pinning again replaces the record and keeps its project
+bindings. A hosted node applies the same pin through the signed offline
+operation `node.remote.pin`.
+
+## `ryeos remote delegate`
+
+```bash
+ryeos remote delegate --remote prod \
+  --scopes ryeos.execute.service.remote/run,ryeos.execute.service.remote/push \
+  --lifetime-secs 3600
+```
+
+Signs, with the caller's own key, a bounded delegation that lets this node act
+for the caller on one remote, and stores it (node-signed) under
+`.ai/node/auth/delegations/<fingerprint>/<remote>.toml`. A later delegation for
+the same remote replaces it. `--scopes` is required: the capabilities lent to
+the remote, a subset of what the caller's grant on the remote allows. The
+effective scopes on the remote are the grant intersected with the delegation.
+`--lifetime-secs` defaults to 8 hours; the node refuses more than 30 days. The
+caller needs the local grant `ryeos.execute.service.remote/delegate`. The
+daemon never holds the signing key: the CLI signs and the node only stores.
+
+`ryeos remote delegation list` shows the caller's stored delegations.
+`ryeos remote delegation revoke --remote prod` asks the remote to record a
+tombstone for the delegation's digest, then deletes the local record;
+`--local-only` skips the remote. On the remote, its operator revokes any
+delegation by digest with `ryeos delegation tombstone --delegator <fp:...>
+--delegation-digest <digest>`. See
+[Remote operations](remote-operations.md#identity-requirements) for the model
+and the typed refusals.
 
 ## `ryeos remote configure`
 
@@ -129,7 +170,9 @@ can check it with the remote operator and rerun with `--expect-fingerprint`.
 
 The command fetches the remote node public key, principal id, canonical site
 ID, vault fingerprint, and ingest-ignore rules. Results are stored in
-`<system_space_dir>/.ai/config/remotes/remotes.yaml`.
+`<system_space_dir>/.ai/node/remotes/<name>.yaml`, one node-signed record per
+remote that also stores how the key was pinned (`pin_source`) and when. Only
+the configured local operator may run this command.
 
 The URL is one canonical, credential-free base URL. User information, query,
 fragment, control/whitespace characters, and a trailing slash are not part of
@@ -140,11 +183,12 @@ signed request refuse redirects, so the configured URL must address the target
 directly rather than an origin-changing redirector.
 
 When `--descriptor` is supplied, the descriptor is a trust/discovery pin,
-not a credential. It pins only the node signing key and its fingerprint.
-`remote configure` still fetches the live `/public-key` document, refuses to
-write config if those descriptor pins differ, and records the live principal,
-key/fingerprint, site ID, and vault fingerprint as the complete configured
-identity used by later contact.
+not a credential. It is a version 2 document signed by the node key it pins,
+binding the remote's name, URL, site ID, vault fingerprint and key.
+`remote configure` verifies the signature, still fetches the live
+`/public-key` document, refuses to write config if the descriptor's pins
+differ, and records the live principal, key/fingerprint, site ID, and vault
+fingerprint as the complete configured identity used by later contact.
 
 Failure modes:
 
@@ -159,30 +203,36 @@ Failure modes:
   `--expect-fingerprint` is not 64 lowercase hex characters
 - refuses with `remote_key_pin_mismatch` when `--expect-fingerprint` differs
   from the live node fingerprint
-- fails if a descriptor pins a different node key/fingerprint than the
-  live remote reports
+- fails if a descriptor pins a different node key, fingerprint, site ID or
+  vault fingerprint than the live remote reports
+- refuses a descriptor with `remote_descriptor_unsigned` (version 1 or no
+  signature), `remote_descriptor_wrong_signer` (signed by a key other than the
+  one it pins) or `remote_descriptor_tampered` (edited after signing); the cure
+  is to ask the remote operator to re-export it
+- fails unless the caller is the configured local operator
 - later signed requests fail if the remote's node key changes and the
   remote config is not refreshed
 
 ## `ryeos remote-descriptor`
 
-Export a local descriptor trust pin for this node.
+Export this node's signed descriptor trust pin.
 
 ```bash
 ryeos remote-descriptor \
   --name prod \
   --url https://ryeos.example.com \
-  --capabilities "remote-execute,bundle-install" \
-  --output ./prod.remote.yaml
+  --capabilities "remote-execute,bundle-install"
 ```
 
-This is local operator tooling. It reads the node's
-`.ai/node/identity/public-identity.json`, emits descriptor YAML with the
-node public key and fingerprint, and optionally writes it to disk. The
-descriptor can be hosted, emailed, checked into infra, or served by any
+This is a read-only daemon service. The running daemon builds a version 2
+descriptor from its own identity and vault public key (node public key,
+fingerprint, site ID and vault fingerprint), signs it with the node key it
+holds, and returns it: the signed document is the `yaml` field of the reply.
+The node key never reaches a tool process. The hosted-node policy decides which
+URLs and admission modes may be advertised. The descriptor can be hosted, emailed, checked into infra, or served by any
 provider-specific layer. It is still only a trust/discovery pin: callers
 must import it with `remote configure --descriptor`, which verifies the
-pin against the live `/public-key` response.
+signature and the pin against the live `/public-key` response.
 
 ## `ryeos admission-token`
 
@@ -190,6 +240,7 @@ Mint a one-time, node-local bootstrap token file on the target node.
 
 ```bash
 ryeos admission-token \
+  --class remote_node \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600
@@ -199,7 +250,35 @@ This is an offline/local operator tool. It writes a token hash file under
 the target system space at `.ai/node/admission/tokens/<sha256>.toml` and
 prints the cleartext token once. The token is not a bearer credential for
 runtime requests; it can only be consumed by `/admission/claim`, where
-the claimant must also sign the claim with the node key being admitted.
+the claimant must also sign the claim with the key being admitted.
+
+`--class` is required and names the grant the token admits:
+
+| `--class` | Admits | Claim must carry |
+|---|---|---|
+| `local_client` | a key local to this node | the claimant signature only; no origin site |
+| `remote_node` | another RyeOS node's key | the claimant signature and its own `origin_site_id` |
+| `remote_principal` | a principal key forwarded by its home site | the principal signature and a co-signature by an admitted node of the token's origin site |
+
+A `remote_principal` token also needs `--origin-site-id "site:<home>"`; no
+other class accepts one. `--grant-lifetime-secs` optionally shortens the
+admitted grant; the node's authorization policy still bounds it by the class
+maximum when the token is claimed. The `remote_principal` co-signer must be
+admitted on this node as a `remote_node` of that site holding the
+`ryeos.attest.request.forwarded-operator` scope.
+
+```bash
+ryeos admission-token \
+  --class remote_principal \
+  --origin-site-id "site:home" \
+  --scopes "ryeos.execute.service.remote/run"
+```
+
+Claims are refused with a typed code that names the cure:
+`admission_class_mismatch`, `admission_origin_site_mismatch`,
+`admission_cosignature_missing`, `admission_cosignature_invalid`, and
+`admission_token_invalid`. A token minted by an earlier release is refused
+with `admission_token_stale`; tokens are not converted, so mint a new one.
 
 ## `ryeos remote admit`
 
@@ -217,6 +296,13 @@ ryeos remote admit \
   --scopes ryeos.execute.service.system/push-head
 ```
 
+With `--as-principal` the command admits the calling principal rather than
+this node. The CLI signs a v3 `remote_principal` claim with the caller's own
+key and sends it to the caller's node, which checks the signature is the
+caller's, co-signs it as the origin site and forwards it to the remote. The
+token must be a `remote_principal` token minted for this node's site. See
+"Getting admitted as a principal" in Remote Operations.
+
 `remote admit` binds `scopes` as a typed array, so pass one repeatable
 `--scopes` flag per exact scope. The target-side `admission-token` authoring
 tool instead accepts its documented comma-separated scope string.
@@ -226,7 +312,9 @@ requires the principal, signing key, key fingerprint, canonical site ID, and
 vault fingerprint to match the locally configured coordinate exactly. Any
 mismatch refuses the operation before the one-time token is released. The
 target then consumes the token and writes a normal node-signed authorized-key
-grant for the caller node key.
+grant for the caller node key. `remote admit` claims `remote_node` tokens;
+a `remote_principal` claim is signed by the principal and co-signed by its
+home node, so it is built by the principal's own tooling.
 
 Because the token is a credential delivered by the target operator, admission
 resolves the named remote only from operator-owned config. Project remote
@@ -261,6 +349,25 @@ identity coordinates, local node identity, current authorization status,
 project bindings, and the bootstrap `authorize-client` command to run on the
 remote host.
 
+## `ryeos remote revoke`
+
+Ask a remote node to revoke a grant.
+
+```bash
+ryeos remote revoke \
+  --remote prod \
+  --fingerprint "<grant fingerprint>" \
+  --reason "key compromised" \
+  [--leave-running] [--keep-delegates]
+```
+
+The remote leaves a node-signed tombstone for the grant, so a restored copy
+stays refused, and by default also revokes the grants that key granted, pauses
+its schedules and cancels the live threads running under the revoked grants.
+Only the principal that granted the key, or the remote's operator, may revoke
+it; the remote's operator grant is revoked offline only. The remote's receipt
+is printed as sent. See [Identity model](../identity-model.md#revocation).
+
 ## `ryeos remote authorize`
 
 Ask a remote node to authorize a public key.
@@ -283,14 +390,14 @@ scope explicitly. It is create-only: `/authorize-key` cannot replace or
 reclassify any existing local-client, remote-node, remote-principal, bootstrap,
 or configured-operator grant. Admission claims are likewise create-only.
 
-Configured-operator continuity is provisioned only by the target's configured
+A principal's delegated runs are provisioned only by the target's configured
 local operator, not by remote delegation. Its node-owned authorization service
-installs the source operator's public key in an origin-bound, exact-scope grant:
+installs the principal's public key in an origin-bound, exact-scope grant:
 
 ```bash
 RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
-  --public-key "<configured_operator_raw_ed25519_base64>" \
-  --label "operator forwarded from source" \
+  --public-key "<principal_raw_ed25519_base64>" \
+  --label "principal forwarded from source" \
   --origin-site-id "site:<source>" \
   --scopes "<comma-separated exact scopes>"
 ```
@@ -319,8 +426,8 @@ RYEOS_APP_ROOT=/path/to/target-app-root ryeos authorize-client \
   --scopes "<comma-separated exact peer scopes>"
 ```
 
-This is maintenance of the existing node-to-node authority, not configured
-operator continuity. The remote-node site must remain the same; changing its
+This is maintenance of the existing node-to-node authority, not a principal's
+delegated authority. The remote-node site must remain the same; changing its
 class or origin is an explicit stopped-node semantic conversion.
 
 Before installing that grant, admit the source node key with the exact
@@ -349,12 +456,12 @@ retains the node's exclusive daemon state lock through publication; a live
 daemon therefore causes a mechanical refusal.
 
 Remote request authorization does not itself make project content trusted. If
-a pushed project contains executable project-authored items, the project
-snapshot must carry the source author's public trust document in its existing
-`.ai/config/keys/trusted/<fingerprint>.toml` tier (or the target operator must
-have made a separate explicit node-trust decision). This is public verification
-material only. Never copy the source private key, and never infer content trust
-from a `remote_principal` grant.
+a pushed project contains executable project-authored items, the target
+operator must have pinned the author's key on the target node with
+`ryeos trust pin --from <PUBLISHER_TRUST.toml> --role project_author --project <root>`
+(a node-signed signer record scoped to that project). A trust document carried
+inside the pushed snapshot grants nothing. Never copy the source private key,
+and never infer content trust from a `remote_principal` grant.
 
 ## `ryeos remote push`
 
@@ -372,18 +479,17 @@ cache is missing, the handler fetches `/ingest-ignore` inline and aborts if
 that fetch fails. The receiving node independently rechecks every transferred
 path against its then-current signed policy before advancing a HEAD.
 
-The ordinary command is node-owned. A durable workflow that must retain the
-configured operator across later remote control selects that principal
-explicitly on the same signed command:
+The command acts as the caller under its delegation, so the remote HEAD is the
+caller's own and a later delegated workflow by the same principal continues
+it. To push as the source node instead, select it explicitly:
 
 ```bash
 ryeos remote push prod \
   --project /absolute/path/to/project \
-  --outbound-principal configured_operator
+  --outbound-principal node
 ```
 
-This does not reuse a node-owned remote HEAD; it creates/advances the distinct
-configured-operator principal-scoped HEAD.
+That creates/advances the distinct node principal-scoped HEAD.
 
 Failure modes:
 
@@ -428,7 +534,7 @@ handoff.
 Fetch explicitly typed CAS artifacts from a remote into one new directory.
 
 ```bash
-ryeos remote pull --remote prod --object-hashes abc123 --output-dir /tmp/objects
+ryeos remote pull --remote prod --root '{"kind":"thread_result","thread_id":"T-..."}' --object-hashes abc123 --output-dir /tmp/objects
 ryeos remote pull --remote prod --blob-hashes def456 --output-dir /tmp/blobs
 ```
 
@@ -527,10 +633,11 @@ ryeos remote run prod tool:my/task --project /absolute/path
 The signed `service:remote/run` contract is broader than the project-bound
 terminal presentation. It accepts `project: {kind: projectless}` with no
 `project` field for remote control-plane service execution, and accepts
-`outbound_principal: configured_operator` when owner continuity is required.
-That path signs with the configured operator and co-signs with the source node;
-the target `/execute` boundary retains both the closed authorized-key class and
-the verified origin into any in-process service handler. Wait mode is used for
+`outbound_principal: delegated` (the default for a non-node caller) or `node`.
+The delegated path signs with the source node key, co-signs with it, and
+carries the caller's own signed delegation; the target `/execute` boundary
+retains the closed authorized-key class, the verified origin and the
+delegation digest into any in-process service handler. Wait mode is used for
 unary service calls. Accepted mode additionally requires a caller-retained
 `launch_id` and is used for durable projectless or project-backed workers.
 Project-backed live/current-HEAD modes still require a configured project
@@ -542,8 +649,8 @@ The destination independently admits their exact owner, relationships and
 bindings against the selected pinned generation (or an explicitly projectless
 consumer). This does not make the command's default live project mode eligible
 for products, forward a source-admitted selection, or transfer product bytes.
-Use an explicit destination-local execution policy and configured-operator
-continuity for a retained product workflow. Accepted launch IDs remain
+Use an explicit destination-local execution policy and a delegation by the
+workflow's owner for a retained product workflow. Accepted launch IDs remain
 create-only: query the exact launch after uncertain delivery, rather than
 resubmitting it and expecting a successful response replay.
 

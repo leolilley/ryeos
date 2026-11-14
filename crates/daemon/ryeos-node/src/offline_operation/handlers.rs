@@ -287,6 +287,16 @@ pub struct QualificationComposeArguments {
     pub maximum_lifetime_seconds: Option<u32>,
 }
 
+/// Recompose installed bindings against the installed bundles. An empty
+/// list recomposes every binding whose pins the installed bundles fail; the
+/// optional `consumer_verifiers` input carries the running node's derive.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecomposeArguments {
+    #[serde(default)]
+    pub bindings: Vec<ryeos_app::node_config::recompose::BindingRef>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapacityArguments {
@@ -492,6 +502,278 @@ pub fn derived_credential_generation(request_digest: &str) -> String {
     )
 }
 
+// ── Trust ────────────────────────────────────────────────────────────────
+
+/// Role and scope a signer is pinned with. Absent lists mean the role's
+/// default.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustPinArguments {
+    pub role: String,
+    #[serde(default)]
+    pub spaces: Vec<String>,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustScopeArguments {
+    pub fingerprint: String,
+    pub spaces: Vec<String>,
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustFingerprintArguments {
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustSucceedArguments {
+    pub old_fingerprint: String,
+}
+
+fn trust_scope(
+    role: ryeos_engine::trust::SignerRole,
+    spaces: &[String],
+    kinds: &[String],
+    projects: &[String],
+) -> Result<ryeos_engine::trust::SignerScope> {
+    use ryeos_engine::trust::{SignerRole, SignerScope, SignerSpace};
+    let mut scope = match role {
+        SignerRole::Publisher => SignerScope::publisher_default(),
+        SignerRole::Operator => SignerScope::operator_default(),
+        SignerRole::Authoring => SignerScope::authoring_default(),
+        SignerRole::ProjectAuthor => SignerScope {
+            spaces: vec![SignerSpace::Project],
+            kinds: vec![ryeos_engine::trust::ALL_KINDS.to_string()],
+            projects: Vec::new(),
+        },
+    };
+    if !spaces.is_empty() {
+        scope.spaces = spaces
+            .iter()
+            .map(|space| {
+                SignerSpace::parse(space).with_context(|| {
+                    format!("`{space}` is not a signer space (bundle, project, node)")
+                })
+            })
+            .collect::<Result<_>>()?;
+    }
+    if !kinds.is_empty() {
+        scope.kinds = kinds.to_vec();
+    }
+    scope.projects = projects.to_vec();
+    scope
+        .validate()
+        .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))?;
+    Ok(scope)
+}
+
+fn validate_trust_scope_lists(
+    spaces: &[String],
+    kinds: &[String],
+    projects: &[String],
+) -> Result<()> {
+    ensure!(
+        spaces.len() <= 3 && kinds.len() <= 64 && projects.len() <= 256,
+        "scope lists are too long"
+    );
+    Ok(())
+}
+
+impl TrustPinArguments {
+    pub fn validate(&self) -> Result<()> {
+        let role = ryeos_engine::trust::SignerRole::parse(&self.role)
+            .with_context(|| format!("`{}` is not a signer role", self.role))?;
+        validate_trust_scope_lists(&self.spaces, &self.kinds, &self.projects)?;
+        trust_scope(role, &self.spaces, &self.kinds, &self.projects).map(|_| ())
+    }
+}
+
+impl TrustScopeArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(is_digest(&self.fingerprint), "fingerprint is not a digest");
+        validate_trust_scope_lists(&self.spaces, &self.kinds, &self.projects)?;
+        let scope = ryeos_engine::trust::SignerScope {
+            spaces: self
+                .spaces
+                .iter()
+                .map(|s| {
+                    ryeos_engine::trust::SignerSpace::parse(s)
+                        .with_context(|| format!("`{s}` is not a signer space"))
+                })
+                .collect::<Result<_>>()?,
+            kinds: self.kinds.clone(),
+            projects: self.projects.clone(),
+        };
+        scope
+            .validate()
+            .map_err(|reason| anyhow::anyhow!("trust_scope_invalid: {reason}"))
+    }
+}
+
+impl TrustFingerprintArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(is_digest(&self.fingerprint), "fingerprint is not a digest");
+        Ok(())
+    }
+}
+
+fn trust_actor<'a>(
+    ctx: &'a HandlerContext<'_>,
+    operator: &'a str,
+) -> crate::trust_registry::Actor<'a> {
+    crate::trust_registry::Actor {
+        node_key: ctx.node.signing_key(),
+        operator,
+        request_digest: ctx.request_digest,
+    }
+}
+
+fn run_trust_change(
+    ctx: &HandlerContext<'_>,
+    change: crate::trust_registry::Change,
+) -> Result<Value> {
+    let operator = operator_key(ctx)?;
+    let operator_fp = ryeos_engine::trust::compute_fingerprint(&operator.verifying_key());
+    let outcome = crate::trust_registry::apply_change(
+        ctx.app_root,
+        ctx.state_lock,
+        &trust_actor(ctx, &operator_fp),
+        &change,
+    )?;
+    Ok(json!({
+        "records": outcome.records,
+        "events_written": outcome.events_written,
+        "registry_digest": outcome.registry_digest,
+    }))
+}
+
+pub(super) fn trust_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustPinArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let role = ryeos_engine::trust::SignerRole::parse(&arguments.role).context("signer role")?;
+    let scope = trust_scope(
+        role,
+        &arguments.spaces,
+        &arguments.kinds,
+        &arguments.projects,
+    )?;
+    let doc = ryeos_engine::trust::PublisherTrustDoc::parse(utf8(
+        ctx.inputs.require("signer")?,
+        "signer trust document",
+    )?)
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let key = doc
+        .decode_verifying_key()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Pin {
+            key,
+            label: doc.owner,
+            role,
+            scope,
+        },
+    )
+}
+
+pub(super) fn trust_scope_change(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustScopeArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let scope = ryeos_engine::trust::SignerScope {
+        spaces: arguments
+            .spaces
+            .iter()
+            .map(|s| {
+                ryeos_engine::trust::SignerSpace::parse(s)
+                    .with_context(|| format!("`{s}` is not a signer space"))
+            })
+            .collect::<Result<_>>()?,
+        kinds: arguments.kinds,
+        projects: arguments.projects,
+    };
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Scope {
+            fingerprint: arguments.fingerprint,
+            scope,
+        },
+    )
+}
+
+pub(super) fn trust_retire(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustFingerprintArguments = ctx.arguments()?;
+    arguments.validate()?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Retire {
+            fingerprint: arguments.fingerprint,
+        },
+    )
+}
+
+pub(super) fn trust_revoke(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustFingerprintArguments = ctx.arguments()?;
+    arguments.validate()?;
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Revoke {
+            fingerprint: arguments.fingerprint,
+        },
+    )
+}
+
+pub(super) fn trust_succeed(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: TrustSucceedArguments = ctx.arguments()?;
+    ensure!(
+        is_digest(&arguments.old_fingerprint),
+        "old fingerprint is not a digest"
+    );
+    let statement = utf8(ctx.inputs.require("succession")?, "succession statement")?.to_owned();
+    run_trust_change(
+        ctx,
+        crate::trust_registry::Change::Succeed {
+            old_fingerprint: arguments.old_fingerprint,
+            statement,
+        },
+    )
+}
+
+// ── Key rotation ─────────────────────────────────────────────────────────
+
+fn rotate_key(ctx: &HandlerContext<'_>, key: crate::key_rotation::RotatedKey) -> Result<Value> {
+    let _: EmptyArguments = ctx.arguments()?;
+    let statement = utf8(ctx.inputs.require("succession")?, "succession statement")?;
+    crate::key_rotation::rotate(
+        key,
+        crate::key_rotation::RotationRequest {
+            app_root: ctx.app_root,
+            state_lock: ctx.state_lock,
+            node_key: ctx.node.signing_key(),
+            request_digest: ctx.request_digest,
+            signer_fingerprint: &ctx.request.signer_fingerprint,
+            statement,
+        },
+    )
+}
+
+pub(super) fn operator_rotate(ctx: &HandlerContext<'_>) -> Result<Value> {
+    rotate_key(ctx, crate::key_rotation::RotatedKey::Operator)
+}
+
+pub(super) fn authoring_rotate(ctx: &HandlerContext<'_>) -> Result<Value> {
+    rotate_key(ctx, crate::key_rotation::RotatedKey::Authoring)
+}
+
 // ── Policy ───────────────────────────────────────────────────────────────
 
 pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value> {
@@ -575,8 +857,7 @@ fn plan_policy_apply(
             "node policy input declares path-owned field `{forbidden}`"
         );
     }
-    let root = RuntimeRoot::new(app_root.to_path_buf());
-    let trust_store = ryeos_engine::trust::TrustStore::load(None, &root.config())
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
         .context("load trust store for current node policies")?;
     if section == ryeos_node_runtime::node_policy::sections::host_access::SECTION_NAME {
         check_host_access_signers(app_root, &trust_store, &body)?;
@@ -903,6 +1184,25 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
     Ok(serde_json::to_value(report)?)
 }
 
+pub(super) fn recompose(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: RecomposeArguments = ctx.arguments()?;
+    let consumer_verifiers = ctx
+        .inputs
+        .get("consumer_verifiers")
+        .map(|bytes| read_json(bytes, "consumer verifiers"))
+        .transpose()?;
+    let report = ryeos_app::node_config::recompose::recompose_bindings(
+        ryeos_app::node_config::recompose::RecomposeRequest {
+            app_root: ctx.app_root,
+            state_lock: ctx.state_lock,
+            bindings: arguments.bindings,
+            consumer_verifiers,
+            dry_run: false,
+        },
+    )?;
+    Ok(serde_json::to_value(report)?)
+}
+
 // ── Capacity and restart ─────────────────────────────────────────────────
 
 pub(super) fn capacity_reissue(ctx: &HandlerContext<'_>) -> Result<Value> {
@@ -1131,6 +1431,7 @@ pub(super) fn remote_pin(ctx: &HandlerContext<'_>) -> Result<Value> {
     ctx.host.pin_remote(super::host::RemotePin {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
+        node: ctx.node,
         name: &arguments.name,
         descriptor: ctx.inputs.require("descriptor")?,
     })
@@ -1147,6 +1448,254 @@ pub(super) fn bundle_replace(ctx: &HandlerContext<'_>) -> Result<Value> {
         archive: ctx.inputs.require("archive")?,
         preserve_runtime_artifacts: arguments.preserve_runtime_artifacts,
     })
+}
+
+// ── Bundle state homes ───────────────────────────────────────────────────
+
+/// Export one namespace, or every namespace, of a bundle's state home as a
+/// signed archive written to a path the operator names.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleStateExportArguments {
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Absolute path of the archive to create; it must not exist.
+    pub output: String,
+}
+
+impl BundleStateExportArguments {
+    pub fn validate(&self) -> Result<()> {
+        validate_state_target(&self.bundle_id, self.namespace.as_deref())?;
+        ensure!(
+            Path::new(&self.output).is_absolute()
+                && Path::new(&self.output).file_name().is_some()
+                && !self.output.contains('\0'),
+            "the export output must be an absolute path naming a new file"
+        );
+        Ok(())
+    }
+}
+
+/// Install a signed archive's namespaces into the node's state homes.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleStateImportArguments {
+    /// Namespaces of the archive the operator lets replace an existing,
+    /// different namespace. Any other existing namespace refuses the import.
+    #[serde(default)]
+    pub replace_namespaces: Vec<String>,
+}
+
+impl BundleStateImportArguments {
+    pub fn validate(&self) -> Result<()> {
+        for namespace in &self.replace_namespaces {
+            ryeos_bundle::runtime_authority::validate_state_home_segment(
+                "replace namespace",
+                namespace,
+            )
+            .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
+}
+
+/// Delete one namespace, or a bundle's whole state home.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleStateRemoveArguments {
+    pub bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+impl BundleStateRemoveArguments {
+    pub fn validate(&self) -> Result<()> {
+        validate_state_target(&self.bundle_id, self.namespace.as_deref())
+    }
+}
+
+fn validate_state_target(bundle_id: &str, namespace: Option<&str>) -> Result<()> {
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", bundle_id)
+        .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    if let Some(namespace) = namespace {
+        ryeos_bundle::runtime_authority::validate_state_home_segment("namespace", namespace)
+            .map_err(anyhow::Error::msg)?;
+    }
+    Ok(())
+}
+
+pub(super) fn bundle_state_export(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: BundleStateExportArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let output = Path::new(&arguments.output);
+    let parent = output
+        .parent()
+        .context("the export output has no parent directory")?;
+    let name = output
+        .file_name()
+        .context("the export output names no file")?;
+    let directory = lillux::PinnedDirectory::open(parent)?.with_context(|| {
+        format!(
+            "the export output directory {} does not exist",
+            parent.display()
+        )
+    })?;
+    if directory.entry_no_follow(name)?.is_some() {
+        // A node that died after writing the archive and before the receipt
+        // finds its own archive here: the same bundle, signed by this node.
+        let existing = lillux::read_regular_file_bounded_no_follow(
+            output,
+            ryeos_app::bundle_state_transfer::MAX_ARCHIVE_BYTES,
+        )
+        .with_context(|| {
+            format!(
+                "{} already exists and is not a readable archive",
+                output.display()
+            )
+        })?;
+        let parsed = ryeos_app::bundle_state_transfer::parse_archive(&existing)?;
+        parsed.manifest.verify(ctx.node.verifying_key())?;
+        ensure!(
+            parsed.manifest.bundle_id == arguments.bundle_id,
+            "{} already exists and holds another bundle's state; export to a new path",
+            output.display()
+        );
+        return Ok(json!({
+            "bundle_id": parsed.manifest.bundle_id,
+            "namespaces": parsed.manifest.namespaces.iter().map(|ns| ns.name.clone()).collect::<Vec<_>>(),
+            "files": parsed.files.len(),
+            "archive_sha256": lillux::sha256_hex(&existing),
+            "output": arguments.output,
+            "already_exported": true,
+        }));
+    }
+    let (archive, summary) = ryeos_app::bundle_state_transfer::export_archive(
+        ctx.app_root,
+        ctx.node,
+        &arguments.bundle_id,
+        arguments.namespace.as_deref(),
+    )?;
+    let mut file = directory
+        .open_regular_create(name, true, true, 0o600)
+        .with_context(|| {
+            format!(
+                "create the archive {}; it must not already exist",
+                output.display()
+            )
+        })?;
+    std::io::Write::write_all(&mut file, &archive)?;
+    file.sync_all()?;
+    Ok(json!({
+        "bundle_id": summary.bundle_id,
+        "namespaces": summary.namespaces,
+        "files": summary.files,
+        "bytes": summary.bytes,
+        "archive_sha256": summary.archive_sha256,
+        "output": arguments.output,
+    }))
+}
+
+pub(super) fn bundle_state_import(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: BundleStateImportArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let archive = ctx.inputs.require("archive")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(ctx.app_root)
+        .context("load the node trust registry")?;
+    let own_fingerprint = ctx.node.principal_id();
+    let own_key = *ctx.node.verifying_key();
+    let signer_key = |signer: &str| -> Option<lillux::crypto::VerifyingKey> {
+        if signer == own_fingerprint {
+            return Some(own_key);
+        }
+        trust_store
+            .get(signer.strip_prefix("fp:").unwrap_or(signer))
+            .map(|trusted| trusted.verifying_key)
+    };
+    let bootstrap = ryeos_node_runtime::bundle_bootstrap::BundleBootstrapLoader {
+        app_root: ctx.app_root,
+        trust_store: &trust_store,
+    };
+    let installed = bootstrap
+        .load_bundle_section()
+        .context("load the node's bundle registrations")?;
+    let namespace_backed = |bundle_id: &str, namespace: &str| -> std::result::Result<(), String> {
+        let record = installed
+            .iter()
+            .find(|record| record.name == bundle_id)
+            .ok_or_else(|| format!("bundle `{bundle_id}` is not installed on this node"))?;
+        let manifest = ryeos_bundle::manifest::load_verified_manifest(
+            &record.path.join(ryeos_engine::AI_DIR),
+            bundle_id,
+            &trust_store,
+        )
+        .map_err(|error| format!("its manifest does not verify: {error:#}"))?
+        .manifest;
+        let decl = manifest
+            .runtime_authority
+            .state_home
+            .as_ref()
+            .ok_or_else(|| {
+                "its signed manifest declares no `runtime_authority.state_home`".to_owned()
+            })?;
+        if decl.namespaces.backs(namespace) {
+            Ok(())
+        } else {
+            Err(format!(
+                "its signed manifest does not declare state namespace `{namespace}`"
+            ))
+        }
+    };
+    let summary = ryeos_app::bundle_state_transfer::import_archive(
+        ctx.app_root,
+        ctx.node,
+        archive,
+        &ryeos_app::bundle_state_transfer::ImportPolicy {
+            signer_key: &signer_key,
+            namespace_backed: &namespace_backed,
+            replace: &arguments.replace_namespaces,
+        },
+    )?;
+    Ok(json!({
+        "bundle_id": summary.bundle_id,
+        "created": summary.created,
+        "replaced": summary.replaced,
+        "unchanged": summary.unchanged,
+        "files": summary.files,
+    }))
+}
+
+/// Receipt first: the receipt lists one digest, the sha256 of the canonical
+/// listing of every file the removal will delete, so the ledger names exactly
+/// what was discarded before anything is.
+pub(super) fn bundle_state_remove_prepare(ctx: &HandlerContext<'_>) -> Result<Prepared> {
+    let arguments: BundleStateRemoveArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let digest = ryeos_app::bundle_state_transfer::listing_digest(
+        ctx.app_root,
+        ctx.node,
+        &arguments.bundle_id,
+        arguments.namespace.as_deref(),
+    )?;
+    Ok(Prepared {
+        discarded_grant_digests: vec![digest],
+    })
+}
+
+pub(super) fn bundle_state_remove_effect(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: BundleStateRemoveArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let summary = ryeos_app::bundle_state_transfer::remove_state(
+        ctx.app_root,
+        ctx.node,
+        &arguments.bundle_id,
+        arguments.namespace.as_deref(),
+    )?;
+    Ok(json!({
+        "bundle_id": summary.bundle_id,
+        "namespaces": summary.namespaces,
+        "bundle_home_removed": summary.bundle_home_removed,
+    }))
 }
 
 // ── Authorization reset ──────────────────────────────────────────────────
@@ -1263,6 +1812,126 @@ pub(super) fn authorization_reset_effect(ctx: &HandlerContext<'_>) -> Result<Val
     }))
 }
 
+/// Revoke one authorized-key grant, and by default every grant it granted,
+/// leaving node-signed tombstones.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationRevokeArguments {
+    /// Fingerprint (64 lowercase hex) of the grant to revoke.
+    pub fingerprint: String,
+    /// Why the grant is revoked, recorded in its tombstone.
+    pub reason: String,
+    /// Revoke only the named grant, not the grants it granted.
+    #[serde(default)]
+    pub keep_delegates: bool,
+}
+
+impl AuthorizationRevokeArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            lillux::valid_hash(&self.fingerprint),
+            "the fingerprint must be a lowercase SHA-256 digest"
+        );
+        let reason = self.reason.trim();
+        ensure!(
+            !reason.is_empty()
+                && reason.len()
+                    <= ryeos_node_runtime::grant_revocation::MAX_REVOCATION_REASON_BYTES,
+            "grant_revocation_reason_invalid: a revocation needs a reason of 1 to {} bytes",
+            ryeos_node_runtime::grant_revocation::MAX_REVOCATION_REASON_BYTES
+        );
+        Ok(())
+    }
+}
+
+fn revocation_plan(
+    ctx: &HandlerContext<'_>,
+    arguments: &AuthorizationRevokeArguments,
+) -> Result<Vec<ryeos_node_runtime::identity::PlannedRevocation>> {
+    let operator = NodeIdentity::load(
+        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
+    )
+    .context("load operator identity to protect its grant from a cascade")?;
+    let auth_dir = super::envelope::authorized_keys_dir(ctx.app_root);
+    ryeos_node_runtime::identity::plan_revocation_cascade(
+        &auth_dir,
+        &arguments.fingerprint,
+        arguments.keep_delegates,
+        &[operator.fingerprint().to_owned()],
+        ctx.node,
+    )
+}
+
+pub(super) fn authorization_revoke_prepare(ctx: &HandlerContext<'_>) -> Result<Prepared> {
+    let arguments: AuthorizationRevokeArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let plan = revocation_plan(ctx, &arguments)?;
+    if plan[0].grant_digest.is_none() {
+        // Nothing on disk for the target: a rerun of a finished revocation
+        // is fine, an unknown fingerprint is refused before any receipt.
+        let known = ryeos_node_runtime::grant_revocation::inspect_tombstones(
+            &ryeos_node_runtime::grant_revocation::revocations_dir(
+                &super::envelope::authorized_keys_dir(ctx.app_root),
+            ),
+            ctx.node,
+        )?
+        .into_iter()
+        .any(|entry| {
+            matches!(
+                entry.state,
+                ryeos_node_runtime::grant_revocation::TombstoneState::Sound(ref tombstone)
+                    if tombstone.fingerprint == arguments.fingerprint
+            )
+        });
+        if !known {
+            let error = ryeos_node_runtime::identity::AuthorizedKeyRevokeError::NotFound {
+                fingerprint: arguments.fingerprint.clone(),
+            };
+            anyhow::bail!("{}: {error}", error.code());
+        }
+    }
+    Ok(Prepared {
+        discarded_grant_digests: plan
+            .into_iter()
+            .filter_map(|step| step.grant_digest)
+            .collect(),
+    })
+}
+
+pub(super) fn authorization_revoke_effect(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: AuthorizationRevokeArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let operator = NodeIdentity::load(
+        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
+    )
+    .context("load operator identity to protect its grant from a cascade")?;
+    let revoked = ryeos_node_runtime::identity::revoke_authorized_key_cascade(
+        &super::envelope::authorized_keys_dir(ctx.app_root),
+        &arguments.fingerprint,
+        &arguments.reason,
+        &ctx.request.signer_fingerprint,
+        arguments.keep_delegates,
+        &[operator.fingerprint().to_owned()],
+        ctx.node,
+    )
+    .map_err(|error| {
+        match error.downcast_ref::<ryeos_node_runtime::identity::AuthorizedKeyRevokeError>() {
+            Some(refusal) => anyhow::anyhow!("{}: {refusal}", refusal.code()),
+            None => error,
+        }
+    })?;
+    Ok(json!({
+        "revoked": revoked.iter().map(|grant| json!({
+            "fingerprint": grant.fingerprint,
+            "grant_digest": grant.grant_digest,
+            "revoked_at": grant.revoked_at,
+            "reason": grant.reason,
+            "already_revoked": grant.already_revoked,
+            "cascaded_from": grant.cascaded_from,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1319,6 +1988,64 @@ mod tests {
             .find(|p| p.join("bundles").is_dir())
             .expect("workspace root with bundles/ directory")
             .to_path_buf()
+    }
+
+    #[test]
+    fn recompose_operation_is_idempotent_on_replay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().to_path_buf();
+        let node =
+            NodeIdentity::create(&RuntimeRoot::new(state.clone()).node_signing_key_path()).unwrap();
+        let lock = StateLock::acquire(&default_lock_path(&state)).unwrap();
+        let request = |bindings: serde_json::Value| RequestBody {
+            schema: REQUEST_SCHEMA.to_owned(),
+            node_fingerprint: node.fingerprint().to_owned(),
+            signer_fingerprint: "b".repeat(64),
+            signer_grant_digest: None,
+            signer_origin_site_id: None,
+            operation: "node.external-execution.recompose".to_owned(),
+            arguments: json!({ "bindings": bindings }),
+            inputs: BTreeMap::new(),
+            expected_result: BTreeMap::new(),
+            precondition: BTreeMap::new(),
+            issued_at: "2026-11-13T00:00:00Z".to_owned(),
+            not_after: "2026-11-13T01:00:00Z".to_owned(),
+        };
+        let inputs = VerifiedInputs::new(BTreeMap::new());
+        let run = |request: &RequestBody| {
+            recompose(&HandlerContext {
+                app_root: &state,
+                state_lock: &lock,
+                request,
+                request_digest: &"c".repeat(64),
+                inputs: &inputs,
+                host: &BareHost,
+                node: &node,
+            })
+        };
+        // A node whose bindings already match its bundles: the effect and its
+        // replay both publish nothing and report the same.
+        let all = request(json!([]));
+        let first = run(&all).expect("first application");
+        let replay = run(&all).expect("replay after the crash");
+        assert_eq!(first, replay);
+        assert_eq!(first["recomposed"], json!([]));
+        // A named binding that is not installed is refused, typed, every time.
+        let absent = request(json!(["runtime_snapshot_production/render-snapshot"]));
+        for _ in 0..2 {
+            let error = run(&absent).unwrap_err();
+            let refusal = error
+                .downcast_ref::<ryeos_app::node_config::recompose::RecomposeRefusal>()
+                .unwrap_or_else(|| panic!("typed refusal: {error:#}"));
+            assert_eq!(
+                refusal.code,
+                ryeos_app::node_config::recompose::RECOMPOSE_BINDING_NOT_INSTALLED
+            );
+        }
+        assert!(
+            serde_json::from_value::<RecomposeArguments>(json!({"bindings": ["bundles/core"]}))
+                .is_err()
+        );
     }
 
     #[test]

@@ -370,11 +370,8 @@ fn preflight_bindings(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     request: &RunRequest,
 ) -> Result<(), CliError> {
-    let trust = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .map_err(|error| local(format!("load node trust for the binding check: {error:#}")))?;
+    let trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .map_err(|error| local(format!("load node trust for the binding check: {error:#}")))?;
     let report = ryeos_app::node_config::coherence::inspect_installed_binding_coherence(
         app_root, &trust, snapshot,
     )

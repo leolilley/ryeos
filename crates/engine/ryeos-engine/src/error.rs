@@ -116,6 +116,11 @@ pub enum EngineError {
         fingerprint: String,
     },
 
+    /// A typed signer-registry refusal (unsigned or tampered record, revoked
+    /// signer, signer outside its scope). The code and cure ride in the text.
+    #[error("{0}")]
+    Trust(#[from] crate::trust::TrustError),
+
     #[error("content hash mismatch for `{canonical_ref}`: expected {expected}, got {actual}")]
     ContentHashMismatch {
         canonical_ref: String,
@@ -447,22 +452,6 @@ pub enum EngineError {
         flattened: String,
         first_item_id: String,
         second_item_id: String,
-    },
-
-    // ── Project trust documents ──────────────────────────────────────
-    /// A trust document in a project's `.ai/config/keys/trusted/` that is
-    /// not vouched for by the node: unsigned (including raw `.pub`/`.key`
-    /// files), self-signed by a key the node does not hold, or signed by a
-    /// key outside the node's own trust store. `code` is one of
-    /// [`crate::trust::PROJECT_TRUST_UNSIGNED`],
-    /// [`crate::trust::PROJECT_TRUST_SELF_SIGNED`] and
-    /// [`crate::trust::PROJECT_TRUST_UNTRUSTED_SIGNER`].
-    #[error("{code}: project trust document {path}: {reason}. {cure}")]
-    ProjectTrustDocumentRefused {
-        code: &'static str,
-        path: String,
-        reason: String,
-        cure: String,
     },
 
     // ── Internal ─────────────────────────────────────────────────────

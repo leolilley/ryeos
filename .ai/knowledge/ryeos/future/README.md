@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-11T09:41:52Z:d624294ebfe210569b158b78312179047922f890822859a6e678f872baad6941:NaKYRszvfkU3fr++pjMCZulN4vLNLfahovy+EM+7ZNUyJM/rHHJ0NMHYG++5A7ZMIHKb+0LX439s9iBcQfO+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T11:09:13Z:85617756aa22ba1d0946d66f6af5c18bcf44debc71d3613973f2dcabc72f5296:p4VP1i3QBPAgNhxS7R1ehWnle6LbsoLUAaaaBwzoVggJs08xcCnxJDX/6S5wEtS9DBTzND7LFo9ZbiP/BbUiBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: README
@@ -134,7 +134,6 @@ gates and are not blanket prerequisites for ordinary application development.
 | [Non-local MCP authentication](mcp-server-auth.md) | Deferred exposure gate | MCP leaves local operator-owned stdio → authenticate audience, replay and exact grants before exposing it. |
 | [Portable execution evidence](portable-execution-graph-advanced-path.md) | Foundation + deferred | Another site needs independent verification → bounded disclosed capsule/evidence closure; verification does not grant continuation. |
 | [Remote AI sync recovery](remote-ai-sync-advanced-recovery.md) | Foundation + deferred | Required crash/multiprocess guarantees exceed current sync → exact recoverable snapshot application with correct locks and history. |
-| [Remote configuration hardening](remote-config-advanced-hardening.md) | Foundation + deferred | Concrete trust or concurrent-edit requirement → bounded operator-owned remote binding and safe updates; discovery is not authority. |
 
 ## Application directions and experiments
 

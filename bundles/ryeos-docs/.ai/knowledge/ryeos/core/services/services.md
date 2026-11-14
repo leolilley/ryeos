@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:a9bbc16afd48673f0dff702152c444768a32cb5c3d39b635011b5b40e8ed676e:TM/W3+tiu5OUxI5Bfn0w9WLTjUsUnftS9mSfKxTn6eKuZPMArPDPA8FIq2MOmFEkF/Hks1aj4HvbsakzkE94Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:a0db9c5d7e8c9c6102f8b934a5e80605d201d94ff153760e61c2b7aa23a44116:Imrch9h+IZE6zpuTBFa762PT5jPE0pyZYJGtvFxSTo5i2DgkwbQnNGh3rqYu4SlHJcTon3QZhCgza/G5Ws5lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -44,15 +44,26 @@ hashes through CAS.
 | `projection/verify` | `projection.verify` | `ryeos.execute.service.projection/verify` |
 | `projection/rebuild` | `projection.rebuild` | `ryeos.execute.service.projection/rebuild` |
 | `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
+| `external-execution/provider-inventory` | `external-execution.provider-inventory` | `ryeos.execute.service.external-execution/provider-inventory` |
 | `external-execution/settle-unknown-allocation` | `external-execution.settle-unknown-allocation` | `ryeos.execute.service.external-execution/settle-unknown-allocation` |
 | `external-execution/status` | `external-execution.status` | `ryeos.execute.service.external-execution/status` |
 | `health/status` | `health.status` | none |
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
 | `identity/renew-key` | `identity.renew-key` | `ryeos.execute.service.identity/renew-key` |
+| `identity/revoke-key` | `identity.revoke-key` | `ryeos.execute.service.identity/revoke-key` |
+| `identity/revoke-delegation` | `identity.revoke-delegation` | `ryeos.execute.service.identity/revoke-delegation` |
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
 | `system/push-head` | `system.push-head` | `ryeos.execute.service.system/push-head` |
+
+`external-execution/provider-inventory` lists, read only, what the provider
+holds for one binding's owner scope and stores a node-signed receipt (see the
+CLI reference). `external-execution/settle-unknown-allocation` takes
+`placement_thread_id`, a free-text `reason` and `inventory`, the digest of such
+a receipt; it refuses with `settle_inventory_refused` unless the receipt is
+fresh, complete, for the allocation's provider account and lists no unknown
+running sandbox created inside the allocation's contact window.
 
 `health/status`, `identity/public_key`, and `system/ingest-ignore` back
 unauthenticated discovery routes. Mutating routes such as
@@ -87,18 +98,36 @@ Admission token files are target-node-local control-plane material, not
 execution credentials. Shape:
 
 ```toml
-version = 1
+version = 2
 token_hash = "sha256-hex-of-token"
 label = "optional-default-label"
 scopes = ["ryeos.execute.service.threads/list"]
 expires_at_unix = 1767225600
+class = "remote_principal"        # local_client | remote_node | remote_principal
+origin_site_id = "site:home"      # remote_principal only
+grant_lifetime_secs = 86400       # optional; bounded by the authorization policy
 ```
+
+The minted grant takes the token's class and origin site, the claim's scopes,
+and an expiry bounded by the node's signed authorization policy. Its
+`authorized_by` is the claimant and the digest of its signed claim, and its
+`granted_by` names the token. Tokens are a stored format with no reader for
+older versions: a token of any other version is refused with
+`admission_token_stale`, and the cure is to mint a new one.
 
 The claim signature covers:
 
 ```text
-ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}\n{sorted_scopes_csv}\n{signed_at_unix}\n{nonce}
+ryeos-admission-claim-v3\n{target_node_principal_id}\n{token_hash}\n{principal_class}\n{public_key}\n{origin_site_id_or_empty}\n{sorted_scopes_csv}\n{signed_at_unix}\n{nonce}
 ```
+
+A `remote_principal` claim also carries `forwarding_key_id` and
+`forwarding_signature`: the co-signature of an admitted `remote_node` of the
+token's origin site over the forwarded-request hash of the claim, which
+includes the principal's own signature. A claim of the wrong class, for the
+wrong origin site, or without a valid co-signature is refused with
+`admission_class_mismatch`, `admission_origin_site_mismatch`,
+`admission_cosignature_missing` or `admission_cosignature_invalid`.
 
 ## Object Services
 
@@ -107,9 +136,14 @@ ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}
 | `objects/has` | `objects.has` | `ryeos.execute.service.objects/has` |
 | `objects/put` | `objects.put` | `ryeos.execute.service.objects/put` |
 | `objects/get` | `objects.get` | `ryeos.execute.service.objects/get` |
+| `objects/get-any` | `objects.get-any` | `ryeos.execute.service.objects/get-any` (operator only) |
+| `objects/closure/get` | `objects.closure.get` | `ryeos.execute.service.objects/closure/get` |
+| `objects/closure/describe` | `objects.closure.describe` | `ryeos.execute.service.objects/closure/describe` |
 
-Object services read and write the node CAS. Remote push/pull, pushed
-HEAD execution, and remote bundle install all depend on these services.
+Object services read and write the node CAS. Reads (`has`, `get`, closure)
+name a typed root and serve only what that root reaches; `objects/get-any` is
+the operator-only unscoped read. Remote push/pull, pushed HEAD execution, and
+remote bundle install all depend on these services.
 Object fetch flows fail closed when requested hashes are missing.
 
 ## Vault Services
@@ -120,9 +154,10 @@ Object fetch flows fail closed when requested hashes are missing.
 | `vault/list` | `vault.list` | `ryeos.execute.service.vault/list` |
 | `vault/delete` | `vault.delete` | `ryeos.execute.service.vault/delete` |
 
-Vault services mutate or read the node vault. In v1, vault storage is a
-single node-level store protected by capabilities, not a per-principal
-namespace.
+Vault services mutate or read the node vault. Vault storage is a single
+node-level store, not a per-principal namespace; each name carries its own
+recipient and writer ceiling in the signed `sealed_vault_names` policy, and a
+name without one is operator-only (see [Services: vault](vault.md)).
 
 Delivering vault secrets into an execution is separate from these services.
 An execution policy whose environment exposes the operator vault (a project
@@ -150,12 +185,19 @@ for the full matrix.
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/revoke` | `remote.revoke` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
 | `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
 | `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |
 | `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
 | `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
+| `remote/delegate` | `remote.delegate` | `ryeos.execute.service.remote/delegate` |
+| `remote/delegation-list` | `remote.delegation-list` | `ryeos.execute.service.remote/delegation-list` |
+| `remote/delegation-revoke` | `remote.delegation-revoke` | `ryeos.execute.service.remote/delegation-revoke` |
+| `remote/offline-operations-facts` | `remote.offline-operations-facts` | `ryeos.execute.service.remote/offline-operations-facts` |
+| `remote/offline-operations-submit` | `remote.offline-operations-submit` | `ryeos.execute.service.remote/offline-operations-submit` |
+| `remote/offline-operations-status` | `remote.offline-operations-status` | `ryeos.execute.service.remote/offline-operations-status` |
 
 ## Core Thread Read Services
 

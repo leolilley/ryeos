@@ -89,6 +89,13 @@ fn build_test_state_at(
         ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
             .unwrap();
     }
+    // Node-signed records (remote pins, registry records) verify against the
+    // node public identity document.
+    if create_identity {
+        identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(root))
+            .unwrap();
+    }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
@@ -289,6 +296,9 @@ fn build_app_state(
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+        vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+            "fp:test-operator",
+        )),
         command_registry: test_command_registry,
         authorizer: test_auth,
         ignore_matcher: Arc::new(

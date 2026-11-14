@@ -1,5 +1,5 @@
 //! The running node reports what remains of its service window before the
-//! planned rollover, through `ryeos status --json` and `ryeos node doctor`.
+//! planned rollover, through `ryeos node status --json` and `ryeos node doctor`.
 //!
 //! The fixture's signed policy is rewritten to a 600 s window with a 60 s
 //! cleanup occupancy and a 60 s drain margin: the service edge is 540 s after
@@ -72,7 +72,7 @@ async fn status_and_doctor_report_the_service_window_to_the_rollover() {
     .expect("start fast daemon with a 600 s window");
 
     let until_rollover = (MAXIMUM_OCCUPANCY_MS - CLEANUP_OCCUPANCY_MS - DRAIN_MARGIN_MS) / 1_000;
-    let first = ryeos_json(&harness, &["status"]);
+    let first = ryeos_json(&harness, &["node", "status"]);
     let window = &first["Running"]["service_window"];
     let seconds = window["seconds_until_rollover"]
         .as_u64()
@@ -91,7 +91,7 @@ async fn status_and_doctor_report_the_service_window_to_the_rollover() {
     );
 
     tokio::time::sleep(Duration::from_millis(2_100)).await;
-    let later = ryeos_json(&harness, &["status"]);
+    let later = ryeos_json(&harness, &["node", "status"]);
     let later_seconds = later["Running"]["service_window"]["seconds_until_rollover"]
         .as_u64()
         .expect("service window on the second read");

@@ -37,7 +37,7 @@ pub struct ScheduleExecution {
     pub expires_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ScheduleExecutionAuthority {
     Node {
@@ -417,6 +417,7 @@ mod tests {
                     || ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                         source_node_fingerprint: "66".repeat(32),
                         source_node_grant_hash: "77".repeat(32),
+                        delegation_digest: None,
                     },
                 ),
             },
@@ -485,6 +486,7 @@ mod tests {
                     ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
                         source_node_fingerprint: "66".repeat(32),
                         source_node_grant_hash: "77".repeat(32),
+                        delegation_digest: None,
                     },
                 )
             };

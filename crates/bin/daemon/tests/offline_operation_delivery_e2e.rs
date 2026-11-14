@@ -44,6 +44,14 @@ async fn signed_delivery(daemon: &DaemonHarness, key: &SigningKey) -> anyhow::Re
         status.is_success(),
         "facts route answered {status}: {report}"
     );
+    // The route names the caller's authority: here the local operator, who
+    // signs without a grant.
+    assert_eq!(report["signer"]["local_operator"], true, "{report}");
+    assert_eq!(
+        report["signer"]["fingerprint"],
+        lillux::signature::compute_fingerprint(&key.verifying_key()).as_str(),
+        "{report}"
+    );
     let facts = report["facts"].as_object().expect("facts object");
     let spec = ryeos_node::offline_operation::table::lookup(OPERATION).expect("operation");
     let pins = ryeos_node::offline_operation::facts::MANDATORY_FACTS

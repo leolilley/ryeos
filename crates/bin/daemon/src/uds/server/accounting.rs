@@ -269,7 +269,10 @@ fn issued_attempt_credential_binding(
     ) {
         Ok(values) => values,
         Err(ryeos_app::vault::VaultReadError::MissingSecrets { .. }) => return Ok(None),
-        Err(error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_)) => {
+        Err(
+            error @ (ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+            | ryeos_app::vault::VaultReadError::NameRefused(_)),
+        ) => {
             return Err(anyhow::Error::new(
                 ryeos_executor::dispatch_error::DispatchError::CapabilityRejected {
                     reason: format!("provider-attempt issue refused: {error}"),
@@ -1885,13 +1888,12 @@ mod tests {
     fn hosted_workflow_environment(
         receive_capability: &str,
     ) -> ryeos_app::vault::ProviderEnvironment {
-        use ryeos_node_runtime::node_policy::sections::provider_environment::{
-            ProviderEnvironmentName, ProviderEnvironmentRecipients,
-        };
+        use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName;
+        use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
         ryeos_app::vault::ProviderEnvironment::captured(
             vec![ProviderEnvironmentName {
                 name: WORKFLOW_KEY.to_owned(),
-                recipients: ProviderEnvironmentRecipients {
+                recipients: NameRecipients {
                     principals: Vec::new(),
                     capabilities: vec![receive_capability.to_owned()],
                 },
@@ -1945,6 +1947,7 @@ mod tests {
         let sources = ryeos_app::vault::SecretSources {
             vault: &vault,
             provider_env: environment,
+            ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:test-operator"),
         };
         let names = vec![WORKFLOW_KEY.to_owned()];
         let child = root

@@ -324,6 +324,8 @@ fn refuse_uncovered_item_declarations(
     };
     let site_id = state.threads.site_id().to_owned();
     let plan_context = PlanContext {
+        // Live and projectless: the live project is its own logical root.
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: principal.to_owned(),
             scopes: capabilities.to_vec(),

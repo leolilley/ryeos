@@ -1,7 +1,9 @@
 //! Grant lifecycle e2e: every grant ends, ending is judged only for the key
 //! holder, a lifetime above the node's signed class maximum is refused, only
 //! the granter or the operator renews, and a grant of a retired class keeps the
-//! node from starting with the cure named.
+//! node from starting with the cure named. A revoked grant leaves a tombstone,
+//! cancels the live threads running under it, and stays dead if its file is
+//! put back.
 
 use ryeosd::test_support as common;
 
@@ -373,4 +375,283 @@ async fn a_grant_of_the_retired_class_keeps_the_node_from_starting_and_names_re_
     };
     assert!(error.contains("re-admit"), "{error}");
     assert!(error.contains("remote_principal"), "{error}");
+}
+
+const REVOKE_KEY_CAP: &str = "ryeos.execute.service.identity/revoke-key";
+
+/// POST as `signer` and return the status with the JSON body.
+async fn call(
+    harness: &DaemonHarness,
+    fixture: &FastFixture,
+    signer: &SigningKey,
+    path: &str,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    body_of(
+        signed_post(harness, &fixture.node, signer, signer, path, body)
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoked_key_cannot_call_and_restored_file_stays_dead() {
+    let granter = SigningKey::from_bytes(&[81u8; 32]);
+    let stranger = SigningKey::from_bytes(&[82u8; 32]);
+    let grantee = SigningKey::from_bytes(&[83u8; 32]);
+    let (harness, fixture) = DaemonHarness::start_fast_with(
+        |state_path, _user, fixture| {
+            register_workflow_bundles(state_path, fixture)?;
+            for key in [&granter, &stranger] {
+                plant_grant(
+                    state_path,
+                    fixture,
+                    key,
+                    &[AUTHORIZE_KEY_CAP, RENEW_KEY_CAP, REVOKE_KEY_CAP, LIST_CAP],
+                    &fixture.user,
+                    GrantExpiry::At(4_102_444_800),
+                )?;
+            }
+            plant_grant(
+                state_path,
+                fixture,
+                &grantee,
+                &[RENEW_KEY_CAP, LIST_CAP],
+                &granter,
+                GrantExpiry::At(4_102_444_800),
+            )?;
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("daemon starts");
+    let grant_file =
+        authorized_keys_dir(&harness.state_path).join(format!("{}.toml", fingerprint(&grantee)));
+    let saved = std::fs::read(&grant_file).expect("the planted grant exists");
+    let digest = lillux::cas::sha256_hex(&saved);
+    let revoke_body = serde_json::json!({
+        "fingerprint": fingerprint(&grantee),
+        "reason": "laptop lost",
+    });
+    let probe = serde_json::json!({ "fingerprint": fingerprint(&grantee) });
+
+    // The grantee authenticates: it is refused for what it asks, not who it is.
+    let (status, json) = call(&harness, &fixture, &grantee, "/renew-key", probe.clone()).await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{json}");
+
+    // A principal that did not grant it cannot revoke it.
+    let (status, json) = call(
+        &harness,
+        &fixture,
+        &stranger,
+        "/revoke-key",
+        revoke_body.clone(),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{json}");
+    assert_eq!(
+        json["error_code"], "grant_revocation_not_permitted",
+        "{json}"
+    );
+    assert!(grant_file.exists(), "a refused revocation removes nothing");
+
+    // Its granter can.
+    let (status, json) = call(&harness, &fixture, &granter, "/revoke-key", revoke_body).await;
+    assert!(status.is_success(), "{status} {json}");
+    assert_eq!(
+        json["revoked"][0]["grant_digest"],
+        digest.as_str(),
+        "{json}"
+    );
+    assert!(!grant_file.exists());
+    let tombstone = harness
+        .state_path
+        .join(".ai/node/auth/revoked")
+        .join(format!("{digest}.toml"));
+    assert!(tombstone.exists(), "the revocation left a tombstone");
+
+    // The key can no longer authenticate, and putting the file back changes
+    // nothing: the tombstone names the exact bytes.
+    let (status, _) = call(&harness, &fixture, &grantee, "/renew-key", probe.clone()).await;
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    std::fs::write(&grant_file, &saved).unwrap();
+    let (status, _) = call(&harness, &fixture, &grantee, "/renew-key", probe.clone()).await;
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    std::fs::remove_file(&grant_file).unwrap();
+
+    // Authorizing the key afresh is a new generation, which is allowed.
+    let (status, json) = call(
+        &harness,
+        &fixture,
+        &granter,
+        "/authorize-key",
+        serde_json::json!({
+            "public_key": public_key_text(&grantee),
+            "label": "re-granted",
+            "scopes": [RENEW_KEY_CAP],
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {json}");
+    let (status, json) = call(&harness, &fixture, &grantee, "/renew-key", probe).await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{json}");
+}
+
+/// `threads.get` status of `thread_id`, read as `signer`.
+async fn thread_status(
+    harness: &DaemonHarness,
+    fixture: &FastFixture,
+    signer: &SigningKey,
+    thread_id: &str,
+) -> String {
+    let body = serde_json::json!({
+        "item_ref": "service:threads/get",
+        "ref_bindings": {},
+        "project_path": null,
+        "parameters": { "thread_id": thread_id },
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
+    });
+    let (status, json) = call(harness, fixture, signer, "/execute", body).await;
+    assert!(status.is_success(), "{status} {json}");
+    json.pointer("/result/thread/status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// A project tool that runs until it is cancelled.
+fn plant_sleeper_tool(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let dir = root.join(".ai/tools/sleeper");
+    std::fs::create_dir_all(&dir)?;
+    let body = r#"#!/usr/bin/env python3
+# ryeos-tool:
+#   category: "sleeper"
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
+#   description: "Runs until cancelled"
+
+import json
+import time
+
+time.sleep(600)
+print(json.dumps({"slept": True}))
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(dir.join("sleeper.py"), signed)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoke_cancels_live_threads_of_principal() {
+    let granter = SigningKey::from_bytes(&[84u8; 32]);
+    let grantee = SigningKey::from_bytes(&[85u8; 32]);
+    let sleeper_caps = [
+        "ryeos.execute.tool.sleeper/sleeper",
+        "ryeos.read.project.live",
+        "ryeos.execute.service.threads/get",
+    ];
+    let project = tempfile::tempdir().expect("project tempdir");
+    let (harness, fixture) = DaemonHarness::start_fast_with(
+        |state_path, _user, fixture| {
+            register_workflow_bundles(state_path, fixture)?;
+            plant_grant(
+                state_path,
+                fixture,
+                &granter,
+                &[AUTHORIZE_KEY_CAP, REVOKE_KEY_CAP, LIST_CAP],
+                &fixture.user,
+                GrantExpiry::At(4_102_444_800),
+            )?;
+            plant_grant(
+                state_path,
+                fixture,
+                &grantee,
+                &sleeper_caps,
+                &granter,
+                GrantExpiry::At(4_102_444_800),
+            )?;
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("daemon starts");
+    plant_sleeper_tool(project.path(), &fixture.publisher).expect("plant the sleeper tool");
+    let project_path = project.path().canonicalize().unwrap();
+
+    // The grantee starts the sleeper without waiting for it.
+    let (status, json) = call(
+        &harness,
+        &fixture,
+        &grantee,
+        "/execute",
+        serde_json::json!({
+            "item_ref": "tool:sleeper/sleeper",
+            "ref_bindings": {},
+            "project_path": project_path.display().to_string(),
+            "parameters": {},
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                ryeos_app::execution_policy::ExecutionResponse::Accepted,
+            ),
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {json}");
+    let thread_id = json
+        .pointer("/result/thread_id")
+        .or_else(|| json.pointer("/thread_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("the launch names its thread: {json}"))
+        .to_owned();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while thread_status(&harness, &fixture, &grantee, &thread_id).await != "running" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sleeper never ran"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // Revoking the grantee's grant cancels the thread it is running.
+    let (status, json) = call(
+        &harness,
+        &fixture,
+        &granter,
+        "/revoke-key",
+        serde_json::json!({ "fingerprint": fingerprint(&grantee), "reason": "compromised" }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {json}");
+    let cancelled = json["live_work"]["cancelled"].as_array().unwrap();
+    assert!(
+        cancelled.iter().any(|id| id == thread_id.as_str()),
+        "{json}"
+    );
+    assert_eq!(json["live_work"]["failed"], serde_json::json!([]), "{json}");
+
+    // The key is dead, so read the outcome as its granter after authorizing
+    // it again: the thread was cancelled, not left running.
+    let (status, json) = call(
+        &harness,
+        &fixture,
+        &granter,
+        "/authorize-key",
+        serde_json::json!({
+            "public_key": public_key_text(&grantee),
+            "label": "re-granted",
+            "scopes": sleeper_caps,
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {json}");
+    assert_eq!(
+        thread_status(&harness, &fixture, &grantee, &thread_id).await,
+        "cancelled"
+    );
 }

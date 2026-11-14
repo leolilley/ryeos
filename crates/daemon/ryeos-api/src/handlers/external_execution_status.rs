@@ -24,7 +24,7 @@ async fn status(
     // only this node's own configured operator may read it.
     ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)
         .map_err(|_| HandlerError::Forbidden("local configured operator required".into()))?;
-    let status = ryeos_app::external_execution_status::read(&state.state_store)
+    let status = ryeos_app::external_execution_status::read(&state.state_store, &state.node_config)
         .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     serde_json::to_value(status).map_err(|error| HandlerError::Internal(error.to_string()))
 }

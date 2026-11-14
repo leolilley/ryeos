@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:52Z:e1bdabac82685dfc206da4b2bfedd6db8b2e17b6727d85b8cc15422508fc1fcf:iWzTA7ZyoSESxky6BGFmUxgyATf4uZWHfCuVXPcPVDPN88fyN1ijcGZw79GSTr1AKt2EDM6kKaVQw7Sb59VoDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:3a4c22e9a75a7830b2f1c3030b691ceafeafde8cbfefd5cdba7dd6f4568efd99:eEfBWbRa7oGbSAFyWlzyzrIQIAj6EMaaSMyHG7bm30CtikmVPQIwez7+NL2iCji6dv+kPPEmNCi6Ndejbo9aDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "remote-development-and-qualification"
@@ -64,7 +64,7 @@ scheduler, migration layer, or workload-specific app root is needed.
 |---|---|
 | Select and pin a target | `ryeos remote configure`; stored named remote pins URL, node principal/key, canonical site ID, vault fingerprint, and ingest-ignore policy |
 | Bootstrap trust | target-local `admission-token` plus source `remote admit`, or target-local exact `authorize-key`/`authorize-client` |
-| Preserve a durable operator principal and origin | explicit configured-operator forwarding for `service:remote/push` and retained-current-HEAD `service:remote/run`, with target `remote_principal` grant and source-node co-signature |
+| Preserve a durable operator principal and origin | delegated forwarding (`ryeos remote delegate`) for `service:remote/push` and retained-current-HEAD `service:remote/run`, with target `remote_principal` grant and source-node co-signature |
 | Transfer a complete project | a `full_project` binding and the typed snapshot/CAS closure used by `remote execute` |
 | Execute on target compute | target-local admitted item execution through the configured remote |
 | Return project changes | clean-base guarded pull/apply from the result snapshot |
@@ -82,7 +82,7 @@ There are two supported execution shapes:
 
 - use synchronous `remote execute` for bounded builds, focused tests, and
   model probes whose project results must be pulled back automatically;
-- use configured-operator push plus an accepted, retained-current-HEAD
+- use a delegated push plus an accepted, retained-current-HEAD
   `remote run` for long jobs where durable target-local thread/result evidence
   is enough.
 
@@ -475,7 +475,7 @@ ryeos.execute.service.bundle/export
 ryeos.execute.service.objects/get
 ```
 
-For configured-operator continuity, stop the target and use the documented
+For a principal that runs delegated work, stop the target and use the documented
 offline semantic conversion. The target grant must bind the configured
 operator key to the initiating node's canonical `site_id` and exact workflow
 scopes; the initiating node key separately receives only
@@ -723,7 +723,7 @@ also retain and verify the workload's target-signed receipt, chain head, or
 other exact authority defined by that workload. Do not weaken owner-scoped
 chain APIs to manufacture that evidence for ordinary `remote execute`.
 
-For a long-running workload, use the configured-operator push/run policy
+For a long-running workload, use the delegated push/run policy
 documented by the remote command reference, retain the returned chain root,
 launch and placement IDs, and inspect only that exact authority. After a
 completed turn has been fenced, the session is terminated, and its frozen

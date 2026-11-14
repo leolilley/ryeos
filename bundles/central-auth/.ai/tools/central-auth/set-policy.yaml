@@ -1,0 +1,36 @@
+# ryeos:signed:2026-11-14T11:18:27Z:e51b331ed27b81d1f83a98abdc1ccded5e2633f9264760314bd45b7c0f207cdc:NzIN6oitQ6VZuA/azgD/Z6aB3BncN9yrZJrPRqyAPsc5BMpyiiOdxNrFvj6Evv8ljdkcs1qk758Hk2r7cW65Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "0.1.0"
+category: "central-auth"
+name: "set-policy"
+executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
+required_caps: ["ryeos.execute.tool.central-auth.set-policy"]
+description: "Store the central-auth role/capability policy for a realm."
+
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        state_home:
+          namespace:
+            from_param: realm_id
+          access: read_write
+
+config:
+  command: "python3"
+  args:
+    - "${tool_dir}/lib/central_auth.py"
+    - "set-policy"
+  input_data: "${params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. example-app."
+    policy:
+      type: object
+      description: "Policy object with roles, allowed_capabilities and login_throttle {max_failures, window_secs, lockout_secs}."
+  required: [realm_id, policy]

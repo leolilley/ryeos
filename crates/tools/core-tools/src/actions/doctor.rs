@@ -65,14 +65,14 @@ pub fn run_doctor(
     isolation: Result<Arc<IsolationRuntime>, &str>,
     source: &Path,
     dependency_roots: &[PathBuf],
-    operator_config_root: &Path,
+    app_root: &Path,
 ) -> DoctorReport {
     let mut checks = vec![
         check_manifest(source),
         check_verify(
             source,
             dependency_roots,
-            operator_config_root,
+            app_root,
             isolation.as_ref().map(Arc::clone).map_err(|reason| *reason),
         ),
     ];
@@ -80,7 +80,6 @@ pub fn run_doctor(
         engine,
         isolation.as_deref().map_err(|reason| *reason),
         source,
-        operator_config_root,
     ));
     checks.push(advisory_bundle_events(source));
 
@@ -248,7 +247,7 @@ fn check_manifest(source: &Path) -> CheckResult {
 fn check_verify(
     source: &Path,
     dependency_roots: &[PathBuf],
-    operator_config_root: &Path,
+    app_root: &Path,
     isolation: Result<Arc<IsolationRuntime>, &str>,
 ) -> CheckResult {
     let isolation = match isolation {
@@ -281,7 +280,7 @@ fn check_verify(
         source,
         &declared_name,
         dependency_roots,
-        operator_config_root,
+        app_root,
         isolation,
     ) {
         Ok(report) => {
@@ -297,7 +296,6 @@ fn check_imports(
     engine: Result<&Engine, &str>,
     isolation: Result<&IsolationRuntime, &str>,
     source: &Path,
-    operator_config_root: &Path,
 ) -> Vec<CheckResult> {
     let refs = python_tool_refs(source);
     if refs.is_empty() {
@@ -367,9 +365,9 @@ fn check_imports(
         .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
         .collect::<Vec<_>>();
-    let isolation_node_trusted_keys_dir = operator_config_root.join("keys/trusted");
 
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: "fp:doctor".into(),
             scopes: vec!["execute".into()],
@@ -393,7 +391,6 @@ fn check_imports(
                 &plan_ctx,
                 &project_path,
                 &isolation_bundle_roots,
-                &isolation_node_trusted_keys_dir,
                 &item_ref,
             ) {
                 Ok(report) => report,
@@ -422,7 +419,6 @@ fn import_one(
     plan_ctx: &PlanContext,
     project_path: &Path,
     isolation_bundle_roots: &[PathBuf],
-    isolation_node_trusted_keys_dir: &Path,
     item_ref: &str,
 ) -> Result<Value, String> {
     let canonical = CanonicalRef::parse(item_ref).map_err(|e| format!("invalid ref: {e}"))?;
@@ -453,12 +449,12 @@ fn import_one(
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,
             captured_callback_socket: false,
             bundle_roots: isolation_bundle_roots,
-            node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             verified_code: &isolation_verified_code,
             verified_command: None,
             external_read_only_mounts: &[],

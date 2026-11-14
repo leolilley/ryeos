@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-10-17T05:23:22Z:a36a1db378eebb05826aeb9505586f5a31ab431ad6fc7a1dd717313cb103cf8c:+h+poQ+j/QSQmKiLvDCLVmEMc4BhCGYmwbTJ2yF3oYrMwTY8Arkfow984E+AuiuK1acYDoTU5s2+4XZn5scmCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T05:04:32Z:14b7a47ca2693d37b6a565e1646fe3203572a9b315dd8863be19e1cfd09a1dc4:ZoLzRlkbmzHZoQK7/4Ru5lIn4DzZ+CaKzhf0FqrPmX/5hzeiefbb5GzdKSEPhqwmedYT0O+5rQUZGfWTPkpFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -112,7 +112,7 @@ thread-list                 thread-tail
 Plus local verbs (no daemon needed):
 ```
 ryeos init
-ryeos trust pin
+ryeos trust pin / scope / retire / revoke / succeed / list / show
 ryeos publish
 ryeos vault put / list / remove / rewrap
 ```

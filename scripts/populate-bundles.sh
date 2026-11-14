@@ -726,9 +726,9 @@ write_seed_trust_doc
 # a lifecycle-local CLI verb on `next` and would otherwise route through a
 # daemon/initialized-node dispatch path during Docker builds.
 SIGN_APP_ROOT="$(mktemp -d)"
-mkdir -p "$SIGN_APP_ROOT/.ai/config/keys/signing"
-cp "$KEY" "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
-chmod 0600 "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
+mkdir -p "$SIGN_APP_ROOT/.ai/node/operator/signing"
+cp "$KEY" "$SIGN_APP_ROOT/.ai/node/operator/signing/private_key.pem"
+chmod 0600 "$SIGN_APP_ROOT/.ai/node/operator/signing/private_key.pem"
 
 ryeos_term_update "publishing core bundle" "signed manifests"
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$PAYLOAD_STAGE/core/ryeos-core-tools" build "$CORE" \

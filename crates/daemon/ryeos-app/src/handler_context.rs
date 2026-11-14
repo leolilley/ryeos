@@ -183,6 +183,13 @@ pub struct HandlerContext {
     /// it is never serialized and never caller input.
     #[serde(skip)]
     pub signed_request_digest: Option<String>,
+    /// Site of the node that forwarded this request under a delegation the
+    /// caller signed. The caller is the delegating principal; this names the
+    /// node that acted for it. `None` for every request that was not
+    /// delegated. Local dispatch context only: never serialized and never
+    /// caller input.
+    #[serde(skip)]
+    pub delegated_via: Option<String>,
     /// Thread of the currently executing recorded service invocation: its own
     /// chain root for a direct invocation, or an inline in-process child in
     /// its callback parent's chain. The executor supplies this only after that
@@ -210,6 +217,7 @@ impl HandlerContext {
             authenticated_origin_site_id: None,
             authenticated_grant_authority: None,
             signed_request_digest: None,
+            delegated_via: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -230,6 +238,7 @@ impl HandlerContext {
             authenticated_origin_site_id,
             authenticated_grant_authority: None,
             signed_request_digest: None,
+            delegated_via: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -251,6 +260,7 @@ impl HandlerContext {
             authenticated_origin_site_id,
             authenticated_grant_authority: None,
             signed_request_digest: None,
+            delegated_via: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -273,6 +283,7 @@ impl HandlerContext {
             authenticated_origin_site_id,
             authenticated_grant_authority: Some(authenticated_grant_authority),
             signed_request_digest: None,
+            delegated_via: None,
             recorded_service_root_id: None,
             original_execution_budget: None,
             task_scope: None,
@@ -305,6 +316,13 @@ impl HandlerContext {
     /// caller.
     pub fn with_signed_request_digest(mut self, digest: Option<String>) -> Self {
         self.signed_request_digest = digest;
+        self
+    }
+
+    /// Record the node that forwarded this request under the caller's
+    /// delegation.
+    pub fn with_delegated_via(mut self, site_id: Option<String>) -> Self {
+        self.delegated_via = site_id;
         self
     }
 

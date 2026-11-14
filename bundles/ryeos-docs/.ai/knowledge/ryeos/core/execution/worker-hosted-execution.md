@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:53Z:17c65dd8a2a0b62530ac7539e68cc4309e24399e1a5cca398b0d2e630a01dcb8:ML2v2rVjq5FWmsVCjjReyuEn/HQ5wJ4FVUUsu5l4FCTMtSFafLa7bOS7IXWc8VIMszwaK30po8vgrgqPaGKMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:f52ee606e3cf4960fc6c2ccd5f42dfa77761419d45c1b47004746cc584e46c39:WS0CsgC39K03KPz4lm/HbkPXmVav87k8EgAOlVFrnBNtmGFAu28R1oKm2EM/TrYmTRe1UpcFpE+kKH6i1qyEBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -138,10 +138,10 @@ depth and do not claim hostile multi-principal isolation.
 Normal remote orchestration is node-to-node and therefore changes the acting
 principal to the source node. An operator-owned durable workflow cannot use
 that identity for its principal-scoped HEAD and later control. The generic
-remote push/run seam has an explicit configured-operator mode: the incoming
-request must already authenticate locally as the source node's exact
-configured operator, the source daemon then signs the outbound request with
-that same local key, and the destination retains only its public key in a
+remote push/run seam acts as the caller by default: the source daemon signs the
+outbound request with its node key and attaches the caller's own signed
+delegation (`ryeos remote delegate`; the operator is one more delegator), and
+the destination retains only the caller's public key in a
 node-signed, exact-scope
 `remote_principal` grant bound to the source site's canonical ID. The source
 node also co-signs the exact request, and the destination accepts that proof

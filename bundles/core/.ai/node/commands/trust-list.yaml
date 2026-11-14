@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T05:09:06Z:c12169405f09fd332e4d9f9f95aea925757e54fd9123a4301b97f76c251057d1:ksbCX1LmKoAVelHqn7bKGBLMChsl5u9pzhTL2JhpBeISsI6ZYYQwKXOh/qDS0pzpyp/lcx5KGQXlbmVq/BdzAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- trust
+- list
+description: List pinned signers with role, scope and status
+dispatch:
+  kind: execute_ref
+  execute: service:trust/list

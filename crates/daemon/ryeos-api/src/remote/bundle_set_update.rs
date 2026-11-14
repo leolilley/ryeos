@@ -69,7 +69,7 @@ impl RemoteAuthority {
         let completion = ryeos_node::verify_init_completion(app_root)?
             .context("node has no verified initialization completion")?;
         let substrate = ryeos_node::load_verified_substrate_identity(app_root)?;
-        let remotes = config::load_remotes_layered(app_root, None)?;
+        let remotes = config::load_remotes(app_root)?;
         let remote = config::get_remote(&remotes, &request.catalog_remote)?;
         let identity = Arc::new(ryeos_node_runtime::identity::NodeIdentity::load(
             &request.operator_signing_key,
@@ -77,10 +77,7 @@ impl RemoteAuthority {
         if identity.fingerprint() != completion.operator_fingerprint {
             bail!("explicit update signer is not the init-completion operator");
         }
-        let trust = ryeos_engine::trust::TrustStore::load(
-            None,
-            &app_root.join(ryeos_engine::AI_DIR).join("config"),
-        )?;
+        let trust = ryeos_engine::trust::TrustStore::load_node_registry(app_root)?;
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
         let generation = ryeos_node_runtime::node_policy::generation::load_policy_generation(
             app_root, &trust, &table,
@@ -120,7 +117,7 @@ impl RemoteAuthority {
         cas: &lillux::CasStore,
     ) -> anyhow::Result<consumer::CatalogResolution> {
         let client = RemoteClient::new(
-            &self.remote.url,
+            self.remote.outbound_url()?,
             &self.remote.principal_id,
             self.identity.clone(),
         );
@@ -145,7 +142,13 @@ impl RemoteAuthority {
             } => catalog_publication_attestation_hash.clone(),
         };
         let response = client
-            .objects_closure_get(std::slice::from_ref(&root), self.closure_options.clone())
+            .objects_closure_get(
+                &crate::objects_read_scope::ReadRoot::CatalogPublication {
+                    catalog_namespace: request.catalog_namespace.clone(),
+                },
+                std::slice::from_ref(&root),
+                self.closure_options.clone(),
+            )
             .await?;
         for entry in response.entries {
             match entry.kind.as_str() {

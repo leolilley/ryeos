@@ -24,7 +24,7 @@ use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 
 /// Boot the engine from the same sources the daemon uses.
-pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
+pub fn boot(_project_path: Option<&Path>) -> Result<Engine> {
     let app_root = roots::app_root().context("resolve app root for node isolation policy")?;
     let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&app_root)
         .context("load retained node isolation generation")?;
@@ -36,13 +36,7 @@ pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
         .registered_generation_node_trust()
         .context("retained isolation generation omitted node trust")?
         .clone();
-    let trust_store = match project_path {
-        Some(project_path) => node_trust_store
-            .with_project_keys(project_path)
-            .map(std::borrow::Cow::into_owned)
-            .with_context(|| "load project item trust")?,
-        None => node_trust_store.clone(),
-    };
+    let trust_store = node_trust_store.clone();
     let kinds = build_kind_registry(&bundle_roots, &node_trust_store)?;
     let (parsers, handlers) =
         build_parser_dispatcher(&bundle_roots, &kinds, &node_trust_store, isolation)?;

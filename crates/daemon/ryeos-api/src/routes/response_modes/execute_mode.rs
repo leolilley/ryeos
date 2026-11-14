@@ -767,6 +767,7 @@ pub(crate) fn admit_host_direct_execution(
     // refused by the launch-time gate or the disabled-shape compile.
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: provenance.logical_project_root(),
             item_ref: root.clone(),
             expected_kind: Some(root.kind.clone()),
             project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
@@ -1822,6 +1823,7 @@ async fn admit_execution_with_publication(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
     let plan_ctx = PlanContext {
+        logical_project_root: provenance.logical_project_root(),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),
@@ -2026,6 +2028,18 @@ async fn admit_execution_with_publication(
                 .required_secrets,
             provenance.project_authority(),
         ) {
+            if let ryeos_app::vault::VaultReadError::NameRefused(refusal) = &err {
+                return Ok((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": refusal.message(),
+                        "error_code": refusal.code(),
+                        "name": refusal.name,
+                        "principal": refusal.principal,
+                    }),
+                )
+                    .into());
+            }
             return Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({
@@ -2147,35 +2161,27 @@ async fn admit_execution_with_publication(
         && request.method().is_none()
         && request.args().is_none();
     let remotes = if remote_target_requested && request_can_need_remote_config {
-        let project_for_layering: Option<&std::path::Path> = if no_project_requested {
-            None
-        } else {
-            Some(project_ctx.original_path.as_ref())
-        };
         Some(
-            crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                project_for_layering,
-            )
-            .map(|report| report.remotes)
-            .map_err(|e| {
-                match crate::remote::config::typed_load_error_or(e, |e| {
-                    crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
-                }) {
-                    crate::handler_error::HandlerError::Structured { code, status, body } => {
-                        RouteDispatchError::Structured {
-                            code,
-                            status,
-                            body,
-                            thread_id: None,
+            crate::remote::config::load_remotes_report(&state.config.app_root)
+                .map(|report| report.remotes)
+                .map_err(|e| {
+                    match crate::remote::config::typed_load_error_or(e, |e| {
+                        crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                    }) {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
                         }
+                        crate::handler_error::HandlerError::Internal(message) => {
+                            RouteDispatchError::Internal(message)
+                        }
+                        other => RouteDispatchError::Internal(other.to_string()),
                     }
-                    crate::handler_error::HandlerError::Internal(message) => {
-                        RouteDispatchError::Internal(message)
-                    }
-                    other => RouteDispatchError::Internal(other.to_string()),
-                }
-            })?,
+                })?,
         )
     } else {
         None
@@ -2241,7 +2247,19 @@ async fn admit_execution_with_publication(
                 return Ok(dispatch_error_response(error));
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote);
+                crate::handlers::remote_push::OutboundPrincipal::resolve(None, &state, &principal)
+                    .client(&state, &plan.remote.remote, &principal)
+                    .map_err(|error| match error {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
+                        }
+                        other => RouteDispatchError::Forbidden(other.to_string()),
+                    })?;
             let rules = plan
                 .remote
                 .remote
@@ -2738,9 +2756,8 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
-    use ryeos_node_runtime::node_policy::sections::provider_environment::{
-        ProviderEnvironmentName, ProviderEnvironmentRecipients,
-    };
+    use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName;
+    use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
 
     static NO_PROVIDER_ENVIRONMENT: ryeos_app::vault::ProviderEnvironment =
         ryeos_app::vault::ProviderEnvironment::none();
@@ -2870,14 +2887,14 @@ mod tests {
             vec![
                 ProviderEnvironmentName {
                     name: "ANTHROPIC_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: Vec::new(),
                         capabilities: strings(&[RECEIVE_ANTHROPIC]),
                     },
                 },
                 ProviderEnvironmentName {
                     name: "OPENAI_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(&["fp:alice", "route:fixed-handler"]),
                         capabilities: Vec::new(),
                     },
@@ -3101,6 +3118,7 @@ mod tests {
         let sources = ryeos_app::vault::SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
         };
         let names = vec!["OPENAI_API_KEY".to_owned()];
         // A child acting for another principal under the inherited authority.
@@ -3147,14 +3165,14 @@ mod tests {
             vec![
                 ProviderEnvironmentName {
                     name: "ANTHROPIC_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(&["fp:placeholder"]),
                         capabilities: strings(anthropic_capabilities),
                     },
                 },
                 ProviderEnvironmentName {
                     name: "OPENAI_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(openai_principals),
                         capabilities: Vec::new(),
                     },
@@ -3185,6 +3203,7 @@ mod tests {
             &ryeos_app::vault::SecretSources {
                 vault: &vault,
                 provider_env: environment,
+                ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
             },
             ryeos_app::vault::SecretRecipient { principal },
             &[name.to_owned()],
@@ -3875,7 +3894,8 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         crate::remote::config::RemoteConfig {
             name: name.to_string(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
             signing_key: format!(
                 "ed25519:{}",
@@ -3891,8 +3911,9 @@ mod tests {
     fn loaded(remote: crate::remote::config::RemoteConfig) -> LoadedRemote {
         LoadedRemote {
             config: remote,
-            scope: crate::remote::config::RemoteConfigScope::Operator,
             config_path: PathBuf::new(),
+            pin_source: crate::remote::config::PinSource::ExpectedFingerprint,
+            pinned_at: String::new(),
         }
     }
 

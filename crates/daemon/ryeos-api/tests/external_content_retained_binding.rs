@@ -288,14 +288,24 @@ fn fixture_bundle_engine(
     bundle_root: &std::path::Path,
     publisher: &NodeIdentity,
 ) -> Arc<ryeos_engine::engine::Engine> {
-    let mut trust = ryeos_engine::test_support::live_trust_store();
-    trust.extend_from(&ryeos_engine::trust::TrustStore::from_signers(vec![
+    let trusted_signer = |verifying_key: lillux::crypto::VerifyingKey, label: &str| {
         ryeos_engine::trust::TrustedSigner {
-            fingerprint: publisher.fingerprint().to_owned(),
-            verifying_key: *publisher.verifying_key(),
-            label: Some("f05 fixture publisher".to_owned()),
-        },
-    ]));
+            fingerprint: lillux::signature::compute_fingerprint(&verifying_key),
+            verifying_key,
+            label: Some(label.to_owned()),
+        }
+    };
+    let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+        trusted_signer(
+            ryeos_engine::test_support::platform_author_verifying_key(),
+            "platform author",
+        ),
+        trusted_signer(
+            ryeos_engine::test_support::dev_publisher_verifying_key(),
+            "dev publisher",
+        ),
+        trusted_signer(*publisher.verifying_key(), "f05 fixture publisher"),
+    ]);
     let core = ryeos_engine::test_support::core_bundle_root();
     let workflow = ryeos_engine::test_support::workflow_bundle_roots();
     let ui = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
@@ -547,6 +557,7 @@ async fn bind_through_managed_activation_owner(
     let resolution = state
         .engine
         .effective_resolution_output(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse("tool:test/source").unwrap(),
             expected_kind: Some("tool".to_owned()),
             project_root: None,

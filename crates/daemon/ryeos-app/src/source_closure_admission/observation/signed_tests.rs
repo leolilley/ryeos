@@ -4,7 +4,7 @@
 
 use super::*;
 use lillux::crypto::SigningKey;
-use ryeos_engine::trust::{TrustStore, TrustedSigner};
+use ryeos_engine::trust::TrustedSigner;
 use ryeos_state::objects::{
     LogicalSourceRoot, SourceClosureFile, SourceClosureManifest, SourceFileMode,
 };
@@ -159,13 +159,12 @@ external_content:
         let mut roots = vec![core.clone()];
         roots.extend(workflow.iter().cloned());
         roots.push(self.bundle.clone());
-        let mut trust = ryeos_engine::test_support::live_trust_store();
         let key = self.signer.verifying_key();
-        trust.extend_from(&TrustStore::from_signers(vec![TrustedSigner {
+        let trust = crate::state::test_support::live_trust_store_with(vec![TrustedSigner {
             fingerprint: lillux::signature::compute_fingerprint(&key),
             verifying_key: key,
             label: Some("source observation fixture".into()),
-        }]));
+        }]);
         let mut kind_roots = vec![self.kind_root.clone(), core.join(".ai/node/engine/kinds")];
         kind_roots.extend(
             workflow

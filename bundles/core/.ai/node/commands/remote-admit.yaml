@@ -1,11 +1,17 @@
-# ryeos:signed:2026-09-01T22:15:11Z:ffa1aa74e192591a35bba37a52a850858986e7774134574a9792a5809d9be649:T2rFFyP8dw+kdyXjIjwUulnRif1jUHSyXRntmJ/rR7G7esCU0O521kHybMCQ9jxhPIkWGqyodIOKiD9kML6EDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T21:35:38Z:f32320704e0391cff36453472768767bbcf8965aed3efa707d86a2a72342c7c7:c41NLCagcqDAhCNoYvLHSPw+05qGaxUKIGOM8THrWuSQxPdD1+tABhQF0mIim96kegrEIEnSJ4dUkBNg/8OPCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - admit
-description: Claim a one-time admission token on a configured remote node
-forms:
-- slots:
-  - field: remote
+description: Claim a one-time admission token on a configured remote node, as this node or (with --as-principal) as yourself
+help:
+  usage: "ryeos remote admit --remote <name> --token <token> --scopes <scope> [--scopes <scope>...] [--label <label>] [--as-principal]"
+  examples:
+    - "ryeos remote admit --remote prod --token <one-time-token> --scopes ryeos.execute.service.objects/has"
+    - "ryeos remote admit --as-principal --remote hosted --token <one-time-token> --scopes ryeos.execute.service.remote/run"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
 dispatch:
-  kind: execute_ref
-  execute: service:remote/admit
+  kind: local_handler
+  handler: remote_admit
+  bootstrap: false

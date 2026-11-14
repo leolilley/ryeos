@@ -33,11 +33,15 @@ pub const FACT_EXTERNAL_EXECUTION: &str = "external_execution_bindings";
 /// Digest of the installed runtime-snapshot production and qualification
 /// bindings.
 pub const FACT_RUNTIME_SNAPSHOTS: &str = "runtime_snapshot_bindings";
-/// Digest of the node's own remotes file, the remote trust anchors it holds.
+/// Digest of the node-signed remote pin records, the remote trust anchors it
+/// holds.
 pub const FACT_REMOTES: &str = "remotes";
 /// Digest of the signed bundle registrations, the set of bundles the node
 /// runs.
 pub const FACT_BUNDLE_REGISTRATIONS: &str = "bundle_registrations";
+
+/// Digest of the node's signer registry: records and key events.
+pub const FACT_TRUST_REGISTRY: &str = "trust_registry";
 
 /// Every fact the node can report, in report order.
 pub const ALL_FACTS: &[&str] = &[
@@ -51,6 +55,7 @@ pub const ALL_FACTS: &[&str] = &[
     FACT_RUNTIME_SNAPSHOTS,
     FACT_REMOTES,
     FACT_BUNDLE_REGISTRATIONS,
+    FACT_TRUST_REGISTRY,
 ];
 
 /// Facts every request pins, whatever its operation.
@@ -114,23 +119,16 @@ pub fn measure(app_root: &Path, ledger_head: &str) -> NodeFacts {
             ),
         ]),
     );
-    facts.insert(
-        FACT_REMOTES.to_owned(),
-        file_digest(&remotes_file(app_root)),
-    );
+    facts.insert(FACT_REMOTES.to_owned(), tree_digest(&node.join("remotes")));
     facts.insert(
         FACT_BUNDLE_REGISTRATIONS.to_owned(),
         tree_digest(&node.join("bundles")),
     );
+    facts.insert(
+        FACT_TRUST_REGISTRY.to_owned(),
+        tree_digest(&node.join("trust")),
+    );
     facts
-}
-
-/// The node's own remotes file, the one `ryeos remote configure` and
-/// `ryeos remote pin` write.
-pub fn remotes_file(app_root: &Path) -> std::path::PathBuf {
-    RuntimeRoot::new(app_root.to_path_buf())
-        .config()
-        .join("remotes/remotes.yaml")
 }
 
 fn combined_digest(parts: &[(&str, String)]) -> String {

@@ -3783,8 +3783,11 @@ fn main() -> Result<()> {
     // Tokio's 2 MiB default while doing that work (the real-process test
     // harness has historically compensated with RUST_MIN_STACK). Make the
     // daemon's actual runtime contract explicit so direct debug and local
-    // qualification installs have the same safe floor as the harness.
-    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
+    // qualification installs have the same safe floor as the harness. The
+    // native launch path (callback authority, host access and root admission
+    // projection) is one deep unoptimized future; 16 MiB is address space
+    // reserved per worker and committed only as it is touched.
+    const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
     let mut composition = DaemonSelectedComposition::bootstrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(DAEMON_WORKER_STACK_BYTES)
@@ -4169,7 +4172,7 @@ async fn run(
     ));
 
     // Repair only daemon-local artifacts. Missing operator artifacts
-    // (user signing key, trust docs) fail with guidance to run
+    // (user signing key, signer record) fail with guidance to run
     // `ryeos init` — daemon never substitutes for operator init.
     bootstrap::repair_daemon_local(&config)?;
 
@@ -4382,6 +4385,7 @@ async fn run(
                     let node_principal = identity.principal_id();
 
                     let plan_ctx = ryeos_engine::contracts::PlanContext {
+                        logical_project_root: None,
                         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                             ryeos_engine::contracts::Principal {
                                 fingerprint: node_principal,
@@ -4403,6 +4407,7 @@ async fn run(
                     let effective_requests = installed_refs
                         .iter()
                         .map(|canonical| ryeos_engine::engine::EffectiveItemRequest {
+                            logical_project_root: None,
                             item_ref: canonical.clone(),
                             expected_kind: Some(canonical.kind.clone()),
                             project_root: None,
@@ -4929,6 +4934,10 @@ async fn run(
                     .retain(),
             );
 
+            let vault_ceilings = Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
+                &node_policy_snapshot,
+                &config.operator_signing_key_path,
+            )?);
             let app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
@@ -5042,6 +5051,7 @@ async fn run(
                 node_policy: node_policy_snapshot,
                 vault,
                 provider_env: Arc::clone(provider_environment.environment()),
+                vault_ceilings,
                 command_registry,
                 authorizer,
                 ignore_matcher,
@@ -8335,6 +8345,7 @@ async fn run_service_standalone(
     let standalone_principal = standalone_operator.principal_id();
     let standalone_handler_context = standalone_operator_handler_context(&standalone_operator);
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: standalone_principal.clone(),
@@ -8678,6 +8689,10 @@ async fn run_service_standalone(
         node_policy: node_policy_snapshot.clone(),
         vault: standalone_vault,
         provider_env: Arc::clone(provider_environment.environment()),
+        vault_ceilings: Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
+            &node_policy_snapshot,
+            &config.operator_signing_key_path,
+        )?),
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
         ignore_matcher: standalone_ignore_matcher,

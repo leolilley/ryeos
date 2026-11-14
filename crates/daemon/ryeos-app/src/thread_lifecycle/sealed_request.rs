@@ -341,6 +341,7 @@ impl SealedResolvedItem {
         pinned_capsule_root.ensure_path_binding()?;
         let materialized_source = capsule_root.join(source_name);
         Ok(ResolvedItem {
+            logical_project_root: None,
             canonical_ref,
             kind: self.kind.clone(),
             source_path: materialized_source,
@@ -1143,6 +1144,7 @@ impl SealedRootExecutionRequest {
             }
         };
         let plan_context = PlanContext {
+            logical_project_root: self.project_authority.logical_project_root(),
             requested_by,
             project_context,
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1689,7 +1691,8 @@ impl SealedRootExecutionRequest {
         CanonicalRef::parse(&self.runtime_ref).map_err(|error| {
             anyhow!("invalid sealed runtime ref `{}`: {error}", self.runtime_ref)
         })?;
-        let resolved_item = self.verified_subject.restore(capsule_root)?;
+        let mut resolved_item = self.verified_subject.restore(capsule_root)?;
+        resolved_item.logical_project_root = self.project_authority.logical_project_root();
         let verified_subject = VerifiedItem {
             resolved: resolved_item.clone(),
             signer: self
@@ -1700,6 +1703,7 @@ impl SealedRootExecutionRequest {
             pinned_version: self.verified_pinned_version.clone(),
         };
         let plan_context = PlanContext {
+            logical_project_root: self.project_authority.logical_project_root(),
             requested_by,
             project_context: self.project_context.clone(),
             subject_resolution_authority: self.project_binding_subject_authority.clone(),
@@ -1909,6 +1913,7 @@ impl SealedRootExecutionRequest {
         rebound_plan_context.project_context = rebound_project_context;
         rebound_plan_context.subject_resolution_authority =
             provenance.subject_resolution_authority();
+        rebound_plan_context.logical_project_root = provenance.logical_project_root();
         let rebound_binding =
             AdmittedProjectBinding::from_provenance(engine, &rebound_plan_context, provenance)?;
         let rebound_materialized_project_root = match provenance {
@@ -1922,6 +1927,7 @@ impl SealedRootExecutionRequest {
             } => Some(provenance.subject_effective_path().to_path_buf()),
         };
         request.resolved_item.materialized_project_root = rebound_materialized_project_root.clone();
+        request.resolved_item.logical_project_root = provenance.logical_project_root();
         {
             let admission = request
                 .root_admission
@@ -1933,6 +1939,8 @@ impl SealedRootExecutionRequest {
                 .verified_subject
                 .resolved
                 .materialized_project_root = rebound_materialized_project_root;
+            admission.verified_subject.resolved.logical_project_root =
+                provenance.logical_project_root();
             // Complete request snapshots include parser/kind registry
             // semantics and belong only to fresh admission. Recovered paths
             // use the sealed execution closure plus a trust-only current

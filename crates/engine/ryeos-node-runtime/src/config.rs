@@ -31,7 +31,7 @@ pub struct Config {
     /// Defaults to `<app_root>/.ai/node/identity/private_key.pem`.
     pub node_signing_key_path: PathBuf,
     /// Operator signing key — used for operator edits in project/config space.
-    /// Defaults to `<app_root>/.ai/config/keys/signing/private_key.pem`.
+    /// Defaults to `<app_root>/.ai/node/operator/signing/private_key.pem`.
     pub operator_signing_key_path: PathBuf,
     pub authorized_keys_dir: PathBuf,
 }

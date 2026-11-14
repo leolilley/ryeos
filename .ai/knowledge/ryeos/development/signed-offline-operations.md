@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:31:52Z:b86cf8badb16d416d1d27e45dd27b3656ca6a2598e2aabd05744b31889ab6a14:aWKuSWcy7TbgKP3RiCBT5yQ9sym4s+6m0jvP5SWQOalEoSCUFWF2Kwbs296uqzhRq2CWIBQ8Jx/OFSyIoJXjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T23:11:47Z:4ae555b1073d912e7974ed7eb8fcc68aa9d5812615acf40f909bf46aa268ca3e:Rxa8OtCJeAO5OvfwsXdqwxyKgoq3VQWFVV1T2cOqOjspKAmx1MyITBkhY9WmtGiCE0nZfXaKbSSQ6BMUNumyDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signed-offline-operations"
@@ -89,6 +89,15 @@ signed against.
   forwarding proof an offline document cannot carry.
 - Never a `remote_node` grant.
 
+A facts report read for a key (`facts --json` for its `--signing-key`, the
+facts route for its authenticated caller, `facts --remote` for the delegated
+operator) names that key's authority under `signer`: `local_operator`, or the
+grant's current `grant_digest`, `origin_site_id` and `principal_class`. `sign`
+takes the grant digest and origin site from there and has no flag for them; it
+refuses facts with no signer, facts read for another key, and a key with no
+usable grant (`grant_error` says why). A facts document assembled by hand from
+a startup log must carry the `signer` object itself.
+
 Each operation has an exact scope, `ryeos.offline.<operation>`. Wildcard
 grants never satisfy it, so a broad grant made for product pushes carries no
 offline power. `authorize-client` refuses wildcard patterns under that prefix,
@@ -159,7 +168,11 @@ Two channels feed one inbox under `.ai/state/offline-operations/inbox/`:
 1. A running node takes `POST /offline-operations`, checks the envelope and
    the preconditions it can measure cheaply, and stores the request. It
    stops only when asked (`--stop`), as a plain operator stop with no restart
-   inhibition. The supervisor or platform starts the next incarnation.
+   inhibition. The supervisor or platform starts the next incarnation. A
+   remote operator reaches this route through its origin node
+   (`submit --remote`), which forwards under the operator's delegation; the
+   route admits the operator as principal, so the delivering key is still the
+   request's signer, and its reply names `delegated_via`.
 2. A node that cannot start gets the request from the platform. The
    entrypoint copies `RYEOS_OFFLINE_OPERATION_REQUEST` and
    `RYEOS_OFFLINE_OPERATION_INPUTS` into the inbox as root, verifies nothing,

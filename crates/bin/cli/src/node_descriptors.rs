@@ -25,11 +25,8 @@ impl LoadedCommandDescriptor {
 }
 
 pub fn load_verified_snapshot(app_root: &Path) -> anyhow::Result<NodeConfigSnapshot> {
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .context("load trust store for verified node config")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("load trust store for verified node config")?;
     load_verified_snapshot_with_trust(app_root, &trust_store)
 }
 
@@ -59,11 +56,8 @@ pub fn load_verified_snapshot_with_trust(
 }
 
 pub fn load_verified_policy_snapshot(app_root: &Path) -> anyhow::Result<NodePolicySnapshot> {
-    let trust_store = ryeos_engine::trust::TrustStore::load(
-        None,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
-    )
-    .context("load trust store for verified node policy")?;
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(app_root)
+        .context("load trust store for verified node policy")?;
     load_verified_policy_snapshot_with_trust(app_root, &trust_store)
 }
 

@@ -135,7 +135,7 @@ impl HostBackedQualificationEndpoint {
             "disposable host node must have its exact loopback endpoint"
         );
         let user_key = lillux::crypto::load_signing_key(
-            &state_path.join(".ai/config/keys/signing/private_key.pem"),
+            &state_path.join(".ai/node/operator/signing/private_key.pem"),
         )?;
         let node_key = lillux::crypto::load_signing_key(
             &state_path.join(".ai/node/identity/private_key.pem"),
