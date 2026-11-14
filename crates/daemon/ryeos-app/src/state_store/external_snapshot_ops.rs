@@ -451,14 +451,50 @@ impl StateStore {
             .quarantine_qualification_termination_attempt(operation_id)
     }
 
+    /// Reserve a qualification attempt with the signed generation it is made
+    /// under. The lifecycle closure must already be published: it is
+    /// verified here against the generation before the journal links it.
     pub(crate) fn reserve_snapshot_qualification(
         &self,
         intent: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationIntent,
+        generation: &runtime_db::runtime_snapshot_qualification::RetainedQualificationGeneration,
     ) -> Result<runtime_db::runtime_snapshot_qualification::SnapshotQualificationRecord> {
         let _permit = self.acquire_write_permit()?;
+        let authority = self.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let cas = authority.cas_store()?;
+        let source = crate::external_artifacts::verify_retained_lifecycle_closure(
+            &cas,
+            &generation.lifecycle_root_hash,
+        )?;
+        anyhow::ensure!(
+            source.declaration_id == intent.provider_id
+                && source.executables[0].payload_blob_hash == intent.adapter_artifact_hash
+                && source.executables.iter().any(|executable| {
+                    executable.role
+                        == ryeos_state::objects::retained_lifecycle_artifacts::RetainedLifecycleExecutableRole::RestorationVerifier
+                        && executable.payload_blob_hash == intent.verifier_artifact_hash
+                })
+                && source.specs[0].blob_hash == intent.provider_spec_digest,
+            "retained lifecycle closure differs from the reserved qualification identity"
+        );
+        authority.ensure_guard(&guard)?;
+        let record = self
+            .lock()?
+            .runtime_db
+            .reserve_snapshot_qualification_with_generation(intent, generation)?;
+        authority.ensure_guard(&guard)?;
+        Ok(record)
+    }
+
+    pub(crate) fn retained_snapshot_qualification_generation(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<runtime_db::runtime_snapshot_qualification::RetainedQualificationGeneration>>
+    {
         self.lock()?
             .runtime_db
-            .reserve_snapshot_qualification(intent)
+            .retained_snapshot_qualification_generation(operation_id)
     }
 
     pub(crate) fn claim_snapshot_qualification_attempt(

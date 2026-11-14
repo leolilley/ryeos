@@ -366,6 +366,27 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.external-execution.recompose",
+        authority_bearing: true,
+        local_signer_only: false,
+        alone: false,
+        inputs: &[InputSlot {
+            name: "consumer_verifiers",
+            max_bytes: 256 * KIB,
+            required: false,
+        }],
+        preconditions: &[FACT_RUNTIME_SNAPSHOTS, FACT_EXTERNAL_EXECUTION],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: arguments_of::<handlers::RecomposeArguments>,
+        handler: Handler::EffectThenReceipt(handlers::recompose),
+        recovery: Recovery {
+            record: "the installed bindings themselves: a recomposed binding pins exactly what is installed",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a re-pin that changes no pinned identity publishes nothing, so a rerun re-pins only the bindings an interrupted run had not yet published and carries every other fact and the credential generation unchanged",
+        },
+    },
+    OperationSpec {
         id: "node.capacity.reissue",
         authority_bearing: false,
         local_signer_only: false,
@@ -778,6 +799,7 @@ mod tests {
             "node.external-execution.qualification-session-compose",
             "node.external-execution.snapshot-compose",
             "node.external-execution.snapshot-qualification-compose",
+            "node.external-execution.recompose",
             "node.capacity.reissue",
             "node.capacity.reanchor",
             "node.allow-restart",
@@ -798,7 +820,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 23);
+        assert_eq!(operations().len(), 24);
     }
 
     #[test]
@@ -833,6 +855,7 @@ mod tests {
                 "node.external-execution.qualification-session-compose",
                 "node.external-execution.snapshot-compose",
                 "node.external-execution.snapshot-qualification-compose",
+                "node.external-execution.recompose",
                 "node.authorize-client",
                 "node.remote.pin",
                 "node.bundle.replace",

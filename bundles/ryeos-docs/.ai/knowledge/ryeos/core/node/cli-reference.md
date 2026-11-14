@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:15:40Z:0e4e16d7f02fb191f3a631a9e677643aa77e1b636f2dcbad5bccd093c2cde0fd:32LF2bHzslcXgka9Oa9nfZFn3QouE7hJdvNoyTsmyPxEA0DQIOLAcwmcXrLTuk3FdExGx9ke+F/+NVpad9KtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:39:36Z:f004ecfaabd92af626a271663bb6194cd547e49fbbb75da2b9a6bf2808ef3c37:HAN662DmjIvilJmB41P953Sh+M1isCAhyN0Qy18yJDeOZCszJfeDj2IN0RaU1J+97TFAaqaJHX2Xm7nBOB7RBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -308,8 +308,11 @@ The `external_capacity` and `credential_profiles` rows ask the running daemon
 external capacity or a credential-profile lock. With the node stopped both are
 `n/a` with `state: not_checked`; a daemon that does not answer makes them warn
 `not_checked` with the error. `external_capacity` covers unsettled
-allocations and open Q local starts, `credential_profiles` every held profile
-lock with the session, Q start or continuation reservation that holds it.
+allocations, open Q local starts and `retained_generations` (runtime snapshot
+binding generations a recompose superseded while a qualification occurrence or
+bootstrap source made under them is still open, each with the operations that
+reference it), `credential_profiles` every held profile lock with the session,
+Q start or continuation reservation that holds it.
 Every listed row carries an `attention` and a `fix`:
 
 | Attention | Meaning | Row status |
@@ -499,6 +502,104 @@ fragment or userinfo, non-zero port) and `--roots` must hold only X.509
 CERTIFICATE blocks. Every run names a fresh credential generation; provision
 the provider secret next and then restart the node.
 
+### `ryeos node external-execution snapshot-compose`
+
+```bash
+ryeos node external-execution snapshot-compose --id <binding-id> \
+  (--binding <external-execution-id> | --backend <backend> --account <label> \
+   --owner-id <owner> --roots <roots.pem>) \
+  --provider-spec <snapshot-spec.json> --sandbox-group-id <sbg-...> \
+  --region <region> --source-plan <starter|standard|pro> \
+  [--contact-timeout-seconds <s>] [--maximum-bootstrap-lifetime-seconds <s>] \
+  [--maximum-upload-bytes <n>] [--app-root <dir>] [--json]
+```
+
+Composes one node-signed `runtime_snapshot_production` binding on a stopped
+node. Backend, account, owner and provider API trust roots come either from an
+installed external-execution binding (`--binding`) or are stated together; the
+adapter artifact comes from the installed bundles, and `--provider-spec` must
+be the snapshot production spec the installed adapter declares. Every run names
+a fresh credential generation: provision it with `provision-credential
+--section runtime_snapshot_production`, then restart the node.
+
+### `ryeos node external-execution snapshot-qualification-compose`
+
+```bash
+ryeos node external-execution snapshot-qualification-compose --id <binding-id> \
+  --snapshot-binding <production-id> --provider-spec <provider-spec.json> \
+  --verifier <restoration-verifier-hash> [--consumer-verifiers <file>] \
+  [--contact-timeout-seconds <s>] [--delivery-timeout-seconds <s>] \
+  [--maximum-lifetime-seconds <s>] [--app-root <dir>] [--json]
+```
+
+Composes one `runtime_snapshot_qualification` binding anchored to an installed
+production binding: it pins that binding's id and digest and reuses its
+provider settings. `--consumer-verifiers` is a JSON object mapping scenario id
+to a consumer verifier selection (`scenario_source_digest`,
+`verifier_artifact_hash`, `archive_budget`), the output of the running node's
+consumer qualification context derive. It uses the producer's credential.
+
+### `ryeos node external-execution qualification-session-compose`
+
+```bash
+ryeos node external-execution qualification-session-compose --id <binding-id> \
+  (--binding <external-execution-id> | --backend <backend> --account <label> \
+   --owner-id <owner> --roots <roots.pem>) \
+  --policy-ref <ref> --provider-declaration-id <id> \
+  --runtime-manifest-hash <hash> [--guest-runtime-manifest-hash <hash>] \
+  --runtime-member-sha256 <sha> --snapshot-id <snp-...> --plan <plan> \
+  --region <region> --private-mailbox-parent <dir> [--capacity-group <group>] \
+  [--limits <limits.json>] [--app-root <dir>] [--json]
+```
+
+Composes the qualification-only structured-session placement binding a
+consumer qualification's Worker session is placed under, restored from the
+provider snapshot `--snapshot-id`. Artifact identities come from the installed
+bundles; every run names a fresh credential generation to provision.
+
+### `ryeos node external-execution recompose`
+
+```bash
+ryeos node external-execution recompose [--binding <section>/<id>]... \
+  [--consumer-verifiers <file>] [--dry-run] [--app-root <dir>] [--json]
+```
+
+Re-pins installed bindings to the installed bundles after a payload change, on
+a stopped node. Without `--binding` it recomposes every binding whose pins the
+`external_bindings` doctor row fails; a named binding is recomposed even when
+coherent (to take new consumer selections, for example). The order is fixed:
+`runtime_snapshot_production` bindings, then every
+`runtime_snapshot_qualification` binding that names a recomposed producer (it
+follows the producer's new digest), then `external_execution` bindings. Only
+artifact identities change: adapter, supervisor and launcher generations,
+restoration verifier, provider and snapshot specs, connector and configuration
+adapter, and the producer digest a qualification pins. Every fact the operator
+stated is carried, and so is the credential generation: the vault keys a
+credential by signer, backend, account and generation, none of which a re-pin
+changes, so no secret is provisioned again. An explicit compose still names a
+fresh generation.
+
+A qualification that selects consumer verifiers needs `--consumer-verifiers`
+(the derive output); its scenario set is carried and each selection is taken
+from the file. Refusals are typed and publish nothing:
+
+| Code | Meaning |
+|---|---|
+| `recompose_artifact_not_installed` | nothing installed fills a pinned role (adapter, restoration verifier, consumer verifier, provider executables) |
+| `recompose_settings_schema_changed` | the installed adapter declares another settings schema; restate the settings with `compose` |
+| `recompose_consumer_verifiers_required` | a qualification to recompose selects consumer verifiers and no file was given |
+| `recompose_consumer_selection_missing` | the file has no selection for a scenario the qualification selects |
+| `recompose_binding_not_installed` | a named binding, or the producer a qualification names, is not installed |
+
+A rerun converges: a re-pin that changes nothing publishes nothing. A
+`binding_credential_absent` finding is listed, not recomposed. `--dry-run`
+prints what would be recomposed. Hosted controllers accept
+`node.external-execution.recompose` from their origin operator as a signed
+offline operation, as they do `compose`. Recompose never waits on open work:
+a qualification occurrence or bootstrap source keeps the generation it was
+made under and is terminated through it; see
+[Runtime Snapshots](runtime-snapshots.md).
+
 ### `ryeos node external-execution provision-credential`
 
 ```bash
@@ -583,7 +684,8 @@ Each change appends a node-signed, hash-chained key event under
 ## Core daemon-backed verbs
 
 - `ryeos external-execution status` — list unsettled external allocations, open
-  Q local starts and held credential-profile locks, each with its owner,
+  Q local starts, superseded snapshot binding generations open work still
+  references, and held credential-profile locks, each with its owner,
   attention and fix. Local configured operator only; the doctor's
   `external_capacity` and `credential_profiles` rows read it.
 - `ryeos execute <ref> [params...]` — execute an item by canonical ref.

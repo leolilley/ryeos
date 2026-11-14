@@ -32,6 +32,7 @@
 //!   - `ryeos node external-execution qualification-session-compose` — compose and install the node-signed qualification-only session binding on a stopped node
 //!   - `ryeos node external-execution snapshot-compose` — compose and install a node-signed runtime snapshot production binding on a stopped node
 //!   - `ryeos node external-execution snapshot-qualification-compose` — compose and install a node-signed snapshot qualification binding on a stopped node
+//!   - `ryeos node external-execution recompose` — re-pin installed bindings to the installed bundles after a payload change on a stopped node
 //!
 //! One client composite is listed here for help but dispatched after the
 //! verified node config loads, because it sequences daemon commands:
@@ -175,6 +176,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
             "snapshot-qualification-compose",
         ],
         summary: "Compose and sign a stopped node's runtime snapshot qualification binding",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "external-execution", "recompose"],
+        summary: "Re-pin a stopped node's bindings to its installed bundles after a payload change",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -421,6 +427,13 @@ pub async fn try_dispatch(
                 console,
             )
             .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("node", Some("external-execution"))
+            if argv.get(2).map(String::as_str) == Some("recompose") =>
+        {
+            crate::lifecycle_external_recompose::run_recompose(&argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("reset")) if argv.get(2).map(String::as_str) == Some("execution-history") => {

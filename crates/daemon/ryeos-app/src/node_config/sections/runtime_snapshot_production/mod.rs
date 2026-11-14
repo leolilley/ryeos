@@ -196,6 +196,10 @@ impl RetainedRuntimeSnapshotProductionBinding {
         Ok(())
     }
 
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) fn digest(&self) -> &str {
         &self.digest
     }

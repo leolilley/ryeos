@@ -7,6 +7,11 @@
 //! `not_checked`. A row FAILs when something waits on the operator, WARNs while
 //! the daemon's recovery is still settling something, and is OK when only
 //! live work holds capacity; `--json` lists every row either way.
+//!
+//! The capacity row also lists `retained_generations`: runtime snapshot
+//! binding generations a recompose superseded while a qualification
+//! occurrence or bootstrap source made under them is still open, each with
+//! the operations that still reference it.
 
 use std::path::Path;
 use std::time::Duration;
@@ -127,10 +132,12 @@ pub(crate) fn rows(status: &ExternalExecutionStatus) -> Vec<CheckResult> {
                     .allocations
                     .iter()
                     .map(|row| row.attention)
-                    .chain(status.qualification_local_starts.iter().map(|row| row.attention)),
+                    .chain(status.qualification_local_starts.iter().map(|row| row.attention))
+                    .chain(status.retained_generations.iter().map(|row| row.attention)),
             ),
             "allocations": status.allocations,
             "qualification_local_starts": status.qualification_local_starts,
+            "retained_generations": status.retained_generations,
         }),
     );
     let profiles = row(
@@ -159,6 +166,7 @@ mod tests {
             "allocations": [],
             "qualification_local_starts": [],
             "credential_profiles": [],
+            "retained_generations": [],
         })
     }
 
@@ -240,6 +248,32 @@ mod tests {
         let rows = rows(&status(value));
         assert_eq!(rows[1].status, OK);
         assert_eq!(rows[1].detail["counts"]["in_use"], 1);
+    }
+
+    #[test]
+    fn doctor_capacity_row_lists_retained_generations_and_their_references() {
+        let mut value = empty();
+        value["retained_generations"] = json!([{
+            "section": "runtime_snapshot_qualification",
+            "binding_id": "render-snapshot-qualification",
+            "retained_digest": "a".repeat(64),
+            "current_digest": "b".repeat(64),
+            "referenced_by": [{
+                "kind": "qualification_occurrence",
+                "operation_id": "c".repeat(64),
+                "occurrence_bound": true,
+            }],
+            "attention": "operator",
+            "fix": "terminate it",
+        }]);
+        let rows = rows(&status(value));
+        assert_eq!(rows[0].status, FAIL);
+        assert_eq!(rows[0].detail["counts"]["operator"], 1);
+        assert_eq!(
+            rows[0].detail["retained_generations"][0]["referenced_by"][0]["operation_id"],
+            "c".repeat(64)
+        );
+        assert_eq!(rows[1].status, OK);
     }
 
     #[test]

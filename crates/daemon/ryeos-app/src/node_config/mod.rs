@@ -23,6 +23,7 @@
 
 pub mod coherence;
 pub mod loader;
+pub mod recompose;
 pub mod sections;
 
 use ryeos_node_runtime::node_config_source::{BundleRecord, NodeItemContext};

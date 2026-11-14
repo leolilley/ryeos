@@ -18,6 +18,7 @@ pub mod lifecycle_commands;
 mod lifecycle_external_compose;
 mod lifecycle_external_credential;
 mod lifecycle_external_qualification_compose;
+mod lifecycle_external_recompose;
 mod lifecycle_external_snapshot_compose;
 mod lifecycle_host_access;
 mod lifecycle_offline_operation;
