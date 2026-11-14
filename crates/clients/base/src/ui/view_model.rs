@@ -4497,7 +4497,13 @@ mod tests {
         assert_eq!(observe["extends"], "surface:ryeos/ui/assistant");
         assert_eq!(
             observe["capabilities"]["sources"],
-            json!(["ryeos.execute.service.*"])
+            json!([
+                "ryeos.execute.service.ui/ryeos-ui/*",
+                "ryeos.execute.service.node/status",
+                "ryeos.execute.service.projects/list",
+                "ryeos.execute.service.events/chain_replay",
+                "ryeos.execute.service.worker-executions/approvals"
+            ])
         );
         assert_eq!(observe["capabilities"]["affordances"], json!([]));
         assert_eq!(observe["view_sets"][0]["id"], "overview");

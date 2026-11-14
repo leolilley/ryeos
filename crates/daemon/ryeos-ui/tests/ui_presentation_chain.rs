@@ -593,6 +593,13 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
         .expect("the destination holds its authored Surface")
         .id()
         .clone();
+    let destination_sets_before = replay_b
+        .composition
+        .surfaces()
+        .get(&destination_surface)
+        .expect("the destination Surface")
+        .view_sets()
+        .len();
     let export_value = serde_json::to_value(&export).unwrap();
     let identity = TransferIdentity {
         operation_id: uuid::Uuid::new_v4().to_string(),
@@ -663,7 +670,11 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
                 .expect("the destination Surface")
                 .view_sets()
                 .len();
-            assert_eq!(imported, 2, "the destination Surface gained the copied set");
+            assert_eq!(
+                imported,
+                destination_sets_before + 2,
+                "the destination Surface gained the copied sets"
+            );
         }
     }
 
