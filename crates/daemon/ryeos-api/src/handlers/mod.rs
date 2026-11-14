@@ -88,6 +88,7 @@ pub mod push_head;
 pub(crate) mod qualification_project_context;
 pub mod rebuild;
 pub mod remote_admit;
+pub mod remote_admit_principal;
 pub mod remote_authorize;
 pub mod remote_bind_project;
 pub mod remote_bundle_install;
@@ -380,6 +381,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     remote_sync_admitted_heads::DESCRIPTOR,
     remote_run::DESCRIPTOR,
     remote_admit::DESCRIPTOR,
+    remote_admit_principal::DESCRIPTOR,
     remote_authorize::DESCRIPTOR,
     remote_threads::DESCRIPTOR,
     remote_thread_status::DESCRIPTOR,

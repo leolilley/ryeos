@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T00:21:02Z:fb2871a493900f49135590d5f969c6ff239bb63f6fc60d6e455e19eb9903e262:QfU7zx4mIR1sWtclrGxRqN9gQiXukkJfP1ATGBuATXicKqCubKVH89tBeMEYr/xQBMp46wlDpl7Ch37bSrwcDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T03:56:32Z:f95e97c05555282c7578e95049f180cc697660b5397d3749f06842ad536a546e:yxGwRvYjkaYf09Kjp/PZrEmHtLjVSv6VIT3VCgL6obzDmIkDWA/VrcJ9Nk64EmWsWXmdySY8RO1BlRtzNL5gDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -60,6 +60,45 @@ principal signs, with its own key, a bounded delegation that lets this node act
 for it on one remote. The daemon never holds a principal's private key, the
 operator's included: the operator is one more principal that signs a
 delegation.
+
+### Getting admitted as a principal
+
+A principal that has no grant on the remote yet is admitted with a
+`remote_principal` token. Three steps, in order:
+
+1. **Mint the token on the remote (node B).** B's operator mints a token for
+   the principal's home site and sends the cleartext to the principal out of
+   band.
+
+   ```bash
+   ryeos admission-token --class remote_principal --origin-site-id "site:home" \
+     --scopes "ryeos.execute.service.remote/run,ryeos.execute.service.vault/list"
+   ```
+
+   B must already admit the home node (A) as a `remote_node` of `site:home`
+   holding `ryeos.attest.request.forwarded-operator`, because that node
+   co-signs every principal claim. A pinned outbound remote for B must exist
+   on A (`remote configure`).
+
+2. **Admit from the home node (node A).** The principal runs this against A.
+   The CLI signs the claim with the principal's own key; A checks that the
+   signature is the caller's, co-signs it as the origin site, and forwards it
+   to B. A never holds the principal's key.
+
+   ```bash
+   ryeos remote admit --as-principal --remote hosted --token "<one-time-token>" \
+     --scopes ryeos.execute.service.remote/run \
+     --scopes ryeos.execute.service.vault/list
+   ```
+
+   The caller needs `ryeos.execute.service.remote/admit-principal` on A.
+   Scopes must be a subset of the token's. The grant on B is a
+   `remote_principal` grant bound to A's site, with an expiry bounded by B's
+   authorization policy. A remote pinned inbound-only is refused with
+   `remote_inbound_only`.
+
+3. **Delegate.** With the grant in place, sign the delegation that lets A act
+   for the principal (next section).
 
 ### Delegating
 
@@ -185,6 +224,7 @@ principal's grant ends all of them, and `not_after` bounds the rest.
 
    ```bash
    ryeos admission-token \
+     --class remote_node \
      --label "dev-machine" \
      --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
      --ttl-secs 600
@@ -515,6 +555,7 @@ ryeos remote-descriptor \
   --url https://ryeos.example.com
 
 ryeos admission-token \
+  --class remote_node \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600

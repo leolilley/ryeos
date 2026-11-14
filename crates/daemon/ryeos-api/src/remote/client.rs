@@ -1890,11 +1890,12 @@ impl RemoteClient {
         let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
         let token_hash = admission_token_hash(token);
-        let claim = admission_claim_string(
+        let claim = crate::handlers::admission_claim::claim_string(
             &self.audience,
             &token_hash,
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteNode,
             public_key,
-            origin_site_id,
+            Some(origin_site_id),
             &scopes,
             signed_at,
             &nonce,
@@ -1903,7 +1904,8 @@ impl RemoteClient {
         let signature =
             lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let mut body = serde_json::json!({
-            "protocol_version": 2,
+            "protocol_version": 3,
+            "principal_class": "remote_node",
             "token": token,
             "public_key": public_key,
             "origin_site_id": origin_site_id,
@@ -1916,6 +1918,12 @@ impl RemoteClient {
             body["label"] = Value::String(label.to_string());
         }
         self.unsigned_post("/admission/claim", &body).await
+    }
+
+    /// POST /admission/claim with a claim body another party already signed
+    /// and co-signed. The caller owns every signature in the body.
+    pub async fn post_admission_claim(&self, body: &Value) -> Result<Value> {
+        self.unsigned_post("/admission/claim", body).await
     }
 
     /// POST /revoke-delegation (authenticated): ask the remote to tombstone one
@@ -2377,7 +2385,7 @@ fn admission_token_hash(token: &str) -> String {
     lillux::cas::sha256_hex(token.as_bytes())
 }
 
-fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
+pub(crate) fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     let mut normalized: Vec<String> = scopes
         .iter()
         .map(|s| s.trim().to_string())
@@ -2400,27 +2408,6 @@ fn normalize_admission_scopes(scopes: &[String]) -> Result<Vec<String>> {
     }
 
     Ok(normalized)
-}
-
-fn admission_claim_string(
-    audience: &str,
-    token_hash: &str,
-    public_key: &str,
-    origin_site_id: &str,
-    scopes: &[String],
-    signed_at: u64,
-    nonce: &str,
-) -> String {
-    format!(
-        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        audience,
-        token_hash,
-        public_key,
-        origin_site_id,
-        scopes.join(","),
-        signed_at,
-        nonce,
-    )
 }
 
 /// A remote `/execute` response with the digest of the request that asked

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T00:21:02Z:b921a5db5e7023815fee6d8c8fa1927b8b5c096d675f5fd904beff6cdfefb047:sc1FeuNl9EW8+PLZ/U+U9JcutFEUROrTVha+74dnCsH8d6A8tqxQM/0jdi/SkBPH0CPtvTvO/ZDBVEjeH8luCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T03:56:32Z:18e0f41f919715464362bea0f7d08c0c23bf963f97499ec89de85e85bd15750b:lRybPMvu06WDv6DHtFQO1YTuSs0BWklNi+Ao3Baz2RJ6r4nCyTsWH03lIP3vh8QKwxZpwxKzcdEDcj+xex04Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -57,6 +57,7 @@ call made by the node itself is signed by the node key alone.
 | `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item; accepted/recoverable orchestration also needs `ryeos.execute.service.launch/status` and `ryeos.execute.service.launch/cancel` | `POST /execute`, or `POST /execute/launch` followed by exact launch status/cancel control when required |
 | `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
 | `ryeos remote thread-status` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads/{thread_id}` |
+| `ryeos remote admit --as-principal` | `ryeos.execute.service.remote/admit-principal` | none (the remote's token and the origin node's co-signature are the authority) | `POST /admission/claim` |
 | `ryeos remote delegate` | `ryeos.execute.service.remote/delegate` | none | none (the node stores the signed delegation) |
 | `ryeos remote delegation list` | `ryeos.execute.service.remote/delegation-list` | none | none |
 | `ryeos remote delegation revoke` | `ryeos.execute.service.remote/delegation-revoke` | `ryeos.execute.service.identity/revoke-delegation` (lent by the delegation; the remote operator may instead run `ryeos delegation tombstone`) | `POST /revoke-delegation` |
@@ -238,6 +239,7 @@ Mint a one-time, node-local bootstrap token file on the target node.
 
 ```bash
 ryeos admission-token \
+  --class remote_node \
   --label "dev-machine" \
   --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600
@@ -247,7 +249,35 @@ This is an offline/local operator tool. It writes a token hash file under
 the target system space at `.ai/node/admission/tokens/<sha256>.toml` and
 prints the cleartext token once. The token is not a bearer credential for
 runtime requests; it can only be consumed by `/admission/claim`, where
-the claimant must also sign the claim with the node key being admitted.
+the claimant must also sign the claim with the key being admitted.
+
+`--class` is required and names the grant the token admits:
+
+| `--class` | Admits | Claim must carry |
+|---|---|---|
+| `local_client` | a key local to this node | the claimant signature only; no origin site |
+| `remote_node` | another RyeOS node's key | the claimant signature and its own `origin_site_id` |
+| `remote_principal` | a principal key forwarded by its home site | the principal signature and a co-signature by an admitted node of the token's origin site |
+
+A `remote_principal` token also needs `--origin-site-id "site:<home>"`; no
+other class accepts one. `--grant-lifetime-secs` optionally shortens the
+admitted grant; the node's authorization policy still bounds it by the class
+maximum when the token is claimed. The `remote_principal` co-signer must be
+admitted on this node as a `remote_node` of that site holding the
+`ryeos.attest.request.forwarded-operator` scope.
+
+```bash
+ryeos admission-token \
+  --class remote_principal \
+  --origin-site-id "site:home" \
+  --scopes "ryeos.execute.service.remote/run"
+```
+
+Claims are refused with a typed code that names the cure:
+`admission_class_mismatch`, `admission_origin_site_mismatch`,
+`admission_cosignature_missing`, `admission_cosignature_invalid`, and
+`admission_token_invalid`. A token minted by an earlier release is refused
+with `admission_token_stale`; tokens are not converted, so mint a new one.
 
 ## `ryeos remote admit`
 
@@ -265,6 +295,13 @@ ryeos remote admit \
   --scopes ryeos.execute.service.system/push-head
 ```
 
+With `--as-principal` the command admits the calling principal rather than
+this node. The CLI signs a v3 `remote_principal` claim with the caller's own
+key and sends it to the caller's node, which checks the signature is the
+caller's, co-signs it as the origin site and forwards it to the remote. The
+token must be a `remote_principal` token minted for this node's site. See
+"Getting admitted as a principal" in Remote Operations.
+
 `remote admit` binds `scopes` as a typed array, so pass one repeatable
 `--scopes` flag per exact scope. The target-side `admission-token` authoring
 tool instead accepts its documented comma-separated scope string.
@@ -274,7 +311,9 @@ requires the principal, signing key, key fingerprint, canonical site ID, and
 vault fingerprint to match the locally configured coordinate exactly. Any
 mismatch refuses the operation before the one-time token is released. The
 target then consumes the token and writes a normal node-signed authorized-key
-grant for the caller node key.
+grant for the caller node key. `remote admit` claims `remote_node` tokens;
+a `remote_principal` claim is signed by the principal and co-signed by its
+home node, so it is built by the principal's own tooling.
 
 Because the token is a credential delivered by the target operator, admission
 resolves the named remote only from operator-owned config. Project remote

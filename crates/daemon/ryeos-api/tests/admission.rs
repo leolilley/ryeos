@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ryeos_api::handler_error::HandlerError;
 use ryeos_api::handlers::{admission_claim, admission_status, admission_submit};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 
 const TEST_POLICY: &str = "local-node-v2";
 const PUSH_SCOPES: &[&str] = &[
@@ -163,6 +164,10 @@ async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
     assert!(grant.contains(&format!("principal = \"fp:{fingerprint}\"")));
     assert!(grant.contains("request_digest = \""));
     assert!(grant.contains(&format!("origin_site_id = \"{}\"", state.threads.site_id())));
+    assert!(grant.contains(&format!(
+        "granted_by = \"admission:{}\"",
+        &lillux::cas::sha256_hex(token.as_bytes())[..12]
+    )));
 
     let reused = admission_claim::handle(
         signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine")),
@@ -219,8 +224,9 @@ async fn admission_claim_rejects_wrong_audience_signature() {
         ClaimToSign {
             audience: "fp:wrong-audience",
             token,
+            class: "remote_node",
             public_key: &req.public_key,
-            origin_site_id: &req.origin_site_id,
+            origin_site_id: req.origin_site_id.as_deref(),
             scopes: &req.scopes.iter().map(String::as_str).collect::<Vec<_>>(),
             signed_at: req.signed_at,
             nonce: &req.nonce,
@@ -239,7 +245,7 @@ async fn admission_claim_rejects_origin_site_changed_after_signing() {
     write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     let mut req = signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("node"));
-    req.origin_site_id = "site:attacker".to_string();
+    req.origin_site_id = Some("site:attacker".to_string());
 
     let result = admission_claim::handle(req, Arc::new(state)).await;
     assert!(matches!(result, Err(HandlerError::Forbidden(_))));
@@ -350,7 +356,7 @@ fn write_admission_token_file_with_issued_at(
     std::fs::create_dir_all(&token_dir).unwrap();
     let expires_at_unix = issued_at_unix + ttl_secs;
     let mut doc = format!(
-        "version = 1\ntoken_hash = \"{token_hash}\"\nscopes = [{}]\nissued_at_unix = {issued_at_unix}\nttl_secs = {ttl_secs}\nexpires_at_unix = {expires_at_unix}\n",
+        "version = 2\nclass = \"remote_node\"\ntoken_hash = \"{token_hash}\"\nscopes = [{}]\nissued_at_unix = {issued_at_unix}\nttl_secs = {ttl_secs}\nexpires_at_unix = {expires_at_unix}\n",
         scopes
             .iter()
             .map(|scope| format!("\"{scope}\""))
@@ -389,8 +395,9 @@ fn signed_claim_request(
         ClaimToSign {
             audience: &audience,
             token,
+            class: "remote_node",
             public_key: &public_key,
-            origin_site_id: &origin_site_id,
+            origin_site_id: Some(&origin_site_id),
             scopes: &scopes.iter().map(String::as_str).collect::<Vec<_>>(),
             signed_at,
             nonce: &nonce,
@@ -398,10 +405,13 @@ fn signed_claim_request(
         claimant,
     );
     admission_claim::Request {
-        protocol_version: 2,
+        protocol_version: 3,
         token: token.to_string(),
         public_key,
-        origin_site_id,
+        principal_class: AuthorizedKeyPrincipalClass::RemoteNode,
+        origin_site_id: Some(origin_site_id),
+        forwarding_key_id: None,
+        forwarding_signature: None,
         label: label.map(str::to_string),
         scopes,
         signed_at,
@@ -413,8 +423,9 @@ fn signed_claim_request(
 struct ClaimToSign<'a> {
     audience: &'a str,
     token: &'a str,
+    class: &'a str,
     public_key: &'a str,
-    origin_site_id: &'a str,
+    origin_site_id: Option<&'a str>,
     scopes: &'a [&'a str],
     signed_at: u64,
     nonce: &'a str,
@@ -423,11 +434,12 @@ struct ClaimToSign<'a> {
 fn sign_claim(claim: ClaimToSign<'_>, claimant: &lillux::crypto::SigningKey) -> String {
     let token_hash = lillux::cas::sha256_hex(claim.token.as_bytes());
     let claim = format!(
-        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "ryeos-admission-claim-v3\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         claim.audience,
         token_hash,
+        claim.class,
         claim.public_key,
-        claim.origin_site_id,
+        claim.origin_site_id.unwrap_or(""),
         claim.scopes.join(","),
         claim.signed_at,
         claim.nonce,
@@ -518,4 +530,463 @@ async fn admission_claim_concurrent_claims_with_different_keys_admit_exactly_one
         .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
         .count();
     assert_eq!(grants, 1);
+}
+
+/// Which shape of token and claim a class test builds.
+struct ClassFixture {
+    token: &'static str,
+    class: &'static str,
+    origin: Option<&'static str>,
+    grant_lifetime_secs: Option<u64>,
+}
+
+fn write_class_token(state: &ryeos_app::state::AppState, fixture: &ClassFixture, version: u32) {
+    let token_hash = lillux::cas::sha256_hex(fixture.token.as_bytes());
+    let token_dir = state
+        .config
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("admission")
+        .join("tokens");
+    std::fs::create_dir_all(&token_dir).unwrap();
+    let issued_at_unix = now_unix();
+    let mut doc = format!(
+        "version = {version}\ntoken_hash = \"{token_hash}\"\nscopes = [\"{}\"]\nissued_at_unix = {issued_at_unix}\nttl_secs = 600\nexpires_at_unix = {}\n",
+        PUSH_SCOPES[0],
+        issued_at_unix + 600,
+    );
+    if version == 2 {
+        doc.push_str(&format!("class = \"{}\"\n", fixture.class));
+    }
+    if let Some(origin) = fixture.origin {
+        doc.push_str(&format!("origin_site_id = \"{origin}\"\n"));
+    }
+    if let Some(lifetime) = fixture.grant_lifetime_secs {
+        doc.push_str(&format!("grant_lifetime_secs = {lifetime}\n"));
+    }
+    std::fs::write(
+        admission_token_path(&state.config.app_root, &token_hash),
+        doc,
+    )
+    .unwrap();
+}
+
+/// A claim of `class` for `origin`, signed by `claimant`, with no co-signature.
+fn class_claim(
+    state: &ryeos_app::state::AppState,
+    token: &str,
+    claimant: &lillux::crypto::SigningKey,
+    class: AuthorizedKeyPrincipalClass,
+    origin: Option<&str>,
+) -> admission_claim::Request {
+    let mut req = signed_claim_request(state, token, claimant, &PUSH_SCOPES[..1], None);
+    req.principal_class = class;
+    req.origin_site_id = origin.map(str::to_string);
+    req.signature = sign_claim(
+        ClaimToSign {
+            audience: &state.identity.principal_id(),
+            token,
+            class: class.as_str(),
+            public_key: &req.public_key,
+            origin_site_id: origin,
+            scopes: &[PUSH_SCOPES[0]],
+            signed_at: req.signed_at,
+            nonce: &req.nonce,
+        },
+        claimant,
+    );
+    req
+}
+
+/// Admit `forwarder` on this node as a `remote_node` of `site` holding the
+/// forwarded-operator attestation scope.
+fn admit_forwarding_node(
+    state: &ryeos_app::state::AppState,
+    forwarder: &lillux::crypto::SigningKey,
+    site: &str,
+    scopes: &[String],
+) -> String {
+    let vk = forwarder.verifying_key();
+    let fp = lillux::signature::compute_fingerprint(&vk);
+    ryeos_node_runtime::identity::write_authorized_remote_node_key_toml(
+        &state.config.authorized_keys_dir,
+        &fp,
+        &base64::engine::general_purpose::STANDARD.encode(vk.as_bytes()),
+        scopes,
+        "forwarding-node",
+        "test-granter",
+        "2026-01-01T00:00:00Z",
+        &ryeos_node_runtime::identity::GrantTerms::for_tests(),
+        site,
+        state.identity.signing_key(),
+    )
+    .unwrap();
+    fp
+}
+
+fn attestation_scopes() -> Vec<String> {
+    vec![ryeos_node_runtime::identity::FORWARDED_OPERATOR_ATTESTATION_SCOPE.to_string()]
+}
+
+/// Co-sign `req` as `forwarder`, which speaks for `site`, the way an origin
+/// node attests a principal's claim.
+fn cosign(
+    state: &ryeos_app::state::AppState,
+    req: &mut admission_claim::Request,
+    token: &str,
+    claimant: &lillux::crypto::SigningKey,
+    forwarder: &lillux::crypto::SigningKey,
+    site: &str,
+) {
+    let audience = state.identity.principal_id();
+    let claim = admission_claim::claim_string(
+        &audience,
+        &lillux::cas::sha256_hex(token.as_bytes()),
+        req.principal_class,
+        &req.public_key,
+        req.origin_site_id.as_deref(),
+        &req.scopes,
+        req.signed_at,
+        &req.nonce,
+    );
+    let forwarder_fp = lillux::signature::compute_fingerprint(&forwarder.verifying_key());
+    let key_id = format!("fp:{forwarder_fp}");
+    let hash = admission_claim::cosignature_content_hash(
+        &audience,
+        &lillux::cas::sha256_hex(claim.as_bytes()),
+        req.signed_at,
+        &req.nonce,
+        &lillux::signature::compute_fingerprint(&claimant.verifying_key()),
+        &req.signature,
+        &key_id,
+        site,
+    );
+    let signature = forwarder.sign(hash.as_bytes());
+    req.forwarding_key_id = Some(key_id);
+    req.forwarding_signature =
+        Some(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()));
+}
+
+fn refusal_code(result: &Result<serde_json::Value, HandlerError>) -> String {
+    match result {
+        Err(HandlerError::Structured { code, .. }) => code.clone(),
+        other => panic!("expected a typed refusal, got {other:?}"),
+    }
+}
+
+const PRINCIPAL_TOKEN: ClassFixture = ClassFixture {
+    token: "principal-token",
+    class: "remote_principal",
+    origin: Some("site:home"),
+    grant_lifetime_secs: None,
+};
+
+#[tokio::test]
+async fn principal_token_requires_principal_and_node_cosignature() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    let token = PRINCIPAL_TOKEN.token;
+    let (toml, _) = token_file_paths(&state, token);
+    let principal = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let home_node = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let other_node = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let unadmitted_node = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    admit_forwarding_node(&state, &home_node, "site:home", &attestation_scopes());
+    admit_forwarding_node(&state, &other_node, "site:elsewhere", &attestation_scopes());
+    let state = Arc::new(state);
+    let claim = |state: &ryeos_app::state::AppState| {
+        class_claim(
+            state,
+            token,
+            &principal,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            Some("site:home"),
+        )
+    };
+
+    // The principal's signature alone is not enough.
+    let alone = admission_claim::handle(claim(&state), state.clone()).await;
+    assert_eq!(refusal_code(&alone), "admission_cosignature_missing");
+
+    // A co-signature from a node that is not admitted here is refused.
+    let mut req = claim(&state);
+    cosign(
+        &state,
+        &mut req,
+        token,
+        &principal,
+        &unadmitted_node,
+        "site:home",
+    );
+    let unadmitted = admission_claim::handle(req, state.clone()).await;
+    assert_eq!(refusal_code(&unadmitted), "admission_cosignature_invalid");
+
+    // A node admitted for another site cannot attest for the token's site.
+    let mut req = claim(&state);
+    cosign(
+        &state,
+        &mut req,
+        token,
+        &principal,
+        &other_node,
+        "site:home",
+    );
+    let wrong_site = admission_claim::handle(req, state.clone()).await;
+    assert_eq!(refusal_code(&wrong_site), "admission_cosignature_invalid");
+
+    // A co-signature over a different claim signature does not transfer.
+    let mut req = claim(&state);
+    cosign(&state, &mut req, token, &principal, &home_node, "site:home");
+    req.nonce = "another-nonce".to_string();
+    let replayed = admission_claim::handle(req, state.clone()).await;
+    assert!(replayed.is_err());
+
+    // None of the refusals burned the token.
+    assert!(
+        toml.is_file(),
+        "refused claims must leave the token claimable"
+    );
+
+    let mut req = claim(&state);
+    cosign(&state, &mut req, token, &principal, &home_node, "site:home");
+    let response = admission_claim::handle(req, state.clone()).await.unwrap();
+    assert_eq!(response["principal_class"], "remote_principal");
+    assert_eq!(response["origin_site_id"], "site:home");
+    let fingerprint = response["fingerprint"].as_str().unwrap();
+    let grant = std::fs::read_to_string(
+        state
+            .config
+            .authorized_keys_dir
+            .join(format!("{fingerprint}.toml")),
+    )
+    .unwrap();
+    assert!(grant.contains("principal_class = \"remote_principal\""));
+    assert!(grant.contains("origin_site_id = \"site:home\""));
+    assert!(grant.contains(&format!("principal = \"fp:{fingerprint}\"")));
+
+    // Single use.
+    let mut again = claim(&state);
+    cosign(
+        &state,
+        &mut again,
+        token,
+        &principal,
+        &home_node,
+        "site:home",
+    );
+    let reused = admission_claim::handle(again, state).await;
+    assert!(matches!(reused, Err(HandlerError::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn node_token_cannot_admit_principal_class_and_the_reverse() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    let node_token = ClassFixture {
+        token: "node-token",
+        class: "remote_node",
+        origin: None,
+        grant_lifetime_secs: None,
+    };
+    write_class_token(&state, &node_token, 2);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let state = Arc::new(state);
+
+    let principal_claim_on_node_token = admission_claim::handle(
+        class_claim(
+            &state,
+            node_token.token,
+            &claimant,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
+            Some("site:home"),
+        ),
+        state.clone(),
+    )
+    .await;
+    assert_eq!(
+        refusal_code(&principal_claim_on_node_token),
+        "admission_class_mismatch"
+    );
+
+    let node_claim_on_principal_token = admission_claim::handle(
+        class_claim(
+            &state,
+            PRINCIPAL_TOKEN.token,
+            &claimant,
+            AuthorizedKeyPrincipalClass::RemoteNode,
+            Some("site:home"),
+        ),
+        state.clone(),
+    )
+    .await;
+    assert_eq!(
+        refusal_code(&node_claim_on_principal_token),
+        "admission_class_mismatch"
+    );
+
+    // Neither refusal consumed a token.
+    assert!(token_file_paths(&state, node_token.token).0.is_file());
+    assert!(token_file_paths(&state, PRINCIPAL_TOKEN.token).0.is_file());
+}
+
+#[tokio::test]
+async fn principal_token_refuses_a_claim_for_another_origin_site() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let forwarder = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    admit_forwarding_node(&state, &forwarder, "site:elsewhere", &attestation_scopes());
+    let mut req = class_claim(
+        &state,
+        PRINCIPAL_TOKEN.token,
+        &claimant,
+        AuthorizedKeyPrincipalClass::RemotePrincipal,
+        Some("site:elsewhere"),
+    );
+    cosign(
+        &state,
+        &mut req,
+        PRINCIPAL_TOKEN.token,
+        &claimant,
+        &forwarder,
+        "site:elsewhere",
+    );
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+    assert_eq!(refusal_code(&result), "admission_origin_site_mismatch");
+}
+
+#[tokio::test]
+async fn forwarding_node_without_attestation_scope_cannot_cosign() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    write_class_token(&state, &PRINCIPAL_TOKEN, 2);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let forwarder = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    admit_forwarding_node(
+        &state,
+        &forwarder,
+        "site:home",
+        &[PUSH_SCOPES[0].to_string()],
+    );
+    let mut req = class_claim(
+        &state,
+        PRINCIPAL_TOKEN.token,
+        &claimant,
+        AuthorizedKeyPrincipalClass::RemotePrincipal,
+        Some("site:home"),
+    );
+    cosign(
+        &state,
+        &mut req,
+        PRINCIPAL_TOKEN.token,
+        &claimant,
+        &forwarder,
+        "site:home",
+    );
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+    assert_eq!(refusal_code(&result), "admission_cosignature_invalid");
+}
+
+#[tokio::test]
+async fn old_format_token_is_refused_as_stale() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    let old = ClassFixture {
+        token: "old-token",
+        class: "remote_node",
+        origin: None,
+        grant_lifetime_secs: None,
+    };
+    write_class_token(&state, &old, 1);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let req = class_claim(
+        &state,
+        old.token,
+        &claimant,
+        AuthorizedKeyPrincipalClass::RemoteNode,
+        Some("site:home"),
+    );
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+    assert_eq!(refusal_code(&result), "admission_token_stale");
+    let Err(HandlerError::Structured { body, .. }) = result else {
+        unreachable!()
+    };
+    assert!(body["error"].as_str().unwrap().contains("mint a new one"));
+}
+
+#[tokio::test]
+async fn token_grant_lifetime_is_bounded_by_the_authorization_policy() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    let long = ClassFixture {
+        token: "long-lifetime-token",
+        class: "local_client",
+        origin: None,
+        grant_lifetime_secs: Some(10_000_000_000),
+    };
+    write_class_token(&state, &long, 2);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let req = class_claim(
+        &state,
+        long.token,
+        &claimant,
+        AuthorizedKeyPrincipalClass::LocalClient,
+        None,
+    );
+    let state = Arc::new(state);
+    let result = admission_claim::handle(req, state.clone()).await;
+    assert_eq!(refusal_code(&result), "grant_lifetime_exceeds_policy");
+    assert!(
+        token_file_paths(&state, long.token).0.is_file(),
+        "a refused lifetime must leave the token claimable"
+    );
+}
+
+#[tokio::test]
+async fn local_client_token_admits_a_local_client_grant_without_origin_site() {
+    let (_tmp, _state_owner, state) = test_state::build_test_state_with_hosted_policy(600);
+    let local = ClassFixture {
+        token: "local-client-token",
+        class: "local_client",
+        origin: None,
+        grant_lifetime_secs: Some(3600),
+    };
+    write_class_token(&state, &local, 2);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let state = Arc::new(state);
+
+    let with_origin = admission_claim::handle(
+        class_claim(
+            &state,
+            local.token,
+            &claimant,
+            AuthorizedKeyPrincipalClass::LocalClient,
+            Some("site:home"),
+        ),
+        state.clone(),
+    )
+    .await;
+    assert_eq!(refusal_code(&with_origin), "admission_origin_site_mismatch");
+
+    let response = admission_claim::handle(
+        class_claim(
+            &state,
+            local.token,
+            &claimant,
+            AuthorizedKeyPrincipalClass::LocalClient,
+            None,
+        ),
+        state.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["principal_class"], "local_client");
+    let fingerprint = response["fingerprint"].as_str().unwrap();
+    let grant = std::fs::read_to_string(
+        state
+            .config
+            .authorized_keys_dir
+            .join(format!("{fingerprint}.toml")),
+    )
+    .unwrap();
+    assert!(grant.contains("principal_class = \"local_client\""));
+    assert!(!grant.contains("origin_site_id"));
 }
