@@ -1,3 +1,4 @@
+# ryeos:signed:2026-11-14T07:05:20Z:f2ccf14c4806587620dc15fd41d09081fd12112f2dd18846d9d876f34690536e:6dzLfyQ8nafPTzu9RiKJjwQrvjisvBulvEUMXySN0sRvx5+Glo1GeivtAq7ILKhig5rfIRyFGO6AwcPpuQUtBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/central-auth/lib
 #   version: "0.1.0"
@@ -35,9 +36,12 @@ PBKDF2_ITERATIONS = 210_000
 DUMMY_KDF_SALT = b"central-auth-dummy-salt"
 # Expired sessions/invites/failure records examined per login or verify.
 OPPORTUNISTIC_GC_SAMPLE = 16
-# The node owns central-auth state: it lives under the app root the daemon
-# hands every launch as RYEOS_APP_ROOT, never at a caller-chosen location.
-STATE_HOME_PARTS = (".ai", "state", "central-auth")
+# The node owns central-auth state: the daemon mounts one bundle state home per
+# realm and names it in RYEOSD_BUNDLE_STATE_HOME, never at a caller-chosen
+# location. Under enforced isolation the daemon mounts the realm's directory
+# at this fixed destination.
+STATE_HOME_ENV = "RYEOSD_BUNDLE_STATE_HOME"
+ENFORCED_STATE_MOUNT = "/run/ryeos/bundle-state"
 CALLER_STATE_LOCATION_KEYS = ("runtime_state_dir", "project_path")
 LOGIN_THROTTLE_FIELDS = ("max_failures", "window_secs", "lockout_secs")
 
@@ -169,16 +173,16 @@ def validate_capability(capability: str) -> str:
 
 
 def state_home() -> Path:
-    raw = os.environ.get("RYEOS_APP_ROOT", "")
+    raw = os.environ.get(STATE_HOME_ENV, "")
     if not raw:
         raise AuthError(
-            "app_root_unavailable",
-            "RYEOS_APP_ROOT is not set; central-auth state lives under the node app root",
+            "state_home_unavailable",
+            "the daemon did not grant a bundle state home: check the tool's state_home declaration",
         )
-    app_root = Path(raw)
-    if not app_root.is_absolute():
-        raise AuthError("app_root_unavailable", f"RYEOS_APP_ROOT must be absolute, saw {raw!r}")
-    return app_root.joinpath(*STATE_HOME_PARTS)
+    home = Path(raw)
+    if not home.is_absolute():
+        raise AuthError("state_home_unavailable", f"{STATE_HOME_ENV} must be absolute, saw {raw!r}")
+    return home
 
 
 def resolve_realm_dir(data: dict[str, Any]) -> Path:
@@ -187,10 +191,19 @@ def resolve_realm_dir(data: dict[str, Any]) -> Path:
             raise AuthError(
                 "caller_state_location_refused",
                 f"{key} is not accepted: central-auth state lives in the node-owned "
-                "<app_root>/.ai/state/central-auth",
+                "bundle state home",
             )
     realm_id = validate_realm(require_str(data, "realm_id"))
-    return state_home() / "realms" / realm_id
+    home = state_home()
+    # The daemon mounted the namespace named by the realm_id launch parameter, so
+    # the home is the realm directory. Without a mount (isolation disabled) the
+    # variable names the real directory, whose name must be that realm.
+    if str(home) != ENFORCED_STATE_MOUNT and os.path.basename(os.path.realpath(home)) != realm_id:
+        raise AuthError(
+            "state_home_unavailable",
+            f"the granted bundle state home is not the namespace for realm {realm_id!r}",
+        )
+    return home
 
 
 def ensure_dirs(realm_dir: Path) -> None:

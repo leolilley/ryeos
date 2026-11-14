@@ -35,9 +35,12 @@ class CentralAuthTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.app_root = Path(self.tmp.name) / "app-root"
-        self.env = mock.patch.dict(os.environ, {"RYEOS_APP_ROOT": str(self.app_root)})
+        self.realm_dir = self.app_root / ".ai" / "state" / "bundle-state" / "central-auth" / "tv"
+        self.env = mock.patch.dict(
+            os.environ,
+            {"RYEOSD_BUNDLE_STATE_HOME": str(self.realm_dir), "RYEOS_APP_ROOT": str(self.app_root)},
+        )
         self.env.start()
-        self.realm_dir = self.app_root / ".ai" / "state" / "central-auth" / "realms" / "tv"
         self.base = {"realm_id": "tv"}
         self.throttle = {"max_failures": 3, "window_secs": 600, "lockout_secs": 300}
         self.policy = {
@@ -191,10 +194,11 @@ class CentralAuthTest(unittest.TestCase):
         self.assertFalse(checked["valid"])
         self.assertEqual(checked["error"]["code"], "invalid_session_grants")
 
-    def test_state_lives_under_app_root(self):
+    def test_state_home_from_env(self):
         self.create_alice()
         self.assertTrue((self.realm_dir / "principals" / "alice.json").is_file())
         self.assertTrue((self.realm_dir / "policy.json").is_file())
+        self.assertFalse((self.realm_dir / "realms").exists())
 
     def test_runtime_state_dir_is_refused(self):
         for key in ("runtime_state_dir", "project_path"):
@@ -204,16 +208,37 @@ class CentralAuthTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, "caller_state_location_refused")
         self.assertFalse((Path(self.tmp.name) / "elsewhere").exists())
 
-    def test_missing_app_root_is_refused(self):
-        for value in (None, "relative/root"):
+    def test_missing_state_home_refused(self):
+        for value in (None, "relative/home"):
             with self.subTest(value=value):
-                env = {k: v for k, v in os.environ.items() if k != "RYEOS_APP_ROOT"}
+                env = {k: v for k, v in os.environ.items() if k != "RYEOSD_BUNDLE_STATE_HOME"}
                 if value is not None:
-                    env["RYEOS_APP_ROOT"] = value
+                    env["RYEOSD_BUNDLE_STATE_HOME"] = value
                 with mock.patch.dict(os.environ, env, clear=True):
                     with self.assertRaises(auth.AuthError) as ctx:
                         auth.command_gc(self.base)
-                self.assertEqual(ctx.exception.code, "app_root_unavailable")
+                self.assertEqual(ctx.exception.code, "state_home_unavailable")
+                if value is None:
+                    self.assertIn("state_home declaration", ctx.exception.message)
+
+    def test_app_root_env_ignored(self):
+        env = {k: v for k, v in os.environ.items() if k != "RYEOSD_BUNDLE_STATE_HOME"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(auth.AuthError) as ctx:
+                auth.command_gc(self.base)
+        self.assertEqual(ctx.exception.code, "state_home_unavailable")
+        self.assertFalse((self.app_root / ".ai" / "state" / "central-auth").exists())
+
+    def test_realm_must_match_mounted_namespace(self):
+        with self.assertRaises(auth.AuthError) as ctx:
+            auth.command_gc({"realm_id": "other"})
+        self.assertEqual(ctx.exception.code, "state_home_unavailable")
+
+    def test_enforced_mount_is_trusted(self):
+        with mock.patch.dict(os.environ, {"RYEOSD_BUNDLE_STATE_HOME": auth.ENFORCED_STATE_MOUNT}):
+            self.assertEqual(
+                auth.resolve_realm_dir({"realm_id": "other"}), Path(auth.ENFORCED_STATE_MOUNT)
+            )
 
     def test_login_missing_principal_runs_kdf(self):
         for principal_id, disabled in (("nobody", False), ("alice", True)):

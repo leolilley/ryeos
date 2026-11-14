@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T00:43:18Z:a1feb05af6da50af340b17aa47a9a0be04092c152c9fecb170f5b0f6bd87f802:0qlCvsxS7retncq/V/atHW4xI3uTWCI5Zw+lCR9MhwQ8KvasNdEG4tEn8Q0QaXA/v40O0bTPJJ42fVPWwB3eDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:05:20Z:17da72c69323b10da6009eba9314526d83beb2f247dd00787548f35b5bd6c84a:IHmcxhmjeZKnY58PPnCPEtIObo4LTd6qvBJNhMyHhr8DQzQbxaApwRQATuxxmJU0ARad6AcM3FQs6fTiUJ9nBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "check-capability"
@@ -6,6 +6,15 @@ executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.check-capability"]
 description: "Verify a session token and check one required capability."
+
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        state_home:
+          namespace:
+            from_param: realm_id
+          access: read_write
 
 config:
   command: "python3"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-12T22:44:06Z:1128b9f9cd54d32b98b5739917e9247a4351f36575a3da9b439b86d1e0a33670:QWFSofLjF170SqmB4MO6KBaKpG3sa7OHLu1KUJDgkHoyAe8QiMNqwPuTN8INO+sRBHzyLiv+TcaYOxTukNRjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:05:20Z:32afc28dbcd2c7e559361cd1ce6a2928b277b69370ce911031e11c7a0338909e:BBLfUdW+peTLRg454g5xtOa23qGHjx7TTy0RFnpGizNn3RMOBA9HDGWcdt0X16oW1G5G636i/hUKTgr8rAU6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: central-auth
 version: 0.1.0
 description: 'Optional application authentication above Standard: principals, sessions, invites, roles and capabilities; separate from native node authority'
@@ -7,3 +7,7 @@ requires_kinds:
 - tool
 - config
 uses_kinds: []
+runtime_authority:
+  state_home:
+    namespaces:
+      kind: launch_param
