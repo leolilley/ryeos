@@ -42,6 +42,7 @@ struct ProjectScheduleCallerAdapter {
     // sessions are owned by an AppState extension, so retaining AppState here
     // would create an extensions -> session -> AppState strong-reference cycle.
     site_id: String,
+    authority: ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts,
 }
 
 impl ProjectScheduleCaller for ProjectScheduleCallerAdapter {
@@ -83,6 +84,16 @@ impl ProjectScheduleCaller for ProjectScheduleCallerAdapter {
             &self.caller,
             &self.site_id,
             registration_request_hash,
+        )
+    }
+
+    fn require_execution_admissible(
+        &self,
+        execution: &ryeos_scheduler_contract::ScheduleExecution,
+    ) -> Result<()> {
+        crate::handlers::scheduler_register::refuse_authority_that_cannot_hold_at_fire(
+            &self.authority,
+            execution,
         )
     }
 }
@@ -413,6 +424,9 @@ pub fn plan(
         caller: Arc::new(ProjectScheduleCallerAdapter {
             caller: ctx.caller.clone(),
             site_id: ctx.state.threads.site_id().to_owned(),
+            authority: ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
+                ctx.state,
+            ),
         }),
     };
     let schedules = session.plan(request)?;
@@ -634,6 +648,13 @@ mod tests {
             _: String,
         ) -> Result<ryeos_scheduler_contract::ScheduleExecutionAuthority> {
             unreachable!("omission never mints execution authority")
+        }
+
+        fn require_execution_admissible(
+            &self,
+            _: &ryeos_scheduler_contract::ScheduleExecution,
+        ) -> Result<()> {
+            unreachable!("omission never writes a schedule")
         }
     }
 

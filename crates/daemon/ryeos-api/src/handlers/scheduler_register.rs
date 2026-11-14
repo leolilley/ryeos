@@ -256,7 +256,12 @@ pub async fn handle(
         paused_reason: None,
     };
     source_record.validate(Some(&req.schedule_id))?;
-    refuse_authority_that_cannot_hold_at_fire(state.as_ref(), &source_record.execution)?;
+    refuse_authority_that_cannot_hold_at_fire(
+        &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
+            state.as_ref(),
+        ),
+        &source_record.execution,
+    )?;
     let body = serde_json::to_value(&source_record)?;
 
     // Write signed YAML through the same pinned source transaction used for
@@ -309,7 +314,8 @@ fn structured_refusal(status: u16, code: &str, message: String, detail: Value) -
     })
 }
 
-/// Refuse at registration a schedule whose authority the first fire would
+/// Refuse at registration, and when project deployment writes a schedule, a
+/// schedule whose authority the first fire would
 /// refuse: the same revalidation a fire runs (the pinned grant generations,
 /// class, origin, capability coverage and, for a forwarded principal, the
 /// delegation's expiry and revocation) and the same execution-policy
@@ -317,34 +323,36 @@ fn structured_refusal(status: u16, code: &str, message: String, detail: Value) -
 /// operator-vault exposure must each be covered by the schedule's own
 /// capabilities, because a fire runs with exactly those). Without this a
 /// schedule registers, then pauses at its first fire.
-fn refuse_authority_that_cannot_hold_at_fire(
-    state: &AppState,
+pub(crate) fn refuse_authority_that_cannot_hold_at_fire(
+    parts: &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts,
     execution: &ScheduleExecution,
 ) -> Result<()> {
     let handler_context =
-        ryeos_app::scheduled_execution_authority::revalidate_scheduled_execution(state, execution)
-            .map_err(|error| {
-                match ryeos_scheduler_contract::ScheduledAuthorityRefusal::find(&error) {
-                    Some(refusal) => structured_refusal(
-                        403,
-                        SCHEDULED_AUTHORITY_REFUSED,
-                        format!(
-                            "this schedule's authority would be refused at its first fire \
+        ryeos_app::scheduled_execution_authority::revalidate_scheduled_execution_with(
+            parts, execution,
+        )
+        .map_err(
+            |error| match ryeos_scheduler_contract::ScheduledAuthorityRefusal::find(&error) {
+                Some(refusal) => structured_refusal(
+                    403,
+                    SCHEDULED_AUTHORITY_REFUSED,
+                    format!(
+                        "this schedule's authority would be refused at its first fire \
                              ({}): {}",
-                            refusal.kind, refusal.detail
-                        ),
-                        serde_json::json!({
-                            "refusal": refusal.kind,
-                            "outcome": refusal.kind.fire_outcome(),
-                        }),
+                        refusal.kind, refusal.detail
                     ),
-                    None => error,
-                }
-            })?;
-    crate::routes::response_modes::execute_mode::preauthorize_execution_policy(
+                    serde_json::json!({
+                        "refusal": refusal.kind,
+                        "outcome": refusal.kind.fire_outcome(),
+                    }),
+                ),
+                None => error,
+            },
+        )?;
+    crate::routes::response_modes::execute_mode::preauthorize_execution_policy_with(
         &execution.policy,
         &handler_context.scopes,
-        state,
+        &parts.authorizer,
     )
     .map_err(|error| {
         use ryeos_app::execution_policy::OperatorVaultCapabilityRequired;

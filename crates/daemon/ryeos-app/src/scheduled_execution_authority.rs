@@ -54,8 +54,41 @@ fn load_pinned_grant(
     })
 }
 
+/// The node facts a schedule's authority is judged against. A value owns
+/// them, so a holder that must not retain the whole [`AppState`] (project
+/// deployment sessions are owned by an `AppState` extension) can still run
+/// the fire-time revalidation.
+#[derive(Clone)]
+pub struct ScheduleAuthorityParts {
+    pub identity: std::sync::Arc<NodeIdentity>,
+    pub authorizer: std::sync::Arc<Authorizer>,
+    pub authorized_keys_dir: std::path::PathBuf,
+    pub app_root: std::path::PathBuf,
+    pub site_id: String,
+}
+
+impl ScheduleAuthorityParts {
+    pub fn from_state(state: &AppState) -> Self {
+        Self {
+            identity: std::sync::Arc::clone(&state.identity),
+            authorizer: std::sync::Arc::clone(&state.authorizer),
+            authorized_keys_dir: state.config.authorized_keys_dir.clone(),
+            app_root: state.config.app_root.clone(),
+            site_id: state.threads.site_id().to_owned(),
+        }
+    }
+}
+
 pub fn revalidate_scheduled_execution(
     state: &AppState,
+    execution: &ScheduleExecution,
+) -> anyhow::Result<HandlerContext> {
+    revalidate_scheduled_execution_with(&ScheduleAuthorityParts::from_state(state), execution)
+}
+
+/// [`revalidate_scheduled_execution`] over [`ScheduleAuthorityParts`].
+pub fn revalidate_scheduled_execution_with(
+    parts: &ScheduleAuthorityParts,
     execution: &ScheduleExecution,
 ) -> anyhow::Result<HandlerContext> {
     execution.policy.validate()?;
@@ -64,8 +97,8 @@ pub fn revalidate_scheduled_execution(
             principal_id,
             effective_origin_site_id,
         } => {
-            if principal_id != &state.identity.principal_id()
-                || effective_origin_site_id != state.threads.site_id()
+            if principal_id != &parts.identity.principal_id()
+                || effective_origin_site_id != &parts.site_id
             {
                 return Err(refused(
                     ScheduledAuthorityRefusalKind::NodeAuthorityChanged,
@@ -89,16 +122,16 @@ pub fn revalidate_scheduled_execution(
         } => {
             check_authenticated_grants(
                 execution,
-                &state.config.authorized_keys_dir,
-                &state.identity,
-                state.threads.site_id(),
-                &state.authorizer,
+                &parts.authorized_keys_dir,
+                &parts.identity,
+                &parts.site_id,
+                &parts.authorizer,
             )?;
             check_pinned_delegation(
                 execution,
-                &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone())
+                &ryeos_engine::roots::RuntimeRoot::new(parts.app_root.clone())
                     .delegation_revocations_dir(),
-                &state.identity,
+                &parts.identity,
                 lillux::time::unix_secs_now(),
             )?;
             Ok(HandlerContext::new_with_grant_authority(
