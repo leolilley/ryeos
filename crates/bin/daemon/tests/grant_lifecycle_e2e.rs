@@ -597,9 +597,12 @@ async fn revoke_cancels_live_threads_of_principal() {
             "ref_bindings": {},
             "project_path": project_path.display().to_string(),
             "parameters": {},
+            // The grantee holds no operator-vault capability, so its launch
+            // does not overlay the operator vault.
             "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
                 ryeos_app::execution_policy::ExecutionResponse::Accepted,
-            ),
+            )
+            .exclude_operator_vault(),
         }),
     )
     .await;
