@@ -163,7 +163,7 @@ pub fn admitted_operator_authority_digest(
     match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
             let local_operator =
-                ryeos_node_runtime::operator_identity::test_support::load_operator(
+                ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
                     &state.config.app_root,
                 )
                 .context("load configured local operator identity")?;
@@ -229,7 +229,7 @@ fn admitted_operator_authority_for_named_role(
     let origin_site_id = match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
             let local_operator =
-                ryeos_node_runtime::operator_identity::test_support::load_operator(
+                ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
                     &state.config.app_root,
                 )
                 .context("load configured local operator identity")?;
@@ -298,7 +298,7 @@ pub fn retained_admitted_operator_authority(
     match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
             let local_operator =
-                ryeos_node_runtime::operator_identity::test_support::load_operator(
+                ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
                     &state.config.app_root,
                 )
                 .context("load configured local operator identity")?;
