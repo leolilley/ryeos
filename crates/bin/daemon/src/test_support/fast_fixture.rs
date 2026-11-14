@@ -592,7 +592,14 @@ pub fn populate_initialized_state_with_profile_and_identities(
 /// lock; a parsed native-capacity policy alone cannot make this fixture live.
 /// Capacity files bind real inode identities and are not byte-stability inputs.
 pub fn seal_initialized_state(state_path: &Path) -> Result<()> {
-    ryeos_node::init::seal_test_fixture_init_completion(state_path)
+    // The fixture plays the operator's command-line tool, which is the one
+    // process that holds the operator key.
+    let operator = lillux::crypto::load_signing_key(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf())
+            .operator_signing_key_path(),
+    )
+    .context("load the fixture operator key")?;
+    ryeos_node::init::seal_test_fixture_init_completion(state_path, &operator)
         .context("seal fast-fixture initialization transaction")
 }
 

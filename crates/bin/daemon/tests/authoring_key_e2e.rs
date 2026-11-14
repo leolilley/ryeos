@@ -31,6 +31,8 @@ const PROJECT: &str = "/srv/projects/alpha";
 struct StoppedNode {
     root: tempfile::TempDir,
     authoring: SigningKey,
+    /// The operator's command-line tool holds this key; the test plays it.
+    operator: SigningKey,
 }
 
 impl StoppedNode {
@@ -52,7 +54,11 @@ impl StoppedNode {
         std::fs::create_dir_all(runtime.state()).expect("state directory");
         let authoring = lillux::crypto::create_signing_key(&runtime.authoring_signing_key_path())
             .expect("authoring key");
-        let node = Self { root, authoring };
+        let node = Self {
+            root,
+            authoring,
+            operator,
+        };
         node.apply(
             "node.trust.pin",
             json!({ "role": "authoring", "spaces": [], "kinds": [], "projects": [] }),
@@ -69,6 +75,7 @@ impl StoppedNode {
         apply_local(
             self.path(),
             &BareHost,
+            &self.operator,
             LocalDraft {
                 operation: operation.to_owned(),
                 arguments,

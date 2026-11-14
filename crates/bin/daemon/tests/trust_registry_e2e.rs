@@ -32,6 +32,8 @@ const OTHER_PROJECT: &str = "/srv/projects/beta";
 struct StoppedNode {
     root: tempfile::TempDir,
     identity: NodeIdentity,
+    /// The operator's command-line tool holds this key; the test plays it.
+    operator: SigningKey,
 }
 
 impl StoppedNode {
@@ -51,7 +53,11 @@ impl StoppedNode {
             &operator,
         );
         std::fs::create_dir_all(runtime.state()).expect("state directory");
-        Self { root, identity }
+        Self {
+            root,
+            identity,
+            operator,
+        }
     }
 
     fn path(&self) -> &Path {
@@ -72,6 +78,7 @@ impl StoppedNode {
         let applied = apply_local(
             self.path(),
             &BareHost,
+            &self.operator,
             LocalDraft {
                 operation: operation.to_owned(),
                 arguments,

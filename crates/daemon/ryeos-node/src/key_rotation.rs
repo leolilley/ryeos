@@ -2,19 +2,23 @@
 //!
 //! A rotation is a signed offline operation on a stopped node. The command
 //! first generates the new key into a staging path inside the key's home and
-//! has the old key sign a succession statement naming it (`prepare_rotation`).
-//! The operation then (`rotate`):
+//! has the old key sign a succession statement naming it (`prepare_rotation`);
+//! for the operator, the new key also signs the new genesis there, because the
+//! daemon never holds an operator key. The operation then (`rotate`):
 //!
 //! 1. records the succession in the signer registry: the new key becomes an
 //!    active signer with the old key's role and scope, the old key is retired
 //!    and keeps verifying what it signed;
-//! 2. for the operator only, replaces the operator genesis, re-issues the
-//!    operator's authorized-key grant under the new key (`never` expiry,
-//!    `authorized_by` naming the rotation request), removes the old key's
-//!    grant, and reseals the init completion under the new key;
-//! 3. installs the new key at the canonical key path, which destroys the old
-//!    private key. This is the commit point and the last effect, so a request
-//!    that stopped earlier is finished by running it again.
+//! 2. for the operator only, re-issues the operator's authorized-key grant
+//!    under the new key (`never` expiry, `authorized_by` naming the rotation
+//!    request), removes the old key's grant, reseals the init completion
+//!    (signed by the node under the operator's rotation request, naming the
+//!    new operator), and installs the genesis the command signed. That
+//!    install is the commit point and the last effect of the node, so a request
+//!    that stopped earlier is finished by running it again;
+//! 3. for the authoring key, installs the new key at the canonical key path,
+//!    which destroys the old private key. For the operator that install is the
+//!    command's, in the operator's process (`install_staged_key`).
 //!
 //! The node key is never rotated here.
 
@@ -223,6 +227,8 @@ impl std::error::Error for KeyRotationError {}
 pub struct PreparedRotation {
     /// The succession statement, signed by the old key.
     pub statement: Vec<u8>,
+    /// For the operator, the new genesis signed by the new key.
+    pub genesis: Option<Vec<u8>>,
     pub old_fingerprint: String,
     pub new_fingerprint: String,
 }
@@ -287,8 +293,17 @@ pub fn prepare_rotation(app_root: &Path, key: RotatedKey) -> Result<PreparedRota
     )
     .render_signed(&old)
     .map_err(|reason| anyhow::anyhow!("sign the succession statement: {reason}"))?;
+    let genesis = match key {
+        RotatedKey::Operator => Some(crate::init::build_rotated_operator_genesis(
+            app_root,
+            &new,
+            &old_fingerprint,
+        )?),
+        RotatedKey::Authoring => None,
+    };
     Ok(PreparedRotation {
         statement: statement.into_bytes(),
+        genesis,
         old_fingerprint,
         new_fingerprint,
     })
@@ -302,7 +317,13 @@ pub struct RotationRequest<'a> {
     pub request_digest: &'a str,
     /// Fingerprint of the key that signed the offline request.
     pub signer_fingerprint: &'a str,
+    /// Signs the init completion the operator rotation reseals: the node key
+    /// under the rotation request.
+    pub signer: crate::apply_authority::DocumentSigner<'a>,
     pub statement: &'a str,
+    /// The new operator's genesis, signed by the new key. Required for an
+    /// operator rotation, absent for an authoring rotation.
+    pub genesis: Option<&'a [u8]>,
 }
 
 /// Apply a rotation. Every step converges, so running a request again after
@@ -314,17 +335,30 @@ pub fn rotate(key: RotatedKey, request: RotationRequest<'_>) -> Result<Value> {
         node_key,
         request_digest,
         signer_fingerprint,
+        signer,
         statement,
+        genesis,
     } = request;
     let root = RuntimeRoot::new(app_root.to_path_buf());
-    let current = load_current(key, &root)?;
-    let current_fingerprint = ryeos_engine::trust::compute_fingerprint(&current.verifying_key());
+    // The operator's key is not on the node: who the operator is comes from
+    // the public genesis. The authoring key is the daemon's own.
+    let current_fingerprint = match key {
+        RotatedKey::Operator => {
+            ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)?
+                .fingerprint()
+                .to_owned()
+        }
+        RotatedKey::Authoring => {
+            let current = load_current(key, &root)?;
+            ryeos_engine::trust::compute_fingerprint(&current.verifying_key())
+        }
+    };
     let named = SuccessionStatement::parse_unverified(statement)
         .map_err(|reason| crate::trust_registry::TrustChangeError::SuccessionInvalid { reason })?;
     let key_path = key.key_path(&root);
 
     if current_fingerprint == named.new_fingerprint {
-        // The new key is already installed: the commit point passed.
+        // The new key is already in force: the commit point passed.
         return Ok(json!({
             "key": key.name(),
             "old_fingerprint": named.old_fingerprint,
@@ -350,25 +384,43 @@ pub fn rotate(key: RotatedKey, request: RotationRequest<'_>) -> Result<Value> {
         }
         .into());
     }
-
-    let staged_path = key.staged_key_path(&root);
-    if lillux::read_optional_regular_file_bounded_no_follow(&staged_path, 64 * 1024)?.is_none() {
-        return Err(KeyRotationError::StagedKeyMissing {
-            key,
-            path: staged_path,
+    let new_public = decode_public_key(&named.new_public_key)?;
+    // The authoring key is installed by the operation that rotates it; its
+    // staged copy must be here. The operator's new key stays with the
+    // operator: the node holds only its public half.
+    match key {
+        RotatedKey::Authoring => {
+            let staged_path = key.staged_key_path(&root);
+            if lillux::read_optional_regular_file_bounded_no_follow(&staged_path, 64 * 1024)?
+                .is_none()
+            {
+                return Err(KeyRotationError::StagedKeyMissing {
+                    key,
+                    path: staged_path,
+                }
+                .into());
+            }
+            let staged = lillux::crypto::load_signing_key(&staged_path)?;
+            let staged_fingerprint =
+                ryeos_engine::trust::compute_fingerprint(&staged.verifying_key());
+            if staged_fingerprint != named.new_fingerprint {
+                return Err(KeyRotationError::StagedKeyMismatch {
+                    key,
+                    staged: staged_fingerprint,
+                    statement: named.new_fingerprint,
+                }
+                .into());
+            }
         }
-        .into());
+        RotatedKey::Operator => {}
     }
-    let staged = lillux::crypto::load_signing_key(&staged_path)?;
-    let staged_fingerprint = ryeos_engine::trust::compute_fingerprint(&staged.verifying_key());
-    if staged_fingerprint != named.new_fingerprint {
-        return Err(KeyRotationError::StagedKeyMismatch {
-            key,
-            staged: staged_fingerprint,
-            statement: named.new_fingerprint,
-        }
-        .into());
-    }
+    let operator_genesis = match key {
+        RotatedKey::Operator => Some(genesis.context(
+            "an operator rotation carries the new genesis, signed by the new key: run `ryeos \
+             node operator rotate` instead of submitting the operation by hand",
+        )?),
+        RotatedKey::Authoring => None,
+    };
 
     // 1. The succession, recorded in the registry.
     let outcome = crate::trust_registry::apply_change(
@@ -396,17 +448,29 @@ pub fn rotate(key: RotatedKey, request: RotationRequest<'_>) -> Result<Value> {
     });
 
     // 2. What the operator key carries beyond the registry record.
-    if key == RotatedKey::Operator {
-        crate::init::rotate_operator_genesis(app_root, &staged, &named.old_fingerprint)?;
+    if let Some(operator_genesis) = operator_genesis {
         let grants = reissue_operator_grant(
             app_root,
             node_key,
-            &staged,
+            &new_public,
             &named.old_fingerprint,
             request_digest,
         )?;
-        crate::init::seal_current_init_completion_as(app_root, None, &staged)
-            .context("reseal the init completion under the new operator key")?;
+        crate::init::seal_current_init_completion(
+            app_root,
+            None,
+            signer,
+            Some(&named.new_fingerprint),
+        )
+        .context("reseal the init completion naming the new operator")?;
+        // The genesis names the operator the node now serves; installing it
+        // is the commit point and the node's last effect.
+        crate::init::install_rotated_operator_genesis(
+            app_root,
+            operator_genesis,
+            &new_public,
+            &named.old_fingerprint,
+        )?;
         result["operator_grant"] = grants;
         result["genesis"] = json!({
             "operator_fingerprint": named.new_fingerprint,
@@ -414,15 +478,60 @@ pub fn rotate(key: RotatedKey, request: RotationRequest<'_>) -> Result<Value> {
         });
     }
 
-    // 3. Install the new key. The atomic replace destroys the old private
-    // key; the staged copy goes after it.
-    let pem = lillux::read_regular_file_bounded_no_follow(&staged_path, 64 * 1024)?;
+    // 3. The authoring key is installed here; the atomic replace destroys the
+    // old private key, and the staged copy goes after it.
+    if key == RotatedKey::Authoring {
+        install_staged_key(app_root, key)?;
+        result["installed_at"] = json!(key_path);
+    }
+    Ok(result)
+}
+
+fn decode_public_key(encoded: &str) -> Result<lillux::crypto::VerifyingKey> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            encoded
+                .strip_prefix("ed25519:")
+                .context("the succession statement's new key is not `ed25519:<base64>`")?,
+        )
+        .context("the succession statement's new key is not base64")?;
+    let array: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("the succession statement's new key is not 32 bytes"))?;
+    lillux::crypto::VerifyingKey::from_bytes(&array)
+        .context("the succession statement's new key is not an Ed25519 key")
+}
+
+/// Install the staged new key at the key's canonical path, which destroys the
+/// old private key, and remove the staging directory. The operator's command
+/// does this in its own process once the node has applied the rotation.
+pub fn install_staged_key(app_root: &Path, key: RotatedKey) -> Result<PathBuf> {
+    let root = RuntimeRoot::new(app_root.to_path_buf());
+    let key_path = key.key_path(&root);
+    let staged_path = key.staged_key_path(&root);
+    let pem = lillux::read_regular_file_bounded_no_follow(&staged_path, 64 * 1024)
+        .with_context(|| format!("read the staged key {}", staged_path.display()))?;
     lillux::atomic_write_private(&key_path, &pem)
         .map_err(|error| anyhow::anyhow!("install the new key {}: {error}", key_path.display()))?;
     lillux::remove_dir_all_durable(&key.staged_dir(&root))
         .context("remove the staged key after installing it")?;
-    result["installed_at"] = json!(key_path);
-    Ok(result)
+    Ok(key_path)
+}
+
+/// Whether a staged operator key is the operator the node now records, which
+/// means the rotation was applied and only the key install is left. The
+/// operator's command finishes it with [`install_staged_key`]; a rerun after
+/// an interruption lands here.
+pub fn staged_key_is_the_applied_operator(app_root: &Path) -> Result<bool> {
+    let root = RuntimeRoot::new(app_root.to_path_buf());
+    let staged_path = RotatedKey::Operator.staged_key_path(&root);
+    if lillux::read_optional_regular_file_bounded_no_follow(&staged_path, 64 * 1024)?.is_none() {
+        return Ok(false);
+    }
+    let staged = lillux::crypto::load_signing_key(&staged_path)?;
+    let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)?;
+    Ok(operator.fingerprint() == ryeos_engine::trust::compute_fingerprint(&staged.verifying_key()))
 }
 
 /// The old key is `active` before the succession and `retired` after it, so a
@@ -466,19 +575,18 @@ fn require_active_or_succeeded(
 fn reissue_operator_grant(
     app_root: &Path,
     node_key: &SigningKey,
-    new_operator: &SigningKey,
+    new_operator: &lillux::crypto::VerifyingKey,
     old_fingerprint: &str,
     request_digest: &str,
 ) -> Result<Value> {
     use base64::Engine as _;
     let directory = crate::offline_operation::authorized_keys_dir(app_root);
-    let new_fingerprint = ryeos_engine::trust::compute_fingerprint(&new_operator.verifying_key());
+    let new_fingerprint = ryeos_engine::trust::compute_fingerprint(new_operator);
     let grant_path = directory.join(format!("{new_fingerprint}.toml"));
     let issued =
         lillux::read_optional_regular_file_bounded_no_follow(&grant_path, 1024 * 1024)?.is_none();
     if issued {
-        let public_key = base64::engine::general_purpose::STANDARD
-            .encode(new_operator.verifying_key().as_bytes());
+        let public_key = base64::engine::general_purpose::STANDARD.encode(new_operator.as_bytes());
         ryeos_node_runtime::identity::write_authorized_key_toml(
             &directory,
             &new_fingerprint,
@@ -681,6 +789,17 @@ mod tests {
             signer: &str,
             statement: &str,
         ) -> Result<Value> {
+            self.rotate_with(key, request, signer, statement, None)
+        }
+
+        fn rotate_with(
+            &self,
+            key: RotatedKey,
+            request: &str,
+            signer: &str,
+            statement: &str,
+            genesis: Option<&[u8]>,
+        ) -> Result<Value> {
             let lock = StateLock::acquire(&default_lock_path(self.path())).unwrap();
             rotate(
                 key,
@@ -690,9 +809,25 @@ mod tests {
                     node_key: &self.key,
                     request_digest: request,
                     signer_fingerprint: signer,
+                    signer: crate::apply_authority::DocumentSigner::Node(&self.key),
                     statement,
+                    genesis,
                 },
             )
+        }
+
+        /// Create the operator key at its canonical path with the public
+        /// records the node reads: the genesis and the registry record.
+        fn with_operator(&self) -> String {
+            let root = RuntimeRoot::new(self.path().to_path_buf());
+            let created =
+                lillux::crypto::create_signing_key(&RotatedKey::Operator.key_path(&root)).unwrap();
+            ryeos_node_runtime::operator_identity::test_support::write_operator_records_for_key(
+                self.path(),
+                &self.key,
+                &created,
+            );
+            ryeos_engine::trust::compute_fingerprint(&created.verifying_key())
         }
 
         fn installed(&self, key: RotatedKey) -> String {
@@ -883,12 +1018,18 @@ mod tests {
     #[test]
     fn operator_rotate_requires_old_key_signature() {
         let node = Node::new();
-        let old_fp = node.with_key(RotatedKey::Operator, SignerScope::operator_default());
+        let old_fp = node.with_operator();
         let prepared = prepare_rotation(node.path(), RotatedKey::Operator).unwrap();
         let statement = String::from_utf8(prepared.statement).unwrap();
         let before = load_view(node.path()).unwrap().registry_digest;
         let error = node
-            .rotate(RotatedKey::Operator, "req-1", &"e".repeat(64), &statement)
+            .rotate_with(
+                RotatedKey::Operator,
+                "req-1",
+                &"e".repeat(64),
+                &statement,
+                prepared.genesis.as_deref(),
+            )
             .unwrap_err();
         assert_eq!(error_code(&error), "key_rotation_signer_not_old_operator");
         assert!(error.to_string().contains(&old_fp));
@@ -954,8 +1095,14 @@ mod tests {
         std::fs::write(directory.join(format!("{old_fp}.toml")), "placeholder").unwrap();
 
         let request = "f".repeat(64);
-        let report =
-            reissue_operator_grant(node.path(), &node.key, &new, &old_fp, &request).unwrap();
+        let report = reissue_operator_grant(
+            node.path(),
+            &node.key,
+            &new.verifying_key(),
+            &old_fp,
+            &request,
+        )
+        .unwrap();
         assert_eq!(report["issued"], new_fp);
         assert_eq!(report["removed"], old_fp);
         assert!(!directory.join(format!("{old_fp}.toml")).exists());
@@ -976,7 +1123,31 @@ mod tests {
             Some(request.as_str())
         );
         // Issuing again keeps the grant.
-        reissue_operator_grant(node.path(), &node.key, &new, &old_fp, &request).unwrap();
+        reissue_operator_grant(
+            node.path(),
+            &node.key,
+            &new.verifying_key(),
+            &old_fp,
+            &request,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_operator_rotation_needs_the_new_genesis_and_never_installs_the_new_key() {
+        let node = Node::new();
+        let old_fp = node.with_operator();
+        let prepared = prepare_rotation(node.path(), RotatedKey::Operator).unwrap();
+        let statement = String::from_utf8(prepared.statement.clone()).unwrap();
+        let error = node
+            .rotate_with(RotatedKey::Operator, "req-1", &old_fp, &statement, None)
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("carries the new genesis"),
+            "{error:#}"
+        );
+        assert!(prepared.genesis.is_some());
+        assert_eq!(node.installed(RotatedKey::Operator), old_fp);
     }
 
     #[test]

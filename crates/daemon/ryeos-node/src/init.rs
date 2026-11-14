@@ -216,9 +216,17 @@ pub struct SubstrateImageReplacement {
     pub new_image_digest: String,
 }
 
-const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v4";
+const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v5";
+/// Offline operations whose operator-signed request may authorize a reseal of
+/// the completion.
+const COMPLETION_OPERATIONS: &[&str] = &[
+    "node.policy-apply",
+    "node.reset.policy-generation",
+    "node.capacity.reanchor",
+    "node.operator.rotate",
+];
 const SUBSTRATE_IDENTITY_SCHEMA: &str = "ryeos/substrate-identity/v2";
-const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
+const INIT_COMPLETION_MAX_BYTES: u64 = 384 * 1024;
 const INIT_SEED_MAX_BYTES: u64 = ryeos_node_runtime::node_document::MAX_ITEM_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +240,8 @@ struct InitCompletionBody {
     substrate_identity_digest: String,
     registration_digests: BTreeMap<String, String>,
     capacity_account: crate::native_capacity::NativeCapacityAccountBinding,
+    /// Which key signed the completion and what vouches for the operator.
+    authority: crate::apply_authority::Authority,
 }
 
 /// Immutable deployment identity used when admitting independently published
@@ -463,6 +473,9 @@ fn load_substrate_identity_record(app_root: &Path) -> Result<SubstrateIdentity> 
 #[serde(deny_unknown_fields)]
 struct InitCompletionDocument {
     body: InitCompletionBody,
+    /// The operator-signed request the node applied, when the node signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<crate::offline_operation::contract::SignedRequest>,
     signature: String,
 }
 
@@ -683,7 +696,15 @@ fn run_init_on_storage(
         &ryeos_node_runtime::state_lock::default_lock_path(&opts.app_root),
     )
     .context("acquire stopped-node authority for initialization")?;
-    run_init_under_lock_on_storage(opts, ceremony, &state_lock, None, observe_storage, observe)
+    run_init_under_lock_on_storage(
+        opts,
+        InitAuthority::OperatorProcess,
+        ceremony,
+        &state_lock,
+        None,
+        observe_storage,
+        observe,
+    )
 }
 
 fn require_source_dir(opts: &InitOptions) -> Result<()> {
@@ -700,6 +721,20 @@ fn require_source_dir(opts: &InitOptions) -> Result<()> {
     Ok(())
 }
 
+/// Whose consent an initialization run records, and so whose key signs what
+/// it produces.
+#[derive(Clone, Copy)]
+pub enum InitAuthority<'a> {
+    /// The run is the operator's own command: the operator key on this
+    /// volume is created if absent and signs the completion and any capacity
+    /// amendment. Only the command-line tool runs this way.
+    OperatorProcess,
+    /// The run applies a queued offline operation. The daemon holds no
+    /// operator key, so the node key signs under the operator-signed request,
+    /// and the operator is the one the node already records.
+    Request(crate::apply_authority::DocumentSigner<'a>),
+}
+
 /// Initialization under a stopped-node state lock the caller already holds.
 /// The lock must protect `opts.app_root`. When `expected_policy_generation`
 /// is given, the prospective node policy generation must have exactly that
@@ -709,9 +744,11 @@ pub fn run_init_under_lock(
     opts: &InitOptions,
     state_lock: &ryeos_node_runtime::state_lock::StateLock,
     expected_policy_generation: Option<&str>,
+    authority: InitAuthority<'_>,
 ) -> Result<InitReport> {
     run_init_under_lock_on_storage(
         opts,
+        authority,
         None,
         state_lock,
         expected_policy_generation,
@@ -722,6 +759,7 @@ pub fn run_init_under_lock(
 
 fn run_init_under_lock_on_storage(
     opts: &InitOptions,
+    authority: InitAuthority<'_>,
     mut ceremony: Option<InitOperatorCeremony>,
     state_lock: &ryeos_node_runtime::state_lock::StateLock,
     expected_policy_generation: Option<&str>,
@@ -849,18 +887,44 @@ fn run_init_under_lock_on_storage(
     let contribution = ceremony
         .as_mut()
         .and_then(|ceremony| ceremony.entropy_contribution.take());
-    let (user_key, user_key_created, contribution_digest) =
-        load_or_create_operator_key(&user_key_path, contribution)
-            .with_context(|| format!("user key at {}", user_key_path.display()))?;
-    let user_fp = compute_fingerprint(&user_key.verifying_key());
-    ensure_operator_genesis(
-        &opts.app_root,
-        &user_key,
-        &user_fp,
-        ceremony.as_ref().map(|ceremony| &ceremony.profile),
-        user_key_created,
-        contribution_digest.as_deref(),
-    )?;
+    let (user_key, user_vk, user_fp, user_key_created) = match authority {
+        InitAuthority::OperatorProcess => {
+            let (user_key, user_key_created, contribution_digest) =
+                load_or_create_operator_key(&user_key_path, contribution)
+                    .with_context(|| format!("user key at {}", user_key_path.display()))?;
+            let user_fp = compute_fingerprint(&user_key.verifying_key());
+            ensure_operator_genesis(
+                &opts.app_root,
+                &user_key,
+                &user_fp,
+                ceremony.as_ref().map(|ceremony| &ceremony.profile),
+                user_key_created,
+                contribution_digest.as_deref(),
+            )?;
+            let user_vk = user_key.verifying_key();
+            (Some(user_key), user_vk, user_fp, user_key_created)
+        }
+        InitAuthority::Request(_) => {
+            // The operator is the one the node already records; its key is
+            // not here and is not needed.
+            let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+                &opts.app_root,
+            )?;
+            (
+                None,
+                *operator.verifying_key(),
+                operator.fingerprint().to_owned(),
+                false,
+            )
+        }
+    };
+    let signer = match (&user_key, authority) {
+        (Some(key), InitAuthority::OperatorProcess) => {
+            crate::apply_authority::DocumentSigner::Operator(key)
+        }
+        (_, InitAuthority::Request(signer)) => signer,
+        (None, InitAuthority::OperatorProcess) => unreachable!("the operator key was loaded"),
+    };
 
     // ── 5. Node key ──
     let node_key_path = opts
@@ -915,7 +979,7 @@ fn run_init_under_lock_on_storage(
         })
         .collect();
     registry_pins.push((
-        user_key.verifying_key(),
+        user_vk,
         "user".to_owned(),
         ryeos_engine::trust::SignerRole::Operator,
         ryeos_engine::trust::SignerScope::operator_default(),
@@ -1201,7 +1265,7 @@ fn run_init_under_lock_on_storage(
         let check = crate::native_capacity::check_capacity_policy_amendment(
             &opts.app_root,
             state_lock,
-            &user_key,
+            &user_fp,
             prospective_capacity_policy,
         )
         .context(
@@ -1458,7 +1522,7 @@ fn run_init_under_lock_on_storage(
                 crate::native_capacity::CapacityPolicyAmendmentRequest {
                     app_root: &opts.app_root,
                     state_lock,
-                    operator_key: &user_key,
+                    signer,
                     policy: prospective_capacity_policy,
                     reason: &format!(
                         "node policy generation {} (replacement)",
@@ -1519,14 +1583,14 @@ fn run_init_under_lock_on_storage(
     let capacity_issuance = crate::native_capacity::prepare_initial_capacity_binding(
         &opts.app_root,
         state_lock,
-        &user_key,
+        user_key.as_ref(),
         user_key_created,
         &node_fp,
         prospective_capacity_policy,
     )?;
     write_init_completion(
         &opts.app_root,
-        &user_key,
+        signer,
         &user_fp,
         &node_fp,
         &vault_pubkey_fingerprint,
@@ -1675,7 +1739,7 @@ fn installed_bundle_names(app_root: &Path) -> Result<BTreeSet<String>> {
 
 fn write_init_completion(
     app_root: &Path,
-    signing_key: &SigningKey,
+    signer: crate::apply_authority::DocumentSigner<'_>,
     operator_fingerprint: &str,
     node_fingerprint: &str,
     vault_fingerprint: &str,
@@ -1709,15 +1773,13 @@ fn write_init_completion(
         substrate_identity_digest: substrate_identity.digest()?,
         registration_digests: registration_digests(app_root)?,
         capacity_account,
+        authority: signer.authority()?,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
-    let signature = signing_key.sign(canonical.as_bytes());
     let document = InitCompletionDocument {
+        request: signer.request(),
+        signature: signer.sign(canonical.as_bytes()),
         body,
-        signature: format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
-        ),
     };
     let bytes = serde_json::to_vec_pretty(&document)?;
     if bytes.len() as u64 > INIT_COMPLETION_MAX_BYTES {
@@ -1766,11 +1828,13 @@ pub fn prepare_prospective_init_completion(
         substrate_identity_digest: substrate_identity.digest()?,
         registration_digests: input.registration_digests,
         capacity_account: input.capacity_account,
+        authority: crate::apply_authority::Authority::Operator,
     };
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
     let signature = signer.signing_key.sign(canonical.as_bytes());
     let document = InitCompletionDocument {
         body,
+        request: None,
         signature: format!(
             "ed25519:{}",
             base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
@@ -1859,28 +1923,26 @@ fn require_lower_hex_digest(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Reseal the completion over the node's current state. `signer` is the
+/// operator's own key in the operator's process, or the node key under the
+/// operator-signed request that authorized the change (or, after a change an
+/// authenticated live caller made, the node key alone). `operator` names the
+/// operator the completion records; absent, it is the configured operator.
 pub(crate) fn seal_current_init_completion(
     app_root: &Path,
     expected_policy_generation_digest: Option<&str>,
+    signer: crate::apply_authority::DocumentSigner<'_>,
+    operator: Option<&str>,
 ) -> Result<()> {
-    let operator_key_path =
-        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
-    let operator_pem = Zeroizing::new(String::from_utf8(
-        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
-    )?);
-    let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
-    seal_current_init_completion_as(app_root, expected_policy_generation_digest, &operator_key)
-}
-
-/// [`seal_current_init_completion`] signed by an operator key the caller
-/// holds, which an operator rotation installs only after the completion
-/// naming it is sealed.
-pub(crate) fn seal_current_init_completion_as(
-    app_root: &Path,
-    expected_policy_generation_digest: Option<&str>,
-    operator_key: &SigningKey,
-) -> Result<()> {
-    let operator_fingerprint = compute_fingerprint(&operator_key.verifying_key());
+    let operator_fingerprint = match (operator, signer) {
+        (Some(named), _) => named.to_owned(),
+        (None, crate::apply_authority::DocumentSigner::Operator(key)) => {
+            compute_fingerprint(&key.verifying_key())
+        }
+        (None, _) => ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)?
+            .fingerprint()
+            .to_owned(),
+    };
 
     let node_key_path = app_root
         .join(ryeos_engine::AI_DIR)
@@ -1917,7 +1979,7 @@ pub(crate) fn seal_current_init_completion_as(
     )?;
     write_init_completion(
         app_root,
-        operator_key,
+        signer,
         &operator_fingerprint,
         &node_fingerprint,
         &vault_fingerprint,
@@ -1926,21 +1988,40 @@ pub(crate) fn seal_current_init_completion_as(
     )
 }
 
+/// The node's own signing key, read from its volume.
+fn load_node_signing_key(app_root: &Path) -> Result<SigningKey> {
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/private_key.pem");
+    let pem = Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&path, 32 * 1024)?,
+    )?);
+    Ok(SigningKey::from_pkcs8_pem(pem.as_str())?)
+}
+
 /// Advance the whole-init commit point after a stopped-node policy update.
 ///
 /// Policy publication is already fail-closed: after its generation digest
 /// changes, the preceding completion record no longer validates. This final
 /// write is the commit point that makes the newly published generation
 /// startable. Re-running the same policy update repairs a crash in that gap.
+/// `signer` is what vouches for the update: the node key under the
+/// operator-signed request that asked for it.
 pub fn seal_init_completion_after_policy_update(
     app_root: &Path,
     expected_policy_generation_digest: &str,
     state_lock: &ryeos_node_runtime::state_lock::StateLock,
+    signer: crate::apply_authority::DocumentSigner<'_>,
 ) -> Result<()> {
     state_lock
         .ensure_protects_app_root(app_root)
         .context("init-completion publication requires this app root's state lock")?;
-    seal_current_init_completion(app_root, Some(expected_policy_generation_digest))
+    seal_current_init_completion(
+        app_root,
+        Some(expected_policy_generation_digest),
+        signer,
+        None,
+    )
 }
 
 /// Advance the whole-init commit point after a stopped-node bundle
@@ -1960,7 +2041,16 @@ pub fn seal_init_completion_after_bundle_registration_change(
     state_lock
         .ensure_protects_app_root(app_root)
         .context("init-completion publication requires this app root's state lock")?;
-    seal_current_init_completion(app_root, None)
+    // A bundle registration change is made by an authenticated live caller;
+    // no operator request exists for it, so the node reseals under its own
+    // key and the completion names no request.
+    let node_key = load_node_signing_key(app_root)?;
+    seal_current_init_completion(
+        app_root,
+        None,
+        crate::apply_authority::DocumentSigner::Node(&node_key),
+        None,
+    )
 }
 
 /// Seal the exact initialized state authored by an integration-test fixture.
@@ -1972,7 +2062,7 @@ pub fn seal_init_completion_after_bundle_registration_change(
 /// The fixture must supply a fresh temporary node for first issuance; resealing
 /// preserves the existing capacity binding and never recreates a lost one.
 #[cfg(feature = "test-support")]
-pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
+pub fn seal_test_fixture_init_completion(app_root: &Path, operator_key: &SigningKey) -> Result<()> {
     use std::ffi::OsStr;
 
     let state_lock = ryeos_node_runtime::state_lock::StateLock::acquire(
@@ -1989,12 +2079,6 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
     let first_completion = onboarding
         .open_pinned_regular(OsStr::new("init-completion.json"), false)?
         .is_none();
-    let operator_key_path =
-        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
-    let operator_pem = Zeroizing::new(String::from_utf8(
-        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
-    )?);
-    let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
     let node = ryeos_node_runtime::identity::NodeIdentity::load(
         &app_root
             .join(ryeos_engine::AI_DIR)
@@ -2013,13 +2097,18 @@ pub fn seal_test_fixture_init_completion(app_root: &Path) -> Result<()> {
     let issuance = crate::native_capacity::prepare_initial_capacity_binding(
         app_root,
         &state_lock,
-        &operator_key,
+        Some(operator_key),
         first_completion,
         node.fingerprint(),
         snapshot.require::<ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy>()?,
     )?;
-    seal_current_init_completion(app_root, Some(snapshot.generation_digest()))
-        .map_err(|error| issuance.retain_error(error))
+    seal_current_init_completion(
+        app_root,
+        Some(snapshot.generation_digest()),
+        crate::apply_authority::DocumentSigner::Operator(operator_key),
+        None,
+    )
+    .map_err(|error| issuance.retain_error(error))
 }
 
 pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionReport>> {
@@ -2053,6 +2142,7 @@ fn verify_init_completion_checking_capacity(
         Ok(_) => {}
     }
     let bytes = lillux::read_regular_file_bounded_no_follow(&path, INIT_COMPLETION_MAX_BYTES)?;
+    refuse_old_completion(&bytes)?;
     let document: InitCompletionDocument = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse init completion {}", path.display()))?;
     if document.body.schema != INIT_COMPLETION_SCHEMA {
@@ -2060,21 +2150,20 @@ fn verify_init_completion_checking_capacity(
     }
     let trust_store = TrustStore::load_node_registry(app_root)
         .context("load pinned operator verification authority")?;
-    // The completion record is operator-signed by design, and only this
-    // node's own operator may sign it: another pinned key (a publisher's)
-    // naming itself as operator is refused. A node with no operator key on
-    // its volume has no local operator to compare against; the record must
-    // then still name a pinned key (the layout cut moves the operator key
-    // home and makes this unconditional).
+    // The completion records the configured operator, and only this node's
+    // own operator may be named: another pinned key (a publisher's) naming
+    // itself as operator is refused. A node with no operator genesis has no
+    // local operator to compare against; the record must then still name a
+    // pinned key.
     if let Some((local_operator, _)) = crate::offline_operation::local_operator(app_root)
-        .context("read the local operator key for init-completion verification")?
+        .context("read the local operator identity for init-completion verification")?
     {
         ryeos_engine::trust::require_document_signer(
             &path,
             &document.body.operator_fingerprint,
             &local_operator,
             "operator",
-            "only this node's operator signs its init completion record: re-run `ryeos init` on this node with its own operator key",
+            "only this node's operator is recorded in its init completion record: re-run `ryeos init` on this node with its own operator key",
         )?;
     }
     let operator_key = trust_store
@@ -2085,16 +2174,34 @@ fn verify_init_completion_checking_capacity(
     if operator_fingerprint != document.body.operator_fingerprint {
         bail!("init completion operator fingerprint disagrees with pinned public key");
     }
-    let signature = document
-        .signature
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| anyhow!("init completion signature has an invalid encoding"))?;
-    let signature =
-        Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(signature)?)?;
     let canonical = lillux::canonical_json(&serde_json::to_value(&document.body)?)?;
-    operator_key
-        .verify(canonical.as_bytes(), &signature)
-        .context("verify init completion signature")?;
+    let node_key = ryeos_engine::trust::load_node_verifying_key(app_root)
+        .context("load the pinned node key for init-completion verification")?;
+    // The operator that consented is looked up in the capacity operator
+    // lineage on demand: only a completion the node sealed under a request
+    // needs it.
+    let lineage_lookup = |fingerprint: &str| -> Result<lillux::crypto::VerifyingKey> {
+        if fingerprint == document.body.operator_fingerprint {
+            return Ok(*operator_key);
+        }
+        crate::native_capacity::OperatorLineage::load(app_root)?
+            .resolve(fingerprint)
+            .copied()
+    };
+    crate::apply_authority::verify(
+        canonical.as_bytes(),
+        &document.signature,
+        &document.body.authority,
+        document.request.as_ref(),
+        &crate::apply_authority::Acceptance {
+            node_key: &node_key,
+            operator_key: &lineage_lookup,
+            operations: COMPLETION_OPERATIONS,
+            allow_node_alone: true,
+            claimed_operator: &document.body.operator_fingerprint,
+        },
+    )
+    .context("verify init completion signature")?;
 
     let node_identity_path = app_root
         .join(ryeos_engine::AI_DIR)
@@ -2163,6 +2270,26 @@ fn verify_init_completion_checking_capacity(
         bundles_verified: registrations.len(),
         capacity_account: document.body.capacity_account,
     }))
+}
+
+/// Refuse, by name and with its cure, a completion record of a shape this
+/// build no longer reads.
+fn refuse_old_completion(bytes: &[u8]) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).context("init completion is not JSON")?;
+    let schema = value
+        .pointer("/body/schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    ensure!(
+        schema == INIT_COMPLETION_SCHEMA,
+        "init_completion_old_shape: the init completion has schema `{schema}`; this build reads \
+         `{INIT_COMPLETION_SCHEMA}`, which the node signs under the operator's request or the \
+         operator signs in the command-line tool, never from a key on the node volume. Stop the \
+         node and run `ryeos init` on this app root with its original arguments, which reseals \
+         the completion"
+    );
+    Ok(())
 }
 
 /// Load substrate compatibility authority only after verifying the complete
@@ -2855,18 +2982,104 @@ fn ensure_operator_genesis_locked(
     Ok(())
 }
 
-/// Replace the operator genesis of a node whose operator key is rotating.
-/// The new genesis is signed by the new key, carries the old display fields
-/// and names the predecessor key and its creation time. A genesis that already
-/// names the new key is left as it is.
-pub(crate) fn rotate_operator_genesis(
+/// The genesis a rotating operator signs with its new key, in the operator's
+/// process. It is signed by the new key, carries the old display fields and
+/// names the predecessor key and its creation time.
+pub(crate) fn build_rotated_operator_genesis(
     app_root: &Path,
     new_key: &SigningKey,
+    predecessor_fingerprint: &str,
+) -> Result<Vec<u8>> {
+    let path =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
+    let new_fingerprint = compute_fingerprint(&new_key.verifying_key());
+    let source = String::from_utf8(lillux::read_regular_file_bounded_no_follow(
+        &path,
+        64 * 1024,
+    )?)
+    .with_context(|| format!("read operator genesis {}", path.display()))?;
+    let previous: serde_json::Value = serde_json::from_str(&source)
+        .with_context(|| format!("parse operator genesis {}", path.display()))?;
+    let previous_fingerprint = previous
+        .get("operator_fingerprint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("operator genesis missing operator_fingerprint"))?;
+    ensure!(
+        previous_fingerprint == predecessor_fingerprint,
+        "operator genesis names {previous_fingerprint}, not the rotating operator \
+         {predecessor_fingerprint}"
+    );
+    let mut document = serde_json::json!({
+        "schema": "ryeos/operator-genesis/v1",
+        "operator_fingerprint": new_fingerprint,
+        "created_at": lillux::time::iso8601_now(),
+        "ceremony_version": "1",
+        "predecessor_fingerprint": predecessor_fingerprint,
+    });
+    if let Some(created) = previous.get("created_at") {
+        document["predecessor_created_at"] = created.clone();
+    }
+    for field in ["display_name", "identity_statement"] {
+        if let Some(value) = previous.get(field) {
+            document[field] = value.clone();
+        }
+    }
+    let canonical = lillux::canonical_json(&document)
+        .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
+    let signature = new_key.sign(canonical.as_bytes());
+    document["signature"] = serde_json::Value::String(format!(
+        "ed25519:{}",
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    ));
+    Ok(serde_json::to_vec_pretty(&document)?)
+}
+
+/// Install the genesis a rotating operator signed with its new key. The
+/// node verifies it against the new key the succession statement names: it
+/// must name the new operator, name the rotating operator as predecessor, and
+/// carry the new key's signature. A genesis that already names the new key is
+/// left as it is.
+pub(crate) fn install_rotated_operator_genesis(
+    app_root: &Path,
+    genesis: &[u8],
+    new_key: &VerifyingKey,
     predecessor_fingerprint: &str,
 ) -> Result<()> {
     let path =
         ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
-    let new_fingerprint = compute_fingerprint(&new_key.verifying_key());
+    let new_fingerprint = compute_fingerprint(new_key);
+    let mut document: serde_json::Value =
+        serde_json::from_slice(genesis).context("parse the rotated operator genesis")?;
+    ensure!(
+        document.get("schema").and_then(serde_json::Value::as_str)
+            == Some("ryeos/operator-genesis/v1")
+            && document
+                .get("operator_fingerprint")
+                .and_then(serde_json::Value::as_str)
+                == Some(new_fingerprint.as_str())
+            && document
+                .get("predecessor_fingerprint")
+                .and_then(serde_json::Value::as_str)
+                == Some(predecessor_fingerprint),
+        "the rotated operator genesis does not name the new operator {new_fingerprint} \
+         succeeding {predecessor_fingerprint}"
+    );
+    let signature = document
+        .as_object_mut()
+        .and_then(|object| object.remove("signature"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .and_then(|value| value.strip_prefix("ed25519:").map(str::to_owned))
+        .ok_or_else(|| anyhow!("the rotated operator genesis carries no Ed25519 signature"))?;
+    let signature = Signature::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .context("decode the rotated operator genesis signature")?,
+    )?;
+    let canonical = lillux::canonical_json(&document)
+        .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
+    new_key
+        .verify(canonical.as_bytes(), &signature)
+        .context("the rotated operator genesis is not signed by the new operator key")?;
     lillux::with_exclusive_file_lock(&path, || {
         let source = String::from_utf8(lillux::read_regular_file_bounded_no_follow(
             &path,
@@ -2887,29 +3100,7 @@ pub(crate) fn rotate_operator_genesis(
             "operator genesis names {previous_fingerprint}, not the rotating operator \
              {predecessor_fingerprint}"
         );
-        let mut document = serde_json::json!({
-            "schema": "ryeos/operator-genesis/v1",
-            "operator_fingerprint": new_fingerprint,
-            "created_at": lillux::time::iso8601_now(),
-            "ceremony_version": "1",
-            "predecessor_fingerprint": predecessor_fingerprint,
-        });
-        if let Some(created) = previous.get("created_at") {
-            document["predecessor_created_at"] = created.clone();
-        }
-        for field in ["display_name", "identity_statement"] {
-            if let Some(value) = previous.get(field) {
-                document[field] = value.clone();
-            }
-        }
-        let canonical = lillux::canonical_json(&document)
-            .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
-        let signature = new_key.sign(canonical.as_bytes());
-        document["signature"] = serde_json::Value::String(format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
-        ));
-        lillux::atomic_write(&path, &serde_json::to_vec_pretty(&document)?)
+        lillux::atomic_write(&path, genesis)
             .map_err(|error| anyhow!("write operator genesis {}: {error}", path.display()))
     })
 }
@@ -3572,7 +3763,9 @@ mod tests {
 
     #[test]
     fn operator_rotation_replaces_the_operator_and_the_node_still_verifies() {
-        use crate::key_rotation::{RotatedKey, RotationRequest, prepare_rotation, rotate};
+        use crate::key_rotation::{
+            RotatedKey, RotationRequest, install_staged_key, prepare_rotation, rotate,
+        };
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -3610,7 +3803,32 @@ mod tests {
         )
         .unwrap();
         let statement = String::from_utf8(prepared.statement.clone()).unwrap();
-        let request_digest = "c".repeat(64);
+        // The operator's own request is what the node's documents carry.
+        let request = crate::offline_operation::contract::SignedRequest::sign(
+            crate::offline_operation::contract::RequestBody {
+                schema: crate::offline_operation::contract::REQUEST_SCHEMA.to_owned(),
+                node_fingerprint: node.fingerprint().to_owned(),
+                signer_fingerprint: old_fp.clone(),
+                signer_grant_digest: None,
+                signer_origin_site_id: None,
+                operation: "node.operator.rotate".to_owned(),
+                arguments: serde_json::json!({}),
+                inputs: BTreeMap::new(),
+                expected_result: BTreeMap::new(),
+                precondition: BTreeMap::new(),
+                issued_at: lillux::time::iso8601_now(),
+                not_after: lillux::time::iso8601_from_unix_secs(
+                    lillux::time::unix_secs_now() + 3600,
+                ),
+            },
+            &old_key,
+        )
+        .unwrap();
+        let request_digest = request.digest().unwrap();
+        let signer = crate::apply_authority::DocumentSigner::Request {
+            node: node.signing_key(),
+            request: &request,
+        };
         let result = rotate(
             RotatedKey::Operator,
             RotationRequest {
@@ -3619,12 +3837,38 @@ mod tests {
                 node_key: node.signing_key(),
                 request_digest: &request_digest,
                 signer_fingerprint: &old_fp,
+                signer,
                 statement: &statement,
+                genesis: prepared.genesis.as_deref(),
             },
         )
         .expect("rotate");
         drop(lock);
         assert_eq!(result["already_rotated"], false);
+        // The node never installed the new private key: that is the
+        // operator's step, and until then the old key is still in place.
+        assert_eq!(
+            compute_fingerprint(
+                &lillux::crypto::load_signing_key(&root.operator_signing_key_path())
+                    .unwrap()
+                    .verifying_key()
+            ),
+            old_fp
+        );
+        install_staged_key(&state, RotatedKey::Operator).expect("operator installs its key");
+        // The completion the node resealed was signed by the node under the
+        // request, not by any operator key.
+        let document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(init_completion_path(&state)).unwrap()).unwrap();
+        assert_eq!(
+            document["body"]["authority"]["signed_by"],
+            "node_under_request"
+        );
+        assert_eq!(
+            document["body"]["authority"]["request_digest"],
+            serde_json::json!(request_digest)
+        );
+        assert!(!crate::key_rotation::staged_key_is_the_applied_operator(&state).unwrap());
 
         // The new key is installed and is not the old one.
         let installed = lillux::crypto::load_signing_key(&root.operator_signing_key_path())
@@ -3677,7 +3921,9 @@ mod tests {
                 node_key: node.signing_key(),
                 request_digest: &request_digest,
                 signer_fingerprint: &old_fp,
+                signer,
                 statement: &statement,
+                genesis: prepared.genesis.as_deref(),
             },
         )
         .expect("rerun");
@@ -3702,7 +3948,11 @@ mod tests {
         let original: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
 
-        rotate_operator_genesis(app_root, &new, &old_fp).unwrap();
+        // The operator's process signs the new genesis; the node installs it
+        // after checking it against the new public key alone.
+        let genesis = build_rotated_operator_genesis(app_root, &new, &old_fp).unwrap();
+        install_rotated_operator_genesis(app_root, &genesis, &new.verifying_key(), &old_fp)
+            .unwrap();
         let rotated: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(rotated["operator_fingerprint"], new_fp);
@@ -3713,12 +3963,40 @@ mod tests {
         assert!(ensure_operator_genesis(app_root, &old, &old_fp, None, false, None).is_err());
 
         let bytes = std::fs::read(&path).unwrap();
-        rotate_operator_genesis(app_root, &new, &old_fp).unwrap();
+        install_rotated_operator_genesis(app_root, &genesis, &new.verifying_key(), &old_fp)
+            .unwrap();
         assert_eq!(
             std::fs::read(&path).unwrap(),
             bytes,
             "rerun changes nothing"
         );
+    }
+
+    #[test]
+    fn a_rotated_genesis_the_new_key_did_not_sign_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path();
+        let old = SigningKey::from_bytes(&[1u8; 32]);
+        let new = SigningKey::from_bytes(&[2u8; 32]);
+        let other = SigningKey::from_bytes(&[3u8; 32]);
+        let old_fp = compute_fingerprint(&old.verifying_key());
+        ensure_operator_genesis(app_root, &old, &old_fp, None, true, None).unwrap();
+        // Signed by a key that is not the succession's new key.
+        let forged = build_rotated_operator_genesis(app_root, &new, &old_fp).unwrap();
+        let error =
+            install_rotated_operator_genesis(app_root, &forged, &other.verifying_key(), &old_fp)
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("does not name the new operator"));
+        let mut tampered: serde_json::Value = serde_json::from_slice(&forged).unwrap();
+        tampered["display_name"] = "other".into();
+        let error = install_rotated_operator_genesis(
+            app_root,
+            &serde_json::to_vec(&tampered).unwrap(),
+            &new.verifying_key(),
+            &old_fp,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("not signed by the new operator key"));
     }
 
     #[test]
@@ -3893,8 +4171,13 @@ mod tests {
             format!("{error:#}").contains("node policy generation differs"),
             "{error:#}"
         );
-        seal_init_completion_after_policy_update(&state, &replacement_digest, &state_lock)
-            .expect("advance whole-init commit point");
+        seal_init_completion_after_policy_update(
+            &state,
+            &replacement_digest,
+            &state_lock,
+            crate::apply_authority::DocumentSigner::Node(identity.signing_key()),
+        )
+        .expect("advance whole-init commit point");
         let completion = verify_init_completion(&state)
             .expect("verify replacement commit")
             .expect("replacement completion");
@@ -3945,8 +4228,13 @@ mod tests {
             &state_lock,
         )
         .expect("publish reclassed policy");
-        seal_init_completion_after_policy_update(&state, update.generation().digest(), &state_lock)
-            .expect("seal the reclassed generation");
+        seal_init_completion_after_policy_update(
+            &state,
+            update.generation().digest(),
+            &state_lock,
+            crate::apply_authority::DocumentSigner::Node(identity.signing_key()),
+        )
+        .expect("seal the reclassed generation");
 
         let refused = format!(
             "{:#}",
@@ -4052,7 +4340,13 @@ mod tests {
         // A pin the seed would not install refuses before anything changes.
         let before = verify_init_completion(&state).unwrap().unwrap();
         let wrong = "0".repeat(64);
-        let error = run_init_under_lock(&replacement, &lock, Some(&wrong)).unwrap_err();
+        let error = run_init_under_lock(
+            &replacement,
+            &lock,
+            Some(&wrong),
+            InitAuthority::OperatorProcess,
+        )
+        .unwrap_err();
         assert!(
             format!("{error:#}").contains("nothing was changed"),
             "{error:#}"
@@ -4065,13 +4359,25 @@ mod tests {
             before.policy_generation_digest
         );
 
-        run_init_under_lock(&replacement, &lock, Some(&pinned)).expect("replacement");
+        run_init_under_lock(
+            &replacement,
+            &lock,
+            Some(&pinned),
+            InitAuthority::OperatorProcess,
+        )
+        .expect("replacement");
         let first = verify_init_completion(&state).unwrap().unwrap();
         assert_eq!(first.policy_generation_digest, pinned);
         // The node died before the receipt: the completion is gone and the same
         // request runs again, to the same generation.
         invalidate_init_completion(&state).unwrap();
-        run_init_under_lock(&replacement, &lock, Some(&pinned)).expect("rerun");
+        run_init_under_lock(
+            &replacement,
+            &lock,
+            Some(&pinned),
+            InitAuthority::OperatorProcess,
+        )
+        .expect("rerun");
         let second = verify_init_completion(&state).unwrap().unwrap();
         assert_eq!(second.policy_generation_digest, pinned);
     }
@@ -4137,7 +4443,7 @@ mod tests {
             crate::native_capacity::CapacityPolicyAmendmentRequest {
                 app_root: state,
                 state_lock: lock,
-                operator_key: &operator,
+                signer: crate::apply_authority::DocumentSigner::Operator(&operator),
                 policy: &as_capacity_policy(&body),
                 reason: "operator applies native_capacity",
                 command: "test policy-apply native_capacity",
@@ -4152,8 +4458,42 @@ mod tests {
             state, &update, &identity, &trust, lock,
         )
         .expect("publish the operator generation");
-        seal_init_completion_after_policy_update(state, update.generation().digest(), lock)
-            .expect("reseal");
+        seal_init_completion_after_policy_update(
+            state,
+            update.generation().digest(),
+            lock,
+            crate::apply_authority::DocumentSigner::Operator(&operator),
+        )
+        .expect("reseal");
+    }
+
+    /// A request the operator signed for this node, as the daemon would
+    /// apply it.
+    fn operator_request(
+        node: &ryeos_node_runtime::identity::NodeIdentity,
+        operator: &SigningKey,
+        operation: &str,
+    ) -> crate::offline_operation::contract::SignedRequest {
+        crate::offline_operation::contract::SignedRequest::sign(
+            crate::offline_operation::contract::RequestBody {
+                schema: crate::offline_operation::contract::REQUEST_SCHEMA.to_owned(),
+                node_fingerprint: node.fingerprint().to_owned(),
+                signer_fingerprint: compute_fingerprint(&operator.verifying_key()),
+                signer_grant_digest: None,
+                signer_origin_site_id: None,
+                operation: operation.to_owned(),
+                arguments: serde_json::json!({}),
+                inputs: BTreeMap::new(),
+                expected_result: BTreeMap::new(),
+                precondition: BTreeMap::new(),
+                issued_at: lillux::time::iso8601_now(),
+                not_after: lillux::time::iso8601_from_unix_secs(
+                    lillux::time::unix_secs_now() + 3600,
+                ),
+            },
+            operator,
+        )
+        .unwrap()
     }
 
     fn capacity_replacement(state: &Path, reset: &[&str]) -> InitOptions {
@@ -4214,8 +4554,13 @@ mod tests {
 
         // Carried: the replacement keeps the operator's body, which is the
         // issuance in force, so nothing is amended.
-        let carried = run_init_under_lock(&capacity_replacement(&state, &[]), &lock, None)
-            .expect("carried replacement");
+        let carried = run_init_under_lock(
+            &capacity_replacement(&state, &[]),
+            &lock,
+            None,
+            InitAuthority::OperatorProcess,
+        )
+        .expect("carried replacement");
         assert!(carried.capacity_amendment.is_none());
         assert_eq!(
             bound_capacity_policy(&state),
@@ -4226,12 +4571,93 @@ mod tests {
         // Reset: the profile's body differs from the issuance in force, so
         // the same replacement amends the issuance and seals a completion
         // that binds it.
+        // The reset is applied the way the daemon applies it: no operator key,
+        // the node key signing under the operator's request.
+        let node = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let operator = lillux::crypto::load_signing_key(
+            &ryeos_engine::roots::RuntimeRoot::new(state.clone()).operator_signing_key_path(),
+        )
+        .unwrap();
+        let request = operator_request(&node, &operator, "node.reset.policy-generation");
         let reset = run_init_under_lock(
             &capacity_replacement(&state, &["native_capacity"]),
             &lock,
             None,
+            InitAuthority::Request(crate::apply_authority::DocumentSigner::Request {
+                node: node.signing_key(),
+                request: &request,
+            }),
         )
         .expect("a reset replacement amends and completes");
+        // The amendment and the completion the node wrote are node-signed
+        // and carry the request's digest; both verify through it.
+        let request_digest = request.digest().unwrap();
+        let amendment_document = fs::read_dir(state.join(".ai/config/onboarding"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("native-capacity-reanchor.")
+            })
+            .map(|entry| fs::read(entry.path()).unwrap())
+            .map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            .find(|document| {
+                document["body"]["authority"]["request_digest"] == request_digest.as_str()
+            })
+            .expect("the amendment the request authorized");
+        assert_eq!(
+            amendment_document["body"]["authority"]["signed_by"],
+            "node_under_request"
+        );
+        let completion_document: serde_json::Value =
+            serde_json::from_slice(&fs::read(init_completion_path(&state)).unwrap()).unwrap();
+        assert_eq!(
+            completion_document["body"]["authority"]["request_digest"],
+            request_digest.as_str()
+        );
+        verify_init_completion(&state)
+            .expect("the node-signed completion verifies through the operator's request")
+            .expect("completion present");
+        // The same completion with a request the operator did not sign is
+        // refused, and the original verifies again once restored.
+        let path = init_completion_path(&state);
+        let original = fs::read(&path).unwrap();
+        let stranger = SigningKey::from_bytes(&[42; 32]);
+        let forged = operator_request(&node, &stranger, "node.reset.policy-generation");
+        let mut tampered: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        tampered["request"] = serde_json::to_value(&forged).unwrap();
+        tampered["body"]["authority"]["request_digest"] = forged.digest().unwrap().into();
+        // The body changed, so the node signature no longer covers it.
+        fs::write(&path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        let refused = format!("{:#}", verify_init_completion(&state).unwrap_err());
+        assert!(
+            refused.contains("apply_authority_signature_invalid"),
+            "{refused}"
+        );
+        // Re-signed by the node over the forged digest: the signature holds,
+        // and the request's own signer is what is refused.
+        let node_key = ryeos_node_runtime::identity::NodeIdentity::load(
+            &state.join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let canonical = lillux::canonical_json(&tampered["body"]).unwrap();
+        tampered["signature"] = crate::offline_operation::contract::encode_signature(
+            &node_key.signing_key().sign(canonical.as_bytes()),
+        )
+        .into();
+        fs::write(&path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+        let refused = format!("{:#}", verify_init_completion(&state).unwrap_err());
+        assert!(
+            refused.contains("apply_authority_request_not_operator"),
+            "{refused}"
+        );
+        fs::write(&path, &original).unwrap();
+        verify_init_completion(&state).unwrap().unwrap();
         let amendment = reset
             .capacity_amendment
             .expect("the reset amends the issuance");
@@ -4250,6 +4676,7 @@ mod tests {
             &capacity_replacement(&state, &["native_capacity"]),
             &lock,
             None,
+            InitAuthority::OperatorProcess,
         )
         .expect("rerun converges");
         assert!(
@@ -4289,6 +4716,7 @@ mod tests {
             &capacity_replacement(&state, &["native_capacity"]),
             &lock,
             None,
+            InitAuthority::OperatorProcess,
         )
         .expect_err("the account refuses the amendment");
         let rendered = format!("{error:#}");
@@ -4316,6 +4744,7 @@ mod tests {
             &capacity_replacement(&state, &["native_capacity"]),
             &lock,
             None,
+            InitAuthority::OperatorProcess,
         )
         .expect("the replacement completes once the account admits it");
         assert_eq!(bound_capacity_policy(&state), as_capacity_policy(&issued));

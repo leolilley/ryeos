@@ -1389,9 +1389,15 @@ fn delegate_wiring(state_path: &Path) -> Result<()> {
         "maintenance",
         &policy,
     )?;
+    // The test plays the operator's command-line tool, which holds the key.
+    let operator = lillux::crypto::load_signing_key(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf())
+            .operator_signing_key_path(),
+    )?;
     ryeos_node::offline_operation::apply_local(
         state_path,
         &ryeos_node::offline_operation::BareHost,
+        &operator,
         ryeos_node::offline_operation::LocalDraft {
             operation: "node.policy-apply".to_owned(),
             arguments: json!({ "section": "maintenance" }),
