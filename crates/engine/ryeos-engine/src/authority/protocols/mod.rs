@@ -12,15 +12,16 @@
 pub mod builder;
 pub mod descriptor;
 pub mod registry;
+pub mod selection;
 
 pub use builder::{
     BuildError, BuildRequest, CallbackBindings, build_method_call_stdin, build_subprocess_spec,
 };
 pub use descriptor::{
     CapturedCompatibleCallback, PersistentSessionChannel, PersistentSessionCleanupAuthority,
-    PersistentSessionFraming, PersistentSessionProtocol, ProtocolDescriptor,
+    PersistentSessionFraming, PersistentSessionProtocol, ProtocolDescriptor, ProtocolHolding,
     QualificationCallbackAuthority, validate_method_runtime_protocol,
-    validate_persistent_session_protocol,
+    validate_persistent_session_protocol, validate_protocol_holding,
 };
 pub use registry::{
     ProtocolError, ProtocolRegistry, VerifiedProtocol, validate_admitted_protocol_descriptor,

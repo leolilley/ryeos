@@ -474,14 +474,33 @@ pub struct RuntimeSpec {
 /// value path and a closed allowlist of signed protocol refs. Engine code
 /// resolves the data but never assigns kind- or product-specific meaning to
 /// the selected protocol.
+///
+/// A selected declaration may also name a second composed path holding a
+/// list of admissible protocol refs. An item then states its protocol either
+/// as the single value at `from_composed` or as the list at `from_composed_set`,
+/// never both; with a list the running node picks the one protocol whose
+/// declared holding it meets.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum SubprocessProtocolDecl {
     Static(String),
     Selected {
         from_composed: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_composed_set: Option<Vec<String>>,
         allowed: Vec<String>,
     },
+}
+
+/// Most protocols one item may list as admissible.
+const MAX_PROTOCOL_CANDIDATES: usize = 8;
+
+fn composed_path<'a>(composed: &'a Value, path: &[String]) -> Option<&'a Value> {
+    let mut value = composed;
+    for part in path {
+        value = value.get(part)?;
+    }
+    Some(value)
 }
 
 impl SubprocessProtocolDecl {
@@ -501,13 +520,20 @@ impl SubprocessProtocolDecl {
             }
             Self::Selected {
                 from_composed,
+                from_composed_set,
                 allowed,
             } => {
-                if from_composed.is_empty()
-                    || from_composed.len() > 16
-                    || from_composed
-                        .iter()
-                        .any(|part| part.trim().is_empty() || part.contains('.'))
+                let bad_path = |path: &[String]| {
+                    path.is_empty()
+                        || path.len() > 16
+                        || path
+                            .iter()
+                            .any(|part| part.trim().is_empty() || part.contains('.'))
+                };
+                if bad_path(from_composed.as_slice())
+                    || from_composed_set
+                        .as_deref()
+                        .is_some_and(|path| bad_path(path) || path == from_composed.as_slice())
                     || allowed.is_empty()
                     || allowed.len() > 32
                     || allowed.iter().any(|value| !valid_ref(value))
@@ -544,14 +570,26 @@ impl SubprocessProtocolDecl {
         }
     }
 
+    /// The single protocol an item states as a scalar. An item that lists
+    /// several admissible protocols has no single protocol to resolve; it goes
+    /// through `candidates` and a node selection instead.
     pub fn resolve(&self, composed: &Value) -> Result<String, String> {
         self.validate()?;
         match self {
             Self::Static(protocol_ref) => Ok(protocol_ref.clone()),
             Self::Selected {
                 from_composed,
+                from_composed_set,
                 allowed,
             } => {
+                if let Some(path) = from_composed_set
+                    && composed_path(composed, path).is_some()
+                {
+                    return Err(format!(
+                        "subprocess protocol `{}` lists several admissible protocols; it cannot be resolved to one without node selection",
+                        path.join(".")
+                    ));
+                }
                 let mut selected = composed;
                 for part in from_composed {
                     selected = selected.get(part).ok_or_else(|| {
@@ -575,6 +613,94 @@ impl SubprocessProtocolDecl {
                 Ok(selected.to_owned())
             }
         }
+    }
+
+    /// Whether the item states its protocols as a list. Only a selected
+    /// declaration with a list path can; a static one never does.
+    pub fn selects_from_set(&self, composed: &Value) -> bool {
+        match self {
+            Self::Static(_) => false,
+            Self::Selected {
+                from_composed_set, ..
+            } => from_composed_set
+                .as_deref()
+                .is_some_and(|path| composed_path(composed, path).is_some()),
+        }
+    }
+
+    /// Every protocol ref the item admits: the one scalar value, or each entry
+    /// of the list. Exactly one of the two forms must be present; each ref must
+    /// be in the signed allowlist, and a list is non-empty, bounded and free of
+    /// duplicates.
+    pub fn candidates(&self, composed: &Value) -> Result<Vec<String>, String> {
+        self.validate()?;
+        let Self::Selected {
+            from_composed,
+            from_composed_set,
+            allowed,
+        } = self
+        else {
+            return self.resolve(composed).map(|protocol_ref| vec![protocol_ref]);
+        };
+        let Some(set_path) = from_composed_set else {
+            return self.resolve(composed).map(|protocol_ref| vec![protocol_ref]);
+        };
+        let scalar = composed_path(composed, from_composed);
+        let list = composed_path(composed, set_path);
+        let list = match (scalar, list) {
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "subprocess protocol must be declared by exactly one of `{}` and `{}`, found both",
+                    from_composed.join("."),
+                    set_path.join(".")
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "subprocess protocol must be declared by exactly one of `{}` and `{}`, found neither",
+                    from_composed.join("."),
+                    set_path.join(".")
+                ));
+            }
+            (Some(_), None) => {
+                return self.resolve(composed).map(|protocol_ref| vec![protocol_ref]);
+            }
+            (None, Some(list)) => list,
+        };
+        let entries = list.as_array().ok_or_else(|| {
+            format!(
+                "subprocess protocol list `{}` must be a sequence",
+                set_path.join(".")
+            )
+        })?;
+        if entries.is_empty() || entries.len() > MAX_PROTOCOL_CANDIDATES {
+            return Err(format!(
+                "subprocess protocol list `{}` must hold between 1 and {MAX_PROTOCOL_CANDIDATES} entries",
+                set_path.join(".")
+            ));
+        }
+        let mut refs: Vec<String> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let protocol_ref = entry.as_str().ok_or_else(|| {
+                format!(
+                    "subprocess protocol list `{}` must hold only strings",
+                    set_path.join(".")
+                )
+            })?;
+            if !allowed.iter().any(|candidate| candidate == protocol_ref) {
+                return Err(format!(
+                    "subprocess protocol `{protocol_ref}` is not in the signed selector allowlist"
+                ));
+            }
+            if refs.iter().any(|existing| existing == protocol_ref) {
+                return Err(format!(
+                    "subprocess protocol list `{}` names `{protocol_ref}` more than once",
+                    set_path.join(".")
+                ));
+            }
+            refs.push(protocol_ref.to_owned());
+        }
+        Ok(refs)
     }
 }
 
@@ -1634,6 +1760,39 @@ impl ExecutionSchema {
                 declaration.path.join(".")
             ),
         })
+    }
+
+    /// The filesystem ceiling for an item whose protocol was selected by the
+    /// node. A scalar-protocol item projects exactly as
+    /// `project_filesystem_authority_ceiling`. An item that lists several
+    /// admissible protocols takes the ceiling from the selected protocol's
+    /// holding and must not also state one itself, so the two cannot disagree.
+    pub fn project_filesystem_authority_ceiling_selected(
+        &self,
+        composed: &Value,
+        holding: Option<&crate::protocols::ProtocolHolding>,
+    ) -> Result<crate::isolation::IsolationFilesystemAuthorityCeiling, EngineError> {
+        let lists_protocols = match self.terminator.as_ref() {
+            Some(TerminatorDecl::Subprocess { protocol }) => protocol.selects_from_set(composed),
+            _ => false,
+        };
+        if !lists_protocols {
+            return self.project_filesystem_authority_ceiling(composed);
+        }
+        if let Some(declaration) = self.filesystem_authority_ceiling.as_ref()
+            && composed_path(composed, &declaration.path).is_some()
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "`{}` must be absent when the item lists several admissible protocols; the selected protocol's holding owns the filesystem authority",
+                    declaration.path.join(".")
+                ),
+            });
+        }
+        let holding = holding.ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: "an item that lists several admissible protocols needs a selected protocol holding to project its filesystem authority".to_owned(),
+        })?;
+        Ok(holding.filesystem_authority)
     }
 
     /// Resolve the signed shared-workspace contract, when this kind owns one.
@@ -5899,6 +6058,219 @@ execution:
                     "execution_protocol": "protocol:other/not_allowed"
                 }))
                 .is_err()
+        );
+    }
+
+    const LIST_PROTOCOL_KIND: &str = "\
+execution:
+  filesystem_authority_ceiling:
+    path: [filesystem_authority]
+    default: node_policy
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      from_composed_set: [execution_protocols]
+      allowed:
+        - protocol:example/first
+        - protocol:example/second
+        - protocol:example/other
+";
+
+    fn list_protocol_decl() -> SubprocessProtocolDecl {
+        let exec = parse_exec(LIST_PROTOCOL_KIND).unwrap().unwrap();
+        let Some(TerminatorDecl::Subprocess { protocol }) = exec.terminator else {
+            panic!("expected subprocess terminator");
+        };
+        protocol
+    }
+
+    #[test]
+    fn candidates_are_the_scalar_or_each_entry_of_the_list() {
+        let protocol = list_protocol_decl();
+        assert_eq!(
+            protocol
+                .candidates(&serde_json::json!({"execution_protocol": "protocol:example/first"}))
+                .unwrap(),
+            vec!["protocol:example/first".to_owned()]
+        );
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/second", "protocol:example/first"],
+        });
+        assert!(protocol.selects_from_set(&listed));
+        assert_eq!(
+            protocol.candidates(&listed).unwrap(),
+            vec![
+                "protocol:example/second".to_owned(),
+                "protocol:example/first".to_owned()
+            ]
+        );
+        // A scalar item is not a list item.
+        assert!(!protocol.selects_from_set(&serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+        })));
+    }
+
+    #[test]
+    fn exactly_one_of_the_scalar_and_list_forms_must_be_present() {
+        let protocol = list_protocol_decl();
+        let both = protocol
+            .candidates(&serde_json::json!({
+                "execution_protocol": "protocol:example/first",
+                "execution_protocols": ["protocol:example/second"],
+            }))
+            .unwrap_err();
+        assert!(both.contains("exactly one") && both.contains("both"), "{both}");
+        let neither = protocol.candidates(&serde_json::json!({})).unwrap_err();
+        assert!(
+            neither.contains("exactly one") && neither.contains("neither"),
+            "{neither}"
+        );
+    }
+
+    #[test]
+    fn a_protocol_list_is_a_bounded_allowed_sequence_without_duplicates() {
+        let protocol = list_protocol_decl();
+        let refused = |value: serde_json::Value| {
+            protocol
+                .candidates(&serde_json::json!({"execution_protocols": value}))
+                .is_err()
+        };
+        assert!(refused(serde_json::json!("protocol:example/first")));
+        assert!(refused(serde_json::json!([])));
+        assert!(refused(serde_json::json!([7])));
+        assert!(refused(serde_json::json!(["protocol:example/not_allowed"])));
+        assert!(refused(serde_json::json!([
+            "protocol:example/first",
+            "protocol:example/first"
+        ])));
+        assert!(refused(serde_json::json!(vec!["protocol:example/first"; 9])));
+    }
+
+    #[test]
+    fn resolve_refuses_an_item_that_lists_several_protocols() {
+        let protocol = list_protocol_decl();
+        let error = protocol
+            .resolve(&serde_json::json!({
+                "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+            }))
+            .unwrap_err();
+        assert!(error.contains("execution_protocols"), "{error}");
+        assert_eq!(
+            protocol
+                .resolve(&serde_json::json!({"execution_protocol": "protocol:example/other"}))
+                .unwrap(),
+            "protocol:example/other"
+        );
+    }
+
+    #[test]
+    fn a_declaration_without_a_list_path_keeps_scalar_behaviour() {
+        let exec = parse_exec(
+            "\
+execution:
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      allowed: [protocol:example/first]
+",
+        )
+        .unwrap()
+        .unwrap();
+        let Some(TerminatorDecl::Subprocess { protocol }) = exec.terminator else {
+            panic!("expected subprocess terminator");
+        };
+        let composed = serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+            "execution_protocols": ["protocol:example/first"],
+        });
+        assert!(!protocol.selects_from_set(&composed));
+        assert_eq!(
+            protocol.candidates(&composed).unwrap(),
+            vec!["protocol:example/first".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_list_path_must_be_canonical_and_distinct_from_the_scalar_path() {
+        for set_path in ["[]", "[execution_protocol]", "[\"a.b\"]"] {
+            let yaml = format!(
+                "execution:\n  terminator:\n    kind: subprocess\n    protocol:\n      from_composed: [execution_protocol]\n      from_composed_set: {set_path}\n      allowed: [protocol:example/first]\n"
+            );
+            assert!(parse_exec(&yaml).is_err(), "{set_path}");
+        }
+    }
+
+    #[test]
+    fn a_selected_ceiling_comes_from_the_holding_for_a_list_and_is_unchanged_for_a_scalar() {
+        use crate::isolation::IsolationFilesystemAuthorityCeiling as Ceiling;
+        let exec = parse_exec(LIST_PROTOCOL_KIND).unwrap().unwrap();
+        let holding = |authority: &str| -> crate::protocols::ProtocolHolding {
+            serde_json::from_value(serde_json::json!({
+                "requires_guarantees": ["isolation:enforced"],
+                "filesystem_authority": authority,
+                "root_settlement": "containment_empty",
+            }))
+            .unwrap()
+        };
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+        });
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(
+                &listed,
+                Some(&holding("captured_execution"))
+            )
+            .unwrap(),
+            Ceiling::CapturedExecution
+        );
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(
+                &listed,
+                Some(&holding("node_policy"))
+            )
+            .unwrap(),
+            Ceiling::NodePolicy
+        );
+        // A list needs the selected holding.
+        assert!(
+            exec.project_filesystem_authority_ceiling_selected(&listed, None)
+                .is_err()
+        );
+        // A list with its own filesystem authority would let two sources disagree.
+        let mut with_authority = listed.clone();
+        with_authority["filesystem_authority"] = "captured_execution".into();
+        let error = exec
+            .project_filesystem_authority_ceiling_selected(
+                &with_authority,
+                Some(&holding("captured_execution")),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("filesystem_authority"), "{error}");
+        // A scalar item projects as before, whatever holding is passed.
+        let scalar = serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+            "filesystem_authority": "captured_execution",
+        });
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(&scalar, None)
+                .unwrap(),
+            exec.project_filesystem_authority_ceiling(&scalar).unwrap()
+        );
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(&scalar, None)
+                .unwrap(),
+            Ceiling::CapturedExecution
+        );
+        assert_eq!(
+            exec.project_filesystem_authority_ceiling_selected(
+                &serde_json::json!({"execution_protocol": "protocol:example/first"}),
+                None
+            )
+            .unwrap(),
+            Ceiling::NodePolicy
         );
     }
 

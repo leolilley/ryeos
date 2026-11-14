@@ -11,17 +11,17 @@
 //! selected. Nothing here names a consumer, an ecosystem or a lane.
 
 use anyhow::{Context as _, bail, ensure};
-use lillux::process_control::{
-    CapabilityRequirement, CapabilityRequirementSpec, HostCapabilities, satisfies,
-};
+use lillux::process_control::CapabilityRequirement;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{qualification::bounded, validate_name};
+pub use crate::node_guarantees::{
+    MAX_REQUIRED_GUARANTEES, NodeGuarantees, unmet_guarantees, validate_required_guarantees,
+};
 
 pub const QUALIFICATION_VARIANTS_SCHEMA: &str = "ryeos.qualification_variants.v1";
 const MAX_VARIANTS: usize = 8;
-pub const MAX_REQUIRED_GUARANTEES: usize = 16;
 const MAX_VARIANTS_BYTES: usize = 16 * 1024;
 
 /// One accepted variant: the guarantees it requires and the signed
@@ -41,87 +41,6 @@ pub struct QualificationVariant {
 pub struct QualificationVariants {
     pub schema: String,
     pub variants: Vec<QualificationVariant>,
-}
-
-/// Why a requirement list is malformed, or `Ok` when every entry names its
-/// capabilities and grades well. A variant that required nothing would be met
-/// by every node, so an empty list is refused.
-pub fn validate_required_guarantees(requires: &[CapabilityRequirement]) -> anyhow::Result<()> {
-    ensure!(
-        !requires.is_empty() && requires.len() <= MAX_REQUIRED_GUARANTEES,
-        "required guarantee count is out of bounds"
-    );
-    for entry in requires {
-        if let Some(refusal) = entry.spec_refusal() {
-            bail!("required guarantee is malformed: {refusal}");
-        }
-    }
-    Ok(())
-}
-
-/// What a node holds: the guarantees it reports and the signed capability
-/// floor that decides which weaker grades of them it admits. A requirement
-/// names grades itself (bare means measured only); a node whose floor
-/// explicitly accepts a grade for a capability admits that grade for the same
-/// capability here, exactly as it does for its own startup.
-#[derive(Debug, Clone, Copy)]
-pub struct NodeGuarantees<'a> {
-    pub reported: &'a HostCapabilities,
-    pub floor: &'a [CapabilityRequirement],
-}
-
-impl<'a> NodeGuarantees<'a> {
-    pub fn new(reported: &'a HostCapabilities, floor: &'a [CapabilityRequirement]) -> Self {
-        Self { reported, floor }
-    }
-
-    /// `Ok` when `entry` is met, else the reason.
-    fn meets(&self, entry: &CapabilityRequirement) -> Result<(), String> {
-        let refusal = match self.reported.meets(entry) {
-            Ok(_) => return Ok(()),
-            Err(refusal) => refusal,
-        };
-        for name in entry.names() {
-            let Some(evidence) = self.reported.provided.get(name) else {
-                continue;
-            };
-            let mut accept: Vec<String> = entry.accepted_grades().to_vec();
-            for floor_entry in self.floor {
-                if floor_entry.names().contains(name) {
-                    for grade in floor_entry.accepted_grades() {
-                        if !accept.contains(grade) {
-                            accept.push(grade.clone());
-                        }
-                    }
-                }
-            }
-            let widened = CapabilityRequirement::Spec(CapabilityRequirementSpec {
-                name: Some(name.clone()),
-                any_of: Vec::new(),
-                accept,
-                providers: entry.providers().to_vec(),
-            });
-            if satisfies(&widened, name, evidence).is_ok() {
-                return Ok(());
-            }
-        }
-        Err(refusal)
-    }
-}
-
-/// The entries of `requires` the node does not hold, each with its reason.
-pub fn unmet_guarantees(
-    requires: &[CapabilityRequirement],
-    node: NodeGuarantees<'_>,
-) -> Vec<(String, String)> {
-    requires
-        .iter()
-        .filter_map(|entry| {
-            node.meets(entry)
-                .err()
-                .map(|reason| (entry.label(), reason))
-        })
-        .collect()
 }
 
 impl QualificationVariants {
@@ -216,7 +135,7 @@ pub fn require_policy_guarantees(
 
 #[cfg(test)]
 mod tests {
-    use lillux::process_control::ProofSource;
+    use lillux::process_control::{HostCapabilities, ProofSource};
     use serde_json::json;
 
     use super::*;

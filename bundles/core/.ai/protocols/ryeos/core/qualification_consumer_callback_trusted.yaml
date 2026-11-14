@@ -1,0 +1,47 @@
+# ryeos:signed:2026-11-14T12:20:23Z:b24fdef32e4dead08be323e3b822f5ac135e5f59f929dd38902f549d1a5eecd3:7oMMk3dVjCS47XX1U/t3EdF3XfWx7Cgh6kByVLmIE9Cav5V1jU1i24aTHsKqatkJ3oQbQenve4dsUW+Cgde0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: qualification_consumer_callback_trusted
+category: ryeos/core
+abi_version: v1
+description: Independent verifier callback protocol for one exact retained remote consumer attempt, run by a node that holds the trusted process-group placement.
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections:
+  - { name: RYE_THREAD_ID, source: thread_id }
+  - { name: RYE_PROJECT_PATH, source: project_path }
+  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }
+  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
+  - { name: RYEOSD_THREAD_ID, source: thread_id }
+  - { name: RYEOSD_PROJECT_STATE_SCOPE, source: project_state_scope }
+  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+  - { name: RYEOSD_RUNTIME_STATE_ROOT, source: runtime_state_root }
+# A qualification verifier on the pinned-snapshot project lane runs against the exact snapshot the subject was
+# captured from, so its project source is a pushed head. The capability is open only to an item that declares that
+# lane (project_lane: pinned_snapshot); remote and detached dispatch stay closed.
+capabilities:
+  allows_pushed_head: true
+  pushed_head_requires_declaration: true
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: runtime_socket
+qualification_callback: remote_consumer
+execution_evidence:
+  handler: handler:ryeos/core/scoped-qualification-execution-evidence
+  config: { subordinate: remote_consumer }
+  limits:
+    max_request_bytes: 2097152
+    max_response_bytes: 2097152
+    max_events: 128
+    max_event_bytes: 65536
+    max_calls: 1
+    max_call_bytes: 65536
+holding:
+  requires_guarantees:
+    - { name: sessions:trusted_process_group, accept: [trusted] }
+  filesystem_authority: node_policy
+  root_settlement: trusted_process_group_absent
