@@ -9940,7 +9940,7 @@ mod tests {
     struct BundleStateFixture {
         app_root: tempfile::TempDir,
         runtime: IsolationRuntime,
-        command: IsolationDescriptorBoundCommand,
+        command: IsolationVerifiedCode,
         project: lillux::PinnedDirectory,
     }
 
