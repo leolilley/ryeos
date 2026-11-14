@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:f95e97c05555282c7578e95049f180cc697660b5397d3749f06842ad536a546e:yxGwRvYjkaYf09Kjp/PZrEmHtLjVSv6VIT3VCgL6obzDmIkDWA/VrcJ9Nk64EmWsWXmdySY8RO1BlRtzNL5gDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:30:21Z:0aff0604592874adefd6cfa54aaf0ef205f5eb01a7b8906f1dfa8156b7347eca:1wUY2E3lDLzH1F2/BT6ncLviW0oz3a6JwhtuwLNXYO8sopLwXPj/go/mGlfua0eHU2RAzNY5Rei1G53uqJh5AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -37,8 +37,11 @@ untrusted tenants.
   `ryeos.execute.service.objects/get` does not by itself reach another
   principal's objects. The unscoped read, `objects/get-any`, is operator-only
   and never part of a recommended grant. See [Services: objects](../services/objects.md#authority-reads-are-scoped-by-root).
-- Vault is a single shared store in v1; capability checks protect
-  mutation/listing, not per-principal isolation.
+- Vault is a single shared store. Capability checks gate the vault services,
+  and the target node's signed `sealed_vault_names` policy bounds, per name,
+  who may write, list and receive it; a name without an entry is operator-only
+  there. The target judges the principal it admitted: the delegated user when
+  the caller holds a delegation, otherwise the calling node.
 - Remote requests are signed with this node's Ed25519 key and carry the
   calling principal's own signed delegation. The remote node admits the
   principal from its authorized-keys trust store and caps the request to the
@@ -262,7 +265,9 @@ principal's grant ends all of them, and `not_after` bounds the rest.
    profiles). When it lapses the key holder receives HTTP 401
    `grant_expired`; the principal that granted it (or the target's operator)
    renews it with `ryeos renew-key --fingerprint <fp>`. The grantee cannot
-   renew its own grant. See [Identity model](../identity-model.md).
+   renew its own grant. A grant is withdrawn early with `ryeos revoke-key`
+   (or `ryeos remote revoke`), which leaves a tombstone. See
+   [Identity model](../identity-model.md).
 
 3. **Choose scopes by operation**. Do not mix local remote-service caps
    with remote authorized-key scopes. The complete matrix is in
@@ -323,6 +328,12 @@ forwarded `remote_principal` principal.
    | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires; `ryeos.use.vault.operator` only if the policy exposes the target's operator vault (not by default, see below) |
    | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
+
+   `remote authorize`, `remote pull` and `remote bundle-install` go out as the
+   caller under its stored delegation (`ryeos remote delegate`), so the
+   scopes above must be in both the caller's grant on the target and the
+   delegation; a caller that is the node itself acts as the node key. With no
+   delegation they are refused with `remote_delegation_missing`.
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
    | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_principal` principal) |
@@ -645,8 +656,12 @@ authorize the new node key.
 2. On the remote: `ryeos authorize-key` with the new node public key.
 3. On the caller: `ryeos remote configure` with the caller's existing
    `--descriptor` or `--expect-fingerprint` pin to pick up changes.
-4. On the remote: remove any superseded authorized-key TOML from
-   `.ai/node/auth/authorized_keys/`.
+4. On the remote: revoke the superseded grant with `ryeos revoke-key
+   --fingerprint <old fingerprint> --reason "rotated"` (run `ryeos remote
+   revoke` from the caller, or `ryeos node authorization revoke` on the
+   stopped remote). Do not delete the file by hand: a revocation leaves a
+   node-signed tombstone, so a restored copy of the old grant stays refused,
+   and it stops the old key's live work and schedules.
 
 ## Remote Ignore Cache
 

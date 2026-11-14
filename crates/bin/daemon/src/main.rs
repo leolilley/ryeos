@@ -4934,6 +4934,10 @@ async fn run(
                     .retain(),
             );
 
+            let vault_ceilings = Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
+                &node_policy_snapshot,
+                &config.operator_signing_key_path,
+            )?);
             let app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
@@ -5047,6 +5051,7 @@ async fn run(
                 node_policy: node_policy_snapshot,
                 vault,
                 provider_env: Arc::clone(provider_environment.environment()),
+                vault_ceilings,
                 command_registry,
                 authorizer,
                 ignore_matcher,
@@ -8684,6 +8689,10 @@ async fn run_service_standalone(
         node_policy: node_policy_snapshot.clone(),
         vault: standalone_vault,
         provider_env: Arc::clone(provider_environment.environment()),
+        vault_ceilings: Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
+            &node_policy_snapshot,
+            &config.operator_signing_key_path,
+        )?),
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
         ignore_matcher: standalone_ignore_matcher,

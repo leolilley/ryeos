@@ -127,6 +127,9 @@ pub struct AppState {
     /// for exactly the names the node policy declares. Read only through
     /// authorized secret delivery, alongside the vault.
     pub provider_env: Arc<crate::vault::ProviderEnvironment>,
+    /// Per-name receive and write ceilings of the shared sealed vault, from
+    /// the node's signed policy, bound to the configured local operator.
+    pub vault_ceilings: Arc<crate::vault::VaultCeilings>,
     /// Command registry for token routing. Built once at startup
     /// from node-config command YAMLs.
     pub command_registry: Arc<CommandRegistry>,
@@ -227,6 +230,7 @@ impl AppState {
         crate::vault::SecretSources {
             vault: self.vault.as_ref(),
             provider_env: self.provider_env.as_ref(),
+            ceilings: self.vault_ceilings.as_ref(),
         }
     }
 
@@ -485,6 +489,14 @@ pub mod test_support {
         };
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)?;
         ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+        // `runtime.author_item` signs with the node's authoring key, which
+        // `ryeos init` creates; a composed test node holds one too.
+        // A root composed twice keeps the key it already has.
+        let authoring_key =
+            ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).authoring_signing_key_path();
+        if !authoring_key.exists() {
+            ryeos_node_runtime::identity::NodeIdentity::create(&authoring_key)?;
+        }
         Ok((config, identity))
     }
 
@@ -576,6 +588,9 @@ pub mod test_support {
             ),
             vault: Arc::new(crate::vault::EmptyVault),
             provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
+            vault_ceilings: Arc::new(crate::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(
                 &[],
                 &Default::default(),

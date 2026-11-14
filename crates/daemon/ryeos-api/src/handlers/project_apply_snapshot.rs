@@ -3433,6 +3433,13 @@ schedules:
                 effective_origin_site_id: self.identity.site_id(),
             })
         }
+
+        fn require_execution_admissible(
+            &self,
+            _: &ryeos_scheduler_contract::ScheduleExecution,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// A scheduler store, service and project directory over one temporary

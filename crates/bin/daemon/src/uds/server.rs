@@ -2195,6 +2195,8 @@ mod tests {
                 project_authority_id: authority_id,
                 source_identity: format!("dotenv:{path}/.env"),
                 include_operator_vault: true,
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
             },
             capability_ceiling: Vec::new(),
@@ -2462,6 +2464,9 @@ mod tests {
                 ]),
             ),
             provider_env: Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+            vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
                 tmpdir.path().join("vault-store.toml"),
                 lillux::vault::VaultSecretKey::generate(),

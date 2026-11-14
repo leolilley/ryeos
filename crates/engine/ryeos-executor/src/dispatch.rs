@@ -2521,6 +2521,7 @@ pub(crate) async fn dispatch_method(
             item_ref: runtime_item_ref.clone(),
             thread_id: thread_id.clone(),
             project_path: request.project_path.to_path_buf(),
+            bundle_state_home: None,
             runtime_state_root: request
                 .provenance
                 .state_root_override()
@@ -2562,7 +2563,7 @@ pub(crate) async fn dispatch_method(
             .env_injections
             .iter()
             .map(|injection| {
-                let value = ryeos_engine::protocol_vocabulary::produce_env_value(
+                let value = ryeos_engine::protocol_vocabulary::produce_optional_env_value(
                     injection.source,
                     &env_request,
                 )
@@ -2573,15 +2574,18 @@ pub(crate) async fn dispatch_method(
                         runtime_protocol.canonical_ref, injection.name, runtime_item_ref,
                     ),
                 })?;
-                Ok(ryeos_app::env_contract::EnvBinding::new(
+                Ok(value.map(|value| ryeos_app::env_contract::EnvBinding::new(
                     injection.name.clone(),
                     value,
                     ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection {
                         source: injection.source,
                     },
-                ))
+                )))
             })
-            .collect::<Result<Vec<_>, DispatchError>>()?;
+            .collect::<Result<Vec<_>, DispatchError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         let envs = ryeos_app::env_contract::EnvContractBuilder::new()
             .with_base_allowlist(std::env::vars_os().map(|(key, value)| {
                 (
@@ -2650,6 +2654,7 @@ pub(crate) async fn dispatch_method(
                     network_authority_ceiling,
                     live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     captured_callback_socket: false,
@@ -3586,10 +3591,54 @@ fn admit_tool_launch(
     trust_class: ryeos_engine::resolution::TrustClass,
     item_ref: &str,
     ctx: &ExecutionContext,
+    launch_params: &Value,
 ) -> Result<Vec<String>, DispatchError> {
-    let caps = derive_manifest_runtime_caps(resolved_item, trust_class, item_ref, ctx)?;
+    let mut caps = derive_manifest_runtime_caps(resolved_item, trust_class, item_ref, ctx)?;
+    caps.extend(derive_tool_state_home_cap(
+        resolved_item,
+        trust_class,
+        ctx,
+        launch_params,
+    )?);
     admit_tool_node_requirements(node, resolved_item, item_ref)?;
     Ok(caps)
+}
+
+/// The bundle state access capability a direct tool launch is entitled to, or
+/// `None` when the tool requests no state home. The installed bundle's signed
+/// manifest must back the namespace the launch resolves, and the caller's own
+/// grant (never the scopes the launch composes for the thread) must carry the
+/// namespace's `use` capability; either refusal is typed and names its fix.
+fn derive_tool_state_home_cap(
+    resolved_item: &ResolvedItem,
+    trust_class: ryeos_engine::resolution::TrustClass,
+    ctx: &ExecutionContext,
+    launch_params: &Value,
+) -> Result<Option<String>, DispatchError> {
+    let refuse = |refusal| crate::execution::launch::state_home_dispatch_error(&refusal);
+    let Some(cap) = ryeos_app::runtime_capability_admission::mint_state_home_cap(
+        resolved_item.metadata.extra.get("requires"),
+        resolved_item,
+        trust_class,
+        &ctx.engine,
+        launch_params,
+    )
+    .map_err(refuse)?
+    else {
+        return Ok(None);
+    };
+    if let Some((bundle_id, namespace, _)) =
+        ryeos_bundle::runtime_authority::parse_bundle_state_access_cap(&cap)
+    {
+        ryeos_app::bundle_state_home::authorize_caller(
+            &ctx.caller_scopes,
+            &bundle_id,
+            &namespace,
+            &ctx.principal_fingerprint,
+        )
+        .map_err(refuse)?;
+    }
+    Ok(Some(cap))
 }
 
 /// Refuse an in-process item that declares node guarantees or a credential
@@ -4843,6 +4892,16 @@ fn require_prepared_launch_secret_availability(
                 source_kind: "launch_preparation".to_owned(),
                 source_name: "symbolic_requirement".to_owned(),
                 remediation: crate::dispatch_error::required_secret_remediation(&name),
+            }
+        }
+        // A vault name the node's ceilings withhold from this principal is an
+        // authorization refusal carrying the ceiling's own code, the same 403
+        // an accepted launch's preflight returns.
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            DispatchError::LaunchPolicyForbidden {
+                code: refusal.code().to_owned(),
+                message: refusal.to_string(),
+                binding: None,
             }
         }
         error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
@@ -6191,6 +6250,7 @@ pub fn preflight_root_dispatch_with_remote_consumer(
                                     v.launch_trust_class(),
                                     &hop_ref.to_string(),
                                     ctx,
+                                    params,
                                 )?;
                                 // A method-dispatch wrapper's accepted form is
                                 // a pre-minted target method thread, not a
@@ -7780,11 +7840,14 @@ runtime_authority:
     #[test]
     fn trusted_live_project_mints_from_its_signed_manifest() {
         let project = tempdir().join("arc");
-        write_signed_manifest(&project.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        write_signed_manifest(
+            &project.join(ryeos_engine::AI_DIR),
+            &SELF_BUNDLE_MANIFEST.replace("name: example-bundle", "name: arc-project"),
+        );
         let ctx = test_execution_context(project.clone());
         let mut resolved = resolved_tool_in_space(
             &project,
-            "tool:example-bundle/send",
+            "tool:arc-project/send",
             ryeos_engine::contracts::ItemSpace::Project,
             &signing_key(),
         );
@@ -8126,7 +8189,7 @@ runtime_authority:
     }
 
     #[test]
-    fn node_trusted_manifest_in_exact_live_project_root_mints_runtime_authority() {
+    fn project_manifest_replaying_an_installed_bundle_manifest_is_refused_as_collision() {
         let installed_bundle = tempdir().join("installed-example-bundle");
         let installed_ai = installed_bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(&installed_ai, SELF_BUNDLE_MANIFEST);
@@ -8157,26 +8220,36 @@ runtime_authority:
             ryeos_engine::contracts::ItemSpace::Project,
             &signing_key(),
         );
-        resolved.resolved_item.metadata.extra = requires_extra(json!({
-            "capabilities": { "manifest": { "runtime_authority": {
-                "bundle_events": [
-                    { "event_kind": "example_event", "operations": ["append"] }
-                ]
-            } } }
-        }));
-
-        let caps = derive_manifest_runtime_caps(
-            &resolved.resolved_item,
-            fixture_trust(&resolved.resolved_item),
-            &resolved.item_ref,
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(
-            caps,
-            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
-            "the node-trusted manifest is bounded by exact project provenance"
-        );
+        let requirements = [
+            json!({ "bundle_events": [
+                { "event_kind": "example_event", "operations": ["append"] }
+            ] }),
+            json!({ "runtime_vault": [
+                { "namespace": "oauth", "operations": ["get"] }
+            ] }),
+            json!({ "item_authoring": [
+                { "kind": "knowledge", "namespace": "runtime-authored/*" }
+            ] }),
+        ];
+        for authority in requirements {
+            resolved.resolved_item.metadata.extra = requires_extra(json!({
+                "capabilities": { "manifest": { "runtime_authority": authority } }
+            }));
+            let err = derive_manifest_runtime_caps(
+                &resolved.resolved_item,
+                fixture_trust(&resolved.resolved_item),
+                &resolved.item_ref,
+                &ctx,
+            )
+            .unwrap_err();
+            let text = err.to_string();
+            assert!(
+                text.contains("project_bundle_id_collision")
+                    && text.contains("example-bundle")
+                    && text.contains("Rename the project bundle"),
+                "a project manifest named after an installed bundle must be refused: {text}"
+            );
+        }
     }
 
     #[test]
@@ -8626,6 +8699,7 @@ requires:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            &json!({}),
         )
         .unwrap();
         assert!(caps.is_empty(), "{caps:?}");
@@ -8638,6 +8712,7 @@ requires:
             fixture_trust(&plain.resolved_item),
             &plain.item_ref,
             &ctx,
+            &json!({}),
         )
         .unwrap();
     }
@@ -8666,6 +8741,7 @@ requires:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            &json!({}),
         )
         .unwrap_err();
         assert!(
@@ -8690,6 +8766,7 @@ requires:
             fixture_trust(&resolved.resolved_item),
             &resolved.item_ref,
             &ctx,
+            &json!({}),
         )
         .unwrap_err();
         assert!(
@@ -8698,6 +8775,113 @@ requires:
                 .contains("this node has no signed capability report"),
             "{error}"
         );
+    }
+
+    const STATE_HOME_MANIFEST: &str = r#"name: example-bundle
+version: "0.1.0"
+description: test
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+runtime_authority:
+  state_home:
+    namespaces:
+      kind: launch_param
+"#;
+
+    fn state_home_tool_requires() -> std::collections::HashMap<String, serde_json::Value> {
+        requires_extra(json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "state_home": {
+                    "namespace": { "from_param": "realm" },
+                    "access": "read_write"
+                }
+            } } }
+        }))
+    }
+
+    fn admit_state_home_tool(
+        manifest: &str,
+        caller_scopes: &[&str],
+        realm: &str,
+    ) -> Result<Vec<String>, DispatchError> {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), manifest);
+        let mut ctx = test_execution_context(bundle.clone());
+        ctx.caller_scopes = caller_scopes.iter().map(|s| (*s).to_owned()).collect();
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/keep",
+            state_home_tool_requires(),
+        );
+        admit_tool_launch(
+            &ryeos_app::extension_state::ExtensionState::new(),
+            &resolved.resolved_item,
+            fixture_trust(&resolved.resolved_item),
+            &resolved.item_ref,
+            &ctx,
+            &json!({ "realm": realm }),
+        )
+    }
+
+    #[test]
+    fn a_direct_tool_with_the_caller_use_cap_is_minted_its_state_access_cap() {
+        let caps = admit_state_home_tool(
+            STATE_HOME_MANIFEST,
+            &["ryeos.use.bundle-state.example-bundle/ns1"],
+            "ns1",
+        )
+        .unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.write.bundle-state.example-bundle/ns1".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_direct_tool_state_home_is_denied_without_the_caller_use_cap() {
+        let error = admit_state_home_tool(
+            STATE_HOME_MANIFEST,
+            &["ryeos.use.bundle-state.example-bundle/ns1"],
+            "ns2",
+        )
+        .unwrap_err();
+        let DispatchError::LaunchPolicyForbidden { code, message, .. } = &error else {
+            panic!("expected a policy refusal: {error}");
+        };
+        assert_eq!(code, "bundle_state_namespace_denied");
+        assert!(
+            message.contains("ryeos.use.bundle-state.example-bundle/ns2"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_direct_tool_state_home_the_manifest_does_not_back_is_refused() {
+        let error = admit_state_home_tool(
+            SELF_BUNDLE_MANIFEST,
+            &["ryeos.use.bundle-state.example-bundle/ns1"],
+            "ns1",
+        )
+        .unwrap_err();
+        let DispatchError::LaunchPreparationFailed { code, .. } = &error else {
+            panic!("expected a preparation refusal: {error}");
+        };
+        assert_eq!(code, "bundle_state_home_undeclared");
+    }
+
+    #[test]
+    fn a_direct_tool_state_namespace_must_be_a_valid_segment() {
+        let error = admit_state_home_tool(
+            STATE_HOME_MANIFEST,
+            &["ryeos.use.bundle-state.*"],
+            "../escape",
+        )
+        .unwrap_err();
+        let DispatchError::LaunchPreparationFailed { code, .. } = &error else {
+            panic!("expected a preparation refusal: {error}");
+        };
+        assert_eq!(code, "bundle_state_namespace_invalid");
     }
 
     #[test]

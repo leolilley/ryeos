@@ -2661,7 +2661,7 @@ async fn absent_delivery_after_an_acknowledged_expiry_settles_as_expired() {
     );
     assert_eq!(
         worker_state(&state, &pending.worker_instance_id),
-        WorkerProcessState::Attached
+        WorkerProcessState::Live
     );
 }
 

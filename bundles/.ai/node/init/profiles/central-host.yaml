@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T19:42:23Z:d5c2ba9ed82eaf2da2bc493e4eb74b05b8361bfb0c40a1ddeaf83165a07506ae:V1OxmkiM7iFJ1P0G5eHNYAC5Y3KCM//wl+Scpi8etgiTiObCysd16mnoKCNbwpUffBGf1Xed/QC8ruMc6dD4BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:9ffd8b6d4eb037f714da449356424dfca7c4f7426bb85bc16d522550363af1c5:dIMkX0SR/z7hQaTfC1HboQ4pr0mHrI2MC1yiml6XWRjhbORnWQEe1TqCRuBiCNNvwBOzm/QG/cKZBcioRHRiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -424,6 +424,9 @@ policies:
     limits: null
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

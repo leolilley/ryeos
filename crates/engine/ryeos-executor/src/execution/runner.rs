@@ -26,7 +26,9 @@ use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, ProjectContext};
-use ryeos_engine::protocol_vocabulary::{CallbackChannel, EnvInjectionSource, produce_env_value};
+use ryeos_engine::protocol_vocabulary::{
+    CallbackChannel, EnvInjectionSource, produce_optional_env_value,
+};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::launch_token_ttl;
@@ -3184,6 +3186,23 @@ fn with_host_access_containment(
     }
 }
 
+/// Open the bundle state namespace a direct launch's sealed capabilities name,
+/// or `None` when they name none. The caps were sealed by admission, which
+/// judged both the signed manifest and the caller's `use` grant.
+fn open_direct_bundle_state_home(
+    state: &AppState,
+    engine: &ryeos_engine::engine::Engine,
+    effective_caps: &[String],
+) -> Result<Option<ryeos_engine::isolation::IsolationBundleStateHome>> {
+    ryeos_app::bundle_state_home::open_for_sealed_caps(
+        &state.config.app_root,
+        &state.identity,
+        &engine.registered_bundle_generation_fingerprint(),
+        effective_caps,
+    )
+    .map_err(|refusal| anyhow::anyhow!("{}: {refusal}", refusal.code()))
+}
+
 // Execution plumbing: each argument is a distinct leg of the thread's
 // auth/provenance context, threaded verbatim — a struct would rename,
 // not simplify. Restructure with a compiler in the loop, not here.
@@ -3210,6 +3229,7 @@ fn build_protocol_launch_env(
     launch_owner: &str,
     scoped_producer_grant: Option<AdmittedScopedProducerGrant>,
     remote_consumer_grant: Option<AdmittedRemoteConsumerGrant>,
+    bundle_state_home: Option<&ryeos_engine::isolation::IsolationBundleStateHome>,
 ) -> Result<ProtocolLaunchEnv> {
     let callback_socket_requested = protocol
         .descriptor
@@ -3385,6 +3405,18 @@ fn build_protocol_launch_env(
         item_ref,
         thread_id: thread_id.to_string(),
         project_path: project_path.to_path_buf(),
+        // Under enforced isolation the workload sees the fixed mount
+        // destination; otherwise there is no mount and it uses the real
+        // directory.
+        bundle_state_home: bundle_state_home.map(|home| {
+            if state.isolation.is_enforced() {
+                std::path::PathBuf::from(
+                    ryeos_engine::isolation::BUNDLE_STATE_ISOLATION_DESTINATION,
+                )
+            } else {
+                home.namespace_dir.clone()
+            }
+        }),
         runtime_state_root: callback_project_path.to_path_buf(),
         acting_principal: acting_principal.to_string(),
         cas_root,
@@ -3398,8 +3430,10 @@ fn build_protocol_launch_env(
 
     let mut bindings = Vec::with_capacity(protocol.descriptor.env_injections.len());
     for injection in &protocol.descriptor.env_injections {
-        let value = match produce_env_value(injection.source, &request) {
-            Ok(value) => value,
+        // A launch without a bundle state home sets no state-home variable.
+        let value = match produce_optional_env_value(injection.source, &request) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
             Err(error) => {
                 if let Some(token) = callback_token.as_deref() {
                     state.callback_tokens.invalidate(token);
@@ -4006,6 +4040,16 @@ fn restore_process_workspace_output_generation(
         budget,
         Some(&state.state_store),
     )
+}
+
+/// A large object scrub quarantined surfaces here, at store redemption after
+/// thread birth. Keep it the typed operator-correctable refusal rather than an
+/// internal failure; the thread is still failed by the caller.
+pub(crate) fn classify_prepared_input_error(error: anyhow::Error) -> anyhow::Error {
+    match super::external_content::classify_quarantined_large_object(&error) {
+        Some(typed) => anyhow::Error::new(typed),
+        None => error,
+    }
 }
 
 pub(crate) fn prepare_process_inputs(
@@ -5341,7 +5385,7 @@ pub async fn run_and_wait(
             wait_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
     let wait_bound_source = wait_bound_source.map(Arc::new);
     effective_path = process_path;
@@ -5442,6 +5486,9 @@ pub async fn run_and_wait(
         &params.resolved.root_raw_content_digest,
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
+    let wait_bundle_state_home =
+        open_direct_bundle_state_home(&state, &engine, &params.effective_caps)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
         bindings: mut protocol_env_bindings,
         callback_token,
@@ -5466,6 +5513,7 @@ pub async fn run_and_wait(
         &wait_launch_owner,
         wait_scoped_producer_grant.clone(),
         wait_remote_consumer_grant,
+        wait_bundle_state_home.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     if let Some(bound) = wait_bound_external.as_ref() {
@@ -5632,6 +5680,7 @@ pub async fn run_and_wait(
             isolation_immutable_project: wait_isolation_immutable_project,
             isolation_workspace_view: wait_workspace_view,
             isolation_live_access_authority: wait_isolation_live_access_authority,
+            bundle_state_home: wait_bundle_state_home,
             isolation_external_read_only_mounts: wait_external_mounts,
             isolation_target_channels: wait_scoped_relay_channels,
             isolation_workspace: wait_isolation_workspace,
@@ -6402,7 +6451,7 @@ pub async fn run_detached(
             bg_launch_isolation.as_ref(),
         ),
     )
-    .map_err(|error| guard.fail_before_spawn(error))?;
+    .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     effective_path = process_path;
     if let Some(lifeline) = process_input_lifeline {
         guard.track_process_input_dir(lifeline);
@@ -6474,6 +6523,9 @@ pub async fn run_detached(
         )));
     }
     let launch_timeout_secs = prepared_plan.timeout_secs;
+    let bg_bundle_state_home =
+        open_direct_bundle_state_home(&state, &engine, &params.effective_caps)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
         bindings: mut protocol_env_bindings,
         callback_token,
@@ -6498,6 +6550,7 @@ pub async fn run_detached(
         &detached_launch_owner,
         None,
         None,
+        bg_bundle_state_home.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error))?;
     if let Some(bound) = bg_bound_external.as_ref() {
@@ -6573,6 +6626,7 @@ pub async fn run_detached(
         bg_isolation_project_authority,
         bg_isolation_immutable_project,
         bg_isolation_live_access_authority,
+        bg_bundle_state_home,
         isolation_daemon_socket_path,
         bg_temp_dir,
         bg_process_input_dir,
@@ -6662,7 +6716,7 @@ impl DetachedDispatchKind {
         bg_project_path, bg_state_root, bg_isolation_workspace,
         bg_project_authority,
         bg_candidate_operation_authority,
-        bg_isolation_project_authority, bg_isolation_immutable_project, bg_isolation_daemon_socket_path, bg_temp_dir,
+        bg_isolation_project_authority, bg_isolation_immutable_project, bg_bundle_state_home, bg_isolation_daemon_socket_path, bg_temp_dir,
         bg_process_input_dir,
         bg_skip_resume_snapshot_pin, bg_terminal_publication, bg_external_realizations,
         bg_source_closure,
@@ -6705,6 +6759,7 @@ async fn dispatch_detached_bg_task(
     bg_isolation_live_access_authority: Option<
         ryeos_engine::isolation::IsolationLiveAccessAuthority,
     >,
+    bg_bundle_state_home: Option<ryeos_engine::isolation::IsolationBundleStateHome>,
     bg_isolation_daemon_socket_path: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_process_input_dir: Option<Arc<TempDirGuard>>,
@@ -7072,6 +7127,7 @@ async fn dispatch_detached_bg_task(
             isolation_immutable_project: bg_isolation_immutable_project,
             isolation_workspace_view: bg_workspace_view,
             isolation_live_access_authority: bg_isolation_live_access_authority,
+            bundle_state_home: bg_bundle_state_home,
             isolation_external_read_only_mounts: bg_external_mounts,
             isolation_target_channels: bg_scoped_relay_channels,
             isolation_workspace: bg_isolation_workspace,
@@ -9149,7 +9205,9 @@ async fn run_existing_recovered_thread(
         recovered_private_view_realizations,
     )
     .map_err(|error| {
-        guard.fail_before_spawn(error.context("recovery_input_materialization_failed"))
+        guard.fail_before_spawn(
+            classify_prepared_input_error(error).context("recovery_input_materialization_failed"),
+        )
     })?;
     if effective_project_root.is_some() {
         prepared_plan
@@ -9292,7 +9350,8 @@ async fn run_existing_recovered_thread(
                         ),
                     )
                 }
-                error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                error @ (ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+                | ryeos_app::vault::VaultReadError::NameRefused(_)) => {
                     guard.fail_thread("vault_read_failed");
                     ResumeError::VaultRead(guard.fail_before_spawn(error.into()))
                 }
@@ -9323,6 +9382,9 @@ async fn run_existing_recovered_thread(
         .state_store
         .get_launch_metadata(&thread_id)?
         .context("recovered direct root has no retained launch metadata")?;
+    let bg_bundle_state_home =
+        open_direct_bundle_state_home(&state, &engine, &params.effective_caps)
+            .map_err(|error| guard.fail_before_spawn(error))?;
     let ProtocolLaunchEnv {
         bindings: mut protocol_env_bindings,
         callback_token,
@@ -9360,6 +9422,7 @@ async fn run_existing_recovered_thread(
             &protocol,
             &params.resolved.root_raw_content_digest,
         )?,
+        bg_bundle_state_home.as_ref(),
     )
     .map_err(|error| guard.fail_before_spawn(error.context("protocol_contract_failed")))?;
     if let Some(bound) = bg_external_realizations.as_ref() {
@@ -9441,6 +9504,7 @@ async fn run_existing_recovered_thread(
         bg_isolation_project_authority,
         bg_isolation_immutable_project,
         bg_isolation_live_access_authority,
+        bg_bundle_state_home,
         isolation_daemon_socket_path,
         bg_temp_dir,
         bg_process_input_dir,

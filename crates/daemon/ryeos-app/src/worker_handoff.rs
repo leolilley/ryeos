@@ -4148,15 +4148,24 @@ fn equivalent_remote_environment(
         (
             EnvironmentAuthority::ProjectOverlay {
                 include_operator_vault: source_vault,
+                recipient_principal: source_principal,
+                recipient_scopes: source_scopes,
                 name_authority: source_names,
                 ..
             },
             EnvironmentAuthority::ProjectOverlay {
                 include_operator_vault: target_vault,
+                recipient_principal: target_principal,
+                recipient_scopes: target_scopes,
                 name_authority: target_names,
                 ..
             },
-        ) => source_vault == target_vault && source_names == target_names,
+        ) => {
+            source_vault == target_vault
+                && source_principal == target_principal
+                && source_scopes == target_scopes
+                && source_names == target_names
+        }
         _ => source == target,
     }
 }
@@ -4211,6 +4220,8 @@ pub fn build_remote_project_rebind(
     let (target_environment, target_overlay_root) = match environment {
         EnvironmentAuthority::ProjectOverlay {
             include_operator_vault,
+            recipient_principal,
+            recipient_scopes,
             name_authority,
             ..
         } => (
@@ -4225,6 +4236,8 @@ pub fn build_remote_project_rebind(
                 ),
                 source_identity: format!("dotenv:{}", target_project_path.join(".env").display()),
                 include_operator_vault: *include_operator_vault,
+                recipient_principal: recipient_principal.clone(),
+                recipient_scopes: recipient_scopes.clone(),
                 name_authority: name_authority.clone(),
             },
             Some(target_project_path.to_path_buf()),

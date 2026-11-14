@@ -1989,6 +1989,7 @@ impl PreparedItemPlan {
             isolation_network_authority_ceiling: network_authority_ceiling,
             isolation_live_access_authority: None,
             isolation_state_root: state_root.map(Path::to_path_buf),
+            isolation_bundle_state_home: None,
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
@@ -3345,6 +3346,9 @@ pub struct SpawnItemParams<'a> {
     pub isolation_workspace_view: Option<lillux::InheritedDescriptorAuthority>,
     pub isolation_live_access_authority:
         Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
+    /// The one node-owned bundle state namespace the launch's sealed
+    /// capabilities name, mounted for the spawned process, or `None`.
+    pub bundle_state_home: Option<ryeos_engine::isolation::IsolationBundleStateHome>,
     pub isolation_external_read_only_mounts:
         Vec<ryeos_engine::isolation::IsolationReadOnlyMountAuthority>,
     /// Protected launch channels derived from the admitted root purpose,
@@ -3465,6 +3469,7 @@ pub fn spawn_item(
             isolation_immutable_project,
             isolation_workspace_view,
             isolation_live_access_authority,
+            bundle_state_home,
             isolation_external_read_only_mounts,
             isolation_target_channels,
             isolation_workspace,
@@ -3664,6 +3669,7 @@ pub fn spawn_item(
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             isolation_live_access_authority,
             isolation_state_root: state_root.map(std::path::Path::to_path_buf),
+            isolation_bundle_state_home: bundle_state_home,
             isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
             isolation_checkpoint_authority: allocated_checkpoint_authority,
             isolation_daemon_socket_path: isolation_daemon_socket_path

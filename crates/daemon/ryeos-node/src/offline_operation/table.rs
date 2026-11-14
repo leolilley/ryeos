@@ -594,6 +594,76 @@ static OPERATIONS: &[OperationSpec] = &[
         },
     },
     OperationSpec {
+        id: "node.bundle-state.export",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::BundleStateExportArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::bundle_state_export),
+        recovery: Recovery {
+            record: "the archive at the output path, which the export creates exclusively",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a rerun that finds a verified archive of the same bundle at the output path, signed by this node, reports it instead of writing again; the node's state is only read",
+        },
+    },
+    OperationSpec {
+        id: "node.bundle-state.import",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: &[InputSlot {
+            name: "archive",
+            max_bytes: 128 * MIB,
+            required: true,
+        }],
+        preconditions: &[FACT_BUNDLE_REGISTRATIONS, FACT_TRUST_REGISTRY],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::BundleStateImportArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::EffectThenReceipt(handlers::bundle_state_import),
+        recovery: Recovery {
+            record: "the namespaces the archive installed, which hold exactly the archive's bytes",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a namespace already holding exactly the archive's bytes is reported unchanged, and an interrupted write is finished by naming the namespace under --replace-namespace",
+        },
+    },
+    OperationSpec {
+        id: "node.bundle-state.remove",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::BundleStateRemoveArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::ReceiptThenEffect {
+            prepare: handlers::bundle_state_remove_prepare,
+            effect: handlers::bundle_state_remove_effect,
+        },
+        recovery: Recovery {
+            record: "the ledger receipt, appended before the delete and listing the digest of the directory listing it covers",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "removing what is already gone removes nothing further, and the intent record says the receipt exists",
+        },
+    },
+    OperationSpec {
         id: "node.reset.authorization",
         authority_bearing: true,
         local_signer_only: true,
@@ -611,6 +681,30 @@ static OPERATIONS: &[OperationSpec] = &[
             record: "the ledger receipt, appended before the swap and listing every discarded grant digest",
             rerun: Rerun::ConvergesOverEffect,
             why: "the swap installs one local-operator grant over whatever is there, so a swap already made is made again to the same effect; the intent record says the receipt exists",
+        },
+    },
+    OperationSpec {
+        id: "node.authorization.revoke",
+        authority_bearing: true,
+        local_signer_only: true,
+        alone: false,
+        inputs: NO_INPUTS,
+        preconditions: &[FACT_AUTHORIZED_KEYS],
+        expected_result: &[],
+        required_expected_result: &[],
+        validate_request: |request| {
+            let arguments: handlers::AuthorizationRevokeArguments =
+                serde_json::from_value(request.arguments.clone())?;
+            arguments.validate()
+        },
+        handler: Handler::ReceiptThenEffect {
+            prepare: handlers::authorization_revoke_prepare,
+            effect: handlers::authorization_revoke_effect,
+        },
+        recovery: Recovery {
+            record: "the ledger receipt, appended before the effect and listing every revoked grant digest, and the node-signed tombstones the effect writes",
+            rerun: Rerun::ConvergesOverEffect,
+            why: "a tombstone is written before its grant file is removed and an existing tombstone is kept, so a rerun finishes any removal an interruption left and confirms the rest; an unknown fingerprint is refused with a typed error before any receipt",
         },
     },
     OperationSpec {
@@ -853,7 +947,11 @@ mod tests {
             "node.authorize-client",
             "node.remote.pin",
             "node.bundle.replace",
+            "node.bundle-state.export",
+            "node.bundle-state.import",
+            "node.bundle-state.remove",
             "node.reset.authorization",
+            "node.authorization.revoke",
             "node.trust.pin",
             "node.trust.scope",
             "node.trust.retire",
@@ -864,7 +962,7 @@ mod tests {
         ] {
             assert!(lookup(id).is_some(), "{id}");
         }
-        assert_eq!(operations().len(), 26);
+        assert_eq!(operations().len(), 30);
     }
 
     #[test]
@@ -903,7 +1001,11 @@ mod tests {
                 "node.authorize-client",
                 "node.remote.pin",
                 "node.bundle.replace",
+                "node.bundle-state.export",
+                "node.bundle-state.import",
+                "node.bundle-state.remove",
                 "node.reset.authorization",
+                "node.authorization.revoke",
                 "node.trust.pin",
                 "node.trust.scope",
                 "node.trust.retire",
@@ -951,7 +1053,7 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 8);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 12);
     }
 
     #[test]

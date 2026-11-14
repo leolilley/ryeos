@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T18:15:39Z:823d291fcf8facfb643582f0a1561c816b1191fc90f5bcbbf6e45a3557b8a3ec:nwy4YKU7axu13DB7e5BEz+XPM0v3LubDI9drCr38JT0ubB9SL3QthuMd7BfCOLNZ6pSUhr4Lw8VS8Xtu+hcrDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:eb37fc0056c6dd20d7d65e783cbe8bb1ec9edf8950694af69d1b6c7e4d7282d7:Xf6bcCP3ubhWcT+r25UPjoz+OQEeYpTeTHSVcZCU8ZfekJt3UNDCmW3GkTSeIYenXkyDqlEEHQvFPZ8LN8FoDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus scheduling.
 schema: 1
 exact_bundles:
@@ -403,6 +403,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

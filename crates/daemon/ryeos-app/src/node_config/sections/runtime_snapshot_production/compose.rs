@@ -447,10 +447,14 @@ pub(crate) mod tests {
 
     pub(crate) fn stopped_node() -> StoppedNode {
         let root = tempfile::tempdir().unwrap();
-        ryeos_node_runtime::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
         .unwrap();
+        ryeos_engine::test_support::write_node_public_identity(
+            root.path(),
+            identity.verifying_key(),
+        );
         let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
             &ryeos_node_runtime::state_lock::default_lock_path(root.path()),
         )

@@ -906,8 +906,21 @@ mod tests {
         ));
         let mut substituted = required.clone();
         substituted["source"]["bootstrap_operation_id"] = json!("d".repeat(64));
+        // Naming both source sandboxes deserializes (each is an admitted
+        // field) but is refused as ambiguous before any source is used.
+        let substituted =
+            serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(substituted).unwrap();
+        let super::RuntimeSnapshotSourceRequest::CapturedProduct {
+            bootstrap_operation_id,
+            source_occurrence_id,
+            ..
+        } = substituted.source
+        else {
+            panic!("captured product source expected");
+        };
         assert!(
-            serde_json::from_value::<super::ProduceRuntimeSnapshotRequest>(substituted).is_err()
+            super::captured_source_occurrence(bootstrap_operation_id, source_occurrence_id)
+                .is_err()
         );
         for (key, value) in [
             ("upload_path", json!("/tmp/ambient")),

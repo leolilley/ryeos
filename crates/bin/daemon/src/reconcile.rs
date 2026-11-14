@@ -4368,6 +4368,8 @@ mod tests {
                 project_authority_id: lillux::sha256_hex(b"live-project\0site:a:/tmp/p\0/tmp/p"),
                 source_identity: "dotenv:/tmp/p/.env".to_string(),
                 include_operator_vault: true,
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
             },
             Vec::new(),

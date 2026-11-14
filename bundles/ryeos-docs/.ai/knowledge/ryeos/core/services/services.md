@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:d1d6579721378ef59fd6b90967c096578b2bbd4376a08ab43f3c7f0edda0226a:ztxiXb4jBmBH/MGh8WOD7elN6mKomsYJkN3udi1oIX8qv0VebGrwQSw8mtp7wLewNuucgPQB6YaPpSzyxUEbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:a0db9c5d7e8c9c6102f8b934a5e80605d201d94ff153760e61c2b7aa23a44116:Imrch9h+IZE6zpuTBFa762PT5jPE0pyZYJGtvFxSTo5i2DgkwbQnNGh3rqYu4SlHJcTon3QZhCgza/G5Ws5lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -51,6 +51,7 @@ hashes through CAS.
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
 | `identity/renew-key` | `identity.renew-key` | `ryeos.execute.service.identity/renew-key` |
+| `identity/revoke-key` | `identity.revoke-key` | `ryeos.execute.service.identity/revoke-key` |
 | `identity/revoke-delegation` | `identity.revoke-delegation` | `ryeos.execute.service.identity/revoke-delegation` |
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
@@ -153,9 +154,10 @@ Object fetch flows fail closed when requested hashes are missing.
 | `vault/list` | `vault.list` | `ryeos.execute.service.vault/list` |
 | `vault/delete` | `vault.delete` | `ryeos.execute.service.vault/delete` |
 
-Vault services mutate or read the node vault. In v1, vault storage is a
-single node-level store protected by capabilities, not a per-principal
-namespace.
+Vault services mutate or read the node vault. Vault storage is a single
+node-level store, not a per-principal namespace; each name carries its own
+recipient and writer ceiling in the signed `sealed_vault_names` policy, and a
+name without one is operator-only (see [Services: vault](vault.md)).
 
 Delivering vault secrets into an execution is separate from these services.
 An execution policy whose environment exposes the operator vault (a project
@@ -183,6 +185,7 @@ for the full matrix.
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/revoke` | `remote.revoke` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
 | `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
 | `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |

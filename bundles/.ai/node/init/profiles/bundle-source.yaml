@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T19:42:23Z:631e35eda66976f55fe89093e024036e93f03ecc5c4237b62053338bee51afe9:aomrSO4IcVrTJjueVAKchp2iTof/kDN2STIw1zY0RHQ3QiOXqZ8EpTaOIeWMvqBa0POnrwwWgye98OHl6qTbBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:15503345adfc1c8eab8e87eb31c3eacbd93cf30a13c85f35955827d6a4c8581a:nu+j60JAw3ohumGiKEHBQyby74Ha6FJ9eSWAFr+dXvajJKBxlaUDfIq/YAqlO8K3DQw0JL4DgPTnwyo0vPFrCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -394,6 +394,9 @@ policies:
     limits: null
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

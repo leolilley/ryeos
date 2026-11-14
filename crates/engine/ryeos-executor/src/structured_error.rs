@@ -214,7 +214,7 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                     "project_file": project_path,
                 })),
                 remediation: Some(format!(
-                    "move {project_path} to your own namespace, e.g. .ai/tools/<project>/runtimes/..., and point executor_id at it; the '{namespace}' namespace is owned by bundle '{bundle}' and resolves from the bundle only"
+                    "move {project_path} to your own namespace, e.g. .ai/tools/<project>/runtimes/..., and point executor_id at it; the '{namespace}' namespace belongs to installed bundle '{bundle}' (by its name or its declared namespaces) and resolves from the bundle only; rename your project's own bundle name and item namespace if it collides"
                 )),
                 ..Self::generic(public_error.code(), public_error.to_string())
             },
@@ -264,7 +264,12 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                     details: Some(refusal.details()),
                     ..Self::generic(refusal.code(), refusal.to_string())
                 },
-                None => Self::generic(public_error.code(), public_error.to_string()),
+                None => match crate::dispatch_error::quarantined_large_object(public_error) {
+                    Some(quarantined) => {
+                        Self::generic(public_error.code(), quarantined.to_string())
+                    }
+                    None => Self::generic(public_error.code(), public_error.to_string()),
+                },
             },
         };
         payload.retryable = public_error.retryable();

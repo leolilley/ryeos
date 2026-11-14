@@ -583,6 +583,7 @@ pub(crate) fn verify_request(
                         source_node_fingerprint: forwarding_fingerprint,
                         source_node_grant_hash: forwarding_key.source_file_hash,
                         delegation_digest: None,
+                        delegation_not_after: None,
                     },
                 ),
             )
@@ -776,6 +777,7 @@ fn verify_delegated(
                         .to_owned(),
                     source_node_grant_hash: node_key.source_file_hash.clone(),
                     delegation_digest: Some(digest),
+                    delegation_not_after: Some(signed.body.not_after),
                 },
             ),
         },
@@ -1315,6 +1317,9 @@ mod tests {
             ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+            vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             command_registry: test_command_registry,
             authorizer: test_auth,
             ignore_matcher: Arc::new(

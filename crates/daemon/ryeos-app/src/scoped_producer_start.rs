@@ -308,6 +308,7 @@ pub fn start_scoped_producer(
             network_authority_ceiling: IsolationNetworkAuthorityCeiling::Isolated,
             live_access: None,
             state_root: None,
+            bundle_state_home: None,
             checkpoint_dir: None,
             checkpoint_authority: None,
             daemon_socket_path: None,

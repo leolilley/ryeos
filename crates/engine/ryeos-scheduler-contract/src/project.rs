@@ -32,6 +32,10 @@ pub trait ProjectScheduleCaller: Send + Sync {
         &self,
         registration_request_hash: String,
     ) -> Result<ScheduleExecutionAuthority>;
+    /// Refuse, with a typed error naming the cure, an execution whose
+    /// authority the first fire would refuse. Run before the schedule is
+    /// written.
+    fn require_execution_admissible(&self, execution: &crate::ScheduleExecution) -> Result<()>;
 }
 
 pub struct ProjectScheduleDeployRequest {

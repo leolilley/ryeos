@@ -719,7 +719,12 @@ schedules:
         .unwrap();
         let before = std::fs::read(&path).unwrap();
         let error = apply_maintenance_schedules(&node_dir, &id, &trust, &policy).unwrap_err();
-        assert!(format!("{error:#}").contains("not signed by this node"));
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(ryeos_engine::trust::NODE_DOCUMENT_WRONG_SIGNER),
+            "{message}"
+        );
+        assert!(message.contains("only the node key"), "{message}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 

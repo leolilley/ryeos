@@ -1,6 +1,7 @@
 //! `vault/list` — list secret key names from the node's vault.
 //!
-//! Returns names only, never values.
+//! Returns names only, never values, and only the names the caller may
+//! receive or write under the node's `sealed_vault_names` policy.
 
 use std::sync::Arc;
 
@@ -27,6 +28,17 @@ pub async fn handle(
         .vault
         .list_keys()
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+
+    // Only names this caller may receive or write are shown; the rest of the
+    // shared store is not disclosed to it.
+    let keys: Vec<String> = keys
+        .into_iter()
+        .filter(|name| {
+            state
+                .vault_ceilings
+                .is_visible(name, &ctx.fingerprint, &ctx.scopes)
+        })
+        .collect();
 
     Ok(serde_json::json!({
         "secrets": keys,

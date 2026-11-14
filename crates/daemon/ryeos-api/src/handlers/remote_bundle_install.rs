@@ -63,7 +63,11 @@ struct BundleExportEntry {
     mode: u32,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
     // Validate bundle name locally before hitting the network.
     crate::handlers::bundle_install::validate_name(&req.bundle_name)?;
 
@@ -103,7 +107,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+    let client = crate::handlers::remote_push::named_remote_client(&state, &req.remote, &ctx)?;
 
     // 1. Call bundle_export on the remote.
     let export_resp: BundleExportResponse =
@@ -1013,10 +1017,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.bundle-install",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.bundle/install"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

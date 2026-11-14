@@ -6,7 +6,8 @@
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::{
-    AuthorizedBy, AuthorizedKeyRenewError, GrantExpiry, GrantLifetimeError, GrantTerms,
+    AuthorizedBy, AuthorizedKeyRenewError, AuthorizedKeyRevokeError, GrantExpiry,
+    GrantLifetimeError, GrantTerms,
 };
 use ryeos_node_runtime::node_policy::sections::authorization::NodeAuthorizationPolicy;
 
@@ -66,6 +67,26 @@ pub(crate) fn renewal_refusal(error: &AuthorizedKeyRenewError) -> HandlerError {
         AuthorizedKeyRenewError::NotGranterOrOperator { .. }
         | AuthorizedKeyRenewError::ScopesNoLongerCovered { .. } => 403,
         AuthorizedKeyRenewError::NeverExpires => 400,
+    };
+    HandlerError::Structured {
+        code: error.code().to_owned(),
+        status,
+        body: serde_json::json!({
+            "error": error.to_string(),
+            "error_code": error.code(),
+        }),
+    }
+}
+
+/// A revocation the node refuses, as a typed refusal: 404 for a missing
+/// grant, 403 for a caller who may not revoke it, 409 for the operator grant
+/// (offline only), 400 for a missing reason.
+pub(crate) fn revocation_refusal(error: &AuthorizedKeyRevokeError) -> HandlerError {
+    let status = match error {
+        AuthorizedKeyRevokeError::NotFound { .. } => 404,
+        AuthorizedKeyRevokeError::NotGranterOrOperator { .. } => 403,
+        AuthorizedKeyRevokeError::OperatorGrantIsOfflineOnly => 409,
+        AuthorizedKeyRevokeError::BadReason => 400,
     };
     HandlerError::Structured {
         code: error.code().to_owned(),

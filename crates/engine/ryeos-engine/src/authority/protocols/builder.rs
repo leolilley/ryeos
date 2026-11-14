@@ -77,6 +77,11 @@ pub struct BuildRequest<'a> {
     /// `EnvInjectionSource::RuntimeStateRoot`.
     pub runtime_state_root: &'a Path,
 
+    /// The launch's bundle state namespace as the workload must see it; see
+    /// `EnvInjectionSource::BundleStateHome`. `None` when the launch opened no
+    /// state home, in which case that injection sets no variable.
+    pub bundle_state_home: Option<&'a Path>,
+
     /// Opaque namespace for durable state owned by the admitted logical
     /// project. Absent for projectless execution.
     pub project_state_scope: Option<&'a str>,
@@ -208,6 +213,16 @@ pub fn build_subprocess_spec(
                     path_kind: "runtime state root",
                 })?
                 .to_owned(),
+            EnvInjectionSource::BundleStateHome => match request.bundle_state_home {
+                Some(path) => path
+                    .to_str()
+                    .ok_or(BuildError::NonUtf8Path {
+                        path_kind: "bundle state home",
+                    })?
+                    .to_owned(),
+                // A launch that opened no state home sets no variable.
+                None => continue,
+            },
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request
                 .cas_root
@@ -428,6 +443,7 @@ mod tests {
             args,
             cwd: Path::new("/project"),
             project_path: Path::new("/project"),
+            bundle_state_home: None,
             runtime_state_root: Path::new("/project"),
             project_state_scope: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -537,6 +553,42 @@ mod tests {
         let req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
         let result = build_subprocess_spec(&desc, &req);
         assert!(matches!(result, Err(BuildError::DuplicateEnvKey { .. })));
+    }
+
+    #[test]
+    fn bundle_state_home_injection_is_absent_without_a_state_home() {
+        let mut desc = tool_descriptor();
+        desc.env_injections.push(EnvInjection {
+            name: "RYEOSD_BUNDLE_STATE_HOME".to_string(),
+            source: EnvInjectionSource::BundleStateHome,
+        });
+        let (item_ref, cb, args, _envelope) = make_test_fixtures();
+        let mut req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
+
+        // A launch that opened no state home sets no variable and is not
+        // refused.
+        let spec = build_subprocess_spec(&desc, &req).unwrap();
+        assert!(
+            spec.env
+                .iter()
+                .all(|(key, _)| key != "RYEOSD_BUNDLE_STATE_HOME"),
+            "no state home, no variable"
+        );
+        assert!(spec.env.iter().any(|(key, _)| key == "RYE_PROJECT_PATH"));
+
+        // A launch that opened one names exactly that directory.
+        req.bundle_state_home = Some(Path::new("/run/ryeos/bundle-state"));
+        let spec = build_subprocess_spec(&desc, &req).unwrap();
+        let env_map: BTreeMap<String, String> = spec.env.into_iter().collect();
+        assert_eq!(
+            env_map["RYEOSD_BUNDLE_STATE_HOME"],
+            "/run/ryeos/bundle-state"
+        );
+
+        // The name is still validated when there is nothing to inject.
+        req.bundle_state_home = None;
+        desc.env_injections.last_mut().unwrap().name = "PATH".to_string();
+        assert!(build_subprocess_spec(&desc, &req).is_err());
     }
 
     #[test]

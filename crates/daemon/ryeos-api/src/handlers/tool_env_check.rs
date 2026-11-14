@@ -189,6 +189,7 @@ pub async fn handle(
                     state.isolation.inspection(),
                 ),
                 ctx.scopes.clone(),
+                Some(&ctx.fingerprint),
             )
             .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
     };
@@ -200,7 +201,12 @@ pub async fn handle(
         &names,
         &project_authority,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| match e {
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            crate::handler_error::vault_name_handler_error(&refusal)
+        }
+        other => HandlerError::Internal(other.to_string()),
+    })?;
 
     let secrets: Vec<Value> = report
         .iter()
@@ -244,6 +250,7 @@ pub async fn handle(
                         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,

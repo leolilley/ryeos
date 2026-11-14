@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:65f192bc6bb94243cd1ebb338bd90788ed688cf373e90c1f33d5135cb787e1be:QOqUcB31PTRYctKo9CBxPH/mw9dcp2J15PfelH+LoY6rEFkwjL/qDW+Y5tRFUUl6QNlgW9s4aTSSV+nqWkaZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:37:06Z:b08b11ef72d634973d8038c5466d2988d79781b60c22e1db67ea3a2966b07b1b:i5121BVidvMiLmnXZ8Hc9XG634Vn7dXMrORL2zW4qXnPZf4Q/Oz7DfgjwpRaWzjo7atxxMbAmw6vvDswyuGAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
-version: "3.6.0"
+version: "3.7.0"
 description: >
   Complete reference for the ryeos CLI: local lifecycle verbs, local
   operator verbs, daemon-backed verbs, aliases, and arguments.
@@ -267,7 +267,20 @@ node. It fails for a grant of a retired schema or class (`grant_schema_stale`,
 cannot be read, and warns for a grant that has expired or will within the
 policy's `warn_before_secs`. Each entry names the grant and its cure: renew a
 lapsed grant with `ryeos renew-key --fingerprint <fp>` (the principal that
-granted it, or the node operator); re-issue a stale one.
+granted it, or the node operator); re-issue a stale one. The row also
+verifies the revocation ledger (`.ai/node/auth/revoked/`): it fails for a
+tombstone that is unsigned, tampered or signed by another key, and warns for a
+grant file that a tombstone already refuses but that is still on disk.
+
+It also lists every readable grant under `inventory` (principal as `fp:<hex>@site:<origin>` when the grant has an origin, class, origin site, label, scope count and `authorized_by`), and warns when a key other than the configured operator holds a wildcard scope (`wildcard_holders`, each with its cure).
+
+Revoke a grant on a running node with `ryeos revoke-key --fingerprint <fp>
+--reason <text> [--leave-running] [--keep-delegates]` (the principal that
+granted it, or the node operator), or on a remote with `ryeos remote revoke
+--fingerprint <fp> --reason <text> [--remote <name>]`. On a stopped node,
+`ryeos node authorization revoke --fingerprint <fp> --reason <text>
+[--keep-delegates]` does the same offline and is the only way to revoke the
+configured operator's own grant. See [Identity model](../identity-model.md#revocation).
 
 The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
@@ -328,6 +341,15 @@ Every listed row carries an `attention` and a `fix`:
 
 `ryeos external-execution status` prints the same view as JSON.
 
+The bundle state rows read the node-owned homes under
+`.ai/state/bundle-state` without writing: `bundle_state_homes` inventories each
+home (namespaces, bytes) and fails when a `.home.json` is missing, foreign or
+tampered, a namespace name is invalid, or a directory is wider than 0700;
+`bundle_state_orphaned` warns about homes whose bundle is not installed (removing
+a bundle keeps its state); `bundle_state_home_unenforced` warns while homes exist
+and isolation is not enforced, because then a home is a convention rather than a
+boundary.
+
 The `remote_content_testimonies` row reads this node's accepted remote
 qualification testimonies from its signed heads, offline and without
 resolving bundles. For each content-lane acceptance it checks whether this
@@ -350,6 +372,12 @@ records without root. It warns when a RyeOS node service records an app root
 that no longer exists, and names the fix,
 `ryeos node host retire --orphaned --confirm`. It reports `n/a` where no native
 service directory is readable without root.
+
+Its `vault_names_without_ceiling` row lists the sealed vault names that the
+signed `sealed_vault_names` policy does not list. Such a name is operator-only,
+so it warns and names the fix, `ryeos node policy-apply sealed_vault_names
+<source.yaml>`. It reads names only, through the read-only vault open, and
+reports a vault it cannot read (a pending rewrap) as a warning.
 
 Its `ui_browser_sessions` row checks that the signed browser-session policy is
 present and valid (schema 5: session lifetime, idle timeout, launch-token
@@ -398,6 +426,23 @@ ryeos node reset policy-generation --node-profile <name> --host-class <class> --
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
 shortcut, and none broadens into another reset scope implicitly.
+
+A bundle's node-owned state (see `ryeos/standard/bundle-state-home`) moves
+and is deleted only through three signed offline operations, local operator
+only, with the daemon stopped:
+
+```bash
+ryeos node bundle-state export --bundle <id> [--namespace <ns>] --output <abs path> [--json]
+ryeos node bundle-state import --archive <file> [--replace-namespace <ns>]... [--json]
+ryeos node bundle-state remove --bundle <id> [--namespace <ns>] --confirm [--json]
+```
+
+`export` writes a tar with a node-signed manifest and refuses an existing output
+path. `import` verifies the manifest under this node's key or a pinned peer node
+key, requires the bundle to be installed with a state home backing each
+namespace, and replaces an existing different namespace only under
+`--replace-namespace`. `remove` appends a ledger receipt naming the digest of
+the listing before it deletes. Removing a bundle never deletes its state.
 
 Large objects that `ryeos external-content scrub` quarantined for byte damage
 stay on disk as evidence, counted against the large-object budget, until an

@@ -197,7 +197,14 @@ pub async fn handle(
     capabilities.sort();
     capabilities.dedup();
     if capabilities.is_empty() || capabilities != requested_capabilities {
-        bail!("scheduler capabilities must be a non-empty sorted unique capability subset");
+        return Err(structured_refusal(
+            400,
+            SCHEDULER_CAPABILITIES_NOT_CANONICAL,
+            "scheduler capabilities must be a non-empty list that is sorted and has no \
+             duplicates; send the capabilities the schedule needs, sorted and unique"
+                .to_owned(),
+            serde_json::json!({ "capabilities": requested_capabilities }),
+        ));
     }
     let authorizer = ryeos_runtime::authorizer::Authorizer::new();
     for capability in &capabilities {
@@ -249,6 +256,12 @@ pub async fn handle(
         paused_reason: None,
     };
     source_record.validate(Some(&req.schedule_id))?;
+    refuse_authority_that_cannot_hold_at_fire(
+        &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
+            state.as_ref(),
+        ),
+        &source_record.execution,
+    )?;
     let body = serde_json::to_value(&source_record)?;
 
     // Write signed YAML through the same pinned source transaction used for
@@ -279,6 +292,10 @@ pub async fn handle(
         "created": !was_existing,
     }))
 }
+
+/// Code of the 400 for a capability list the scheduler cannot accept as is.
+pub const SCHEDULER_CAPABILITIES_NOT_CANONICAL: &str = "scheduler_capabilities_not_canonical";
+use crate::schedule_admission::{refuse_authority_that_cannot_hold_at_fire, structured_refusal};
 
 /// Refuse at registration a schedule whose capabilities do not cover what its
 /// item declares. A fire runs with exactly the schedule's registered

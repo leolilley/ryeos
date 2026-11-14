@@ -8,7 +8,9 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use ryeos_scheduler_contract::{ScheduledAuthorityRefusal, ScheduledAuthorityRefusalKind};
+use ryeos_scheduler_contract::{
+    ScheduleAutoPauseReason, ScheduledAuthorityRefusal, ScheduledAuthorityRefusalKind,
+};
 use serde::Serialize;
 
 /// One schedule whose pinned grant generation no longer holds.
@@ -19,6 +21,41 @@ pub struct SupersededScheduleGrant {
     pub enabled: bool,
     pub refusal: ScheduledAuthorityRefusalKind,
     pub detail: String,
+}
+
+/// A schedule whose pinned grant still holds but lapses within the warning
+/// window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExpiringScheduleGrant {
+    pub schedule_id: String,
+    pub principal_id: String,
+    /// RFC 3339 UTC time at which the earliest pinned grant lapses.
+    pub grant_expires_at: String,
+}
+
+/// A schedule the scheduler paused for want of authority, whose pinned grants
+/// are not themselves the finding (they hold again or were re-sealed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PausedByAuthority {
+    pub schedule_id: String,
+    pub principal_id: String,
+    pub reason: ryeos_scheduler_contract::ScheduleAutoPauseReason,
+}
+
+/// What the stopped-node doctor reports about schedule authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ScheduleAuthorityReport {
+    pub superseded: Vec<SupersededScheduleGrant>,
+    pub expiring: Vec<ExpiringScheduleGrant>,
+    pub paused_by_authority: Vec<PausedByAuthority>,
+}
+
+impl ScheduleAuthorityReport {
+    pub fn is_empty(&self) -> bool {
+        self.superseded.is_empty()
+            && self.expiring.is_empty()
+            && self.paused_by_authority.is_empty()
+    }
 }
 
 /// Every signed schedule source under `<app_root>/.ai/node/schedules` whose
@@ -32,14 +69,38 @@ pub fn superseded_schedule_grants(
     node_identity: &ryeos_node_runtime::identity::NodeIdentity,
     trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<Vec<SupersededScheduleGrant>> {
+    Ok(schedule_authority_report(
+        app_root,
+        authorized_keys_dir,
+        node_identity,
+        trust_store,
+        0,
+        0,
+    )?
+    .superseded)
+}
+
+/// The full schedule-authority reading at `now` (Unix seconds): schedules
+/// whose pinned generation no longer holds, schedules whose pinned grant
+/// lapses within `warn_before_secs`, and schedules paused for want of
+/// authority.
+pub fn schedule_authority_report(
+    app_root: &Path,
+    authorized_keys_dir: &Path,
+    node_identity: &ryeos_node_runtime::identity::NodeIdentity,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    warn_before_secs: u64,
+    now: u64,
+) -> Result<ScheduleAuthorityReport> {
+    use ryeos_node_runtime::identity::GrantExpiry;
     let schedules_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("schedules");
+    let mut report = ScheduleAuthorityReport::default();
     if !schedules_dir.is_dir() {
-        return Ok(Vec::new());
+        return Ok(report);
     }
-    let mut superseded = Vec::new();
     for path in ryeos_scheduler::projection::canonical_schedule_source_paths(&schedules_dir)? {
         let source = ryeos_scheduler::projection::load_verified_schedule_source(
             &path,
@@ -53,7 +114,44 @@ pub fn superseded_schedule_grants(
             authorized_keys_dir,
             node_identity,
         ) {
-            Ok(_) => {}
+            Ok(pinned) => {
+                if let Some((grant, forwarding)) = pinned {
+                    let soonest = [Some(grant.expires_at), forwarding.map(|g| g.expires_at)]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|expiry| match expiry {
+                            GrantExpiry::At(secs) => Some(secs),
+                            GrantExpiry::Never => None,
+                        })
+                        .min();
+                    if let Some(secs) = soonest
+                        && secs <= now.saturating_add(warn_before_secs)
+                        && warn_before_secs > 0
+                    {
+                        report.expiring.push(ExpiringScheduleGrant {
+                            schedule_id: record.schedule_id.clone(),
+                            principal_id: record.execution.principal_id().to_owned(),
+                            grant_expires_at: lillux::time::iso8601_from_unix_secs(secs),
+                        });
+                    }
+                }
+                if let Some(reason) = record.paused_reason
+                    && !record.enabled
+                    && matches!(
+                        reason,
+                        ScheduleAutoPauseReason::AuthorityRevoked
+                            | ScheduleAutoPauseReason::AuthorityExpired
+                            | ScheduleAutoPauseReason::AuthorityChanged
+                            | ScheduleAutoPauseReason::AuthorityNarrowed
+                    )
+                {
+                    report.paused_by_authority.push(PausedByAuthority {
+                        schedule_id: record.schedule_id.clone(),
+                        principal_id: record.execution.principal_id().to_owned(),
+                        reason,
+                    });
+                }
+            }
             Err(error) => {
                 let refusal = ScheduledAuthorityRefusal::find(&error)
                     .cloned()
@@ -61,7 +159,7 @@ pub fn superseded_schedule_grants(
                     .with_context(|| {
                         format!("inspect pinned grants of schedule {}", record.schedule_id)
                     })?;
-                superseded.push(SupersededScheduleGrant {
+                report.superseded.push(SupersededScheduleGrant {
                     principal_id: record.execution.principal_id().to_owned(),
                     schedule_id: record.schedule_id,
                     enabled: record.enabled,
@@ -71,7 +169,7 @@ pub fn superseded_schedule_grants(
             }
         }
     }
-    Ok(superseded)
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -253,5 +351,33 @@ mod tests {
             node.inspect()[0].refusal,
             ScheduledAuthorityRefusalKind::GrantRevoked
         );
+    }
+
+    #[test]
+    fn grants_lapsing_within_the_window_and_authority_pauses_are_reported() {
+        let node = Node::new();
+        node.grant("2026-11-13T00:00:00Z");
+        node.pinned_schedule("nightly");
+        let report = schedule_authority_report(
+            node.app_root(),
+            &node.auth_dir(),
+            &node.identity,
+            &node.trust(),
+            1_000,
+            4_102_444_800 - 500,
+        )
+        .unwrap();
+        assert_eq!(report.expiring.len(), 1, "{report:#?}");
+        assert_eq!(report.expiring[0].schedule_id, "nightly");
+        let outside = schedule_authority_report(
+            node.app_root(),
+            &node.auth_dir(),
+            &node.identity,
+            &node.trust(),
+            100,
+            0,
+        )
+        .unwrap();
+        assert!(outside.is_empty(), "{outside:#?}");
     }
 }

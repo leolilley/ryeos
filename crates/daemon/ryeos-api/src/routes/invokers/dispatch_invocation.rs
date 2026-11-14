@@ -361,6 +361,7 @@ impl CompiledDispatchInvoker {
         let resolved_authority = ryeos_app::execution_policy::resolve_local_live_authority(
             &project_ctx.effective_path,
             principal_scopes.clone(),
+            &principal_id,
             &ctx.state.isolation,
             environment,
         )
