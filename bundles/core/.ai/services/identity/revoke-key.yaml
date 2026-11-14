@@ -1,0 +1,10 @@
+# ryeos:signed:2026-11-14T05:54:19Z:e2056a6ba7f7f7e83e4c44df7169a2bec2408e21f6818517f3372468e6c7297a:z6ObrR093liCXQfANK7OrvRHXZ6Srvoj+GS6hoMxGCljt9JUMvo9Ha1scVwxvIT/GFtwdVZf+AccjJ+YzLlkBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: identity.revoke-key
+required_caps: ["ryeos.execute.service.identity/revoke-key"]
+schema:
+  fingerprint: string
+  reason: string
+  leave_running: boolean?
+  keep_delegates: boolean?
+description: "Revoke an authorized-key grant, leaving a node-signed tombstone. Only the principal that granted the key or the node operator may revoke it; the configured operator's own grant is revoked offline only. By default it also revokes the grants the key granted, pauses schedules pinned to the revoked grants, and cancels live threads running under them."

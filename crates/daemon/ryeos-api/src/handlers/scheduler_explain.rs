@@ -128,6 +128,61 @@ pub(crate) fn schedule_authority_view(
     state: &AppState,
     execution: &ryeos_scheduler_contract::ScheduleExecution,
 ) -> Value {
+    let mut view = schedule_authority_verdict(state, execution);
+    if let Value::Object(fields) = &mut view {
+        fields.insert(
+            "expires_at".to_owned(),
+            authority_expires_at(state, execution).map_or(Value::Null, Value::String),
+        );
+    }
+    view
+}
+
+/// The earlier of the pinned principal grant's expiry and the schedule's own
+/// `expires_at`: when the schedule stops firing for lifetime reasons. `None`
+/// when neither is bounded. A grant that cannot be read contributes nothing
+/// (the verdict already reports why).
+fn authority_expires_at(
+    state: &AppState,
+    execution: &ryeos_scheduler_contract::ScheduleExecution,
+) -> Option<String> {
+    use ryeos_node_runtime::identity::GrantExpiry;
+    let grant_secs = match &execution.authority {
+        ryeos_scheduler_contract::ScheduleExecutionAuthority::Authenticated {
+            principal_id,
+            ..
+        } => principal_id
+            .strip_prefix("fp:")
+            .and_then(|fingerprint| {
+                ryeos_node_runtime::identity::load_verified_authorized_key_unjudged(
+                    fingerprint,
+                    &state.config.authorized_keys_dir,
+                    &state.identity,
+                )
+                .ok()
+                .flatten()
+            })
+            .and_then(|grant| match grant.expires_at {
+                GrantExpiry::At(secs) => Some(secs),
+                GrantExpiry::Never => None,
+            }),
+        ryeos_scheduler_contract::ScheduleExecutionAuthority::Node { .. } => None,
+    };
+    let schedule_secs = execution
+        .expires_at
+        .as_deref()
+        .and_then(lillux::time::unix_secs_from_iso8601);
+    [grant_secs, schedule_secs]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(lillux::time::iso8601_from_unix_secs)
+}
+
+fn schedule_authority_verdict(
+    state: &AppState,
+    execution: &ryeos_scheduler_contract::ScheduleExecution,
+) -> Value {
     match ryeos_app::scheduled_execution_authority::revalidate_scheduled_execution(state, execution)
     {
         Ok(_) => serde_json::json!({"valid": true, "refusal": null}),

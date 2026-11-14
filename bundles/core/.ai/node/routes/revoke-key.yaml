@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-14T05:54:19Z:7f5dbb3bdf5e7e04bfffd9933249e32c6c34761d641fe015175f5cb51ce42ad4:MOfU8TGz3LghnmXn5WC8e1Rwi+fgd7c+WZTEqHt/HXD7wMzwxrtyJ6TlZIcyvPke6kaSicJA/Z3J7oE4gehFCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/revoke-key
+path: /revoke-key
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 120000
+  concurrent_max: 10
+response:
+  mode: json
+  source: service:identity/revoke-key
