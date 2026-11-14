@@ -881,6 +881,10 @@ fn local_detail(tokens: &str, description: &str) -> String {
             "ryeos node reset authorization --confirm [--app-root <DIR>]",
             "--confirm         confirm retirement of all grants\n--app-root <DIR>  application root",
         ),
+        "node authorization revoke" => (
+            "ryeos node authorization revoke --fingerprint <FINGERPRINT> --reason <TEXT> [--keep-delegates] [--app-root <DIR>]",
+            "--fingerprint     grant to revoke\n--reason          why it is revoked\n--keep-delegates  leave the grants it granted\n--app-root <DIR>  application root",
+        ),
         "node reset replay-indexes" => (
             "ryeos node reset replay-indexes --confirm [--app-root <DIR>]",
             "--confirm         confirm replay-index retirement\n--app-root <DIR>  application root",

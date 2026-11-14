@@ -1564,6 +1564,126 @@ pub(super) fn authorization_reset_effect(ctx: &HandlerContext<'_>) -> Result<Val
     }))
 }
 
+/// Revoke one authorized-key grant, and by default every grant it granted,
+/// leaving node-signed tombstones.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationRevokeArguments {
+    /// Fingerprint (64 lowercase hex) of the grant to revoke.
+    pub fingerprint: String,
+    /// Why the grant is revoked, recorded in its tombstone.
+    pub reason: String,
+    /// Revoke only the named grant, not the grants it granted.
+    #[serde(default)]
+    pub keep_delegates: bool,
+}
+
+impl AuthorizationRevokeArguments {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            lillux::valid_hash(&self.fingerprint),
+            "the fingerprint must be a lowercase SHA-256 digest"
+        );
+        let reason = self.reason.trim();
+        ensure!(
+            !reason.is_empty()
+                && reason.len()
+                    <= ryeos_node_runtime::grant_revocation::MAX_REVOCATION_REASON_BYTES,
+            "grant_revocation_reason_invalid: a revocation needs a reason of 1 to {} bytes",
+            ryeos_node_runtime::grant_revocation::MAX_REVOCATION_REASON_BYTES
+        );
+        Ok(())
+    }
+}
+
+fn revocation_plan(
+    ctx: &HandlerContext<'_>,
+    arguments: &AuthorizationRevokeArguments,
+) -> Result<Vec<ryeos_node_runtime::identity::PlannedRevocation>> {
+    let operator = NodeIdentity::load(
+        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
+    )
+    .context("load operator identity to protect its grant from a cascade")?;
+    let auth_dir = super::envelope::authorized_keys_dir(ctx.app_root);
+    ryeos_node_runtime::identity::plan_revocation_cascade(
+        &auth_dir,
+        &arguments.fingerprint,
+        arguments.keep_delegates,
+        &[operator.fingerprint().to_owned()],
+        ctx.node,
+    )
+}
+
+pub(super) fn authorization_revoke_prepare(ctx: &HandlerContext<'_>) -> Result<Prepared> {
+    let arguments: AuthorizationRevokeArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let plan = revocation_plan(ctx, &arguments)?;
+    if plan[0].grant_digest.is_none() {
+        // Nothing on disk for the target: a rerun of a finished revocation
+        // is fine, an unknown fingerprint is refused before any receipt.
+        let known = ryeos_node_runtime::grant_revocation::inspect_tombstones(
+            &ryeos_node_runtime::grant_revocation::revocations_dir(
+                &super::envelope::authorized_keys_dir(ctx.app_root),
+            ),
+            ctx.node,
+        )?
+        .into_iter()
+        .any(|entry| {
+            matches!(
+                entry.state,
+                ryeos_node_runtime::grant_revocation::TombstoneState::Sound(ref tombstone)
+                    if tombstone.fingerprint == arguments.fingerprint
+            )
+        });
+        if !known {
+            let error = ryeos_node_runtime::identity::AuthorizedKeyRevokeError::NotFound {
+                fingerprint: arguments.fingerprint.clone(),
+            };
+            anyhow::bail!("{}: {error}", error.code());
+        }
+    }
+    Ok(Prepared {
+        discarded_grant_digests: plan
+            .into_iter()
+            .filter_map(|step| step.grant_digest)
+            .collect(),
+    })
+}
+
+pub(super) fn authorization_revoke_effect(ctx: &HandlerContext<'_>) -> Result<Value> {
+    let arguments: AuthorizationRevokeArguments = ctx.arguments()?;
+    arguments.validate()?;
+    let operator = NodeIdentity::load(
+        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
+    )
+    .context("load operator identity to protect its grant from a cascade")?;
+    let revoked = ryeos_node_runtime::identity::revoke_authorized_key_cascade(
+        &super::envelope::authorized_keys_dir(ctx.app_root),
+        &arguments.fingerprint,
+        &arguments.reason,
+        &ctx.request.signer_fingerprint,
+        arguments.keep_delegates,
+        &[operator.fingerprint().to_owned()],
+        ctx.node,
+    )
+    .map_err(|error| {
+        match error.downcast_ref::<ryeos_node_runtime::identity::AuthorizedKeyRevokeError>() {
+            Some(refusal) => anyhow::anyhow!("{}: {refusal}", refusal.code()),
+            None => error,
+        }
+    })?;
+    Ok(json!({
+        "revoked": revoked.iter().map(|grant| json!({
+            "fingerprint": grant.fingerprint,
+            "grant_digest": grant.grant_digest,
+            "revoked_at": grant.revoked_at,
+            "reason": grant.reason,
+            "already_revoked": grant.already_revoked,
+            "cascaded_from": grant.cascaded_from,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
