@@ -2580,11 +2580,6 @@ fn create_layout(app_root: &Path) -> Result<()> {
         ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
             .operator_dir()
             .join("signing"),
-        app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("trusted"),
     ];
     for d in &dirs {
         fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
