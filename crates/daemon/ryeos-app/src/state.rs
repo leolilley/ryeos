@@ -487,9 +487,12 @@ pub mod test_support {
         ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
         // `runtime.author_item` signs with the node's authoring key, which
         // `ryeos init` creates; a composed test node holds one too.
-        ryeos_node_runtime::identity::NodeIdentity::create(
-            &ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).authoring_signing_key_path(),
-        )?;
+        // A root composed twice keeps the key it already has.
+        let authoring_key =
+            ryeos_engine::roots::RuntimeRoot::new(root.to_path_buf()).authoring_signing_key_path();
+        if !authoring_key.exists() {
+            ryeos_node_runtime::identity::NodeIdentity::create(&authoring_key)?;
+        }
         Ok((config, identity))
     }
 
