@@ -61,7 +61,7 @@ fn development_source_policy_keeps_source_and_excludes_generated_payloads() {
         "tests/e2e/manual-directives/.ai/knowledge/test-findings.md",
         "tests/e2e/development-cargo/qualification.json",
         "bundles/central-auth/.ai/manifest.source.yaml",
-        "bundles/central-auth/.ai/tools/ryeos/central-auth/login.yaml",
+        "bundles/central-auth/.ai/tools/central-auth/login.yaml",
     ] {
         assert!(!matcher.is_ignored(source), "excluded {source}");
     }

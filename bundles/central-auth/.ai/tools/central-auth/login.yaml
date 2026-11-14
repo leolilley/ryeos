@@ -1,10 +1,10 @@
-# ryeos:signed:2026-11-14T07:05:20Z:dd5d6d557b4761d61c790e6d223d68bde538ed25667a598f710ded7fa55f5904:f9pRJOD4A8hl6gxDckTpXz/Vmx1dpUX1rUfQ1Hs3vorj8FfP6tw9uRya4N0qCRDfdl095FFSei6E0jr/SoqDCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T11:18:27Z:6a342f018cd5868ed2b9daa94aed76da669577d7ed5f272addee5a8f420e10ac:16tQf2250GXK+IBzSNlAywubg9ArOcaREoLr27kPuaffXRWLfjsM2deynz5YLF/xZn3ePRIJx2lINEyJp1p9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
-category: "ryeos/central-auth"
+category: "central-auth"
 name: "login"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
-required_caps: ["ryeos.execute.tool.ryeos.central-auth.login"]
+required_caps: ["ryeos.execute.tool.central-auth.login"]
 description: "Validate credentials or redeem an invite and issue an opaque session token."
 
 requires:
