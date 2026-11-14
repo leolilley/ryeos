@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T18:15:39Z:71852b464cf1e6354388f5cd9359ef15a05ecce6f8e815369359c8a926e13c39:mVA5Z6rLvfReJma42yXx0V7seVDHcJG4mVOaxvs5Ythqi74oOxOnu4T+tSa29FAUkRg+CQfSmXl7vR/m6+0UDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:6a326e354f5b5271743e68da864b871c4a4e86720c3dc4b2379ab7a96d5461b6:AmNCPC1cP98TMwhv4n7qoIlnf2XNYZNB6uwfqs+3lKEB3plqDBk/Z3LdBokkdntjPUmYGH24+IEftMoA2cAzDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -512,6 +512,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

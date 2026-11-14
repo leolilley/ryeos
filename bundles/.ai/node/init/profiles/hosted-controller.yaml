@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T21:21:48Z:ef4bd467d20d0b4af84b25fbffbf4a4449816d393d2b4a1362fee68a272f6c43:Zb9DumOIDa+F1hRDiC0uvJZq4/T9vK9+To0V35o1Becy8oq7WEchF8RCRzdS3k8qDPXLUi0LQ0+CieeX2dAwDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:5c8a5ab33ce9e4c46822b422da3afcca1a2d4db6ec2aa0f2ed255ed72c84862a:Yh/UscdecP7Eyj6pdxYe8iCmyH9qjUiRV6542fdrt83bFiASIzd92otezSKIk95ur8ko/QnmoXp+247OiGHVBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -493,6 +493,9 @@ policies:
           # a recipient capability.
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
+  sealed_vault_names:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 5
     session_ttl_secs: 28800
