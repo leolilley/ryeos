@@ -26,7 +26,9 @@ use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, ProjectContext};
-use ryeos_engine::protocol_vocabulary::{CallbackChannel, EnvInjectionSource, produce_env_value};
+use ryeos_engine::protocol_vocabulary::{
+    CallbackChannel, EnvInjectionSource, produce_optional_env_value,
+};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::launch_token_ttl;
@@ -3399,8 +3401,10 @@ fn build_protocol_launch_env(
 
     let mut bindings = Vec::with_capacity(protocol.descriptor.env_injections.len());
     for injection in &protocol.descriptor.env_injections {
-        let value = match produce_env_value(injection.source, &request) {
-            Ok(value) => value,
+        // A launch without a bundle state home sets no state-home variable.
+        let value = match produce_optional_env_value(injection.source, &request) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
             Err(error) => {
                 if let Some(token) = callback_token.as_deref() {
                     state.callback_tokens.invalidate(token);

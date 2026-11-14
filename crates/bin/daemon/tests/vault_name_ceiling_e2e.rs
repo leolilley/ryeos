@@ -79,10 +79,10 @@ transport:
   kind: remote_http
   base_url: "{mock_base_url}"
 body_template:
-  model: "{{{{model}}}}"
-  messages: "{{{{messages}}}}"
-  tools: "{{{{tools}}}}"
-  stream: "{{{{stream}}}}"
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
 auth:
   env_var: "{SECRET_NAME}"
   header_name: "Authorization"

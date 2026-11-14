@@ -1666,7 +1666,7 @@ pub(super) fn bundle_state_import(ctx: &HandlerContext<'_>) -> Result<Value> {
 }
 
 /// Receipt first: the receipt lists one digest, the sha256 of the canonical
-/// listing of every file the removal will delete, so the ledger names exactly
+/// listing of every file the removal will delete, so the receipt names exactly
 /// what was discarded before anything is.
 pub(super) fn bundle_state_remove_prepare(ctx: &HandlerContext<'_>) -> Result<Prepared> {
     let arguments: BundleStateRemoveArguments = ctx.arguments()?;
