@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T06:59:09Z:a65e8d81f4a10dc9f91e35950e9d14e6ce4f352091469f3f8fb27df98e4db1a4:Tbuohxm8RxY/59oIqe7XooQkDCqrYUEdkZerQqPyiJ7oHY+fM9tsFr/mQ5yclPK29D4ujexPcBbxzelAjoUaDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:1f82590016b2f474326249ad4175f0c1f9bf858c492b32d093bb6906960b7d80:mArK6PkUuddDmSNnafnA/kWxOzN1HCnclTB9hYxQ3rhLGBPaQk0xvYjgRrKZ8KA0oy618mpvaYTHjS5U9m4pBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -370,6 +370,12 @@ records without root. It warns when a RyeOS node service records an app root
 that no longer exists, and names the fix,
 `ryeos node host retire --orphaned --confirm`. It reports `n/a` where no native
 service directory is readable without root.
+
+Its `vault_names_without_ceiling` row lists the sealed vault names that the
+signed `sealed_vault_names` policy does not list. Such a name is operator-only,
+so it warns and names the fix, `ryeos node policy-apply sealed_vault_names
+<source.yaml>`. It reads names only, through the read-only vault open, and
+reports a vault it cannot read (a pending rewrap) as a warning.
 
 Its `ui_browser_sessions` row checks that the signed browser-session policy is
 present and valid (schema 5: session lifetime, idle timeout, launch-token

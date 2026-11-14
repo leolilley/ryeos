@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T05:54:19Z:bb56275bfff8816d984b42942e1e958a22dfb4e2858b869819e7d5c1a33fad06:wBBEdK/U97P61jG6QbohJ/eJdrx3q3AKgYISHxZUP61i+afXnp9vRXPAeE03DcBOOWvQTK4/IK3Y3IvXJ7NnAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:eb004e3d1e114d83c9a600606207c429cf562c70f41f1a98707240d5ce505862:LzwRryAQbuOUCdQu1PrTIWYlPS9JnUcaRFqkvmDoD8xEpz2vLpOtg6y9siGtJ57LCQzVdzBTFBKY/EYlAndIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -37,8 +37,11 @@ untrusted tenants.
   `ryeos.execute.service.objects/get` does not by itself reach another
   principal's objects. The unscoped read, `objects/get-any`, is operator-only
   and never part of a recommended grant. See [Services: objects](../services/objects.md#authority-reads-are-scoped-by-root).
-- Vault is a single shared store in v1; capability checks protect
-  mutation/listing, not per-principal isolation.
+- Vault is a single shared store. Capability checks gate the vault services,
+  and the target node's signed `sealed_vault_names` policy bounds, per name,
+  who may write, list and receive it; a name without an entry is operator-only
+  there. The target judges the principal it admitted: the delegated user when
+  the caller holds a delegation, otherwise the calling node.
 - Remote requests are signed with this node's Ed25519 key and carry the
   calling principal's own signed delegation. The remote node admits the
   principal from its authorized-keys trust store and caps the request to the

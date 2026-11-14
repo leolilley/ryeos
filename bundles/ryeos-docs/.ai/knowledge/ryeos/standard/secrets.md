@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:11:14Z:017d3c0e53125a6a0aabf3f947a3b35c51d25cf955b159f146f75552bca60f3a:rDfGjV5CHBcezcs8y70+5d9a3osGGUEjL0OtaqzQVQUS6+PxbVFUAqsPPbbYhI4IZtTLJIpg86/oP7o3XWSTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:b1a202a28d62a5a52623a6f32b77b577e7208b20277c4290b4e9c0933eee6080:tu1kl76fOVZ9HCqXv2Fh1QqojM7jKiESgitENQTSe91bFH2lXoMwBcYzFsPLltxFMmv1ySaWxl5pHrd7mWP6DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [secrets, vault, env, dotenv, providers, security]
@@ -23,10 +23,11 @@ For each declared secret (a tool/item `required_secrets` entry, or a provider's
 `auth.env_var`), the daemon reads only the source the launch's admitted
 environment authority names:
 
-1. **Sealed vault** — `ryeos vault put <NAME> …`. One store per node, shared
-   by every principal that holds the `ryeos.execute.service.vault/*`
-   capabilities: it is not scoped per principal, so a secret one of them sets
-   is listed, replaced and delivered for the others.
+1. **Sealed vault** — `ryeos vault put <NAME> …`. One store per node, not
+   scoped per principal. Which principals may receive, replace or delete each
+   name is decided by the node's signed `sealed_vault_names` policy (see
+   [Per-name vault ceilings](#per-name-vault-ceilings)); a name the policy does
+   not list is operator-only.
 2. **Project `.env` overlay** — read only from the pinned, identity-checked
    project root the authority names, and only for declared names the vault
    (when the authority includes it) did not already supply.
@@ -82,6 +83,61 @@ Who holds it:
 - `remote execute` and `remote run` send `include_operator_vault: false` by
   default. Asking a remote to expose its operator vault needs the capability
   both locally (the source checks its caller) and in the target's grant.
+
+## Per-name vault ceilings
+
+The vault is one shared store, so holding the `ryeos.execute.service.vault/*`
+capabilities does not by itself let a principal touch every name. The node's
+signed `sealed_vault_names` policy section lists, per name, two ceilings:
+
+```yaml
+schema: 1
+names:
+  - name: ZEN_API_KEY
+    recipients:            # who may have the value delivered into a launch
+      principals: [fp:<operator>, fp:<teammate>]
+      capabilities: []
+    writers:               # who may set or delete it
+      principals: [fp:<operator>]
+      capabilities: [ryeos.write.vault.zen_api_key]
+```
+
+- Each list holds principals and exact capabilities; both are sorted and
+  unique, at least one entry is required, and a capability must be exact (no
+  wildcard). A principal passes when it is listed or holds a listed capability
+  exactly; a wildcard grant that merely covers the capability does not pass.
+- Nothing is implied: an operator that should keep writing a listed name lists
+  itself.
+- **A name with no entry is operator-only.** Only the node's configured local
+  operator may receive or write it. Every other principal is refused with
+  `vault_name_has_no_ceiling`. A node whose vault predates the ceilings
+  therefore behaves as before for the operator and fails closed for everyone
+  else; `ryeos node doctor` lists such names in the
+  `vault_names_without_ceiling` row (warning) with the fix.
+- `vault/set` and `vault/delete` judge the caller against `writers` and refuse
+  with 403 `vault_name_not_writable`. `vault/list` shows a caller only the
+  names it may receive or write.
+- Delivery judges every vault name a launch declares against `recipients`,
+  under the principal and the capability ceiling the launch was admitted
+  with, and refuses with 403 `vault_name_not_delivered`. This covers a
+  project overlay that includes the operator vault and the `operator` vault
+  namespace. A projectless launch carries no capability ceiling, so only
+  listed principals (and the operator) receive. Principals without a grant of
+  their own, such as `session:<id>` and `route-handler:<bundle>:<id>`, are
+  judged by that exact string and must be listed by name; a route that
+  declares `operator_vault: true` needs its `route-handler:` principal listed
+  as a recipient for each name its handler declares.
+- Every refusal names the fix: apply a `sealed_vault_names` section with the
+  node stopped, `ryeos node policy-apply sealed_vault_names <source.yaml>`.
+  The change takes effect at the next start. The section is carried across a
+  policy-generation cut like any operator-applied section.
+- On a remote node the writer check sees the principal the remote admitted:
+  the delegated user when the caller holds a signed delegation, otherwise the
+  calling node. A remote vault name must therefore list that principal as a
+  writer on the remote.
+- Provider-delivered environment names keep their own ceiling in
+  `provider_environment`; bundle-scoped runtime vault entries stay bound to
+  their bundle and are not named here.
 
 ## The `.env` overlay only reads what was declared
 

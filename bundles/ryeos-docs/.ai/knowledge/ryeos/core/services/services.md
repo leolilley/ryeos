@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T05:54:19Z:f063936e04672a439ead3e49c6e0c554f6f80f45d1d84b1ce5c7195fab49cbbe:I7yxXIbo8NB+28QE0laZhKM8zkPKuvDq2HjJ/I2HpjNYLNYGiD7PkRE7XRKNXrkRg0RdlpZu/XMhD00POS6UAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:a0db9c5d7e8c9c6102f8b934a5e80605d201d94ff153760e61c2b7aa23a44116:Imrch9h+IZE6zpuTBFa762PT5jPE0pyZYJGtvFxSTo5i2DgkwbQnNGh3rqYu4SlHJcTon3QZhCgza/G5Ws5lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -154,9 +154,10 @@ Object fetch flows fail closed when requested hashes are missing.
 | `vault/list` | `vault.list` | `ryeos.execute.service.vault/list` |
 | `vault/delete` | `vault.delete` | `ryeos.execute.service.vault/delete` |
 
-Vault services mutate or read the node vault. In v1, vault storage is a
-single node-level store protected by capabilities, not a per-principal
-namespace.
+Vault services mutate or read the node vault. Vault storage is a single
+node-level store, not a per-principal namespace; each name carries its own
+recipient and writer ceiling in the signed `sealed_vault_names` policy, and a
+name without one is operator-only (see [Services: vault](vault.md)).
 
 Delivering vault secrets into an execution is separate from these services.
 An execution policy whose environment exposes the operator vault (a project
