@@ -561,11 +561,7 @@ mod tests {
         assert_eq!(kind, ScheduledAuthorityRefusalKind::GrantRevoked);
     }
 
-    fn delegated_execution(
-        fixture: &Fixture,
-        digest: &str,
-        not_after: u64,
-    ) -> ScheduleExecution {
+    fn delegated_execution(fixture: &Fixture, digest: &str, not_after: u64) -> ScheduleExecution {
         let mut execution = fixture.pinned_execution();
         if let ScheduleExecutionAuthority::Authenticated {
             principal_class,

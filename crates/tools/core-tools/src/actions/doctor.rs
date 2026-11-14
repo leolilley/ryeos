@@ -718,10 +718,7 @@ mod tests {
             "a config directory is not an app root: {error}"
         );
         assert!(
-            error.contains(&format!(
-                "{}/.ai/node",
-                config_root.display()
-            )),
+            error.contains(&format!("{}/.ai/node", config_root.display())),
             "the trust path is joined under whatever root is passed: {error}"
         );
     }

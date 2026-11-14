@@ -297,12 +297,7 @@ pub const SCHEDULED_AUTHORITY_REFUSED: &str = "scheduled_authority_refused";
 /// execution policy needs.
 pub const SCHEDULE_POLICY_CAPABILITY_NOT_COVERED: &str = "schedule_policy_capability_not_covered";
 
-fn structured_refusal(
-    status: u16,
-    code: &str,
-    message: String,
-    detail: Value,
-) -> anyhow::Error {
+fn structured_refusal(status: u16, code: &str, message: String, detail: Value) -> anyhow::Error {
     let mut body = serde_json::json!({ "error": message, "error_code": code });
     if let (Some(body), Value::Object(detail)) = (body.as_object_mut(), detail) {
         body.extend(detail);
