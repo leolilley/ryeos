@@ -3461,6 +3461,21 @@ pub fn covering_authority_for(
     }
 }
 
+/// Record the covering authority on a root launch's metadata unless it already
+/// carries one: a continuation keeps the authority that covered its seed, and a
+/// fresh root records its caller. Every launch driver must pass through this so
+/// that revoking an authorized-key grant can find the live threads it covered.
+pub(crate) fn with_root_covering_authority(
+    metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    acting_principal: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+) -> ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+    if metadata.covering_authority.is_some() {
+        return metadata;
+    }
+    metadata.with_covering_authority(covering_authority_for(acting_principal, handler_context))
+}
+
 /// Typed 403 refusal naming the item, the caller, every uncovered cap, and the cure.
 fn caller_capability_not_covered_error(
     item_ref: &str,
@@ -5820,12 +5835,8 @@ async fn prepare_managed_launch_authority(
         // admitting principal, or the operator follow-up's sender); a fresh
         // root records the caller that lent it its declared caps and, when that
         // caller authenticated under an authorized-key grant, the grant digest.
-        if metadata.covering_authority.is_none() {
-            metadata = metadata.with_covering_authority(covering_authority_for(
-                params.acting_principal,
-                params.handler_context,
-            ));
-        }
+        metadata =
+            with_root_covering_authority(metadata, params.acting_principal, params.handler_context);
         if let Some(native_resume) = native_resume {
             metadata = metadata.with_native_resume(native_resume);
         }
@@ -12326,6 +12337,48 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::execution::limits::{LimitCaps, LimitValues};
+
+    fn grant_backed_context(digest: &str) -> ryeos_app::handler_context::HandlerContext {
+        ryeos_app::handler_context::HandlerContext::new_with_grant_authority(
+            "fp:grantee".to_owned(),
+            vec![],
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+            None,
+            ryeos_engine::principal_contract::AuthenticatedGrantAuthority {
+                principal_grant_hash: digest.to_owned(),
+                forwarding: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_fresh_root_records_the_grant_digest_it_authenticated_under() {
+        let digest = "ab".repeat(32);
+        let context = grant_backed_context(&digest);
+        let metadata = with_root_covering_authority(
+            ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            "fp:grantee",
+            Some(&context),
+        );
+        let authority = metadata.covering_authority.expect("covering authority");
+        assert_eq!(authority.principal, "fp:grantee");
+        assert_eq!(authority.grant_digest.as_deref(), Some(digest.as_str()));
+    }
+
+    #[test]
+    fn a_seeded_covering_authority_is_kept() {
+        let seeded = ryeos_app::launch_metadata::CoveringAuthority {
+            principal: "fp:seed".to_owned(),
+            grant_digest: None,
+        };
+        let metadata = with_root_covering_authority(
+            ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+                .with_covering_authority(seeded.clone()),
+            "fp:grantee",
+            Some(&grant_backed_context(&"cd".repeat(32))),
+        );
+        assert_eq!(metadata.covering_authority, Some(seeded));
+    }
 
     #[test]
     fn retained_launch_error_keeps_only_typed_bounded_stage_diagnostics() {

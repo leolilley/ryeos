@@ -4483,6 +4483,11 @@ fn admitted_root_launch_metadata(
         .with_admitted_execution_closure(execution_closure)
         .with_resume_context(resume)
         .with_sealed_root_request(sealed);
+    metadata = super::launch::with_root_covering_authority(
+        metadata,
+        &params.acting_principal,
+        params.handler_context.as_ref(),
+    );
     // External guest requirements were checked above and admit no controller
     // device resources. Host architecture/availability is not guest authority.
     let selected_resources = match prepared_plan.execution_plan().endpoint_requirement {
