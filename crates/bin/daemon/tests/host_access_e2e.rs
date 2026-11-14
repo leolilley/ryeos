@@ -439,13 +439,33 @@ async fn on_an_enforcing_lane_only_granted_host_tools_leave_the_sandbox() {
         .as_str()
         .expect("graph thread id")
         .to_owned();
-    let threads = h.list_threads(100).await.expect("list threads");
-    let child = threads
-        .iter()
-        .find(|thread| thread.item_ref == PROBE_REF && thread.chain_root_id == graph_thread)
-        .unwrap_or_else(|| panic!("graph child thread not listed: {threads:#?}"));
+    // An inline in-process child is a thread in the graph's chain, listed
+    // through `threads.children` of the graph thread.
+    let (children_status, children_body) = h
+        .post_execute(
+            "service:threads/children",
+            ".",
+            serde_json::json!({ "thread_id": graph_thread }),
+        )
+        .await
+        .expect("post service:threads/children");
+    assert!(
+        children_status.is_success(),
+        "threads.children failed: {children_status}; {children_body:#}"
+    );
+    let child_id = children_body
+        .pointer("/result/children")
+        .and_then(Value::as_array)
+        .and_then(|children| {
+            children
+                .iter()
+                .find(|child| child.get("item_ref").and_then(Value::as_str) == Some(PROBE_REF))
+        })
+        .and_then(|child| child.get("thread_id").and_then(Value::as_str))
+        .unwrap_or_else(|| panic!("graph child thread not listed: {children_body:#}"))
+        .to_owned();
     let child = h
-        .get_thread(&child.thread_id)
+        .get_thread(&child_id)
         .await
         .expect("get child thread")
         .expect("child thread exists");
