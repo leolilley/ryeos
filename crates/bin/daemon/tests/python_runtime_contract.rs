@@ -160,6 +160,7 @@ fn run_tool_with_hints(
             &plan_ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan walks to subprocess terminal");
 

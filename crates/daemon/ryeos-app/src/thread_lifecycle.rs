@@ -60,7 +60,7 @@ pub use direct_execution::{
     effective_child_external_content_declarations, external_direct_environment,
     prepare_bundle_item_plan_for_qualification, prepare_captured_item_plan,
     prepare_external_direct_project_file, prepare_external_qualification_local_worker_plan,
-    prepare_item_plan, qualification_worker_protocol_lane_admits, spawn_item,
+    prepare_item_plan, qualification_worker_selection_admits_posture, spawn_item,
     with_prepared_external_qualification_local_worker_plan,
 };
 pub(crate) use direct_execution::{
@@ -8154,56 +8154,68 @@ fn verified_execution_subject(
     }
 }
 
-/// Resolve the exact current signed protocol selected by a direct item's kind
-/// and composed definition. This is the non-spawning identity owner shared by
-/// ordinary execution and independent product-qualification rechecks; wire and
-/// result-retention policy remain with the executor.
+/// Resolve the exact current signed protocol a direct item's kind and composed
+/// definition select on this node. An item that states one protocol resolves
+/// to it; an item that lists several admissible protocols resolves to the one
+/// the node's own reported guarantees meet, and none or several is refused.
+/// This is the non-spawning identity owner shared by ordinary execution and
+/// independent product-qualification rechecks; wire and result-retention
+/// policy remain with the executor. The selection is a node-local launch fact
+/// beside the resolution output and never part of its definition digest.
 pub fn resolve_direct_terminator_protocol<'a>(
     engine: &'a Engine,
     resolved: &ResolvedExecutionRequest,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<&'a ryeos_engine::protocols::VerifiedProtocol> {
+    Ok(select_direct_terminator_protocol(engine, resolved, isolation)?.protocol)
+}
+
+/// The selection `resolve_direct_terminator_protocol` returns the protocol of,
+/// with the holding it was selected under.
+pub fn select_direct_terminator_protocol<'a>(
+    engine: &'a Engine,
+    resolved: &ResolvedExecutionRequest,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+) -> Result<ryeos_engine::protocols::SelectedProtocol<'a>> {
     let kind = &resolved.resolved_item.kind;
     let schema = engine
         .kinds
         .get(kind)
         .ok_or_else(|| anyhow!("execution kind schema not registered: {kind}"))?;
-    let terminator = schema
+    let execution = schema
         .execution()
-        .and_then(|execution| execution.terminator.as_ref())
-        .ok_or_else(|| anyhow!("execution kind '{kind}' has no terminator"))?;
-    let protocol_ref = match terminator {
-        ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => {
-            let effective = engine.effective_item(ryeos_engine::engine::EffectiveItemRequest {
-                logical_project_root: None,
-                item_ref: resolved.resolved_item.canonical_ref.clone(),
-                expected_kind: Some(kind.clone()),
-                project_root: resolved.resolved_item.materialized_project_root.clone(),
-                subject_resolution_authority: resolved
-                    .resolved_item
-                    .subject_resolution_authority
-                    .clone(),
-            })?;
-            if effective.source.content_hash != resolved.resolved_item.content_hash {
-                bail!("effective subprocess protocol selection changed the verified root bytes");
-            }
-            protocol
-                .resolve(&effective.composed_value)
-                .map_err(anyhow::Error::msg)?
-        }
-        ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
+        .ok_or_else(|| anyhow!("execution kind '{kind}' has no execution schema"))?;
+    match execution.terminator.as_ref() {
+        Some(ryeos_engine::kind_registry::TerminatorDecl::Subprocess { .. }) => {}
+        Some(ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. }) => {
             bail!("execution kind '{kind}' has an in-process terminator")
         }
-    };
-    engine
-        .protocols
-        .require(&protocol_ref)
-        .map_err(|error| anyhow!("protocol lookup failed for '{protocol_ref}': {error}"))
+        None => bail!("execution kind '{kind}' has no terminator"),
+    }
+    let effective = engine.effective_item(ryeos_engine::engine::EffectiveItemRequest {
+        logical_project_root: None,
+        item_ref: resolved.resolved_item.canonical_ref.clone(),
+        expected_kind: Some(kind.clone()),
+        project_root: resolved.resolved_item.materialized_project_root.clone(),
+        subject_resolution_authority: resolved.resolved_item.subject_resolution_authority.clone(),
+    })?;
+    if effective.source.content_hash != resolved.resolved_item.content_hash {
+        bail!("effective subprocess protocol selection changed the verified root bytes");
+    }
+    ryeos_engine::protocols::select_subprocess_protocol(
+        execution,
+        &effective.composed_value,
+        &engine.protocols,
+        isolation,
+    )?
+    .ok_or_else(|| anyhow!("execution kind '{kind}' has no subprocess terminator"))
 }
 
 pub(super) fn build_execution_plan_for_request(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
     verified: &VerifiedItem,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
     parent_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
 ) -> Result<ryeos_engine::contracts::ExecutionPlan> {
@@ -8211,6 +8223,7 @@ pub(super) fn build_execution_plan_for_request(
         engine,
         resolved,
         verified,
+        isolation,
         sealed_content,
         parent_filesystem_ceiling,
         None,
@@ -8221,12 +8234,21 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
     verified: &VerifiedItem,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     sealed_content: Option<&dyn ryeos_engine::project_content::SealedDependencyBytes>,
     parent_filesystem_ceiling: ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling,
     logical_context: Option<(&str, Option<&std::path::Path>)>,
 ) -> Result<ryeos_engine::contracts::ExecutionPlan> {
-    let filesystem_ceiling = project_execution_filesystem_authority_ceiling(engine, resolved)?
-        .intersect(parent_filesystem_ceiling);
+    // The protocol this node selects for the item is a launch fact beside the
+    // item's resolution. It supplies the filesystem ceiling of an item that
+    // lists several admissible protocols and keys the plan identity.
+    let selected = select_planned_terminator_protocol(engine, resolved, isolation)?;
+    let filesystem_ceiling = project_execution_filesystem_authority_ceiling(
+        engine,
+        resolved,
+        selected.as_ref(),
+    )?
+    .intersect(parent_filesystem_ceiling);
     let mut plan = if let Some((root_source, logical_project_root)) = logical_context {
         engine
             .build_bundle_plan_from_captured_root_with_logical_project_root(
@@ -8237,6 +8259,7 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
                 &resolved.plan_context.execution_hints,
                 sealed_content,
                 filesystem_ceiling,
+                selected,
                 logical_project_root,
             )
             .map_err(|e| anyhow!("current Bundle plan build failed: {e}"))?
@@ -8273,6 +8296,7 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
                         authority,
                         sealed_content,
                         filesystem_ceiling,
+                        selected,
                     )
                     .map_err(|e| anyhow!("plan build failed: {e}"))
             }
@@ -8294,6 +8318,7 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
                     &resolved.plan_context.execution_hints,
                     sealed_content,
                     filesystem_ceiling,
+                    selected,
                 )
                 .map_err(|e| anyhow!("plan build failed: {e}")),
         }?
@@ -8306,9 +8331,36 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
     Ok(plan)
 }
 
+/// The protocol this node selects for a request whose item lists several
+/// admissible protocols. An item that states one protocol, and a request with
+/// no admitted composed subject to read a list from, plan exactly as before and
+/// carry no selection.
+fn select_planned_terminator_protocol<'a>(
+    engine: &'a Engine,
+    resolved: &ResolvedExecutionRequest,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+) -> Result<Option<ryeos_engine::protocols::SelectedProtocol<'a>>> {
+    let kind = &resolved.resolved_item.kind;
+    let execution = engine
+        .kinds
+        .get(kind)
+        .and_then(|schema| schema.execution.as_ref())
+        .ok_or_else(|| anyhow!("execution kind `{kind}` has no execution schema"))?;
+    let Some(admission) = resolved.root_admission.as_ref() else {
+        return Ok(None);
+    };
+    ryeos_engine::protocols::select_listed_protocol(
+        execution,
+        &admission.resolution_output().composed.composed,
+        &engine.protocols,
+        isolation,
+    )
+}
+
 pub(super) fn project_execution_filesystem_authority_ceiling(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
+    selected: Option<&ryeos_engine::protocols::SelectedProtocol<'_>>,
 ) -> Result<ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling> {
     let kind = &resolved.resolved_item.kind;
     let execution = engine
@@ -8325,7 +8377,10 @@ pub(super) fn project_execution_filesystem_authority_ceiling(
         )
     })?;
     execution
-        .project_filesystem_authority_ceiling(&admission.resolution_output().composed.composed)
+        .project_filesystem_authority_ceiling_selected(
+            &admission.resolution_output().composed.composed,
+            selected.and_then(|selected| selected.holding),
+        )
         .map_err(|error| anyhow!("compile execution filesystem-authority ceiling: {error}"))
 }
 
@@ -8387,12 +8442,14 @@ pub fn project_execution_posture(
 pub fn validate_item(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<ValidatedItem> {
     let verified = verified_execution_subject(engine, resolved)?;
     let plan = build_execution_plan_for_request(
         engine,
         resolved,
         &verified,
+        isolation,
         None,
         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
     )?;

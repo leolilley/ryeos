@@ -808,22 +808,32 @@ impl SealedRootExecutionRequest {
     pub fn process_containment_for_qualification(
         &self,
     ) -> Result<super::ProcessContainmentRequirement> {
-        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        self.process_containment_for_qualification_under(None)
+    }
+
+    /// The containment a qualification verifier must run under, given the
+    /// holding of the protocol the node selected for it. The sealed policy's
+    /// minimum settlement and the selected holding's root settlement each name
+    /// a requirement; the stricter stands, so neither can weaken the other.
+    pub fn process_containment_for_qualification_under(
+        &self,
+        selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
+    ) -> Result<super::ProcessContainmentRequirement> {
+        use super::ProcessContainmentRequirement as Requirement;
         self.validate_qualification_purpose()?;
-        Ok(self.qualification.as_ref().map_or(
-            super::ProcessContainmentRequirement::None,
-            |purpose| match purpose
-                .policy_source
-                .policy
-                .minimum_verifier_process_settlement
-            {
-                Settlement::ScopeEmpty => super::ProcessContainmentRequirement::CgroupScope,
-                Settlement::ContainmentEmpty => {
-                    super::ProcessContainmentRequirement::AnyQualifiedContainment
-                }
-                Settlement::TrustedProcessGroupAbsent => super::ProcessContainmentRequirement::None,
-            },
-        ))
+        let from_holding =
+            selected_holding.map_or(Requirement::None, |holding| {
+                Requirement::for_settlement(holding.root_settlement)
+            });
+        Ok(self.qualification.as_ref().map_or(Requirement::None, |purpose| {
+            Requirement::for_settlement(
+                purpose
+                    .policy_source
+                    .policy
+                    .minimum_verifier_process_settlement,
+            )
+            .at_least(from_holding)
+        }))
     }
 
     /// Whether the sealed root demands any retained containment.

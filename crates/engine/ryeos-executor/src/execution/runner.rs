@@ -2994,10 +2994,12 @@ struct ProtocolLaunchEnv {
 fn resolved_terminator_protocol<'a>(
     engine: &'a ryeos_engine::engine::Engine,
     resolved: &ResolvedExecutionRequest,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<&'a ryeos_engine::protocols::VerifiedProtocol> {
     let kind = &resolved.resolved_item.kind;
-    let protocol =
-        ryeos_app::thread_lifecycle::resolve_direct_terminator_protocol(engine, resolved)?;
+    let protocol = ryeos_app::thread_lifecycle::resolve_direct_terminator_protocol(
+        engine, resolved, isolation,
+    )?;
     let remote_consumer = resolved
         .root_admission
         .as_ref()
@@ -5100,7 +5102,11 @@ pub async fn run_and_wait(
     {
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
-    let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
+    let protocol = resolved_terminator_protocol(
+        &engine,
+        &params.resolved,
+        wait_launch_isolation.as_ref(),
+    )?;
     let stdout_shape = protocol.descriptor.stdout.shape;
     let wait_cas_guard = state
         .state_store
@@ -6264,7 +6270,11 @@ pub async fn run_detached(
     {
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
-    let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
+    let protocol = resolved_terminator_protocol(
+        &engine,
+        &params.resolved,
+        bg_launch_isolation.as_ref(),
+    )?;
     let bg_cas_guard = state
         .state_store
         .pinned_state_authority()?

@@ -1,12 +1,15 @@
-# ryeos:signed:2026-11-13T05:59:32Z:1919921d6ad2ae97ef33395e5b9ba79d0c5b80a76a27b51dd845d4ce2a15e517:3Yy+6d9jqxM6oc+CFMNToxRpCgU58gSyIaqRZ//NUdb5Wrnz3StjC82vYNFCXz2dP5zfJfTNYSH6Uw3FP2nBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T12:59:02Z:6d68961ec5cfb1f03537eeb37c3d05c2736b6c31b1fbc180f7d2cfc35cbc8d95:4jxGAwi3DEWqevcVtbX45W3/Am4cul1jKZB/Dkb42zJ3A09F6QMlGq7Ay92cdhBeMfwBkS1Eb8JnbnzaojAUCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 executor_id: "@subprocess"
-description: Explicit external-only Codex authoring profile; refuses until its guest product is independently qualified. The contained variant of the Worker, selected on a node that reports enforced isolation and qualified descendant containment (see config:codex/qualification-variants).
-# The node contains and settles every descendant of the session, including one that leaves its process group, so the
-# Worker may hold captured filesystem authority.
-execution_protocol: protocol:ryeos/core/contained_structured_session
-filesystem_authority: captured_execution
+description: >-
+  Explicit external-only Codex authoring profile; refuses until its guest product is independently qualified.
+  One Worker for every node. It lists the session protocols it may run under and the node selects the one whose
+  declared holding it reports: contained descendant settlement with captured filesystem authority, or a trusted
+  process group under node policy.
+execution_protocols:
+  - protocol:ryeos/core/contained_structured_session
+  - protocol:ryeos/core/trusted_structured_session
 external_product_slots:
   - id: guest-runtime
     relationship_ref: config:codex/guest-runtime-products

@@ -1,23 +1,13 @@
-# ryeos:signed:2026-11-14T01:32:46Z:d3b7347df028c864d69e383da578aabc0694c8f35d110b8467cb9c8d10e17338:CO612AJARcprWeetZbrfURmj78CgeTFr9GUY9OXDDftj19l79GqIGcHqTEuduE3dfZbQyb8rHGQR02K24Va6Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T12:59:02Z:b06e729b5a2001972c89fedfd265bd5633bfbb00b6f71edcbea2af363ff8901d:fpEZnlGTRdvxBUJXm0SxJMuckMoSP7PwZDbdSAjeg2L/SX4g1YWB+DovlecFthDXyz+1dI66ryJ89C4V3hYVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Contained variant of the independent consumer qualification of the exact
-  Codex guest runtime, for a node that holds enforced isolation and qualified descendant
-  containment; the node-derived external candidate context is merged into verifier_parameters
+description: Independent consumer qualification of the exact Codex guest runtime. One policy for every
+  node. The holding it runs under is selected by the node from the protocols the Worker and verifier
+  list, not named here. The node-derived external candidate context is merged into verifier_parameters
   before signing
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:codex/qualification/consumer-runtime-verifier
-  requires_guarantees:
-  - isolation:enforced
-  - filesystem:captured_execution
-  - callback:captured_compatible
-  - any_of:
-    - termination:scope
-    - termination:pid_namespace
-  - any_of:
-    - recovery:scope
-    - recovery:pid_namespace
   subject_declaration_id: subject
   allowed_claims:
   - bounded_candidate_capture
@@ -25,7 +15,6 @@ product_qualification_policy:
   - controller_credential_exclusion
   - native_writer_exclusion
   - no_local_execution_fallback
-  minimum_verifier_process_settlement: containment_empty
   verifier_parameters:
     schema: ryeos.codex.consumer_verifier.v4
     controller:

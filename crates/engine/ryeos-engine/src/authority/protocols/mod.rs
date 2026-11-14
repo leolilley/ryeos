@@ -26,6 +26,10 @@ pub use descriptor::{
 pub use registry::{
     ProtocolError, ProtocolRegistry, VerifiedProtocol, validate_admitted_protocol_descriptor,
 };
+pub use selection::{
+    SelectedProtocol, project_node_filesystem_authority_ceiling, require_holding_met,
+    select_listed_protocol, select_protocol, select_subprocess_protocol,
+};
 
 /// Protocol ABI version this engine supports.
 /// Distinct from handler and runtime ABI versions.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T23:57:18Z:ca1006f9c7a568d40a7a9a555b21849965d0bdd92ca823bc874d1bf6a804975f:qWtRBYSnDZjqHw0tgtkgXmkp9Lb6lkmPqRHRgMAPOaQ1eRBB4Qat5I+0ikgUB25QBmQzYCtBdzu5KiSQvsYBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T12:59:02Z:b31e6f0f884d112a40ab550c72e3842b9c9e3b703acc1f7191e5dd65be44b2b1:lyFEZnGtKUXNEbAS+ku6/AKorVT4fOlvxUCXb316+1IiG5ItIIxQGpy+9mXTwYcnLfYAWf2kUjVSl3T/Cv9TAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
@@ -49,7 +49,8 @@ launch must refuse before model-provider turn contact.
 
 A trusted disposable authoring placement is a fourth, deliberately weaker
 product. Its signed node policy may enable `trusted_process_group_sessions`,
-and its worker selects `cleanup_authority: trusted_process_group`. RyeOS then
+and the session protocol the node then selects declares
+`cleanup_authority: trusted_process_group`. RyeOS then
 owns the exact direct process-group lifecycle, retained candidate, completion
 fence, and independent evaluation, but does not claim hard containment or
 hostile descendant-death proof. This lane exists for single-tenant managed
@@ -58,9 +59,11 @@ product remains under qualification. It must not use
 `external_placement_incarnation`, satisfy that product's acceptance claims, or
 silently fall back from a missing local process scope.
 
-The trusted lane is selected explicitly by all three authorities: the signed
-node policy, the distinct trusted session protocol, and the selected trusted
-worker item. Ordinary and hardened workers remain fail-closed. One placement
+The trusted holding is selected by the node, never by a separate worker item:
+the signed node policy enables it, and the one authoring worker lists both the
+contained and the trusted session protocols, so the node picks the protocol
+whose declared holding it reports. Ordinary and hardened workers remain
+fail-closed. One placement
 should run one worker campaign at a time; import and freeze the candidate
 before recycling it. Deployment, signing, competition submission, and
 publication credentials stay outside the worker service.

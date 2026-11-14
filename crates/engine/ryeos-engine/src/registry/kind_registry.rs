@@ -1744,6 +1744,15 @@ impl ExecutionSchema {
         &self,
         composed: &Value,
     ) -> Result<crate::isolation::IsolationFilesystemAuthorityCeiling, EngineError> {
+        // An item that lists several admissible protocols has no filesystem
+        // ceiling of its own to read; defaulting here would silently widen it.
+        if let Some(TerminatorDecl::Subprocess { protocol }) = self.terminator.as_ref()
+            && protocol.selects_from_set(composed)
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: "an item that lists several admissible protocols takes its filesystem authority from the node-selected protocol; use the selected projection".to_owned(),
+            });
+        }
         let Some(declaration) = self.filesystem_authority_ceiling.as_ref() else {
             return Ok(crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy);
         };
@@ -6272,6 +6281,119 @@ execution:
             .unwrap(),
             Ceiling::NodePolicy
         );
+    }
+
+    fn contained_style_protocol(name: &str) -> crate::protocols::VerifiedProtocol {
+        let descriptor: crate::protocols::ProtocolDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "kind": "protocol",
+                "name": name,
+                "category": "example",
+                "abi_version": "v1",
+                "stdin": {"shape": "opaque"},
+                "stdout": {"shape": "opaque_bytes", "mode": "terminal"},
+                "capabilities": {
+                    "allows_pushed_head": false,
+                    "allows_target_site": false,
+                    "allows_detached": false,
+                },
+                "lifecycle": {"mode": "managed"},
+                "callback_channel": "none",
+                "holding": {
+                    "requires_guarantees": ["isolation:enforced"],
+                    "filesystem_authority": "captured_execution",
+                    "root_settlement": "containment_empty",
+                },
+            }))
+            .unwrap();
+        crate::protocols::VerifiedProtocol {
+            canonical_ref: format!("protocol:example/{name}"),
+            raw_content_digest: "0".repeat(64),
+            signer_fingerprint: "test".to_owned(),
+            descriptor,
+            trust_class: crate::resolution::TrustClass::TrustedBundle,
+            bundle_root: std::path::PathBuf::new(),
+            descriptor_path: std::path::PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn node_selection_passes_a_scalar_through_and_refuses_a_list_no_candidate_meets() {
+        let exec = parse_exec(LIST_PROTOCOL_KIND).unwrap().unwrap();
+        let registry = crate::protocols::ProtocolRegistry::from_verified(vec![
+            contained_style_protocol("first"),
+            contained_style_protocol("second"),
+        ]);
+        // A disabled node holds no enforced isolation.
+        let isolation = crate::isolation::IsolationRuntime::disabled_for_authoring();
+        let scalar = serde_json::json!({
+            "execution_protocol": "protocol:example/first",
+            "filesystem_authority": "captured_execution",
+        });
+        // A scalar item is not held to its protocol's guarantees here: it
+        // resolves to exactly the protocol it states and projects as before.
+        let selected =
+            crate::protocols::select_subprocess_protocol(&exec, &scalar, &registry, &isolation)
+                .unwrap()
+                .unwrap();
+        assert_eq!(selected.protocol.canonical_ref, "protocol:example/first");
+        assert!(crate::protocols::select_listed_protocol(&exec, &scalar, &registry, &isolation)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            crate::protocols::project_node_filesystem_authority_ceiling(
+                &exec, &scalar, &registry, &isolation
+            )
+            .unwrap(),
+            crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution
+        );
+        // A list takes the selected holding's ceiling; this node meets none.
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+        });
+        let error = crate::protocols::project_node_filesystem_authority_ceiling(
+            &exec, &listed, &registry, &isolation,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("protocol:example/first") && error.contains("protocol:example/second"),
+            "{error}"
+        );
+        // The scalar projection refuses a list rather than defaulting to node_policy.
+        assert!(exec.project_filesystem_authority_ceiling(&listed).is_err());
+    }
+
+    #[test]
+    fn host_authority_refuses_an_item_that_lists_several_protocols() {
+        let yaml = "\
+execution:
+  effect_class_ceiling:
+    path: [effects]
+  host_authority:
+    path: [host_authority]
+    incompatible: [[network_authority], [workspace_access]]
+    admitted_effects: [live]
+    admitted_protocols: [protocol:example/first]
+    graph_parent_profiles: [graph_run]
+  terminator:
+    kind: subprocess
+    protocol:
+      from_composed: [execution_protocol]
+      from_composed_set: [execution_protocols]
+      allowed: [protocol:example/first, protocol:example/second]
+";
+        let execution = parse_exec(yaml).unwrap().unwrap();
+        let listed = serde_json::json!({
+            "execution_protocols": ["protocol:example/first", "protocol:example/second"],
+            "host_authority": "required",
+            "effects": "live",
+        });
+        let error = execution
+            .project_execution_posture(&listed)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("lists several admissible protocols"), "{error}");
     }
 
     #[test]

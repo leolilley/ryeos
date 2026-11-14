@@ -1021,7 +1021,7 @@ pub(crate) fn admit_or_verify_prepared_sessions(
             )
             .with_context(|| format!("verify recovered session dependency `{name}`"))?;
         } else {
-            let session = session_contract(engine, dependency)?;
+            let session = session_contract(engine, dependency, state.isolation.as_ref())?;
             if (!target_environment.is_empty() || !target_evidence.is_empty()) && session.is_none()
             {
                 bail!("worker-input target `{name}` is not a persistent-session dependency");
@@ -1142,7 +1142,7 @@ pub(crate) fn preview_prepared_dependencies(
             .with_context(|| format!("validate prepared execution dependency `{name}`"))?;
         let verified = dependency.captured_verified_subject()?;
         let kind = verified.resolved.kind.as_str();
-        let session_definition = session_contract(engine, dependency)?;
+        let session_definition = session_contract(engine, dependency, state.isolation.as_ref())?;
         let supports_execution_runtime = if state.isolation.is_enforced() {
             true
         } else if let Some((_, protocol)) = session_definition.as_ref() {
@@ -1343,7 +1343,9 @@ fn validate_prepared_content_targets(
                     supports_execution_runtime = false;
                     break;
                 };
-                let Some((_, protocol)) = session_contract(engine, target_dependency)? else {
+                let Some((_, protocol)) =
+                    session_contract(engine, target_dependency, state.isolation.as_ref())?
+                else {
                     supports_execution_runtime = false;
                     break;
                 };
@@ -1980,6 +1982,7 @@ fn manifest_materializes_directory<'a>(
 pub(crate) fn session_contract(
     engine: &ryeos_engine::engine::Engine,
     dependency: &PreparedExecutionDependency,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<Option<(PersistentSessionDecl, VerifiedProtocol)>> {
     let kind = &dependency.captured_verified_subject()?.resolved.kind;
     let execution = engine
@@ -1991,23 +1994,26 @@ pub(crate) fn session_contract(
         return Ok(None);
     };
     apply_resource_overrides(&mut declaration, &dependency.resolution.composed.composed)?;
-    let TerminatorDecl::Subprocess {
-        protocol: protocol_selection,
-    } = execution
+    let TerminatorDecl::Subprocess { .. } = execution
         .terminator
         .as_ref()
         .ok_or_else(|| anyhow!("persistent-session kind `{kind}` has no terminator"))?
     else {
         bail!("persistent-session kind `{kind}` is not subprocess-terminated");
     };
-    let protocol_ref = protocol_selection
-        .resolve(&dependency.resolution.composed.composed)
-        .map_err(|reason| anyhow!("persistent-session kind `{kind}`: {reason}"))?;
-    let protocol = engine
-        .protocols
-        .get(&protocol_ref)
-        .cloned()
-        .ok_or_else(|| anyhow!("persistent-session protocol `{protocol_ref}` is not installed"))?;
+    // The session runs under the protocol this node selects: the item's single
+    // protocol, or the listed one the node's own guarantees meet.
+    let protocol = ryeos_engine::protocols::select_subprocess_protocol(
+        execution,
+        &dependency.resolution.composed.composed,
+        &engine.protocols,
+        isolation,
+    )
+    .map_err(|reason| anyhow!("persistent-session kind `{kind}`: {reason}"))?
+    .ok_or_else(|| anyhow!("persistent-session kind `{kind}` is not subprocess-terminated"))?
+    .protocol
+    .clone();
+    let protocol_ref = protocol.canonical_ref.clone();
     validate_persistent_session_protocol(&protocol.descriptor)
         .map_err(|error| anyhow!("persistent-session protocol `{protocol_ref}`: {error}"))?;
     if let Some(target) = execution
@@ -2442,12 +2448,10 @@ fn verify_session_capsule(
         ryeos_app::external_placement::verify_retained_external_candidate_capsule(state, &capsule)
             .context(SessionCapsuleVerificationStage::Load)?;
     } else {
-        validate_session_process_control(
-            state,
-            &retained_session_protocol(engine, &capsule)
-                .context(SessionCapsuleVerificationStage::RetainedProtocol)?,
-        )
-        .context(SessionCapsuleVerificationStage::ProcessControl)?;
+        let retained = retained_session_protocol(engine, &capsule)
+            .context(SessionCapsuleVerificationStage::RetainedProtocol)?;
+        validate_retained_session_process_control(state, &capsule, &retained)
+            .context(SessionCapsuleVerificationStage::ProcessControl)?;
     }
     validate_capsule_nested_authority(
         &capsule,
@@ -2622,7 +2626,7 @@ where
     require_candidate_connector_ready(capsule.external_candidate.as_ref())?;
     validate_capsule_current_trust(&state.engine, &capsule)?;
     let session_protocol = retained_session_protocol(&state.engine, &capsule)?;
-    validate_session_process_control(state, &session_protocol)?;
+    validate_retained_session_process_control(state, &capsule, &session_protocol)?;
     if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         let protocol_ref = capsule_protocol_identity(&capsule)?.0;
         bail!(
@@ -2674,6 +2678,33 @@ where
         &cancelled,
         on_delta,
     )
+}
+
+/// Re-admit a retained session capsule's protocol against this node as it is
+/// now. Recovery pins the protocol the capsule was admitted under: the guarantees
+/// that protocol's holding requires are re-checked against the node's current
+/// report, and no selection among candidates is run again, so a node that lost
+/// a guarantee refuses even when it would now select a different protocol for
+/// a fresh launch.
+fn validate_retained_session_process_control(
+    state: &AppState,
+    capsule: &AdmittedPersistentSessionCapsule,
+    session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
+) -> Result<()> {
+    let descriptor =
+        ryeos_app::persistent_session_admission::retained_session_descriptor(&state.engine, capsule)?;
+    if let Some(holding) = descriptor.holding.as_ref() {
+        let reported = state.isolation.reported_guarantees();
+        ryeos_engine::protocols::require_holding_met(
+            capsule_protocol_identity(capsule)?.0,
+            holding,
+            ryeos_state::node_guarantees::NodeGuarantees::new(
+                &reported,
+                state.isolation.capability_floor(),
+            ),
+        )?;
+    }
+    validate_session_process_control(state, session)
 }
 
 /// This is node admission of a retained protocol, not portable document
@@ -2839,15 +2870,29 @@ fn supports_private_descriptor_realizations(
 }
 
 /// A qualification verifier (a tool whose signed protocol carries a
-/// qualification callback) on a lane the node already trusts for process-group
-/// sessions receives its immutable runtime inputs through a node-owned private
-/// view rather than the project copy. The rule holds only while isolation is
-/// not enforced; enforced isolation delivers them through its own mounts.
+/// qualification callback) running under the trusted holding receives its
+/// immutable runtime inputs through a node-owned private view rather than the
+/// project copy. The selected protocol's holding decides it (node-policy
+/// filesystem authority settled as an absent trusted process group); a
+/// protocol that declares none keeps the node-posture rule. Either way it holds
+/// only while isolation is not enforced and the node accepts trusted
+/// process-group sessions; enforced isolation delivers inputs through its own
+/// mounts.
 pub(crate) fn tool_supports_private_descriptor_realizations(
     descriptor: &ryeos_engine::protocols::descriptor::ProtocolDescriptor,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> bool {
-    !isolation.is_enforced()
+    use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+    let trusted_holding = match descriptor.holding.as_ref() {
+        Some(holding) => {
+            holding.filesystem_authority
+                == ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy
+                && holding.root_settlement == TrustedProcessGroupAbsent
+        }
+        None => true,
+    };
+    trusted_holding
+        && !isolation.is_enforced()
         && descriptor.qualification_callback.is_some()
         && isolation
             .inspection()
@@ -2902,7 +2947,7 @@ fn start_capsule_process(
     } else {
         None
     };
-    validate_session_process_control(state, &session_protocol)?;
+    validate_retained_session_process_control(state, capsule, &session_protocol)?;
     if session_protocol.process_mode != PersistentSessionProcessMode::PooledRequests {
         bail!("exclusive persistent-session protocol cannot use the pooled launcher");
     }
@@ -4247,7 +4292,7 @@ pub fn start_exclusive_capsule(
         // Recovery of an admitted capsule is not current node permission.
         // Recheck before local capacity reservation, realization preparation
         // or held spawn. External guests use their distinct placement owner.
-        validate_session_process_control(state, &session_protocol)?;
+        validate_retained_session_process_control(state, &capsule, &session_protocol)?;
     }
     use ryeos_engine::protocols::descriptor::PersistentSessionWorkspaceAuthority;
     if session_protocol.process_mode != PersistentSessionProcessMode::ExclusiveSession
@@ -4968,6 +5013,28 @@ fn canonical_hash(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_contained_holding_never_takes_private_realizations() {
+        let body = "kind: protocol\nname: direct\ncategory: test\nabi_version: v1\nstdin: {shape: opaque}\nstdout: {shape: opaque_bytes, mode: terminal}\nenv_injections:\n  - {name: RYE_THREAD_ID, source: thread_id}\ncapabilities: {allows_pushed_head: false, allows_target_site: false, allows_detached: false}\nlifecycle: {mode: managed}\ncallback_channel: none\n";
+        let mut descriptor: ryeos_engine::protocols::descriptor::ProtocolDescriptor =
+            serde_yaml::from_str(body).unwrap();
+        descriptor.qualification_callback =
+            Some(ryeos_engine::protocols::QualificationCallbackAuthority::RemoteConsumer);
+        descriptor.holding = Some(
+            serde_json::from_value(json!({
+                "requires_guarantees": ["isolation:enforced"],
+                "filesystem_authority": "captured_execution",
+                "root_settlement": "containment_empty",
+            }))
+            .unwrap(),
+        );
+        let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
+        assert!(!tool_supports_private_descriptor_realizations(
+            &descriptor,
+            &isolation
+        ));
+    }
 
     #[test]
     fn tool_private_realizations_require_callback_protocol_and_trusted_lane() {

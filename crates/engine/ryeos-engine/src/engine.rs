@@ -1364,6 +1364,7 @@ impl CheckedEngineGeneration<'_> {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.engine.build_plan_current(
             ctx,
@@ -1372,6 +1373,7 @@ impl CheckedEngineGeneration<'_> {
             hints,
             sealed_content,
             filesystem_authority_ceiling,
+            selected_protocol,
         )
     }
 
@@ -3969,6 +3971,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             self.build_plan_current(
@@ -3978,6 +3981,7 @@ impl Engine {
                 hints,
                 sealed_content,
                 filesystem_authority_ceiling,
+                selected_protocol,
             )
         })
     }
@@ -3990,6 +3994,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         crate::scope::check_execution_scope(&ctx.requested_by)?;
 
@@ -4024,6 +4029,7 @@ impl Engine {
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
             filesystem_authority_ceiling,
+            selected_protocol,
             project_authority: None,
             sealed_content,
         })?;
@@ -4044,6 +4050,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -4074,6 +4081,7 @@ impl Engine {
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
                 filesystem_authority_ceiling,
+                selected_protocol,
                 project_authority: None,
                 sealed_content,
             })?;
@@ -4093,6 +4101,7 @@ impl Engine {
         hints: &ExecutionHints,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
         logical_project_root: Option<&Path>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.with_checked_bundle_generation(|generation| {
@@ -4120,6 +4129,7 @@ impl Engine {
                     node_trust_store: &self.node_trust_store,
                     host_env: &self.host_env,
                     filesystem_authority_ceiling,
+                    selected_protocol,
                     project_authority: None,
                     sealed_content,
                 },
@@ -4143,6 +4153,7 @@ impl Engine {
         admitted: &AdmittedRequestAuthoritySnapshot,
         sealed_content: Option<&dyn crate::project_content::SealedDependencyBytes>,
         filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+        selected_protocol: Option<crate::protocols::SelectedProtocol<'_>>,
     ) -> Result<ExecutionPlan, EngineError> {
         self.checked_bundle_generation(|| {
             crate::scope::check_execution_scope(&ctx.requested_by)?;
@@ -4196,6 +4207,7 @@ impl Engine {
                 node_trust_store: &self.node_trust_store,
                 host_env: &self.host_env,
                 filesystem_authority_ceiling,
+                selected_protocol,
                 project_authority: Some((project_root, project_content)),
                 sealed_content,
             })?;

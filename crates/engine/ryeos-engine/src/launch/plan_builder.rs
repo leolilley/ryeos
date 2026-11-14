@@ -1076,6 +1076,11 @@ pub struct BuildPlanInput<'a> {
     /// Already admitted composed/parent filesystem ceiling. It is consumed
     /// before runtime templates can read host bindings, not just at spawn.
     pub filesystem_authority_ceiling: crate::isolation::IsolationFilesystemAuthorityCeiling,
+    /// The protocol this node selected for the root's subprocess terminator,
+    /// a node-local launch fact. It supplies the filesystem ceiling of an item
+    /// that lists several admissible protocols and keys the plan cache; it is
+    /// never part of the item's resolution or definition digest.
+    pub selected_protocol: Option<crate::protocols::SelectedProtocol<'a>>,
     pub project_authority: Option<(
         &'a Path,
         &'a dyn crate::project_content::AuthoritativeProjectContent,
@@ -1158,6 +1163,7 @@ fn build_plan_with_execution_root(
         node_trust_store,
         host_env,
         filesystem_authority_ceiling: admitted_filesystem_ceiling,
+        selected_protocol,
         project_authority,
         sealed_content,
     } = input;
@@ -1379,7 +1385,10 @@ fn build_plan_with_execution_root(
             })?;
     let root_value = &terminal.intermediates[0].parsed;
     let filesystem_authority_ceiling = execution
-        .project_filesystem_authority_ceiling(root_value)?
+        .project_filesystem_authority_ceiling_selected(
+            root_value,
+            selected_protocol.and_then(|selected| selected.holding),
+        )?
         .intersect(admitted_filesystem_ceiling);
     let network_authority_ceiling = execution.project_network_authority_ceiling(root_value)?;
     let execution_posture = execution.project_execution_posture(root_value)?;
@@ -1480,6 +1489,7 @@ fn build_plan_with_execution_root(
         registry_fingerprint,
         parameters,
         hints,
+        selected_protocol.map(|selected| selected.protocol.canonical_ref.as_str()),
     );
 
     // Step 7: Build plan ID
@@ -1525,6 +1535,7 @@ fn compute_cache_key(
     registry_fingerprint: &str,
     parameters: &serde_json::Value,
     hints: &ExecutionHints,
+    selected_protocol_ref: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"ryeos:plan:v1:");
@@ -1537,6 +1548,10 @@ fn compute_cache_key(
     hasher.update(parameters.to_string().as_bytes());
     hasher.update(b":");
     hasher.update(serde_json::to_string(&hints).unwrap_or_default().as_bytes());
+    // The protocol this node selected changes the plan's filesystem ceiling, so
+    // plans built under different selections must never share an identity.
+    hasher.update(b":protocol=");
+    hasher.update(selected_protocol_ref.unwrap_or("").as_bytes());
     for h in chain_content_hashes {
         hasher.update(b":");
         hasher.update(h.as_bytes());
@@ -2198,6 +2213,7 @@ config:
                 host_env: &HostEnvBindings::default(),
                 filesystem_authority_ceiling:
                     crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                selected_protocol: None,
                 project_authority: authority,
                 sealed_content: None,
             })
@@ -2310,6 +2326,7 @@ config:
                 host_env: &HostEnvBindings::default(),
                 filesystem_authority_ceiling:
                     crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                selected_protocol: None,
                 project_authority: None,
                 sealed_content: None,
             })
@@ -2422,6 +2439,7 @@ config:
                 // runtime_workspace's protocol ceiling must not widen a
                 // narrower ceiling authored by the worker itself.
                 filesystem_authority_ceiling: NodePolicy,
+                selected_protocol: None,
                 project_authority: None,
                 sealed_content: None,
             })
@@ -2488,6 +2506,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2560,6 +2579,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2633,6 +2653,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2682,6 +2703,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -2750,6 +2772,7 @@ config:
                     host_env: &host_env,
                     filesystem_authority_ceiling:
                         crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+                    selected_protocol: None,
                     project_authority: None,
                     sealed_content: None,
                 },
@@ -3283,6 +3306,7 @@ config:
             host_env: &HostEnvBindings::default(),
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -3305,6 +3329,7 @@ config:
             "fp1",
             &json!(1),
             &ExecutionHints::default(),
+            None,
         );
         let k2 = compute_cache_key(
             "tool:a",
@@ -3313,6 +3338,7 @@ config:
             "fp1",
             &json!(1),
             &ExecutionHints::default(),
+            None,
         );
         assert_eq!(k1, k2);
 
@@ -3323,8 +3349,27 @@ config:
             "fp1",
             &json!(1),
             &ExecutionHints::default(),
+            None,
         );
         assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn cache_key_follows_the_selected_protocol() {
+        let key = |selected: Option<&str>| {
+            compute_cache_key(
+                "worker:a",
+                "hash1",
+                &[],
+                "fp1",
+                &json!(1),
+                &ExecutionHints::default(),
+                selected,
+            )
+        };
+        assert_eq!(key(Some("protocol:x/contained")), key(Some("protocol:x/contained")));
+        assert_ne!(key(Some("protocol:x/contained")), key(Some("protocol:x/trusted")));
+        assert_ne!(key(Some("protocol:x/contained")), key(None));
     }
 
     #[test]
@@ -3366,6 +3411,7 @@ config:
             "fp",
             &from_string,
             &ExecutionHints::default(),
+            None,
         );
         let key_typed = compute_cache_key(
             "tool:x",
@@ -3374,6 +3420,7 @@ config:
             "fp",
             &from_typed,
             &ExecutionHints::default(),
+            None,
         );
         assert_eq!(key_string, key_typed);
     }
@@ -3493,6 +3540,7 @@ category: ryeos/core/subprocess\n";
             host_env: &host_env,
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })
@@ -3517,6 +3565,7 @@ category: ryeos/core/subprocess\n";
             host_env: &host_env,
             filesystem_authority_ceiling:
                 crate::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution,
+            selected_protocol: None,
             project_authority: None,
             sealed_content: None,
         })

@@ -129,6 +129,7 @@ fn build_plan_rejects_params_violating_config_schema() {
         &ctx.execution_hints,
         None,
         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        None,
     );
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -164,6 +165,7 @@ fn build_plan_accepts_params_conforming_to_config_schema() {
         &ctx.execution_hints,
         None,
         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        None,
     );
 
     let _ = fs::remove_dir_all(&project_dir);

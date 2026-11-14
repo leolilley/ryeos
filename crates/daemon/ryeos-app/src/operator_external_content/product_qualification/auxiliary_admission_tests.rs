@@ -388,6 +388,7 @@ fn seed_auxiliary_qualification_in_context(
     let protocol = crate::thread_lifecycle::resolve_direct_terminator_protocol(
         &fixture.state.engine,
         &request,
+        &fixture.state.isolation,
     )
     .context("resolve auxiliary direct protocol")?;
     let artifact = prepared.admitted_artifact_identity(&request, protocol)?;

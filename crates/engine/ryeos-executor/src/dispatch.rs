@@ -498,6 +498,29 @@ pub(crate) enum HopAction {
     },
 }
 
+/// The protocol ref an item's composed definition selects on this node. An item
+/// that states one protocol resolves to it exactly as before; an item that
+/// lists several admissible protocols resolves to the one the node's own
+/// reported guarantees meet, and none or several is a named refusal.
+pub(crate) fn node_selected_protocol_ref(
+    execution: &ExecutionSchema,
+    protocol: &ryeos_engine::kind_registry::SubprocessProtocolDecl,
+    composed: &Value,
+    engine: &ryeos_engine::engine::Engine,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+) -> Result<String, String> {
+    match ryeos_engine::protocols::select_listed_protocol(
+        execution,
+        composed,
+        &engine.protocols,
+        isolation,
+    ) {
+        Ok(Some(selected)) => Ok(selected.protocol.canonical_ref.clone()),
+        Ok(None) => protocol.resolve(composed),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
 fn concrete_subprocess_protocol_ref<'a>(
     protocol: &'a ryeos_engine::kind_registry::SubprocessProtocolDecl,
     kind: &str,
@@ -570,12 +593,19 @@ pub(crate) fn resolve_dispatch_hop(
     current_ref: &CanonicalRef,
     ctx: &ExecutionContext,
 ) -> Result<VerifiedHop, DispatchError> {
-    resolve_dispatch_hop_with_verified(current_ref, ctx, None, None)
+    resolve_dispatch_hop_with_verified(
+        current_ref,
+        ctx,
+        &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+        None,
+        None,
+    )
 }
 
 fn resolve_dispatch_hop_with_verified(
     current_ref: &CanonicalRef,
     ctx: &ExecutionContext,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     preverified: Option<VerifiedItem>,
     admitted: Option<(
         &Path,
@@ -759,13 +789,17 @@ fn resolve_dispatch_hop_with_verified(
                             .into(),
                     });
                 }
-                let protocol_ref =
-                    protocol
-                        .resolve(&effective.composed_value)
-                        .map_err(|detail| DispatchError::SchemaMisconfigured {
-                            kind: schema_kind.clone(),
-                            detail,
-                        })?;
+                let protocol_ref = node_selected_protocol_ref(
+                    exec,
+                    protocol,
+                    &effective.composed_value,
+                    &ctx.engine,
+                    isolation,
+                )
+                .map_err(|detail| DispatchError::SchemaMisconfigured {
+                    kind: schema_kind.clone(),
+                    detail,
+                })?;
                 TerminatorDecl::Subprocess {
                     protocol: ryeos_engine::kind_registry::SubprocessProtocolDecl::Static(
                         protocol_ref,
@@ -4112,9 +4146,14 @@ async fn dispatch_inner(
             }
             _ => match request.root_admission.as_ref() {
                 Some(admission) => {
-                    launch_contract_applicability_from_admission(item_ref, ctx, admission)?
+                    launch_contract_applicability_from_admission(
+                        item_ref,
+                        ctx,
+                        state.isolation.as_ref(),
+                        admission,
+                    )?
                 }
-                None => launch_contract_applicability(item_ref, ctx)?,
+                None => launch_contract_applicability(item_ref, ctx, state.isolation.as_ref())?,
             },
         };
         if let LaunchContractApplicability::NonEnvelope { class } = applicability {
@@ -4222,6 +4261,7 @@ async fn dispatch_inner(
         let hop = resolve_dispatch_hop_with_verified(
             &current_ref,
             ctx,
+            state.isolation.as_ref(),
             verified_root.take().or(admitted_verified),
             admitted_hop_authority,
         )?;
@@ -4458,8 +4498,9 @@ fn can_reuse_root_dispatch_evidence(
 pub fn launch_contract_applicability(
     item_ref: &str,
     ctx: &ExecutionContext,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<LaunchContractApplicability, DispatchError> {
-    launch_contract_applicability_with_evidence(item_ref, ctx, None, None, None)
+    launch_contract_applicability_with_evidence(item_ref, ctx, isolation, None, None, None)
 }
 
 /// Classify the launch contract from an already-admitted root and its exact
@@ -4469,6 +4510,7 @@ pub fn launch_contract_applicability(
 pub fn launch_contract_applicability_from_admission(
     item_ref: &str,
     ctx: &ExecutionContext,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
 ) -> Result<LaunchContractApplicability, DispatchError> {
     root_admission.validate().map_err(DispatchError::Internal)?;
@@ -4487,6 +4529,7 @@ pub fn launch_contract_applicability_from_admission(
     launch_contract_applicability_with_evidence(
         item_ref,
         ctx,
+        isolation,
         Some(root_admission.verified_subject().clone()),
         admitted_hop_authority,
         remote_consumer.as_ref(),
@@ -4496,6 +4539,7 @@ pub fn launch_contract_applicability_from_admission(
 fn launch_contract_applicability_with_evidence(
     item_ref: &str,
     ctx: &ExecutionContext,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
     admitted_root: Option<VerifiedItem>,
     admitted_hop_authority: Option<(
         &Path,
@@ -4527,6 +4571,7 @@ fn launch_contract_applicability_with_evidence(
         let hop = resolve_dispatch_hop_with_verified(
             &current,
             ctx,
+            isolation,
             admitted_verified,
             admitted_hop_authority,
         )?;
@@ -5350,16 +5395,20 @@ fn finish_root_dispatch_preflight(
                     kind: kind.clone(),
                     detail: "direct admission kind is unavailable".into(),
                 })?;
-        if let Some(TerminatorDecl::Subprocess { protocol }) = schema
-            .execution()
-            .and_then(|execution| execution.terminator.as_ref())
+        if let Some(execution) = schema.execution()
+            && let Some(TerminatorDecl::Subprocess { protocol }) = execution.terminator.as_ref()
         {
-            let protocol_ref = protocol
-                .resolve(&root_admission.resolution_output().composed.composed)
-                .map_err(|detail| DispatchError::SchemaMisconfigured {
-                    kind: kind.clone(),
-                    detail,
-                })?;
+            let protocol_ref = node_selected_protocol_ref(
+                execution,
+                protocol,
+                &root_admission.resolution_output().composed.composed,
+                &ctx.engine,
+                state.isolation.as_ref(),
+            )
+            .map_err(|detail| DispatchError::SchemaMisconfigured {
+                kind: kind.clone(),
+                detail,
+            })?;
             let selected = ctx
                 .engine
                 .protocols
@@ -6067,6 +6116,7 @@ pub fn preflight_root_dispatch_with_remote_consumer(
         let hop = resolve_dispatch_hop_with_verified(
             &current_ref,
             ctx,
+            state.isolation.as_ref(),
             cached_root_subject.take(),
             admitted_hop_authority,
         );
@@ -7565,9 +7615,11 @@ metadata:
 
             fs::write(&source_path, b"name: replaced\n").unwrap();
 
+            let isolation = ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring();
             let hop = resolve_dispatch_hop_with_verified(
                 &admitted.resolved.canonical_ref,
                 &ctx,
+                &isolation,
                 Some(admitted.clone()),
                 None,
             )
@@ -7585,6 +7637,7 @@ metadata:
             let applicability = launch_contract_applicability_with_evidence(
                 "service:example/status",
                 &ctx,
+                &isolation,
                 Some(admitted),
                 None,
                 None,

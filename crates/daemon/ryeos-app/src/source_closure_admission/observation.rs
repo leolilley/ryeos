@@ -77,13 +77,16 @@ pub fn observe_bundle_structured_source(
                     ryeos_engine::kind_registry::SourceClosureLocationDecl::OwnerRelativeSource { .. }),
             "source observation requires an owner-relative session source contract"
         );
-        let ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } = execution
+        let ryeos_engine::kind_registry::TerminatorDecl::Subprocess { .. } = execution
             .terminator.as_ref().context("source kind has no terminator")?
         else {
             anyhow::bail!("source observation requires a subprocess session protocol");
         };
-        let protocol_ref = protocol.resolve(&resolution.composed.composed).map_err(anyhow::Error::msg)?;
-        let protocol = engine.protocols.get(&protocol_ref).context("source protocol is not installed")?;
+        // The protocol is the one this node selects for the subject: the item's
+        // single protocol, or the listed one the node's guarantees meet.
+        let protocol = ryeos_engine::protocols::select_subprocess_protocol(
+            execution, &resolution.composed.composed, &engine.protocols, state.isolation.as_ref(),
+        )?.context("source kind has no subprocess session protocol")?.protocol;
         ryeos_engine::protocols::validate_persistent_session_protocol(&protocol.descriptor)
             .map_err(anyhow::Error::msg)?;
         ensure!(

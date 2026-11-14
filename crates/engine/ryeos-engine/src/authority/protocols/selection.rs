@@ -105,6 +105,106 @@ pub fn select_protocol<'a>(
     }
 }
 
+/// The protocol a node runs for an item's subprocess terminator, chosen from
+/// the item's composed definition and the node's own reported guarantees.
+///
+/// An item that states one protocol resolves to exactly that protocol and asks
+/// nothing further of the node here; the holding it declares, if any, rides
+/// along for the launch checks that read it. An item that lists several
+/// admissible protocols goes through `select_protocol`. `None` means the kind
+/// has no subprocess terminator. The result is a node-local launch fact: it is
+/// never part of the resolution output or the definition digest.
+pub fn select_subprocess_protocol<'a>(
+    execution: &crate::kind_registry::ExecutionSchema,
+    composed: &serde_json::Value,
+    registry: &'a ProtocolRegistry,
+    isolation: &crate::isolation::IsolationRuntime,
+) -> anyhow::Result<Option<SelectedProtocol<'a>>> {
+    let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol }) =
+        execution.terminator.as_ref()
+    else {
+        return Ok(None);
+    };
+    if !protocol.selects_from_set(composed) {
+        let protocol_ref = protocol.resolve(composed).map_err(anyhow::Error::msg)?;
+        let protocol = registry.require(&protocol_ref)?;
+        return Ok(Some(SelectedProtocol {
+            protocol,
+            holding: protocol.descriptor.holding.as_ref(),
+        }));
+    }
+    let candidates = protocol.candidates(composed).map_err(anyhow::Error::msg)?;
+    let reported = isolation.reported_guarantees();
+    select_protocol(
+        &candidates,
+        registry,
+        NodeGuarantees::new(&reported, isolation.capability_floor()),
+    )
+    .map(Some)
+}
+
+/// Whether `node` still holds what a retained protocol's holding requires.
+///
+/// Recovery of an admitted launch pins the protocol it was admitted under: it
+/// re-checks that one holding against the node's current report and never
+/// selects among candidates again, so a node that lost the guarantee refuses
+/// even when it now meets another candidate's.
+pub fn require_holding_met(
+    protocol_ref: &str,
+    holding: &ProtocolHolding,
+    node: NodeGuarantees<'_>,
+) -> anyhow::Result<()> {
+    let unmet = unmet_guarantees(&holding.requires_guarantees, node);
+    ensure!(
+        unmet.is_empty(),
+        "this node no longer holds the guarantees retained protocol {protocol_ref} requires: {}",
+        unmet
+            .iter()
+            .map(|(label, reason)| format!("{label}: {reason}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    Ok(())
+}
+
+/// The selection for an item that lists several admissible protocols, and
+/// `None` for one that states a single protocol or has no subprocess
+/// terminator. Launch checks that must keep the scalar path exactly as it was
+/// call this instead of `select_subprocess_protocol`.
+pub fn select_listed_protocol<'a>(
+    execution: &crate::kind_registry::ExecutionSchema,
+    composed: &serde_json::Value,
+    registry: &'a ProtocolRegistry,
+    isolation: &crate::isolation::IsolationRuntime,
+) -> anyhow::Result<Option<SelectedProtocol<'a>>> {
+    let lists_protocols = matches!(
+        execution.terminator.as_ref(),
+        Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol })
+            if protocol.selects_from_set(composed)
+    );
+    if !lists_protocols {
+        return Ok(None);
+    }
+    select_subprocess_protocol(execution, composed, registry, isolation)
+}
+
+/// The filesystem-authority ceiling an item runs under on this node. A kind
+/// without a protocol list projects exactly as
+/// `ExecutionSchema::project_filesystem_authority_ceiling`; an item that lists
+/// several admissible protocols takes the ceiling of the one this node selects.
+pub fn project_node_filesystem_authority_ceiling(
+    execution: &crate::kind_registry::ExecutionSchema,
+    composed: &serde_json::Value,
+    registry: &ProtocolRegistry,
+    isolation: &crate::isolation::IsolationRuntime,
+) -> anyhow::Result<crate::isolation::IsolationFilesystemAuthorityCeiling> {
+    let selected = select_listed_protocol(execution, composed, registry, isolation)?;
+    Ok(execution.project_filesystem_authority_ceiling_selected(
+        composed,
+        selected.as_ref().and_then(|selected| selected.holding),
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -324,6 +424,56 @@ mod tests {
         let error = selected(&pair(), &both, &[]).unwrap_err().to_string();
         assert!(error.contains("more than one"), "{error}");
         assert!(error.contains(CONTAINED) && error.contains(TRUSTED), "{error}");
+    }
+
+    fn holding_of(registry: &ProtocolRegistry, protocol_ref: &str) -> ProtocolHolding {
+        registry
+            .require(protocol_ref)
+            .unwrap()
+            .descriptor
+            .holding
+            .clone()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_retained_holding_is_met_while_the_node_still_holds_its_guarantees() {
+        let registry = registry();
+        let held = node(&[("sessions:trusted_process_group", ProofSource::Trusted)]);
+        require_holding_met(
+            TRUSTED,
+            &holding_of(&registry, TRUSTED),
+            NodeGuarantees::new(&held, &[]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_retained_holding_is_refused_when_the_node_lost_a_guarantee_and_never_reselects() {
+        let registry = registry();
+        // The node now meets the OTHER candidate's guarantees only. Recovery
+        // of a launch admitted under the trusted protocol must refuse rather
+        // than move to the contained one.
+        let now_contained = node(&[
+            ("isolation:enforced", ProofSource::Measured),
+            ("termination:scope", ProofSource::Measured),
+        ]);
+        let error = require_holding_met(
+            TRUSTED,
+            &holding_of(&registry, TRUSTED),
+            NodeGuarantees::new(&now_contained, &[]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(TRUSTED) && error.contains("sessions:trusted_process_group"),
+            "{error}"
+        );
+        assert_eq!(
+            selected(&pair(), &now_contained, &[]).unwrap(),
+            CONTAINED,
+            "a fresh launch on the same node would select the other protocol"
+        );
     }
 
     #[test]
