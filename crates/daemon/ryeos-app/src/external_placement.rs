@@ -1538,29 +1538,6 @@ impl ExternalPlacementBackendRegistry {
         )
     }
 
-    pub(crate) fn terminate_snapshot_qualification_occurrence(
-        &self,
-        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
-        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
-        credential: &PlacementCredential,
-        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterRequest,
-        first_contact: bool,
-        deadline: lillux::time::MonotonicDeadline,
-    ) -> Result<ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
-        let backend = self.producer_generation(
-            producer,
-            "exact signed qualification termination adapter generation is not installed",
-        )?;
-        backend.terminate_snapshot_qualification_occurrence(
-            producer,
-            qualification,
-            credential,
-            request,
-            first_contact,
-            deadline,
-        )
-    }
-
     pub(crate) fn observe_snapshot_qualification_occurrence(
         &self,
         producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,

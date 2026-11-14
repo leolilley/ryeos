@@ -799,12 +799,18 @@ impl StateStore {
     /// read under one store lock so they agree with each other.
     pub(crate) fn external_execution_status_rows(
         &self,
+        now_ms: i64,
     ) -> Result<crate::external_execution_status::StatusRows> {
         let g = self.lock()?;
+        let mut snapshot_references = g
+            .runtime_db
+            .open_snapshot_qualification_references(now_ms)?;
+        snapshot_references.extend(g.runtime_db.open_snapshot_bootstrap_references()?);
         Ok(crate::external_execution_status::StatusRows {
             allocations: g.runtime_db.unsettled_external_allocations()?,
             local_starts: g.runtime_db.open_qualification_local_starts()?,
             profiles: g.runtime_db.held_credential_profiles()?,
+            snapshot_references,
         })
     }
 }

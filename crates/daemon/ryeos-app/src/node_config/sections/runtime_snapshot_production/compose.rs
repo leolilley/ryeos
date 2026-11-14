@@ -398,6 +398,42 @@ pub(crate) fn installed_production_binding(
     admit_signed_production(app_root, id, &signed, identity)
 }
 
+/// Re-pin the installed production binding `id` to the installed lifecycle
+/// adapter generation and snapshot production spec, carrying every other
+/// field, the credential generation among them. Signs and verifies the new
+/// bytes exactly as the loader would, but publishes nothing: the caller
+/// publishes once every binding of a recompose has been prepared.
+pub(crate) fn repin_production(
+    app_root: &Path,
+    installed: &InstalledRuntimeSnapshotProductionBinding,
+    adapter_artifact_hash: &str,
+    snapshot_spec_sha256: &str,
+    identity: &ryeos_node_runtime::identity::NodeIdentity,
+) -> Result<crate::node_config::recompose::RepinOutcome<InstalledRuntimeSnapshotProductionBinding>>
+{
+    let mut document = installed.document.clone();
+    document.adapter_artifact_hash = adapter_artifact_hash.to_owned();
+    document.snapshot_spec_sha256 = snapshot_spec_sha256.to_owned();
+    let fields_changed = crate::node_config::recompose::changed_fields(
+        &serde_json::to_value(&installed.document)?,
+        &serde_json::to_value(&document)?,
+    );
+    if fields_changed.is_empty() {
+        return Ok(crate::node_config::recompose::RepinOutcome::unchanged(
+            installed.clone(),
+        ));
+    }
+    document.validate()?;
+    let signed = sign_node_document(&serde_yaml::to_string(&document)?, identity)?;
+    let new = admit_signed_production(app_root, &installed.id, &signed, identity)?;
+    Ok(crate::node_config::recompose::RepinOutcome {
+        old: installed.clone(),
+        new,
+        signed: Some(signed),
+        fields_changed,
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

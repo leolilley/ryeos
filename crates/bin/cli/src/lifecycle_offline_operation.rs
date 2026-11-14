@@ -8,6 +8,12 @@
 //! operator says `--stop`. `list` reads what a node has queued, applied and
 //! refused. The node decides everything: nothing here is applied by the
 //! command line, and what `sign` checks the node checks again.
+//!
+//! With `--remote <name>` the call goes to the operator's own node instead,
+//! which forwards it to that remote under the delegation the operator stored
+//! for it (`ryeos remote delegate`). The remote admits the operator as the
+//! principal; the operator's key signs the request and the call to its own
+//! node, and never leaves this process.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -57,7 +63,7 @@ fn operator_key_path(app_root: Option<PathBuf>, signing_key: Option<PathBuf>) ->
 #[command(
     name = "ryeos node offline-operation sign",
     about = "Sign an offline-operation request against a node's facts, without the node",
-    long_about = "Builds and signs one request. The facts it is signed against come from the node: a file holding the output of `ryeos node offline-operation facts --json` (or of the daemon's facts route), or the volume of a node on this machine. The request is valid for one hour unless --lifetime-minutes says otherwise, up to 24 hours. A remote operator also names the grant it signs under and the origin site the grant is bound to. The output is a delivery document for `submit`; --stage-dir also writes the files a platform delivers to a node that cannot start.",
+    long_about = "Builds and signs one request. The facts it is signed against come from the node: a file holding the output of `ryeos node offline-operation facts --json` (local, or of a remote with --remote), or the volume of a node on this machine. The facts name the authority the signing key holds on that node, read for that key: the node's local operator signs without a grant, and a remote operator's request names its current grant digest and origin site from them. Facts read for another key, or for a key the node holds no grant for, are refused. The request is valid for one hour unless --lifetime-minutes says otherwise, up to 24 hours. The output is a delivery document for `submit`; --stage-dir also writes the files a platform delivers to a node that cannot start.",
     no_binary_name = true
 )]
 struct SignArgs {
@@ -77,7 +83,8 @@ struct SignArgs {
     #[arg(long = "expect")]
     expected: Vec<String>,
 
-    /// JSON file with the node's facts, as printed by `facts --json`.
+    /// JSON file with the node's facts, as printed by `facts --json` for the
+    /// signing key.
     #[arg(long, conflicts_with = "from_node")]
     facts: Option<PathBuf>,
 
@@ -97,14 +104,6 @@ struct SignArgs {
     /// App root holding the default operator key.
     #[arg(long)]
     app_root: Option<PathBuf>,
-
-    /// Digest of the signer's grant file on the node (a remote operator).
-    #[arg(long, requires = "origin_site")]
-    grant_digest: Option<String>,
-
-    /// The origin site the signer's grant is bound to (a remote operator).
-    #[arg(long, requires = "grant_digest")]
-    origin_site: Option<String>,
 
     /// How long the request stays valid, in minutes. Defaults to 60; at most
     /// 1440.
@@ -139,14 +138,22 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     };
     let spec = lookup(&args.operation)
         .with_context(|| format!("this build has no offline operation `{}`", args.operation))?;
+    let key_path = operator_key_path(args.app_root, args.signing_key)?;
+    let key = lillux::crypto::load_signing_key(&key_path)
+        .with_context(|| format!("load the signing key {}", key_path.display()))?;
+    let signer_fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
     let report = match (&args.facts, &args.from_node) {
         (Some(path), None) => read_json(path, "facts")?,
         (None, Some(app_root)) => {
             let app_root = ryeos_node::NodeConfig::load_local(Some(app_root.clone()))?.app_root;
-            ryeos_node::offline_operation::deliver::local_facts_report(&app_root)?
+            ryeos_node::offline_operation::deliver::local_facts_report(
+                &app_root,
+                Some(&signer_fingerprint),
+            )?
         }
         _ => bail!("give exactly one of --facts and --from-node"),
     };
+    let remote = signer_authority(&report, &signer_fingerprint)?;
     let facts = report
         .get("facts")
         .and_then(Value::as_object)
@@ -183,16 +190,6 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
         Some(path) => read_json(path, "arguments")?,
         None => json!({}),
     };
-    let remote = match (args.grant_digest, args.origin_site) {
-        (Some(grant_digest), Some(origin_site_id)) => Some(RemoteSigner {
-            grant_digest,
-            origin_site_id,
-        }),
-        _ => None,
-    };
-    let key_path = operator_key_path(args.app_root, args.signing_key)?;
-    let key = lillux::crypto::load_signing_key(&key_path)
-        .with_context(|| format!("load the signing key {}", key_path.display()))?;
     let delivery = sign_request_now(
         SignDraft {
             node_fingerprint,
@@ -243,6 +240,57 @@ pub fn run_sign(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     }
     console.status(&banner)?;
     Ok(())
+}
+
+/// Facts that name no signer: read before signers were reported, or taken
+/// from a startup log.
+pub const FACTS_WITHOUT_SIGNER: &str = "offline_operation_facts_without_signer";
+/// Facts read for another key than the one signing.
+pub const FACTS_FOR_ANOTHER_SIGNER: &str = "offline_operation_facts_for_another_signer";
+/// The node holds no usable grant for the signing key.
+pub const SIGNER_UNGRANTED: &str = "offline_operation_signer_ungranted";
+
+/// The authority the signing key holds on the node, from the facts read for
+/// it: `None` for the node's local operator, who names no grant, or the grant
+/// digest and origin site a remote operator's request names. Every other case
+/// is refused with its code and cure; nothing is assumed.
+fn signer_authority(report: &Value, fingerprint: &str) -> Result<Option<RemoteSigner>> {
+    let read_again = "read them again for this key: `ryeos node offline-operation facts --json \
+                      [--signing-key <key>]` on the node's machine, or `ryeos node \
+                      offline-operation facts --remote <name> --json` through your own node";
+    let Some(signer) = report.get("signer").filter(|value| value.is_object()) else {
+        bail!(
+            "{FACTS_WITHOUT_SIGNER}: the facts do not say what authority the signing key holds on the node; {read_again}"
+        );
+    };
+    let text = |field: &str| signer.get(field).and_then(Value::as_str);
+    if text("fingerprint") != Some(fingerprint) {
+        bail!(
+            "{FACTS_FOR_ANOTHER_SIGNER}: the facts were read for {}, but the signing key is {fingerprint}; {read_again}",
+            text("fingerprint").unwrap_or("no key")
+        );
+    }
+    if signer.get("local_operator") == Some(&Value::Bool(true)) {
+        return Ok(None);
+    }
+    let Some(grant_digest) = text("grant_digest") else {
+        let reason = text("grant_error")
+            .map(|error| format!(" ({error})"))
+            .unwrap_or_default();
+        bail!(
+            "{SIGNER_UNGRANTED}: the node holds no usable grant for {fingerprint}{reason}; its local operator grants it a remote_principal grant bound to your origin site with the exact `ryeos.offline.<operation>` scope"
+        );
+    };
+    let Some(origin_site_id) = text("origin_site_id") else {
+        bail!(
+            "{SIGNER_UNGRANTED}: the node's grant for {fingerprint} is a `{}` grant bound to no origin site; only a remote_principal grant may sign offline operations from outside the node",
+            text("principal_class").unwrap_or("unknown")
+        );
+    };
+    Ok(Some(RemoteSigner {
+        grant_digest: grant_digest.to_owned(),
+        origin_site_id: origin_site_id.to_owned(),
+    }))
 }
 
 /// Write the request and its inputs as a platform delivers them to a node
@@ -303,6 +351,67 @@ async fn call(
     Ok(reply)
 }
 
+// ── through the operator's own node ─────────────────────────────────
+
+const REMOTE_SUBMIT_SERVICE: &str = "service:remote/offline-operations-submit";
+const REMOTE_FACTS_SERVICE: &str = "service:remote/offline-operations-facts";
+const REMOTE_STATUS_SERVICE: &str = "service:remote/offline-operations-status";
+
+/// One call to a service of the operator's own node, which forwards it to a
+/// remote under the operator's delegation. The node's refusal comes back as
+/// its stable code and the message that names the cure.
+pub(crate) async fn through_own_node(
+    app_root: Option<PathBuf>,
+    signing_key: Option<PathBuf>,
+    service: &str,
+    parameters: Value,
+) -> Result<Value> {
+    let root = ryeos_node::NodeConfig::load_local(app_root)?.app_root;
+    let key_path =
+        signing_key.unwrap_or_else(|| crate::transport::signing::operator_signing_key_path(&root));
+    let signer = crate::transport::signing::Signer::load(&key_path)?;
+    let base = crate::transport::http::resolve_daemon_url(&root).await?;
+    let discovered = crate::transport::discovery::discover_audience(&base).await?;
+    let body = json!({
+        "item_ref": service,
+        "ref_bindings": {},
+        "product_selections": [],
+        "parameters": parameters,
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
+    });
+    let bytes = serde_json::to_vec(&body)?;
+    let headers = signer.sign("POST", "/execute", &bytes, &discovered.principal_id)?;
+    let target = format!("{}/execute", discovered.base_url.trim_end_matches('/'));
+    match crate::transport::http::post_json(&target, &headers, &bytes).await {
+        Ok(response) => response
+            .get("result")
+            .cloned()
+            .with_context(|| format!("the node returned no result: {response}")),
+        Err(crate::error::CliDispatchError::Transport(
+            crate::error::CliTransportError::HttpError { status, body },
+        )) => Err(refusal(status, &body)),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A refusal from the operator's node as `code: message`, with the remote's
+/// own reason when the remote refused the request.
+fn refusal(status: u16, body: &str) -> anyhow::Error {
+    let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+        return anyhow::anyhow!("the node answered HTTP {status}: {body}");
+    };
+    let text = |field: &str| parsed.get(field).and_then(Value::as_str);
+    let code = text("code").or_else(|| text("error_code"));
+    let message = text("error").or_else(|| text("message")).unwrap_or(body);
+    match (code, text("reason")) {
+        (Some(code), Some(reason)) => anyhow::anyhow!("{code} ({reason}): {message}"),
+        (Some(code), None) => anyhow::anyhow!("{code}: {message}"),
+        _ => anyhow::anyhow!("the node answered HTTP {status}: {message}"),
+    }
+}
+
 /// A string field of a node's reply, or `unknown`.
 fn field_text<'a>(reply: &'a Value, field: &str) -> &'a str {
     reply
@@ -311,13 +420,59 @@ fn field_text<'a>(reply: &'a Value, field: &str) -> &'a str {
         .unwrap_or("unknown")
 }
 
+// ── facts of a remote ───────────────────────────────────────────────
+
+/// `ryeos node offline-operation facts --remote <name>`: the remote's facts,
+/// read through this operator's own node, as the document `sign --facts`
+/// reads.
+pub async fn run_remote_facts(
+    remote: &str,
+    app_root: Option<PathBuf>,
+    signing_key: Option<PathBuf>,
+    json_output: bool,
+    console: &crate::tty::Console,
+) -> Result<()> {
+    let report = through_own_node(
+        app_root,
+        signing_key,
+        REMOTE_FACTS_SERVICE,
+        json!({ "remote": remote }),
+    )
+    .await?;
+    if json_output {
+        crate::tty::write_json(&report)?;
+        return Ok(());
+    }
+    let mut banner =
+        crate::tty::StatusBanner::new(crate::tty::Tone::Neutral, "OFFLINE-OPERATION FACTS");
+    banner.detail = Some(format!(
+        "remote {remote}, node {}",
+        field_text(&report, "node_fingerprint")
+    ));
+    if let Some(facts) = report.get("facts").and_then(Value::as_object) {
+        banner.rows = facts
+            .iter()
+            .map(|(fact, value)| {
+                crate::tty::Row::key_value(
+                    fact.as_str(),
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned),
+                )
+            })
+            .collect();
+    }
+    console.status(&banner)?;
+    Ok(())
+}
+
 // ── submit ───────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos node offline-operation submit",
     about = "Send a signed offline-operation request to a running node's route",
-    long_about = "The node verifies the request exactly as it will at its next startup and queues it. It applies nothing while running. The node keeps running unless --stop is given; with --stop it makes a plain operator stop, and its supervisor (or the hosting platform) starts it again, which applies the request. The key that authenticates the delivery must be the key that signed the request.",
+    long_about = "The node verifies the request exactly as it will at its next startup and queues it. It applies nothing while running. The node keeps running unless --stop is given; with --stop it makes a plain operator stop, and its supervisor (or the hosting platform) starts it again, which applies the request. The key that authenticates the delivery must be the key that signed the request. With --remote <name> the request and its input files go to this operator's own node, which forwards them to that remote under the operator's stored delegation (`ryeos remote delegate --remote <name> --scopes ryeos.execute.service.offline-operations/submit,...`); the remote records the operator as the principal and this node's site as the forwarding node.",
     no_binary_name = true
 )]
 struct SubmitArgs {
@@ -328,6 +483,12 @@ struct SubmitArgs {
     /// The node's base URL. Defaults to the daemon of the local app root.
     #[arg(long)]
     url: Option<String>,
+
+    /// Deliver through this operator's own node to the remote of this name,
+    /// under the delegation stored for it. The delegation must lend
+    /// `ryeos.execute.service.offline-operations/submit`.
+    #[arg(long, conflicts_with = "url")]
+    remote: Option<String>,
 
     /// Stop the node once the request is queued, so that it is applied at the
     /// next startup. Without it the node keeps running.
@@ -360,15 +521,29 @@ pub async fn run_submit(argv: &[String], console: &crate::tty::Console) -> Resul
     if args.stop {
         body["stop"] = json!("now");
     }
-    let reply = call(
-        args.url.as_deref(),
-        args.app_root,
-        args.signing_key,
-        "POST",
-        "/offline-operations",
-        Some(&body),
-    )
-    .await?;
+    let reply = match &args.remote {
+        Some(remote) => {
+            body["remote"] = json!(remote);
+            let forwarded =
+                through_own_node(args.app_root, args.signing_key, REMOTE_SUBMIT_SERVICE, body)
+                    .await?;
+            forwarded
+                .get("result")
+                .cloned()
+                .context("the node returned no remote result")?
+        }
+        None => {
+            call(
+                args.url.as_deref(),
+                args.app_root,
+                args.signing_key,
+                "POST",
+                "/offline-operations",
+                Some(&body),
+            )
+            .await?
+        }
+    };
     if args.json {
         crate::tty::write_json(&reply)?;
         return Ok(());
@@ -393,6 +568,19 @@ pub async fn run_submit(argv: &[String], console: &crate::tty::Console) -> Resul
         crate::tty::Row::key_value("request", text("request_digest")),
         crate::tty::Row::key_value("ledger head", text("ledger_head")),
     ];
+    if let Some(remote) = &args.remote {
+        banner
+            .rows
+            .push(crate::tty::Row::key_value("remote", remote.clone()));
+        banner.rows.push(crate::tty::Row::key_value(
+            "submitted by",
+            text("submitted_by"),
+        ));
+        banner.rows.push(crate::tty::Row::key_value(
+            "delegated via",
+            text("delegated_via"),
+        ));
+    }
     console.status(&banner)?;
     Ok(())
 }
@@ -410,6 +598,12 @@ struct ListArgs {
     /// The node's base URL. Defaults to the local node's volume.
     #[arg(long)]
     url: Option<String>,
+
+    /// Read the remote of this name through this operator's own node, under
+    /// the delegation stored for it. The delegation must lend
+    /// `ryeos.execute.service.offline-operations/status`.
+    #[arg(long, conflicts_with = "url")]
+    remote: Option<String>,
 
     /// The key authenticating the call. Defaults to the operator key under
     /// the app root.
@@ -430,8 +624,17 @@ pub async fn run_list(argv: &[String], console: &crate::tty::Console) -> Result<
     else {
         return Ok(());
     };
-    let report = match &args.url {
-        Some(url) => {
+    let report = match (&args.remote, &args.url) {
+        (Some(remote), _) => {
+            through_own_node(
+                args.app_root,
+                args.signing_key,
+                REMOTE_STATUS_SERVICE,
+                json!({ "remote": remote }),
+            )
+            .await?
+        }
+        (None, Some(url)) => {
             call(
                 Some(url.as_str()),
                 args.app_root,
@@ -442,7 +645,7 @@ pub async fn run_list(argv: &[String], console: &crate::tty::Console) -> Result<
             )
             .await?
         }
-        None => {
+        (None, None) => {
             let app_root = ryeos_node::NodeConfig::load_local(args.app_root)?.app_root;
             ryeos_node::offline_operation::deliver::local_status_report(&app_root)?
         }
@@ -520,28 +723,59 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_digest_needs_its_origin_site() {
-        let error = SignArgs::try_parse_from(argv(&[
-            "--operation",
-            "node.allow-restart",
-            "--facts",
-            "facts.json",
-            "--grant-digest",
-            "abc",
-        ]))
-        .unwrap_err();
-        assert!(error.to_string().contains("origin-site"), "{error}");
-        SignArgs::try_parse_from(argv(&[
-            "--operation",
-            "node.allow-restart",
-            "--facts",
-            "facts.json",
-            "--grant-digest",
-            "abc",
-            "--origin-site",
-            "site:origin-a",
-        ]))
-        .unwrap();
+    fn the_signer_authority_comes_from_facts_read_for_this_key() {
+        let key = "a".repeat(64);
+        let local = json!({ "signer": { "fingerprint": key, "local_operator": true } });
+        assert!(signer_authority(&local, &key).unwrap().is_none());
+
+        let remote = json!({ "signer": {
+            "fingerprint": key,
+            "local_operator": false,
+            "principal_class": "remote_principal",
+            "grant_digest": "b".repeat(64),
+            "origin_site_id": "site:origin-a",
+        }});
+        let signer = signer_authority(&remote, &key).unwrap().unwrap();
+        assert_eq!(signer.grant_digest, "b".repeat(64));
+        assert_eq!(signer.origin_site_id, "site:origin-a");
+
+        let refused = |report: Value| signer_authority(&report, &key).unwrap_err().to_string();
+        assert!(refused(json!({ "facts": {} })).starts_with(FACTS_WITHOUT_SIGNER));
+        assert!(
+            refused(json!({ "signer": { "fingerprint": "c".repeat(64), "local_operator": true } }))
+                .starts_with(FACTS_FOR_ANOTHER_SIGNER)
+        );
+        let ungranted = refused(json!({ "signer": {
+            "fingerprint": key,
+            "local_operator": false,
+            "grant_digest": null,
+            "grant_error": "the grant expired",
+        }}));
+        assert!(ungranted.starts_with(SIGNER_UNGRANTED), "{ungranted}");
+        assert!(ungranted.contains("the grant expired"), "{ungranted}");
+        let unbound = refused(json!({ "signer": {
+            "fingerprint": key,
+            "local_operator": false,
+            "principal_class": "local_client",
+            "grant_digest": "b".repeat(64),
+            "origin_site_id": null,
+        }}));
+        assert!(unbound.starts_with(SIGNER_UNGRANTED), "{unbound}");
+    }
+
+    #[test]
+    fn a_grant_digest_is_not_an_argument() {
+        assert!(
+            SignArgs::try_parse_from(argv(&[
+                "--operation",
+                "node.allow-restart",
+                "--facts",
+                "facts.json",
+                "--grant-digest",
+                "abc",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -565,6 +799,56 @@ mod tests {
         assert!(split_pair("a", "--input").is_err());
         assert!(split_pair("=b", "--input").is_err());
         assert!(split_pair("a=", "--input").is_err());
+    }
+
+    #[test]
+    fn a_remote_delivery_names_no_url() {
+        let remote =
+            SubmitArgs::try_parse_from(argv(&["--file", "d.json", "--remote", "hosted"])).unwrap();
+        assert_eq!(remote.remote.as_deref(), Some("hosted"));
+        assert!(
+            SubmitArgs::try_parse_from(argv(&[
+                "--file",
+                "d.json",
+                "--remote",
+                "hosted",
+                "--url",
+                "https://hosted.example",
+            ]))
+            .is_err()
+        );
+        assert!(
+            ListArgs::try_parse_from(argv(&[
+                "--remote",
+                "hosted",
+                "--url",
+                "https://hosted.example",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_refusal_reads_as_its_code_and_cure() {
+        let refused = refusal(
+            403,
+            r#"{"code":"remote_offline_operation_refused","reason":"stale_ledger_head","error":"remote `hosted` refused the request: sign again"}"#,
+        );
+        assert_eq!(
+            refused.to_string(),
+            "remote_offline_operation_refused (stale_ledger_head): remote `hosted` refused the request: sign again"
+        );
+        let missing = refusal(
+            403,
+            r#"{"code":"remote_delegation_missing","error":"sign one with `ryeos remote delegate --remote hosted`"}"#,
+        );
+        assert!(
+            missing
+                .to_string()
+                .starts_with("remote_delegation_missing: ")
+        );
+        let plain = refusal(502, "Bad Gateway");
+        assert!(plain.to_string().contains("HTTP 502"));
     }
 
     #[test]

@@ -812,6 +812,71 @@ mod tests {
     }
 
     #[test]
+    fn a_terminated_source_releases_its_lifecycle_closure_across_reopen() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        // The journal-only fixture links this synthetic closure root.
+        let root = "a".repeat(64);
+        let (intent, occurrence) = {
+            let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+            let opened = source(&db, false);
+            assert_eq!(
+                db.snapshot_bootstrap_lifecycle_roots().unwrap(),
+                vec![root.clone()]
+            );
+            opened
+        };
+        let termination = termination(&intent, &occurrence);
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+        // Still open across a restart, and while its termination is pending.
+        assert_eq!(
+            db.snapshot_bootstrap_lifecycle_roots().unwrap(),
+            vec![root.clone()]
+        );
+        db.reserve_bootstrap_termination(&termination).unwrap();
+        db.claim_bootstrap_termination_attempt(&termination.operation_id)
+            .unwrap();
+        assert_eq!(
+            db.snapshot_bootstrap_lifecycle_roots().unwrap(),
+            vec![root.clone()]
+        );
+        db.bind_bootstrap_terminal_observation(&RuntimeSnapshotBootstrapTerminalObservation {
+            schema: 1,
+            operation_id: termination.operation_id.clone(),
+            occurrence_id: occurrence.occurrence_id.clone(),
+            provider_response_sha256: "c".repeat(64),
+            terminated_at: "2026-11-14T00:00:00Z".into(),
+            contact_deadline_exceeded: false,
+        })
+        .unwrap();
+        assert!(db.snapshot_bootstrap_lifecycle_roots().unwrap().is_empty());
+        drop(db);
+        let db = crate::runtime_db::test_native::TestRuntime::open(&path);
+        assert!(db.snapshot_bootstrap_lifecycle_roots().unwrap().is_empty());
+        // The signed journal row and its link stay.
+        assert_eq!(
+            db.snapshot_bootstrap_operation(&intent.operation_id)
+                .unwrap()
+                .unwrap()
+                .lifecycle_artifacts_root
+                .as_deref(),
+            Some(root.as_str())
+        );
+    }
+
+    #[test]
+    fn a_source_with_a_snapshot_still_being_created_keeps_its_closure() {
+        let db = crate::runtime_db::test_native::TestRuntime::open_temporary();
+        let (source, occurrence) = source(&db, false);
+        let snapshot = ready_snapshot(&db, &source, &occurrence);
+        db.reserve_runtime_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            db.snapshot_bootstrap_lifecycle_roots().unwrap(),
+            vec!["a".repeat(64)]
+        );
+    }
+
+    #[test]
     fn late_source_can_be_terminated_but_mutation_is_one_shot() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");

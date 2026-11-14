@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-28T22:38:56Z:176bbcbe723ffa1aa7c7d4e3ffea28f27168916d2a53071fc6ed67867afe62ab:rUYRO3FA+2qmgj4ql/GIUFngoOq7NLoLswLOOGTEV+1Ekip2A9HeIayi6CSvQKavkm7c3caBUkgAi8RIPqAQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T21:32:28Z:344b72a9b6e67c951c9039e5883193863652db5c2f3f015b54a0579ab8c5b93d:a+xU3Sorna3ORR53zZP4RgMzYjHL3ninIhckpOteqmTOfJ3ftSuKLGPxBYaGyiwP1T2iI4RtswvKFu4EDmyJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: offline-operations.submit
 required_caps: ["ryeos.execute.service.offline-operations/submit"]
@@ -6,4 +6,4 @@ schema:
   request: object
   inputs: object
   stop: string
-description: "Verify a signed offline-operation request exactly as the startup applier does and queue it in the node's inbox for the next startup; with stop=now, also stop the node so that startup comes at once. Never applies anything itself; returns {request_digest, operation, ledger_head, already_queued, stop}"
+description: "Verify a signed offline-operation request exactly as the startup applier does and queue it in the node's inbox for the next startup; with stop=now, also stop the node so that startup comes at once. Never applies anything itself; returns {request_digest, operation, ledger_head, already_queued, stop, submitted_by, delegated_via}; submitted_by is the authenticated caller, the request's signer, and delegated_via the site of the node that forwarded it under the caller's delegation, or null"

@@ -676,6 +676,56 @@ impl RecoveredBootstrapLifecycle {
     }
 }
 
+/// Termination-only facade over the lifecycle generation a qualification
+/// occurrence was created under, rebuilt from its retained CAS closure. It
+/// never enters the fresh-work registry and exposes no create or verify.
+pub(crate) struct RecoveredQualificationLifecycle {
+    backend: crate::external_lifecycle_adapter::ExecutableExternalPlacementBackend,
+}
+
+impl RecoveredQualificationLifecycle {
+    pub(crate) fn from_generation(
+        state: &crate::state::AppState,
+        generation: &crate::runtime_db::runtime_snapshot_qualification::RetainedQualificationGeneration,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &crate::vault::placement::PlacementCredential,
+    ) -> Result<Self> {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        let backend = recover_retained_lifecycle_backend(
+            &authority.cas_store()?,
+            &generation.lifecycle_root_hash,
+            crate::private_artifact_home::root(&state.config.runtime_state_dir()),
+        )
+        .context(
+            "the qualification's retained lifecycle generation is gone; it is reclaimed only after the occurrence settles",
+        )?;
+        authority.ensure_guard(&guard)?;
+        backend.preflight_snapshot_qualification_create(producer, qualification, credential)?;
+        Ok(Self { backend })
+    }
+
+    pub(crate) fn terminate(
+        &self,
+        producer: &crate::node_config::sections::runtime_snapshot_production::InstalledRuntimeSnapshotProductionBinding,
+        qualification: &crate::node_config::sections::runtime_snapshot_qualification::InstalledRuntimeSnapshotQualificationBinding,
+        credential: &crate::vault::placement::PlacementCredential,
+        request: &ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterRequest,
+        first_contact: bool,
+        deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<crate::external_placement::ExternalLifecycleObservation<ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotQualificationTerminationAdapterResponse>>{
+        self.backend.terminate_snapshot_qualification_occurrence(
+            producer,
+            qualification,
+            credential,
+            request,
+            first_contact,
+            deadline,
+        )
+    }
+}
+
 /// `credential_home_root` is the root of the node's credential-profile
 /// homes, which no lifecycle adapter upload may draw a file from.
 pub fn resolve_external_execution_artifacts(

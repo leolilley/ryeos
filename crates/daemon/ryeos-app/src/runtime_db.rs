@@ -2667,7 +2667,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // nullable `host_origin`; epoch-132 capsules lack it and refuse.
 // Epoch 134: `thread_runtime.process_quarantine` records the attached identity
 // recovery cannot prove gone; an epoch-133 store lacks the column and refuses.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 134;
+// Epoch 135: `runtime_snapshot_qualification_authority` retains the signed
+// generation and lifecycle closure each qualification occurrence was created
+// under; an epoch-134 store lacks the table and refuses.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 135;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -3683,6 +3686,35 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "updated_at_ms",
                         col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "runtime_snapshot_qualification_authority",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "production_binding_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "qualification_binding_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "lifecycle_root_hash",
+                        col_type: "TEXT",
                         pk: false,
                         not_null: true,
                     },

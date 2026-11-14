@@ -62,7 +62,10 @@ itself before any other startup check can refuse. No shell is involved.
 - Sign against the node's facts: `ryeos node offline-operation facts --json`
   (stopped node on this machine), the running node's `GET
   /offline-operations/facts`, or the facts every startup prints to the
-  platform log. `ryeos node offline-operation sign` builds the request; it is
+  platform log (a document assembled from the log adds the `signer` object
+  `sign` reads: `{"fingerprint": <key>, "local_operator": true}`, or a
+  remote operator's `grant_digest` and `origin_site_id`). `ryeos node
+  offline-operation sign` builds the request; it is
   valid for one hour unless `--lifetime-minutes` says otherwise, up to 24
   hours. A remote operator signs with a `remote_principal` grant that names the
   exact scope `ryeos.offline.<operation>`; wildcard grants never satisfy an
@@ -73,6 +76,10 @@ itself before any other startup check can refuse. No shell is involved.
   The node keeps running unless `--stop` is given, which makes a plain operator
   stop; the supervisor or hosting platform must start the next incarnation
   (Render restarts every exit; Railway needs the restart policy Always).
+  A remote operator delivers through its own origin node instead:
+  `ryeos node offline-operation submit --remote <name> --file request.json`
+  forwards the request and its input files under the operator's delegation
+  for that remote (`facts --remote` and `list --remote` read the same way).
 - Node that cannot start: set `RYEOS_OFFLINE_OPERATION_REQUEST` (an absolute
   file path, or base64 of at most 64 KiB) and `RYEOS_OFFLINE_OPERATION_INPUTS`
   (a directory). The entrypoint copies them into the inbox as root, verifies
