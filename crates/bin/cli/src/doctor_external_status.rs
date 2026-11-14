@@ -78,26 +78,7 @@ fn unanswered(error: &str) -> Vec<CheckResult> {
 }
 
 async fn fetch(app_root: &Path) -> anyhow::Result<ExternalExecutionStatus> {
-    let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
-    let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
-    let signer = crate::transport::signing::Signer::resolve(app_root)?;
-    let body = serde_json::to_vec(&json!({
-        "item_ref": STATUS_REF,
-        "ref_bindings": {},
-        "product_selections": [],
-        "parameters": {},
-    }))?;
-    let headers = signer.sign("POST", "/execute", &body, &discovered.principal_id)?;
-    let response = crate::transport::http::post_json(
-        &format!("{}/execute", discovered.base_url),
-        &headers,
-        &body,
-    )
-    .await?;
-    let result = response
-        .get("result")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("status response carries no result: {response}"))?;
+    let result = crate::dispatcher::execute_service(app_root, STATUS_REF, json!({})).await?;
     Ok(serde_json::from_value(result)?)
 }
 

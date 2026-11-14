@@ -65,7 +65,10 @@ fn grant_host_direct_on_the_lane(state_path: &Path, node: &SigningKey) {
     let raw = std::fs::read_to_string(&path).expect("read isolation policy");
     let mut body: Value =
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).expect("parse");
-    body["policy"]["host_classes"]["local"]["host_direct"] = "operator_granted".into();
+    let document = serde_json::to_value(&body).expect("isolation policy as json");
+    let class = common::fast_fixture::fixture_host_class_of_policy(&document)
+        .expect("the fixture's host class");
+    body["policy"]["host_classes"][class]["host_direct"] = "operator_granted".into();
     write_policy(
         state_path,
         node,
