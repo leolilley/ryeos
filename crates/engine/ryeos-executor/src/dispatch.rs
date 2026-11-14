@@ -4850,6 +4850,11 @@ fn require_prepared_launch_secret_availability(
                 remediation: crate::dispatch_error::required_secret_remediation(&name),
             }
         }
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            DispatchError::CapabilityRejected {
+                reason: refusal.to_string(),
+            }
+        }
         error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
             DispatchError::LaunchPreparationFailed {
                 code: "launch_secret_check_failed".to_owned(),

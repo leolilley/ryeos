@@ -9293,7 +9293,8 @@ async fn run_existing_recovered_thread(
                         ),
                     )
                 }
-                error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                error @ (ryeos_app::vault::VaultReadError::AuthorityViolation(_)
+                | ryeos_app::vault::VaultReadError::NameRefused(_)) => {
                     guard.fail_thread("vault_read_failed");
                     ResumeError::VaultRead(guard.fail_before_spawn(error.into()))
                 }

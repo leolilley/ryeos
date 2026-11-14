@@ -127,6 +127,9 @@ pub struct AppState {
     /// for exactly the names the node policy declares. Read only through
     /// authorized secret delivery, alongside the vault.
     pub provider_env: Arc<crate::vault::ProviderEnvironment>,
+    /// Per-name receive and write ceilings of the shared sealed vault, from
+    /// the node's signed policy, bound to the configured local operator.
+    pub vault_ceilings: Arc<crate::vault::VaultCeilings>,
     /// Command registry for token routing. Built once at startup
     /// from node-config command YAMLs.
     pub command_registry: Arc<CommandRegistry>,
@@ -227,6 +230,7 @@ impl AppState {
         crate::vault::SecretSources {
             vault: self.vault.as_ref(),
             provider_env: self.provider_env.as_ref(),
+            ceilings: self.vault_ceilings.as_ref(),
         }
     }
 
@@ -576,6 +580,9 @@ pub mod test_support {
             ),
             vault: Arc::new(crate::vault::EmptyVault),
             provider_env: Arc::new(crate::vault::ProviderEnvironment::none()),
+            vault_ceilings: Arc::new(crate::vault::VaultCeilings::operator_only(
+                "fp:test-operator",
+            )),
             command_registry: Arc::new(ryeos_runtime::CommandRegistry::from_records(
                 &[],
                 &Default::default(),

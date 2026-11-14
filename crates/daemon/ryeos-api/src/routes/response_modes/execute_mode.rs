@@ -2028,6 +2028,18 @@ async fn admit_execution_with_publication(
                 .required_secrets,
             provenance.project_authority(),
         ) {
+            if let ryeos_app::vault::VaultReadError::NameRefused(refusal) = &err {
+                return Ok((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": refusal.message(),
+                        "error_code": refusal.code(),
+                        "name": refusal.name,
+                        "principal": refusal.principal,
+                    }),
+                )
+                    .into());
+            }
             return Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({
@@ -2744,9 +2756,8 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
-    use ryeos_node_runtime::node_policy::sections::provider_environment::{
-        ProviderEnvironmentName, ProviderEnvironmentRecipients,
-    };
+    use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName;
+    use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
 
     static NO_PROVIDER_ENVIRONMENT: ryeos_app::vault::ProviderEnvironment =
         ryeos_app::vault::ProviderEnvironment::none();
@@ -2876,14 +2887,14 @@ mod tests {
             vec![
                 ProviderEnvironmentName {
                     name: "ANTHROPIC_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: Vec::new(),
                         capabilities: strings(&[RECEIVE_ANTHROPIC]),
                     },
                 },
                 ProviderEnvironmentName {
                     name: "OPENAI_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(&["fp:alice", "route:fixed-handler"]),
                         capabilities: Vec::new(),
                     },
@@ -3107,6 +3118,7 @@ mod tests {
         let sources = ryeos_app::vault::SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
         };
         let names = vec!["OPENAI_API_KEY".to_owned()];
         // A child acting for another principal under the inherited authority.
@@ -3153,14 +3165,14 @@ mod tests {
             vec![
                 ProviderEnvironmentName {
                     name: "ANTHROPIC_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(&["fp:placeholder"]),
                         capabilities: strings(anthropic_capabilities),
                     },
                 },
                 ProviderEnvironmentName {
                     name: "OPENAI_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(openai_principals),
                         capabilities: Vec::new(),
                     },
@@ -3191,6 +3203,7 @@ mod tests {
             &ryeos_app::vault::SecretSources {
                 vault: &vault,
                 provider_env: environment,
+                ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
             },
             ryeos_app::vault::SecretRecipient { principal },
             &[name.to_owned()],

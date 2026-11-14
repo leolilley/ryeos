@@ -200,7 +200,12 @@ pub async fn handle(
         &names,
         &project_authority,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| match e {
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            crate::handler_error::vault_name_handler_error(&refusal)
+        }
+        other => HandlerError::Internal(other.to_string()),
+    })?;
 
     let secrets: Vec<Value> = report
         .iter()
