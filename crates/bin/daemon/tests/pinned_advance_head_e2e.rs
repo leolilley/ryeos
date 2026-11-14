@@ -101,6 +101,10 @@ fn plant_writing_graph(project_dir: &Path, signer: &SigningKey) -> Result<()> {
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: test
 version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.advance/write
 config:
   start: write
   config_schema:
@@ -111,6 +115,7 @@ config:
     write:
       action:
         item_id: "tool:advance/write"
+        ref_bindings: {}
         params:
           gate: "${inputs.gate}"
       next:
