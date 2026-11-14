@@ -168,6 +168,9 @@ async fn start_pair() -> Result<Pair> {
                     "ryeos.execute.service.remote/delegate",
                     "ryeos.execute.service.remote/threads",
                     "ryeos.execute.service.remote/vault-set",
+                    "ryeos.execute.service.remote/authorize",
+                    "ryeos.execute.service.remote/pull",
+                    "ryeos.execute.service.remote/bundle-install",
                     THREADS_CAP,
                     "ryeos.execute.service.remote/delegation-revoke",
                 ],
@@ -577,6 +580,45 @@ async fn a_principal_without_a_delegation_is_refused_on_origin_and_capped_on_hos
         )
         .await?;
     assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{body}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_pull_and_bundle_install_go_out_as_the_caller_not_the_node() -> Result<()> {
+    let pair = start_pair().await?;
+    let u2 = u2_key();
+    let calls = [
+        (
+            "service:remote/authorize",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "public_key": format!("ed25519:{}", public_b64(&hosted_operator_key())),
+                "label": "x",
+                "scopes": ["ryeos.execute.service.threads/list"],
+            }),
+        ),
+        (
+            "service:remote/pull",
+            json!({
+                "remote": HOSTED_REMOTE,
+                "root": {"kind": "thread_result", "thread_id": "T-x"},
+                "object_hashes": ["object:00"],
+                "output_dir": "/nonexistent/out",
+            }),
+        ),
+        (
+            "service:remote/bundle-install",
+            json!({"remote": HOSTED_REMOTE, "bundle_name": "knowledge"}),
+        ),
+    ];
+    for (service, params) in calls {
+        let (status, body) = pair.origin_service(&u2, service, params).await?;
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "{service}: {body}");
+        assert!(
+            body.to_string().contains("remote_delegation_missing"),
+            "{service}: {body}"
+        );
+    }
     Ok(())
 }
 
