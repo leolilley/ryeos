@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:65f192bc6bb94243cd1ebb338bd90788ed688cf373e90c1f33d5135cb787e1be:QOqUcB31PTRYctKo9CBxPH/mw9dcp2J15PfelH+LoY6rEFkwjL/qDW+Y5tRFUUl6QNlgW9s4aTSSV+nqWkaZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:20784b1e28272db629a3a52b194d39d5e20098e23bd77a0049611e5f7d1603cc:rlwkKQ5Rbqgbkg4Q9JvaEUSzyHeQfwC9y2/7m5JK+JKx1eqUAm1PRbQ0zr76CKL6+N/QSCbLYMMr1CFKsjzEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -267,7 +267,18 @@ node. It fails for a grant of a retired schema or class (`grant_schema_stale`,
 cannot be read, and warns for a grant that has expired or will within the
 policy's `warn_before_secs`. Each entry names the grant and its cure: renew a
 lapsed grant with `ryeos renew-key --fingerprint <fp>` (the principal that
-granted it, or the node operator); re-issue a stale one.
+granted it, or the node operator); re-issue a stale one. The row also
+verifies the revocation ledger (`.ai/node/auth/revoked/`): it fails for a
+tombstone that is unsigned, tampered or signed by another key, and warns for a
+grant file that a tombstone already refuses but that is still on disk.
+
+Revoke a grant on a running node with `ryeos revoke-key --fingerprint <fp>
+--reason <text> [--leave-running] [--keep-delegates]` (the principal that
+granted it, or the node operator), or on a remote with `ryeos remote revoke
+--fingerprint <fp> --reason <text> [--remote <name>]`. On a stopped node,
+`ryeos node authorization revoke --fingerprint <fp> --reason <text>
+[--keep-delegates]` does the same offline and is the only way to revoke the
+configured operator's own grant. See [Identity model](../identity-model.md#revocation).
 
 The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the

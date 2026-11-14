@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T03:56:32Z:d1d6579721378ef59fd6b90967c096578b2bbd4376a08ab43f3c7f0edda0226a:ztxiXb4jBmBH/MGh8WOD7elN6mKomsYJkN3udi1oIX8qv0VebGrwQSw8mtp7wLewNuucgPQB6YaPpSzyxUEbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T05:54:19Z:f063936e04672a439ead3e49c6e0c554f6f80f45d1d84b1ce5c7195fab49cbbe:I7yxXIbo8NB+28QE0laZhKM8zkPKuvDq2HjJ/I2HpjNYLNYGiD7PkRE7XRKNXrkRg0RdlpZu/XMhD00POS6UAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -51,6 +51,7 @@ hashes through CAS.
 | `identity/public_key` | `identity.public_key` | none |
 | `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
 | `identity/renew-key` | `identity.renew-key` | `ryeos.execute.service.identity/renew-key` |
+| `identity/revoke-key` | `identity.revoke-key` | `ryeos.execute.service.identity/revoke-key` |
 | `identity/revoke-delegation` | `identity.revoke-delegation` | `ryeos.execute.service.identity/revoke-delegation` |
 | `node/status` | `node.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
@@ -183,6 +184,7 @@ for the full matrix.
 | `remote/pull` | `remote.pull` | `ryeos.execute.service.remote/pull` |
 | `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
 | `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/revoke` | `remote.revoke` | `ryeos.execute.service.remote/admin` |
 | `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
 | `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
 | `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |
