@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:39:36Z:f004ecfaabd92af626a271663bb6194cd547e49fbbb75da2b9a6bf2808ef3c37:HAN662DmjIvilJmB41P953Sh+M1isCAhyN0Qy18yJDeOZCszJfeDj2IN0RaU1J+97TFAaqaJHX2Xm7nBOB7RBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T00:21:02Z:88d9e3f6569fbd04974d71d53de8ebdd1e21750d007cdb3ece54ff4539750c7e:EyMWURQNTRsU2FIPWV7DNtXUIPU4f0f+odMbZZUuu3XE6JZqe5mXd7Pl3raQCfyx2PyuHgm594jjTYhUIIQRDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -767,6 +767,23 @@ install, and vault proxying.
   remote pin (`--input descriptor=<file>`) or a bundle installed from an
   archive (`--input archive=<file.tar.gz>`). See "Wiring a hosted node
   without a shell" in [Remote Operations](../remote/remote-operations.md).
+- `ryeos node offline-operation facts|submit|list --remote <name>` — read a
+  remote's facts, deliver a request signed with your own key (with its input
+  files), or read what the remote queued and applied, through your own node
+  under the delegation you stored for that remote. The delegation must lend
+  `ryeos.execute.service.offline-operations/facts`, `/submit` and `/status`
+  (`ryeos remote delegate --remote <name> --scopes ...`); an inbound-only
+  remote is refused with `remote_inbound_only`.
+- `ryeos node offline-operation sign --facts <file>` signs under the authority
+  the facts name for the signing key (`signer`): the local operator signs
+  without a grant, and a remote operator's request takes its grant digest and
+  origin site from the facts. `facts --json` reports the signer for
+  `--signing-key` (default the operator key), `facts --remote` for you as the
+  delegated principal. Facts without a signer, read for another key, or for a
+  key the node holds no usable grant for are refused with
+  `offline_operation_facts_without_signer`,
+  `offline_operation_facts_for_another_signer` and
+  `offline_operation_signer_ungranted`.
 See [Remote Command Reference](../remote/remote-command-reference.md).
 
 ## Aliases Quick Reference

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:c1eaea331705fba5ec57562c2d30c7a1c92ec2b5286b91c1dcbbdbc84cbc78d2:+xAJDCsafMCS7LuRrtTt09AXzeH5pBVJz5fGDI60A8n/tQreNNInApufoYFdwu/J7UXewkdh2fxekKVbe0FMBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T21:32:28Z:ae2b1d6eba1f68e2be2ff39d2a514a2e5a9002010a4921c3243dc3a50a1edae3:yUNwG0vOskPl6YY1X6ZtvwWPHZZjwhQHn5TwRuN4eh/uav4A4ZlL3jY6UX+1u/BK2veLoDMrWvHlw77UWQa6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -41,6 +41,9 @@ The authoritative matrix is in
 | `remote/delegate` | `remote.delegate` | `ryeos.execute.service.remote/delegate` |
 | `remote/delegation-list` | `remote.delegation-list` | `ryeos.execute.service.remote/delegation-list` |
 | `remote/delegation-revoke` | `remote.delegation-revoke` | `ryeos.execute.service.remote/delegation-revoke` |
+| `remote/offline-operations-facts` | `remote.offline-operations-facts` | `ryeos.execute.service.remote/offline-operations-facts` |
+| `remote/offline-operations-submit` | `remote.offline-operations-submit` | `ryeos.execute.service.remote/offline-operations-submit` |
+| `remote/offline-operations-status` | `remote.offline-operations-status` | `ryeos.execute.service.remote/offline-operations-status` |
 
 ## Operational invariants
 
