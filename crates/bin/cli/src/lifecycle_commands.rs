@@ -504,12 +504,8 @@ pub async fn try_dispatch(
                 Some("export" | "import" | "remove")
             ) =>
         {
-            crate::lifecycle_bundle_state::run(
-                argv[2].as_str(),
-                &argv[3..],
-                console,
-            )
-            .map_err(map_local_err)?;
+            crate::lifecycle_bundle_state::run(argv[2].as_str(), &argv[3..], console)
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("trust", Some(verb @ ("pin" | "scope" | "retire" | "revoke" | "succeed"))) => {
@@ -3133,10 +3129,9 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         .iter()
                         .map(|record| record.name.clone())
                         .collect::<std::collections::BTreeSet<_>>(),
-                    isolation
-                        .as_ref()
-                        .ok()
-                        .map(|runtime| runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce),
+                    isolation.as_ref().ok().map(|runtime| {
+                        runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce
+                    }),
                 ));
                 if !args.no_bundles {
                     for record in &snapshot.bundles {

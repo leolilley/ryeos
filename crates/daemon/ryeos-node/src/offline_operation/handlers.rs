@@ -1529,10 +1529,18 @@ pub(super) fn bundle_state_export(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: BundleStateExportArguments = ctx.arguments()?;
     arguments.validate()?;
     let output = Path::new(&arguments.output);
-    let parent = output.parent().context("the export output has no parent directory")?;
-    let name = output.file_name().context("the export output names no file")?;
-    let directory = lillux::PinnedDirectory::open(parent)?
-        .with_context(|| format!("the export output directory {} does not exist", parent.display()))?;
+    let parent = output
+        .parent()
+        .context("the export output has no parent directory")?;
+    let name = output
+        .file_name()
+        .context("the export output names no file")?;
+    let directory = lillux::PinnedDirectory::open(parent)?.with_context(|| {
+        format!(
+            "the export output directory {} does not exist",
+            parent.display()
+        )
+    })?;
     if directory.entry_no_follow(name)?.is_some() {
         // A node that died after writing the archive and before the receipt
         // finds its own archive here: the same bundle, signed by this node.
@@ -1541,7 +1549,10 @@ pub(super) fn bundle_state_export(ctx: &HandlerContext<'_>) -> Result<Value> {
             ryeos_app::bundle_state_transfer::MAX_ARCHIVE_BYTES,
         )
         .with_context(|| {
-            format!("{} already exists and is not a readable archive", output.display())
+            format!(
+                "{} already exists and is not a readable archive",
+                output.display()
+            )
         })?;
         let parsed = ryeos_app::bundle_state_transfer::parse_archive(&existing)?;
         parsed.manifest.verify(ctx.node.verifying_key())?;
@@ -1565,12 +1576,14 @@ pub(super) fn bundle_state_export(ctx: &HandlerContext<'_>) -> Result<Value> {
         &arguments.bundle_id,
         arguments.namespace.as_deref(),
     )?;
-    let mut file = directory.open_regular_create(name, true, true, 0o600).with_context(|| {
-        format!(
-            "create the archive {}; it must not already exist",
-            output.display()
-        )
-    })?;
+    let mut file = directory
+        .open_regular_create(name, true, true, 0o600)
+        .with_context(|| {
+            format!(
+                "create the archive {}; it must not already exist",
+                output.display()
+            )
+        })?;
     std::io::Write::write_all(&mut file, &archive)?;
     file.sync_all()?;
     Ok(json!({
@@ -1622,7 +1635,9 @@ pub(super) fn bundle_state_import(ctx: &HandlerContext<'_>) -> Result<Value> {
             .runtime_authority
             .state_home
             .as_ref()
-            .ok_or_else(|| "its signed manifest declares no `runtime_authority.state_home`".to_owned())?;
+            .ok_or_else(|| {
+                "its signed manifest declares no `runtime_authority.state_home`".to_owned()
+            })?;
         if decl.namespaces.backs(namespace) {
             Ok(())
         } else {

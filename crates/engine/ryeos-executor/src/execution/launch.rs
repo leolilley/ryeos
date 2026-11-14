@@ -12757,6 +12757,155 @@ mod tests {
         );
     }
 
+    const STATE_ACCESS: &str = "ryeos.write.bundle-state.central-auth/realm-a";
+
+    #[test]
+    fn bundle_state_namespace_needs_the_callers_own_use_grant() {
+        // The caller's grant, not anything the item composed, opens the home.
+        let granted = caps(&["ryeos.use.bundle-state.central-auth/realm-a"]);
+        let out = apply_policy(
+            &[],
+            &[STATE_ACCESS],
+            CapabilityPolicy::RootAdmission {
+                caller_scopes: &granted,
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, caps(&[STATE_ACCESS]));
+
+        // A grant for a sibling namespace, an execute wildcard, or nothing at
+        // all is refused with the typed code, naming the cure.
+        for scopes in [
+            caps(&["ryeos.use.bundle-state.central-auth/realm-b"]),
+            caps(&["ryeos.execute.*"]),
+            caps(&[]),
+        ] {
+            let error = apply_policy(
+                &[],
+                &[STATE_ACCESS],
+                CapabilityPolicy::RootAdmission {
+                    caller_scopes: &scopes,
+                },
+                "",
+            )
+            .unwrap_err();
+            let (code, message) = refusal_parts(error);
+            assert_eq!(code, "bundle_state_namespace_denied");
+            assert!(
+                message.contains("ryeos.use.bundle-state.central-auth/realm-a")
+                    && message.contains("fp:caller"),
+                "{message}"
+            );
+        }
+        // A wildcard use grant for the bundle covers every namespace.
+        let wildcard = caps(&["ryeos.use.bundle-state.central-auth/*"]);
+        assert!(
+            apply_policy(
+                &[],
+                &[STATE_ACCESS],
+                CapabilityPolicy::RootAdmission {
+                    caller_scopes: &wildcard,
+                },
+                "",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn follow_child_keeps_only_a_state_namespace_its_parent_held() {
+        let execute = "ryeos.execute.tool.child/run";
+        let parent_with = caps(&[execute, STATE_ACCESS]);
+        let kept = apply_policy(
+            &[],
+            &[STATE_ACCESS],
+            CapabilityPolicy::FollowChildHybrid {
+                parent_effective_caps: &parent_with,
+            },
+            execute,
+        )
+        .unwrap();
+        assert_eq!(kept, caps(&[STATE_ACCESS]));
+
+        // A parent that held no namespace (or another one) cannot hand the
+        // child a home: the child has no caller to present the use cap.
+        for parent in [
+            caps(&[execute]),
+            caps(&[execute, "ryeos.write.bundle-state.central-auth/realm-b"]),
+        ] {
+            let error = apply_policy(
+                &[],
+                &[STATE_ACCESS],
+                CapabilityPolicy::FollowChildHybrid {
+                    parent_effective_caps: &parent,
+                },
+                execute,
+            )
+            .unwrap_err();
+            let (code, _) = refusal_parts(error);
+            assert_eq!(code, "bundle_state_namespace_denied");
+        }
+    }
+
+    #[test]
+    fn exact_pinned_continuation_reuses_the_sealed_state_access() {
+        // The sealed set already carries the access cap the first admission
+        // minted after the caller check; a continuation has no caller scopes
+        // and must neither re-judge them nor drift.
+        let sealed = caps(&[STATE_ACCESS]);
+        let out = apply_policy(
+            &[],
+            &[STATE_ACCESS],
+            CapabilityPolicy::ExactPinned(&sealed),
+            "",
+        )
+        .unwrap();
+        assert_eq!(out, sealed);
+    }
+
+    #[test]
+    fn state_home_refusals_carry_their_codes_and_statuses() {
+        use ryeos_bundle::runtime_authority::StateHomeRefusal;
+
+        for (refusal, code, status) in [
+            (
+                StateHomeRefusal::Undeclared {
+                    bundle_id: "b".into(),
+                    detail: "d".into(),
+                },
+                "bundle_state_home_undeclared",
+                422,
+            ),
+            (
+                StateHomeRefusal::NamespaceInvalid { detail: "d".into() },
+                "bundle_state_namespace_invalid",
+                400,
+            ),
+            (
+                StateHomeRefusal::NamespaceDenied {
+                    bundle_id: "b".into(),
+                    namespace: "n".into(),
+                    caller: "fp:x".into(),
+                },
+                "bundle_state_namespace_denied",
+                403,
+            ),
+            (
+                StateHomeRefusal::Unavailable { detail: "d".into() },
+                "bundle_state_home_unavailable",
+                503,
+            ),
+        ] {
+            let BuildAndLaunchError::LaunchPreparation(inner) = state_home_launch_error(refusal)
+            else {
+                panic!("a state home refusal is a launch-preparation refusal");
+            };
+            assert_eq!(inner.code(), code);
+            assert_eq!(inner.http_status().as_u16(), status, "{code}");
+        }
+    }
+
     #[test]
     fn root_admission_refuses_every_uncovered_declared_cap() {
         let scopes = caps(&["ryeos.execute.tool.echo"]);

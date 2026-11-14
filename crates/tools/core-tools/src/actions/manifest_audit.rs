@@ -699,7 +699,8 @@ mod tests {
             },
         );
         assert!(diff_authority(&none, &fixed).iter().any(|finding| {
-            finding.risk == Risk::Added && finding.message == "state_home fixed namespaces: +realm-a"
+            finding.risk == Risk::Added
+                && finding.message == "state_home fixed namespaces: +realm-a"
         }));
         assert!(diff_authority(&none, &open).iter().any(|finding| {
             finding.risk == Risk::NewWildcard

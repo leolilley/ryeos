@@ -146,7 +146,9 @@ fn read_tree(
             lillux::PinnedEntryType::Regular => {
                 let file = directory
                     .open_regular(&entry.name, false)?
-                    .with_context(|| format!("{} vanished while it was read", relative.display()))?;
+                    .with_context(|| {
+                        format!("{} vanished while it was read", relative.display())
+                    })?;
                 let bytes = lillux::read_open_regular_file_bounded(file, MAX_FILE_BYTES)
                     .with_context(|| format!("read {}", relative.display()))?;
                 let key = relative
@@ -158,7 +160,9 @@ fn read_tree(
             lillux::PinnedEntryType::Directory => {
                 let child = directory
                     .open_child_directory(&entry.name)?
-                    .with_context(|| format!("{} vanished while it was read", relative.display()))?;
+                    .with_context(|| {
+                        format!("{} vanished while it was read", relative.display())
+                    })?;
                 read_tree(&child, &relative, depth + 1, remaining, out)?;
             }
             other => bail!(
@@ -181,11 +185,9 @@ fn open_bundle_home(
     let home = root
         .open_child_directory(OsStr::new(bundle_id))?
         .with_context(|| format!("bundle `{bundle_id}` has no state home"))?;
-    let bytes = lillux::read_regular_file_bounded_no_follow(
-        &home.path().join(HOME_RECORD_NAME),
-        16 * 1024,
-    )
-    .context("read the home record")?;
+    let bytes =
+        lillux::read_regular_file_bounded_no_follow(&home.path().join(HOME_RECORD_NAME), 16 * 1024)
+            .context("read the home record")?;
     let record: HomeRecord = serde_json::from_slice(&bytes).context("parse the home record")?;
     record
         .verify(bundle_id, node.verifying_key())
@@ -286,7 +288,11 @@ pub fn export_archive(
     let mut byte_count = 0u64;
     for (name, files) in &contents {
         for (path, bytes) in files {
-            append_entry(&mut builder, &format!("{FILES_PREFIX}/{name}/{path}"), bytes)?;
+            append_entry(
+                &mut builder,
+                &format!("{FILES_PREFIX}/{name}/{path}"),
+                bytes,
+            )?;
             file_count += 1;
             byte_count += bytes.len() as u64;
         }
@@ -396,7 +402,12 @@ pub fn parse_archive(bytes: &[u8]) -> Result<ParsedArchive> {
                 key.0,
                 key.1
             );
-            ensure!(listed.insert(key.clone()), "manifest lists {}/{} twice", key.0, key.1);
+            ensure!(
+                listed.insert(key.clone()),
+                "manifest lists {}/{} twice",
+                key.0,
+                key.1
+            );
         }
     }
     ensure!(
@@ -680,18 +691,23 @@ pub fn remove_state(
         };
         directory.remove_contents_recursive_bounded(TREE_BUDGET)?;
         ensure!(
-            home.remove_empty_child_if_same(name_os, &directory)?.is_some(),
+            home.remove_empty_child_if_same(name_os, &directory)?
+                .is_some(),
             "namespace `{name}` changed while it was removed"
         );
         summary.namespaces.push(name);
     }
     if namespace.is_none() {
         let record = home.path().join(HOME_RECORD_NAME);
-        if home.entry_no_follow(OsStr::new(HOME_RECORD_NAME))?.is_some() {
+        if home
+            .entry_no_follow(OsStr::new(HOME_RECORD_NAME))?
+            .is_some()
+        {
             std::fs::remove_file(&record).context("remove the home record")?;
         }
         ensure!(
-            root.remove_empty_child_if_same(bundle_name, &home)?.is_some(),
+            root.remove_empty_child_if_same(bundle_name, &home)?
+                .is_some(),
             "the home of `{bundle_id}` changed while it was removed"
         );
         summary.bundle_home_removed = true;
@@ -727,7 +743,9 @@ mod tests {
     fn seed(node: &Node, bundle: &str, namespace: &str, files: &[(&str, &[u8])]) -> PathBuf {
         let opened =
             open_or_create(node.app.path(), bundle, namespace, &node.identity, "gen").unwrap();
-        let directory = lillux::PinnedDirectory::open(&opened.path).unwrap().unwrap();
+        let directory = lillux::PinnedDirectory::open(&opened.path)
+            .unwrap()
+            .unwrap();
         for (path, bytes) in files {
             write_file(&directory, path, bytes).unwrap();
         }
@@ -757,7 +775,10 @@ mod tests {
             &source,
             "central-auth",
             "realm-a",
-            &[("sessions/one.json", b"{\"a\":1}"), ("top.bin", &[0, 1, 2, 255])],
+            &[
+                ("sessions/one.json", b"{\"a\":1}"),
+                ("top.bin", &[0, 1, 2, 255]),
+            ],
         );
         seed(&source, "central-auth", "realm-b", &[("x", b"b")]);
         let (archive, summary) =
@@ -784,14 +805,24 @@ mod tests {
             std::fs::read(landed.join("sessions/one.json")).unwrap(),
             b"{\"a\":1}"
         );
-        assert_eq!(std::fs::read(landed.join("top.bin")).unwrap(), [0, 1, 2, 255]);
+        assert_eq!(
+            std::fs::read(landed.join("top.bin")).unwrap(),
+            [0, 1, 2, 255]
+        );
 
         // The imported home is the target node's own, and re-exports identically.
-        let (again, _) =
-            export_archive(target.app.path(), &target.identity, "central-auth", Some("realm-a"))
-                .unwrap();
+        let (again, _) = export_archive(
+            target.app.path(),
+            &target.identity,
+            "central-auth",
+            Some("realm-a"),
+        )
+        .unwrap();
         let reparsed = parse_archive(&again).unwrap();
-        assert_eq!(reparsed.manifest.source_node, target.identity.principal_id());
+        assert_eq!(
+            reparsed.manifest.source_node,
+            target.identity.principal_id()
+        );
         assert_eq!(
             reparsed.files[&("realm-a".to_owned(), "top.bin".to_owned())],
             [0, 1, 2, 255]
@@ -830,7 +861,10 @@ mod tests {
             &policy(&nobody, &everything_backed, &[]),
         )
         .unwrap_err();
-        assert!(format!("{error:#}").contains("neither is nor has pinned"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("neither is nor has pinned"),
+            "{error:#}"
+        );
 
         // Trusting the wrong key for the claimed signer fails the signature
         // binding, as does tampering with the manifest body.
@@ -857,7 +891,12 @@ mod tests {
         let mut forged = parsed.manifest.clone();
         forged.bundle_id = "other-bundle".to_owned();
         let mut builder = tar::Builder::new(Vec::new());
-        append_entry(&mut builder, MANIFEST_ENTRY, &serde_json::to_vec(&forged).unwrap()).unwrap();
+        append_entry(
+            &mut builder,
+            MANIFEST_ENTRY,
+            &serde_json::to_vec(&forged).unwrap(),
+        )
+        .unwrap();
         append_entry(&mut builder, "files/realm-a/x", b"1").unwrap();
         let forged_archive = builder.into_inner().unwrap();
         let error = import_archive(
@@ -912,7 +951,12 @@ mod tests {
         let trust = move |candidate: &str| (candidate == fp).then_some(key);
 
         let target = node();
-        let landed = seed(&target, "central-auth", "realm-a", &[("x", b"old"), ("y", b"keep")]);
+        let landed = seed(
+            &target,
+            "central-auth",
+            "realm-a",
+            &[("x", b"old"), ("y", b"keep")],
+        );
         let error = import_archive(
             target.app.path(),
             &target.identity,

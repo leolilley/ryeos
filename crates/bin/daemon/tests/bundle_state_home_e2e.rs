@@ -230,7 +230,10 @@ async fn a_tool_with_the_caller_cap_writes_into_its_namespace() {
     let landed = namespace_dir(&h, BUNDLE, "ns1").join("x");
     assert_eq!(
         std::fs::read_to_string(&landed).unwrap_or_else(|error| {
-            panic!("the tool's write must land at {}: {error}\n{body:#}", landed.display())
+            panic!(
+                "the tool's write must land at {}: {error}\n{body:#}",
+                landed.display()
+            )
         }),
         "written"
     );
@@ -293,7 +296,11 @@ async fn an_item_whose_bundle_declares_no_state_home_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_invalid_namespace_is_refused_before_any_directory_exists() {
     let caller = limited_caller(0x64);
-    let (h, _fixture) = start(vec![(caller.clone(), execute_scopes(&["ryeos.use.bundle-state.*"]))]).await;
+    let (h, _fixture) = start(vec![(
+        caller.clone(),
+        execute_scopes(&["ryeos.use.bundle-state.*"]),
+    )])
+    .await;
 
     for bad in ["../escape", "UPPER", ""] {
         let (status, body) = execute_as(&h, &caller, WRITE_TOOL, bad).await;
@@ -303,7 +310,12 @@ async fn an_invalid_namespace_is_refused_before_any_directory_exists() {
             "{bad:?}: {body:#}"
         );
     }
-    assert!(!h.state_path.join(".ai/state/bundle-state").join(BUNDLE).exists());
+    assert!(
+        !h.state_path
+            .join(".ai/state/bundle-state")
+            .join(BUNDLE)
+            .exists()
+    );
 }
 
 /// Under enforced isolation the tool sees only its own namespace, at the fixed

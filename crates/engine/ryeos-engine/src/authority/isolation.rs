@@ -34,12 +34,11 @@ use authority::IsolationReadOnlyMountScope;
 
 pub use authority::{
     BUNDLE_STATE_ISOLATION_DESTINATION, IsolationAdmittedCommand, IsolationBundleStateHome,
-    IsolationCommandAuthority, IsolationCommandAuthorityRef,
-    IsolationDescriptorBoundCommand, IsolationDescriptorFileIdentity,
-    IsolationFilesystemAuthorityCeiling, IsolationLaunchContext, IsolationLiveAccessAuthority,
-    IsolationNetworkAuthorityCeiling, IsolationProducerPreparedDirectoryAuthority,
-    IsolationProducerPreparedImmutableFileAuthority, IsolationProjectAuthority,
-    IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
+    IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
+    IsolationDescriptorFileIdentity, IsolationFilesystemAuthorityCeiling, IsolationLaunchContext,
+    IsolationLiveAccessAuthority, IsolationNetworkAuthorityCeiling,
+    IsolationProducerPreparedDirectoryAuthority, IsolationProducerPreparedImmutableFileAuthority,
+    IsolationProjectAuthority, IsolationReadOnlyMountAuthority, IsolationRealizationMemberCommand,
     IsolationTargetChannelAuthority, IsolationVerifiedCode,
     IsolationWritableRuntimeViewMountAuthority, OriginalProductManifestRole,
 };
@@ -4240,12 +4239,12 @@ impl IsolationRuntime {
                 || context.state_root.is_some_and(collides)
                 || context.checkpoint_dir.is_some_and(collides)
                 || self.app_root.as_deref().is_some_and(collides)
-                || readable_mounts.iter().any(|mount| {
-                    mount.destination != destination && collides(&mount.destination)
-                })
-                || writable_mounts.iter().any(|mount| {
-                    mount.destination != destination && collides(&mount.destination)
-                })
+                || readable_mounts
+                    .iter()
+                    .any(|mount| mount.destination != destination && collides(&mount.destination))
+                || writable_mounts
+                    .iter()
+                    .any(|mount| mount.destination != destination && collides(&mount.destination))
             {
                 return Err(refused(format!(
                     "bundle state mount destination {BUNDLE_STATE_ISOLATION_DESTINATION} overlaps \
@@ -7585,8 +7584,7 @@ fn validate_writable_mount(
             && validation.canonical_checkpoint_dir == Some(path);
         let is_exact_daemon_state_root = mount_authority == WritableMountAuthority::DaemonStateRoot
             && validation.canonical_state_root == Some(path);
-        let is_exact_bundle_state_home = mount_authority
-            == WritableMountAuthority::BundleStateHome
+        let is_exact_bundle_state_home = mount_authority == WritableMountAuthority::BundleStateHome
             && validation.canonical_bundle_state_home == Some(path);
         if paths_overlap(path, app_root)
             && !is_exact_runtime_workspace

@@ -132,7 +132,10 @@ fn run_export(argv: &[String], console: &crate::tty::Console) -> Result<()> {
         return Ok(());
     };
     let app_root = app_root(args.app_root.clone())?;
-    let output = args.output.to_str().ok_or_else(|| anyhow::anyhow!("--output is not UTF-8"))?;
+    let output = args
+        .output
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("--output is not UTF-8"))?;
     let arguments = ryeos_node::offline_operation::handlers::BundleStateExportArguments {
         bundle_id: args.bundle.clone(),
         namespace: args.namespace.clone(),
@@ -147,7 +150,13 @@ fn run_export(argv: &[String], console: &crate::tty::Console) -> Result<()> {
         BTreeMap::new(),
         BTreeMap::new(),
     )?;
-    report(console, args.json, "export", &applied.result, &applied.receipt.digest()?)
+    report(
+        console,
+        args.json,
+        "export",
+        &applied.result,
+        &applied.receipt.digest()?,
+    )
 }
 
 fn run_import(argv: &[String], console: &crate::tty::Console) -> Result<()> {
@@ -169,7 +178,13 @@ fn run_import(argv: &[String], console: &crate::tty::Console) -> Result<()> {
         BTreeMap::from([("archive".to_owned(), archive)]),
         BTreeMap::new(),
     )?;
-    report(console, args.json, "import", &applied.result, &applied.receipt.digest()?)
+    report(
+        console,
+        args.json,
+        "import",
+        &applied.result,
+        &applied.receipt.digest()?,
+    )
 }
 
 fn run_remove(argv: &[String], console: &crate::tty::Console) -> Result<()> {
@@ -193,5 +208,11 @@ fn run_remove(argv: &[String], console: &crate::tty::Console) -> Result<()> {
         BTreeMap::new(),
         BTreeMap::new(),
     )?;
-    report(console, args.json, "remove", &applied.result, &applied.receipt.digest()?)
+    report(
+        console,
+        args.json,
+        "remove",
+        &applied.result,
+        &applied.receipt.digest()?,
+    )
 }

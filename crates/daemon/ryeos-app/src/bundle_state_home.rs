@@ -224,10 +224,11 @@ pub fn open_or_create(
     identity: &NodeIdentity,
     generation: &str,
 ) -> Result<OpenedStateHome, StateHomeRefusal> {
-    ryeos_state::objects::validate_bundle_identifier("bundle_id", bundle_id)
-        .map_err(|error| StateHomeRefusal::NamespaceInvalid {
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", bundle_id).map_err(|error| {
+        StateHomeRefusal::NamespaceInvalid {
             detail: format!("{error:#}"),
-        })?;
+        }
+    })?;
     validate_state_home_segment("namespace", namespace)
         .map_err(|detail| StateHomeRefusal::NamespaceInvalid { detail })?;
 
@@ -281,11 +282,13 @@ pub fn open_or_create(
                 "open namespace `{namespace}` of bundle `{bundle_id}`: {error:#}"
             ))
         })?;
-    namespace_dir.require_owner_private_directory().map_err(|error| {
-        unavailable(format!(
-            "namespace `{namespace}` of bundle `{bundle_id}`: {error:#}"
-        ))
-    })?;
+    namespace_dir
+        .require_owner_private_directory()
+        .map_err(|error| {
+            unavailable(format!(
+                "namespace `{namespace}` of bundle `{bundle_id}`: {error:#}"
+            ))
+        })?;
     bundle_dir
         .sync()
         .and_then(|()| root.sync())
@@ -402,9 +405,8 @@ pub fn inventory(app_root: &Path, node_key: &VerifyingKey) -> Result<Vec<HomeInv
                         .require_owner_enclosed_tree_bounded(INVENTORY_BUDGET, INVENTORY_MAX_BYTES)
                     {
                         Ok(total) => bytes = Some(total),
-                        Err(error) => ns_problems.push(format!(
-                            "namespace is not an owner-private tree: {error:#}"
-                        )),
+                        Err(error) => ns_problems
+                            .push(format!("namespace is not an owner-private tree: {error:#}")),
                     }
                 }
                 Ok(None) => ns_problems.push(format!("`{name}` is not a directory")),
@@ -474,7 +476,9 @@ mod tests {
             lillux::PinnedDirectory::open(&root_path(app.path()).join("central-auth"))
                 .unwrap()
                 .unwrap(),
-            lillux::PinnedDirectory::open(&opened.path).unwrap().unwrap(),
+            lillux::PinnedDirectory::open(&opened.path)
+                .unwrap()
+                .unwrap(),
         ] {
             dir.require_owner_private_directory().unwrap();
         }
@@ -516,8 +520,8 @@ mod tests {
         // A record rewritten for another bundle fails to verify.
         let original = std::fs::read_to_string(&record_path).unwrap();
         std::fs::write(&record_path, original.replace("gen-1", "gen-evil")).unwrap();
-        let refusal = open_or_create(app.path(), "central-auth", "realm-a", &id, "gen-3")
-            .unwrap_err();
+        let refusal =
+            open_or_create(app.path(), "central-auth", "realm-a", &id, "gen-3").unwrap_err();
         assert_eq!(refusal.code(), "bundle_state_home_unavailable");
         let homes = inventory(app.path(), id.verifying_key()).unwrap();
         assert!(matches!(homes[0].record, RecordState::Invalid(_)));
@@ -549,8 +553,8 @@ mod tests {
         authorize_caller(&wildcard, "central-auth", "realm-b", "fp:caller").unwrap();
         authorize_caller(&["*".to_owned()], "central-auth", "realm-b", "fp:operator").unwrap();
 
-        let denied = authorize_caller(&granted, "central-auth", "realm-b", "fp:caller")
-            .unwrap_err();
+        let denied =
+            authorize_caller(&granted, "central-auth", "realm-b", "fp:caller").unwrap_err();
         assert_eq!(denied.code(), "bundle_state_namespace_denied");
         let message = denied.to_string();
         assert!(
@@ -575,8 +579,8 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let id = identity(keys.path());
         for bad in ["", "..", "a/b", "A", "-x", ".hidden", "a\0b"] {
-            let refusal = open_or_create(app.path(), "central-auth", bad, &id, "gen-1")
-                .unwrap_err();
+            let refusal =
+                open_or_create(app.path(), "central-auth", bad, &id, "gen-1").unwrap_err();
             assert_eq!(refusal.code(), "bundle_state_namespace_invalid", "{bad:?}");
         }
         let refusal = open_or_create(app.path(), "../escape", "ok", &id, "gen-1").unwrap_err();

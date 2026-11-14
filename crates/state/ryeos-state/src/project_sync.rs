@@ -833,7 +833,9 @@ mod tests {
             );
             assert!(matches!(
                 classify_project_ai_path(path, None),
-                ProjectAiPathClass::NodeOwned { prefix: ".ai/state" }
+                ProjectAiPathClass::NodeOwned {
+                    prefix: ".ai/state"
+                }
             ));
         }
         // The project manifest validator refuses a manifest that carries a home.

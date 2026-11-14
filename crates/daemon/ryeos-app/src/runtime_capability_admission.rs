@@ -56,8 +56,12 @@ pub fn mint_runtime_capability_caps(
     // (2) Authority upper bound comes from the signed manifest at the exact
     // provenance boundary that supplied the item (see
     // `authoritative_manifest`).
-    let manifest =
-        authoritative_manifest(resolved_item, effective_trust_class, engine, &effective_bundle_id)?;
+    let manifest = authoritative_manifest(
+        resolved_item,
+        effective_trust_class,
+        engine,
+        &effective_bundle_id,
+    )?;
     manifest.runtime_authority.validate()?;
 
     // Manifest-declared caps form the upper bound. Cap strings come from the
@@ -114,10 +118,11 @@ pub fn mint_state_home_cap(
     let Some(requires_value) = requires_value else {
         return Ok(None);
     };
-    let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
-        .map_err(|detail| StateHomeRefusal::NamespaceInvalid {
+    let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value).map_err(
+        |detail| StateHomeRefusal::NamespaceInvalid {
             detail: format!("invalid `requires.capabilities`: {detail}"),
-        })?;
+        },
+    )?;
     let Some(requirement) = reqs.manifest.runtime_authority.state_home.as_ref() else {
         return Ok(None);
     };

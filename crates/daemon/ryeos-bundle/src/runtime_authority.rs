@@ -178,7 +178,11 @@ pub fn project_snapshot_cap(op: &ProjectSnapshotOperation) -> String {
 
 /// Build the access capability the daemon mints into a launch whose item
 /// requested a state home the signed manifest backs (item side).
-pub fn bundle_state_access_cap(bundle_id: &str, namespace: &str, access: StateHomeAccess) -> String {
+pub fn bundle_state_access_cap(
+    bundle_id: &str,
+    namespace: &str,
+    access: StateHomeAccess,
+) -> String {
     canonical_cap(
         CAP_KIND_BUNDLE_STATE,
         &format!("{bundle_id}/{namespace}"),
@@ -1778,8 +1782,8 @@ mod tests {
             &fixed,
             "ryeos.write.bundle-state.central-auth/realm-b"
         ));
-        let open = state_home_manifest(StateHomeNamespaces::LaunchParam)
-            .declared_caps("central-auth");
+        let open =
+            state_home_manifest(StateHomeNamespaces::LaunchParam).declared_caps("central-auth");
         assert!(manifest_backs_requested_cap(&open, &requested));
         assert!(!manifest_backs_requested_cap(
             &open,
@@ -1898,8 +1902,13 @@ mod tests {
             vec!["a".to_owned(), "a".to_owned()],
             vec!["Upper".to_owned()],
         ] {
-            let decls = state_home_manifest(StateHomeNamespaces::Fixed { names: names.clone() });
-            assert!(decls.validate().is_err(), "must refuse fixed names {names:?}");
+            let decls = state_home_manifest(StateHomeNamespaces::Fixed {
+                names: names.clone(),
+            });
+            assert!(
+                decls.validate().is_err(),
+                "must refuse fixed names {names:?}"
+            );
         }
         assert!(
             state_home_manifest(StateHomeNamespaces::Fixed {
@@ -1935,8 +1944,7 @@ mod tests {
             }
         );
         let open: RuntimeAuthorityDecls =
-            serde_yaml::from_str("state_home:\n  namespaces:\n    kind: launch_param\n")
-                .unwrap();
+            serde_yaml::from_str("state_home:\n  namespaces:\n    kind: launch_param\n").unwrap();
         assert_eq!(
             open.state_home.unwrap().namespaces,
             StateHomeNamespaces::LaunchParam
