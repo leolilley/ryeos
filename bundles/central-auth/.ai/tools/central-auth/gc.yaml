@@ -1,10 +1,10 @@
-# ryeos:signed:2026-11-14T07:05:20Z:d681bea9a1690cae7c313f4ac41755c58ee3659880ce807f474db2036ddf3cea:/MiCFpoCBF+bSgwHzQqfLSwZ5MwOjO8LE39zyyMgoCmbIxMKqyvmqtqvmpIWnGRg3Z8HxyC4ozX0Tjg+WZaiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T11:18:27Z:5903dbd460255301d89a5935e126ffe461962ccbbd8a47d4b2a79dca475d87ce:Da4lljVAuRYtS89fK9zvBi8V0RgExN5bhBzlka37Q07lJlVhnmq2uYIzTga5Zyo5e3pcNfLTT87YTekCts1ECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
-category: "ryeos/central-auth"
+category: "central-auth"
 name: "gc"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
-required_caps: ["ryeos.execute.tool.ryeos.central-auth.gc"]
+required_caps: ["ryeos.execute.tool.central-auth.gc"]
 description: "Full sweep: remove expired sessions, exhausted or expired invites, and stale login-failure records. Login and verify-session also purge a bounded sample on every call."
 
 requires:

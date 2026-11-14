@@ -1,11 +1,11 @@
-# ryeos:signed:2026-11-14T07:05:20Z:e2bf5a0784e5c0116d06d949623947aaaa4f961b1f8526aa5ad3a419357257e4:FhTZshRQr9S7I5bKnBX8k6pad7U7XTt9xTQLOfsVGnflXX8ro7L5dOFnxTol6twaLJk4Oe/WudJ8flMxwfhEBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T11:18:27Z:3b4528c3324afbf39cf7d48c2ae3958dbc8adbe507cf0700394f8b4c4917917b:WRcfFEYLNoq/O6ny3zsUN4fRHgtpRlXReHFdoaPeoxXJRHVkxOAyqL+t3v2C8pYU0oskduAOHxoTf9PSoEQQBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
-category: "ryeos/central-auth"
-name: "verify-session"
+category: "central-auth"
+name: "revoke-session"
 executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
-required_caps: ["ryeos.execute.tool.ryeos.central-auth.verify-session"]
-description: "Verify a session token and optionally check one required capability."
+required_caps: ["ryeos.execute.tool.central-auth.revoke-session"]
+description: "Revoke one session token."
 
 requires:
   capabilities:
@@ -20,7 +20,7 @@ config:
   command: "python3"
   args:
     - "${tool_dir}/lib/central_auth.py"
-    - "verify-session"
+    - "revoke-session"
   input_data: "${params_json}"
   timeout_secs: 15
 
@@ -31,7 +31,5 @@ config_schema:
       type: string
       description: "Realm/app namespace, e.g. example-app."
     session_token:
-      type: string
-    required_capability:
       type: string
   required: [realm_id, session_token]

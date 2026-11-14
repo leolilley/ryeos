@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-14T07:05:20Z:f2ccf14c4806587620dc15fd41d09081fd12112f2dd18846d9d876f34690536e:6dzLfyQ8nafPTzu9RiKJjwQrvjisvBulvEUMXySN0sRvx5+Glo1GeivtAq7ILKhig5rfIRyFGO6AwcPpuQUtBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T11:18:27Z:3dc0a296174019a668874cbb2e9df8ddd957edbea2aece28b92c1467102dc9b3:+p9bUZkHgOWDfX7uE0Ij1iaVcXX9AIlldkqYU4GrRW/1kIJpsdbqJIBuKypa4I9pWVV6Kh++Pt1iEYz9nB/XBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
-#   category: ryeos/central-auth/lib
+#   category: central-auth/lib
 #   version: "0.1.0"
 #   tool_type: python
 #   executor_id: null

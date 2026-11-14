@@ -12,7 +12,6 @@ MODULE_PATH = (
     Path(__file__).resolve().parents[1]
     / ".ai"
     / "tools"
-    / "ryeos"
     / "central-auth"
     / "lib"
     / "central_auth.py"
