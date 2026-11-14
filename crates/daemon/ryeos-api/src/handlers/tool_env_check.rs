@@ -137,13 +137,12 @@ pub async fn handle(
         plan_ctx: plan_ctx.clone(),
         requested_call: None,
     };
-    let applicability =
-        ryeos_executor::dispatch::launch_contract_applicability(
-            &req.item_ref,
-            &exec_ctx,
-            state.isolation.as_ref(),
-        )
-        .map_err(map_dispatch_error)?;
+    let applicability = ryeos_executor::dispatch::launch_contract_applicability(
+        &req.item_ref,
+        &exec_ctx,
+        state.isolation.as_ref(),
+    )
+    .map_err(map_dispatch_error)?;
     let prepared = ryeos_executor::dispatch::prepare_launch_contract(
         &applicability,
         &verified.resolved,

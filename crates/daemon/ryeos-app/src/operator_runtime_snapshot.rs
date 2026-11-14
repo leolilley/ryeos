@@ -154,8 +154,7 @@ fn current_captured_product_source(
         &witness.evidence.manifest_hash,
         limits.max_object_bytes,
     )?;
-    let identity =
-        derive_guest_owner_runtime_manifest_identity(&manifest)?;
+    let identity = derive_guest_owner_runtime_manifest_identity(&manifest)?;
     ensure!(
         identity.manifest_hash == witness.evidence.manifest_hash
             && witness.attestation_hash == witness_hash,

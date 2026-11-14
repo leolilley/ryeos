@@ -487,7 +487,9 @@ pub(crate) mod tests {
             verifier_ref: "tool:fixtures/qualify_runtime".into(),
             subject_declaration_id: "runtime".into(),
             allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
-            minimum_verifier_process_settlement: Some(VerifierProcessSettlementAuthority::ScopeEmpty),
+            minimum_verifier_process_settlement: Some(
+                VerifierProcessSettlementAuthority::ScopeEmpty,
+            ),
             verifier_parameters: json!({"scope":"bounded_fixture"}),
             consumer_execution_context: None,
             producer_scenarios: BTreeMap::new(),

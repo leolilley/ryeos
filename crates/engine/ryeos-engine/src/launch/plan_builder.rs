@@ -3387,8 +3387,14 @@ config:
                 selected,
             )
         };
-        assert_eq!(key(Some("protocol:x/contained")), key(Some("protocol:x/contained")));
-        assert_ne!(key(Some("protocol:x/contained")), key(Some("protocol:x/trusted")));
+        assert_eq!(
+            key(Some("protocol:x/contained")),
+            key(Some("protocol:x/contained"))
+        );
+        assert_ne!(
+            key(Some("protocol:x/contained")),
+            key(Some("protocol:x/trusted"))
+        );
         assert_ne!(key(Some("protocol:x/contained")), key(None));
     }
 

@@ -509,9 +509,8 @@ pub(crate) mod tests {
     ) {
         let (mut source, mut policy) = fixture();
         policy.policy.consumer_execution_context = None;
-        policy.policy.minimum_verifier_process_settlement = Some(
-            super::super::VerifierProcessSettlementAuthority::ScopeEmpty,
-        );
+        policy.policy.minimum_verifier_process_settlement =
+            Some(super::super::VerifierProcessSettlementAuthority::ScopeEmpty);
         let scenario = ProductQualificationProducerScenario {
             recipe_ref: None,
             remote_verifier: Some(source.selection.clone()),

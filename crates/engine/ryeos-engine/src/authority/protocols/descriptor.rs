@@ -810,7 +810,11 @@ mod tests {
         assert!(serde_json::from_value::<ProtocolDescriptor>(value).is_err());
     }
 
-    fn holding_value(guarantees: serde_json::Value, authority: &str, settlement: &str) -> ProtocolHolding {
+    fn holding_value(
+        guarantees: serde_json::Value,
+        authority: &str,
+        settlement: &str,
+    ) -> ProtocolHolding {
         serde_json::from_value(serde_json::json!({
             "requires_guarantees": guarantees,
             "filesystem_authority": authority,
@@ -943,7 +947,11 @@ mod tests {
         let mut unknown = value.clone();
         unknown["holding"]["extra"] = serde_json::json!(true);
         assert!(serde_json::from_value::<ProtocolDescriptor>(unknown).is_err());
-        for field in ["requires_guarantees", "filesystem_authority", "root_settlement"] {
+        for field in [
+            "requires_guarantees",
+            "filesystem_authority",
+            "root_settlement",
+        ] {
             let mut missing = value.clone();
             missing["holding"].as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<ProtocolDescriptor>(missing).is_err());

@@ -5144,11 +5144,8 @@ pub async fn run_and_wait(
     {
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
-    let protocol = resolved_terminator_protocol(
-        &engine,
-        &params.resolved,
-        wait_launch_isolation.as_ref(),
-    )?;
+    let protocol =
+        resolved_terminator_protocol(&engine, &params.resolved, wait_launch_isolation.as_ref())?;
     let stdout_shape = protocol.descriptor.stdout.shape;
     let wait_cas_guard = state
         .state_store
@@ -6312,11 +6309,8 @@ pub async fn run_detached(
     {
         prepared_plan.ensure_no_project_local_interpreter(params.provenance.effective_path())?;
     }
-    let protocol = resolved_terminator_protocol(
-        &engine,
-        &params.resolved,
-        bg_launch_isolation.as_ref(),
-    )?;
+    let protocol =
+        resolved_terminator_protocol(&engine, &params.resolved, bg_launch_isolation.as_ref())?;
     let bg_cas_guard = state
         .state_store
         .pinned_state_authority()?

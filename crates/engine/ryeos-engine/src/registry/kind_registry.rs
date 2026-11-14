@@ -640,10 +640,14 @@ impl SubprocessProtocolDecl {
             allowed,
         } = self
         else {
-            return self.resolve(composed).map(|protocol_ref| vec![protocol_ref]);
+            return self
+                .resolve(composed)
+                .map(|protocol_ref| vec![protocol_ref]);
         };
         let Some(set_path) = from_composed_set else {
-            return self.resolve(composed).map(|protocol_ref| vec![protocol_ref]);
+            return self
+                .resolve(composed)
+                .map(|protocol_ref| vec![protocol_ref]);
         };
         let scalar = composed_path(composed, from_composed);
         let list = composed_path(composed, set_path);
@@ -663,7 +667,9 @@ impl SubprocessProtocolDecl {
                 ));
             }
             (Some(_), None) => {
-                return self.resolve(composed).map(|protocol_ref| vec![protocol_ref]);
+                return self
+                    .resolve(composed)
+                    .map(|protocol_ref| vec![protocol_ref]);
             }
             (None, Some(list)) => list,
         };
@@ -6129,7 +6135,10 @@ execution:
                 "execution_protocols": ["protocol:example/second"],
             }))
             .unwrap_err();
-        assert!(both.contains("exactly one") && both.contains("both"), "{both}");
+        assert!(
+            both.contains("exactly one") && both.contains("both"),
+            "{both}"
+        );
         let neither = protocol.candidates(&serde_json::json!({})).unwrap_err();
         assert!(
             neither.contains("exactly one") && neither.contains("neither"),
@@ -6153,7 +6162,10 @@ execution:
             "protocol:example/first",
             "protocol:example/first"
         ])));
-        assert!(refused(serde_json::json!(vec!["protocol:example/first"; 9])));
+        assert!(refused(serde_json::json!(vec![
+            "protocol:example/first";
+            9
+        ])));
     }
 
     #[test]
@@ -6337,9 +6349,11 @@ execution:
                 .unwrap()
                 .unwrap();
         assert_eq!(selected.protocol.canonical_ref, "protocol:example/first");
-        assert!(crate::protocols::select_listed_protocol(&exec, &scalar, &registry, &isolation)
-            .unwrap()
-            .is_none());
+        assert!(
+            crate::protocols::select_listed_protocol(&exec, &scalar, &registry, &isolation)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             crate::protocols::project_node_filesystem_authority_ceiling(
                 &exec, &scalar, &registry, &isolation
@@ -6393,7 +6407,10 @@ execution:
             .project_execution_posture(&listed)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("lists several admissible protocols"), "{error}");
+        assert!(
+            error.contains("lists several admissible protocols"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -34,8 +34,6 @@ mod reservation;
 pub const MAX_FINALIZATION_ATTEMPTS: u8 = 4;
 
 pub use account::NativeCapacityAccountBinding;
-#[cfg(test)]
-pub(crate) use account::reissue::leave_outstanding_debit;
 pub(crate) use account::prepare_initial_capacity_binding;
 pub use account::reanchor::{
     CapacityPolicyAmendmentCheck, CapacityPolicyAmendmentEvidence, CapacityPolicyAmendmentReport,
@@ -43,6 +41,8 @@ pub use account::reanchor::{
     ReanchorReport, ReanchorRequest, amend_capacity_policy, check_capacity_policy_amendment,
     read_capacity_policy_amendments, read_capacity_reanchors, reanchor_capacity,
 };
+#[cfg(test)]
+pub(crate) use account::reissue::leave_outstanding_debit;
 pub use account::reissue::{
     CapacityReissueEvidence, ReissueReport, ReissueRequest, read_capacity_reissuances,
     reissue_capacity,

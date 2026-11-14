@@ -758,7 +758,10 @@ mod tests {
             (" protocol:ryeos/core/x", "node_policy"),
             ("protocol:ryeos/core/x", "Node Policy"),
         ] {
-            assert!(Holding::new(protocol, authority).is_err(), "{protocol:?} {authority:?}");
+            assert!(
+                Holding::new(protocol, authority).is_err(),
+                "{protocol:?} {authority:?}"
+            );
         }
         assert!(Holding::new(&format!("protocol:{}", "a".repeat(300)), "node_policy").is_err());
     }

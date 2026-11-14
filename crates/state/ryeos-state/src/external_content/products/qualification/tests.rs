@@ -818,7 +818,10 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
     let mut evidence = evidence();
     evidence.verifier.process_settlement_authority =
         Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
-    evidence.origin_holdings.verifier.process_settlement_authority =
+    evidence
+        .origin_holdings
+        .verifier
+        .process_settlement_authority =
         VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
     assert!(evidence.validate().is_err());
     evidence
@@ -829,8 +832,10 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
     evidence.validate().unwrap();
     evidence.verifier.process_settlement_authority =
         Some(VerifierProcessSettlementAuthority::ScopeEmpty);
-    evidence.origin_holdings.verifier.process_settlement_authority =
-        VerifierProcessSettlementAuthority::ScopeEmpty;
+    evidence
+        .origin_holdings
+        .verifier
+        .process_settlement_authority = VerifierProcessSettlementAuthority::ScopeEmpty;
     evidence.validate().unwrap();
     evidence.verifier.process_settlement_authority = None;
     assert!(evidence.validate().is_err());
@@ -3196,8 +3201,7 @@ fn origin_holdings_are_required_exact_and_part_of_the_semantic_identity() {
     assert!(ProductQualificationEvidence::from_value(&unknown).is_err());
 
     let mut wrong_protocol = valid.clone();
-    wrong_protocol.origin_holdings.verifier.execution_protocol =
-        "protocol:fixtures/other".into();
+    wrong_protocol.origin_holdings.verifier.execution_protocol = "protocol:fixtures/other".into();
     assert!(
         wrong_protocol
             .validate()
@@ -3231,7 +3235,10 @@ fn origin_holdings_are_required_exact_and_part_of_the_semantic_identity() {
     assert!(no_worker.validate().is_err());
 
     let mut changed_holding = valid.clone();
-    changed_holding.origin_holdings.verifier.filesystem_authority = "captured_execution".into();
+    changed_holding
+        .origin_holdings
+        .verifier
+        .filesystem_authority = "captured_execution".into();
     assert_ne!(
         valid.semantic_identity_value().unwrap(),
         changed_holding.semantic_identity_value().unwrap()

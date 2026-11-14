@@ -27,7 +27,8 @@ pub(crate) struct PreparedExternalQualificationLocalSession {
     pub(crate) protocol: PersistentSessionProtocol,
     /// The protocol the node selected for this Worker and its holding's
     /// filesystem authority, retained with the process row at attachment.
-    pub(crate) selected_holding: ryeos_app::external_qualification_local::QualificationWorkerSelectedHolding,
+    pub(crate) selected_holding:
+        ryeos_app::external_qualification_local::QualificationWorkerSelectedHolding,
 }
 
 /// The plan, privately copied inputs, and exact source/cache/workspace lifelines stay

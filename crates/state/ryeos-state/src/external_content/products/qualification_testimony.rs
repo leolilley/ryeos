@@ -35,7 +35,8 @@ use serde_json::Value;
 
 use super::qualification::{
     OriginHolding, ProductQualificationEvidence, ProductQualificationPolicySource,
-    ProductQualificationResult, ProductQualificationVerifier, bounded, exact_coordinate, validate_claims,
+    ProductQualificationResult, ProductQualificationVerifier, bounded, exact_coordinate,
+    validate_claims,
 };
 use super::qualification_publication::QualificationCoordinate;
 use super::transfer::ProductWitnessSource;
@@ -63,11 +64,10 @@ pub const REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE: &str =
 /// Namespaces that held heads of superseded acceptance evidence. Nothing
 /// resolves an acceptance through them; they are read only to name what an
 /// operator must accept again.
-pub const RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES: &[&str] =
-    &[
-        "remote-qualification-testimonies",
-        "remote-qualification-acceptances-v4",
-    ];
+pub const RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES: &[&str] = &[
+    "remote-qualification-testimonies",
+    "remote-qualification-acceptances-v4",
+];
 pub const MAX_REMOTE_QUALIFICATION_TESTIMONY_BODY_BYTES: usize = 128 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES: usize = 256 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_BYTES: usize = 16 * 1024;
@@ -941,10 +941,12 @@ pub fn admit(
     if body.lane == QualificationLane::Product {
         let holdings = &evidence.product()?.origin_holdings;
         let accepted = |holding: &OriginHolding| {
-            policy.accepted_origin_holdings.binary_search(holding).is_ok()
+            policy
+                .accepted_origin_holdings
+                .binary_search(holding)
+                .is_ok()
         };
-        if !accepted(&holdings.verifier) || holdings.worker.as_ref().is_some_and(|w| !accepted(w))
-        {
+        if !accepted(&holdings.verifier) || holdings.worker.as_ref().is_some_and(|w| !accepted(w)) {
             bail!("origin holding is not accepted by this site policy");
         }
     }
@@ -1337,8 +1339,10 @@ pub(crate) mod tests {
         unsorted.accepted_origin_holdings.reverse();
         assert!(unsorted.validate().is_err());
         let mut duplicate = sorted.clone();
-        duplicate.accepted_origin_holdings =
-            vec![holding("protocol:fixtures/a"), holding("protocol:fixtures/a")];
+        duplicate.accepted_origin_holdings = vec![
+            holding("protocol:fixtures/a"),
+            holding("protocol:fixtures/a"),
+        ];
         assert!(duplicate.validate().is_err());
         let mut too_many = sorted.clone();
         too_many.accepted_origin_holdings = (0..=MAX_REMOTE_QUALIFICATION_ACCEPTED_ORIGIN_HOLDINGS)

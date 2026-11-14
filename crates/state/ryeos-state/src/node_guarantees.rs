@@ -167,7 +167,10 @@ mod tests {
             contained.contains("any_of(termination:scope, termination:pid_namespace)"),
             "{contained}"
         );
-        assert!(!contained.contains("isolation:enforced is not held"), "{contained}");
+        assert!(
+            !contained.contains("isolation:enforced is not held"),
+            "{contained}"
+        );
         let trusted = unmet(&trusted(), &node).join(" | ");
         assert!(
             trusted.contains("sessions:trusted_process_group is not held"),
@@ -221,7 +224,8 @@ mod tests {
             .is_err()
         );
         assert!(validate_required_guarantees(&requires(json!(["isolation:enforced"]))).is_ok());
-        let too_many = vec![CapabilityRequirement::Name("a".to_owned()); MAX_REQUIRED_GUARANTEES + 1];
+        let too_many =
+            vec![CapabilityRequirement::Name("a".to_owned()); MAX_REQUIRED_GUARANTEES + 1];
         assert!(validate_required_guarantees(&too_many).is_err());
     }
 }

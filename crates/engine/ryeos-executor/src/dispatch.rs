@@ -4150,14 +4150,12 @@ async fn dispatch_inner(
                 evidence.applicability().clone()
             }
             _ => match request.root_admission.as_ref() {
-                Some(admission) => {
-                    launch_contract_applicability_from_admission(
-                        item_ref,
-                        ctx,
-                        state.isolation.as_ref(),
-                        admission,
-                    )?
-                }
+                Some(admission) => launch_contract_applicability_from_admission(
+                    item_ref,
+                    ctx,
+                    state.isolation.as_ref(),
+                    admission,
+                )?,
                 None => launch_contract_applicability(item_ref, ctx, state.isolation.as_ref())?,
             },
         };

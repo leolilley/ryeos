@@ -85,8 +85,7 @@ impl CheckerProgramSelector {
             "unsupported checker program/wire"
         );
         ensure!(
-            self.max_header_bytes == 2 * 1024 * 1024
-                && self.max_response_bytes == 64 * 1024,
+            self.max_header_bytes == 2 * 1024 * 1024 && self.max_response_bytes == 64 * 1024,
             "checker safety bounds changed"
         );
         for id in [&self.runtime.id, &self.code.id] {

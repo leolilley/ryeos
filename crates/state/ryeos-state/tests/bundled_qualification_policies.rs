@@ -288,12 +288,21 @@ fn each_shipped_protocol_holding_agrees_with_its_session_block_and_its_peer() {
     // A session protocol's holding is implied by its own session block.
     let session = |name: &str| core_protocol(name)["session"].clone();
     let contained_session = session("contained_structured_session");
-    assert_eq!(contained_session["cleanup_authority"], "descendant_containment");
-    assert_eq!(contained_session["workspace_authority"], "ephemeral_scratch");
+    assert_eq!(
+        contained_session["cleanup_authority"],
+        "descendant_containment"
+    );
+    assert_eq!(
+        contained_session["workspace_authority"],
+        "ephemeral_scratch"
+    );
     assert_eq!(contained_authority, "captured_execution");
     assert_eq!(contained_settlement, Settlement::ContainmentEmpty);
     let trusted_session = session("trusted_structured_session");
-    assert_eq!(trusted_session["cleanup_authority"], "trusted_process_group");
+    assert_eq!(
+        trusted_session["cleanup_authority"],
+        "trusted_process_group"
+    );
     assert_eq!(trusted_session["workspace_authority"], "runtime_workspace");
     assert_eq!(trusted_authority, "node_policy");
     assert_eq!(trusted_settlement, Settlement::TrustedProcessGroupAbsent);
@@ -304,11 +313,17 @@ fn each_shipped_protocol_holding_agrees_with_its_session_block_and_its_peer() {
     let (callback_contained, authority, settlement) =
         holding("qualification_consumer_callback_contained");
     assert_eq!(callback_contained, contained);
-    assert_eq!((authority.as_str(), settlement), ("captured_execution", contained_settlement));
+    assert_eq!(
+        (authority.as_str(), settlement),
+        ("captured_execution", contained_settlement)
+    );
     let (callback_trusted, authority, settlement) =
         holding("qualification_consumer_callback_trusted");
     assert_eq!(callback_trusted, trusted);
-    assert_eq!((authority.as_str(), settlement), ("node_policy", trusted_settlement));
+    assert_eq!(
+        (authority.as_str(), settlement),
+        ("node_policy", trusted_settlement)
+    );
     assert_ne!(contained_authority, trusted_authority);
     assert!(!trusted_settlement.satisfies(contained_settlement));
     assert!(Settlement::ScopeEmpty.satisfies(contained_settlement));
@@ -325,7 +340,11 @@ fn each_shipped_protocol_holding_agrees_with_its_session_block_and_its_peer() {
     ] {
         contained_node.provide(name, ProofSource::Measured, "test", "held");
     }
-    for name in ["termination:scope", "recovery:scope", "sessions:trusted_process_group"] {
+    for name in [
+        "termination:scope",
+        "recovery:scope",
+        "sessions:trusted_process_group",
+    ] {
         contained_node.refuse(name, format!("{name} is not held"));
     }
     let mut trusted_node = HostCapabilities::default();
@@ -358,13 +377,21 @@ fn each_shipped_protocol_holding_agrees_with_its_session_block_and_its_peer() {
 #[test]
 fn shipped_verifier_contract_pins_one_worker_and_names_no_settlement() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let path = root.join("bundles/codex/.ai/tools/codex/qualification/consumer-runtime-verifier.yaml");
+    let path =
+        root.join("bundles/codex/.ai/tools/codex/qualification/consumer-runtime-verifier.yaml");
     let document: Value = serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
     let contract: Value =
         serde_json::from_str(document["config"]["args"][2].as_str().unwrap()).unwrap();
-    assert_eq!(contract["target"]["worker_ref"], "worker:codex/external-hosted-authoring");
+    assert_eq!(
+        contract["target"]["worker_ref"],
+        "worker:codex/external-hosted-authoring"
+    );
     // The settlement the verifier root must reach comes from its selected
     // protocol's holding, not from its signed product contract.
-    assert!(contract["semantic_checker"].get("required_root_settlement").is_none());
+    assert!(
+        contract["semantic_checker"]
+            .get("required_root_settlement")
+            .is_none()
+    );
     assert!(contract["target"].get("required_root_settlement").is_none());
 }

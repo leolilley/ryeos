@@ -2691,8 +2691,10 @@ fn validate_retained_session_process_control(
     capsule: &AdmittedPersistentSessionCapsule,
     session: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
 ) -> Result<()> {
-    let descriptor =
-        ryeos_app::persistent_session_admission::retained_session_descriptor(&state.engine, capsule)?;
+    let descriptor = ryeos_app::persistent_session_admission::retained_session_descriptor(
+        &state.engine,
+        capsule,
+    )?;
     if let Some(holding) = descriptor.holding.as_ref() {
         let reported = state.isolation.reported_guarantees();
         ryeos_engine::protocols::require_holding_met(

@@ -5875,7 +5875,10 @@ mod captured_verifier_admission_tests {
         );
         let contained = protocol("qualification_consumer_callback_contained.yaml");
         assert_eq!(
-            contained.holding.as_ref().map(|holding| holding.filesystem_authority),
+            contained
+                .holding
+                .as_ref()
+                .map(|holding| holding.filesystem_authority),
             Some(ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::CapturedExecution)
         );
         admit(&contained).unwrap();

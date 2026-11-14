@@ -988,8 +988,9 @@ product_qualification_policy:
 
     fn set(relationships: Vec<ProductRelationship>) -> ProductRelationships {
         ProductRelationships {
-            schema: ryeos_state::external_content::products::composition::PRODUCT_RELATIONSHIPS_SCHEMA
-                .into(),
+            schema:
+                ryeos_state::external_content::products::composition::PRODUCT_RELATIONSHIPS_SCHEMA
+                    .into(),
             relationships,
         }
     }
@@ -1025,7 +1026,9 @@ product_qualification_policy:
             .err()
             .context("an ambiguous join selected a relationship")?;
         ensure!(
-            refusal.to_string().contains("several product relationships"),
+            refusal
+                .to_string()
+                .contains("several product relationships"),
             "{refusal}"
         );
         Ok(())

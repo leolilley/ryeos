@@ -828,10 +828,13 @@ impl SealedRootExecutionRequest {
         let Some(purpose) = self.qualification.as_ref() else {
             return Ok(Requirement::None);
         };
-        let from_holding = selected_holding
-            .map(|holding| Requirement::for_settlement(holding.root_settlement));
+        let from_holding =
+            selected_holding.map(|holding| Requirement::for_settlement(holding.root_settlement));
         match (
-            purpose.policy_source.policy.minimum_verifier_process_settlement,
+            purpose
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement,
             from_holding,
         ) {
             (Some(minimum), from_holding) => Ok(Requirement::for_settlement(minimum)

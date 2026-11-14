@@ -50,7 +50,7 @@ pub fn select_protocol<'a>(
         && only.descriptor.holding.is_none()
     {
         return Ok(SelectedProtocol {
-            protocol: *only,
+            protocol: only,
             holding: None,
         });
     }
@@ -340,7 +340,10 @@ mod tests {
         let error = selected(&[TRUSTED.to_owned(), PLAIN.to_owned()], &held, &[])
             .unwrap_err()
             .to_string();
-        assert!(error.contains(PLAIN) && error.contains("no holding"), "{error}");
+        assert!(
+            error.contains(PLAIN) && error.contains("no holding"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -356,7 +359,8 @@ mod tests {
             ("termination:pid_namespace", ProofSource::Measured),
         ]);
         let registry = registry();
-        let selection = select_protocol(&pair(), &registry, NodeGuarantees::new(&held, &[])).unwrap();
+        let selection =
+            select_protocol(&pair(), &registry, NodeGuarantees::new(&held, &[])).unwrap();
         assert_eq!(selection.protocol.canonical_ref, CONTAINED);
         assert!(selection.holding.is_some());
     }
@@ -372,7 +376,10 @@ mod tests {
         // Enforced but uncontained, and not trusted: no candidate is met.
         let held = node(&[("isolation:enforced", ProofSource::Measured)]);
         let error = selected(&pair(), &held, &[]).unwrap_err().to_string();
-        assert!(error.contains(CONTAINED) && error.contains(TRUSTED), "{error}");
+        assert!(
+            error.contains(CONTAINED) && error.contains(TRUSTED),
+            "{error}"
+        );
         assert!(
             error.contains("any_of(termination:scope, termination:pid_namespace)"),
             "{error}"
@@ -423,7 +430,10 @@ mod tests {
         ]);
         let error = selected(&pair(), &both, &[]).unwrap_err().to_string();
         assert!(error.contains("more than one"), "{error}");
-        assert!(error.contains(CONTAINED) && error.contains(TRUSTED), "{error}");
+        assert!(
+            error.contains(CONTAINED) && error.contains(TRUSTED),
+            "{error}"
+        );
     }
 
     fn holding_of(registry: &ProtocolRegistry, protocol_ref: &str) -> ProtocolHolding {

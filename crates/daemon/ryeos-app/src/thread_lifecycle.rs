@@ -8243,12 +8243,9 @@ pub(super) fn build_execution_plan_for_request_with_logical_context(
     // item's resolution. It supplies the filesystem ceiling of an item that
     // lists several admissible protocols and keys the plan identity.
     let selected = select_planned_terminator_protocol(engine, resolved, isolation)?;
-    let filesystem_ceiling = project_execution_filesystem_authority_ceiling(
-        engine,
-        resolved,
-        selected.as_ref(),
-    )?
-    .intersect(parent_filesystem_ceiling);
+    let filesystem_ceiling =
+        project_execution_filesystem_authority_ceiling(engine, resolved, selected.as_ref())?
+            .intersect(parent_filesystem_ceiling);
     let mut plan = if let Some((root_source, logical_project_root)) = logical_context {
         engine
             .build_bundle_plan_from_captured_root_with_logical_project_root(

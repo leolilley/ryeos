@@ -1103,7 +1103,8 @@ fn verifier_origin_holding(
     else {
         bail!("qualification verifier has no retained direct closure");
     };
-    let settlement = observed.context("direct qualification verifier has no observed settlement")?;
+    let settlement =
+        observed.context("direct qualification verifier has no observed settlement")?;
     let body = lillux::signature::strip_signature_lines(protocol_descriptor_document);
     if lillux::signature::content_hash(&body) != *protocol_content_hash {
         bail!("qualification verifier retained protocol differs from its admitted identity");

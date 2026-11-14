@@ -878,7 +878,9 @@ impl ProductQualificationPolicy {
         ) {
             (None, Some(_)) | (Some(_), None) => {}
             (None, None) => {
-                bail!("qualification policy without a consumer context requires a minimum verifier settlement")
+                bail!(
+                    "qualification policy without a consumer context requires a minimum verifier settlement"
+                )
             }
             (Some(_), Some(_)) => {
                 bail!(
@@ -1529,8 +1531,7 @@ pub struct OriginHolding {
 impl OriginHolding {
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_canonical_unsuffixed_ref("origin holding protocol", &self.execution_protocol)?;
-        validate_name(&self.filesystem_authority)
-            .context("origin holding filesystem authority")?;
+        validate_name(&self.filesystem_authority).context("origin holding filesystem authority")?;
         Ok(())
     }
 }
@@ -1713,7 +1714,9 @@ impl ProductQualificationEvidence {
         }
         match (&self.consumer_content, &self.origin_holdings.worker) {
             (Some(_), Some(_)) | (None, None) => Ok(()),
-            (Some(_), None) => bail!("qualification consumer evidence has no Worker origin holding"),
+            (Some(_), None) => {
+                bail!("qualification consumer evidence has no Worker origin holding")
+            }
             (None, Some(_)) => bail!("qualification Worker origin holding has no consumer content"),
         }
     }
