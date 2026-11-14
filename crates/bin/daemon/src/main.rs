@@ -3783,8 +3783,11 @@ fn main() -> Result<()> {
     // Tokio's 2 MiB default while doing that work (the real-process test
     // harness has historically compensated with RUST_MIN_STACK). Make the
     // daemon's actual runtime contract explicit so direct debug and local
-    // qualification installs have the same safe floor as the harness.
-    const DAEMON_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024;
+    // qualification installs have the same safe floor as the harness. The
+    // native launch path (callback authority, host access and root admission
+    // projection) is one deep unoptimized future; 16 MiB is address space
+    // reserved per worker and committed only as it is touched.
+    const DAEMON_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
     let mut composition = DaemonSelectedComposition::bootstrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(DAEMON_WORKER_STACK_BYTES)
