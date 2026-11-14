@@ -29,7 +29,15 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let client = named_remote_client(&state, &req.remote, &ctx)?;
-    let result = client.vault_set(&req.name, &req.value).await;
+    let result = client
+        .vault_set(&req.name, &req.value)
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(crate::remote::client::map_remote_call_error(
+                error,
+                "remote vault-set",
+            ))
+        });
     drop(client);
     result
 }

@@ -166,6 +166,8 @@ async fn start_pair() -> Result<Pair> {
                 &u2,
                 &[
                     "ryeos.execute.service.remote/delegate",
+                    "ryeos.execute.service.remote/threads",
+                    "ryeos.execute.service.remote/vault-set",
                     THREADS_CAP,
                     "ryeos.execute.service.remote/delegation-revoke",
                 ],

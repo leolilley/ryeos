@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-13T20:05:09Z:544d449252f47f580ab428c32fb6b4338bda8e04ae84d19c1f616d551465655a:ctE7apesrN05UATZrGZx7ZFZyqdIYWyb7Y4bRkBqWa8YFWRPRxvLXF3Zk8YHLUI6o8cQtKIuRcAT67tsTMyPDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T01:40:30Z:fa9b946b64ee3385716ef619000efe724ad503c6fe2297e9c0eaca5a1a1aab58:S6z6R9IBc1nmu9O3iYLJfjbhEy2Wue1p9McRDn6YV43dHQ6M1fOXYNe1jD2usu3NEkwBEYNiqNlz5apvjFluDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
-endpoint: objects.get_any
+endpoint: objects.get-any
 required_caps: ["ryeos.execute.service.objects/get-any"]
 schema:
   object_hashes: string[]?

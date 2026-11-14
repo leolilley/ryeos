@@ -253,6 +253,26 @@ pub fn pin_signer_with_node_key(
     role: crate::trust::SignerRole,
     scope: crate::trust::SignerScope,
 ) -> String {
+    pin_signer_chained(app_root, node_key, verifying_key, label, role, scope, None)
+}
+
+/// Pin a signer the way the registry does: the record names a node-signed
+/// event appended to the hash-chained key-event log, so the registry verifies
+/// and later operations can extend it. `signed_at` fixes the signature time of
+/// the record and its event for byte-stable fixtures; `None` signs now.
+pub fn pin_signer_chained(
+    app_root: &std::path::Path,
+    node_key: &lillux::crypto::SigningKey,
+    verifying_key: &VerifyingKey,
+    label: &str,
+    role: crate::trust::SignerRole,
+    scope: crate::trust::SignerScope,
+    signed_at: Option<&str>,
+) -> String {
+    let sign = |body: &str| match signed_at {
+        Some(at) => lillux::signature::sign_content_at(body, node_key, "#", None, at),
+        None => lillux::signature::sign_content(body, node_key, "#", None),
+    };
     let mut record = crate::trust::SignerRecord::new(
         verifying_key,
         label,
@@ -260,15 +280,38 @@ pub fn pin_signer_with_node_key(
         scope,
         crate::trust::SignerStatus::Active,
     );
-    record.event = lillux::cas::sha256_hex(format!("fixture:{}", record.fingerprint).as_bytes());
+    let events = crate::trust::events_dir(app_root);
+    std::fs::create_dir_all(&events).expect("create fixture key-event dir");
+    let mut chain = std::fs::read_dir(&events)
+        .expect("read fixture key-event dir")
+        .map(|entry| {
+            let path = entry.expect("fixture key-event entry").path();
+            let text = std::fs::read_to_string(&path).expect("read fixture key event");
+            serde_yaml::from_str::<crate::trust::TrustEvent>(
+                &lillux::signature::strip_signature_lines(&text),
+            )
+            .expect("parse fixture key event")
+        })
+        .collect::<Vec<_>>();
+    chain.sort_by_key(|event| event.seq);
+    let node_fingerprint = crate::trust::compute_fingerprint(&node_key.verifying_key());
+    let event = crate::trust::TrustEvent {
+        schema: crate::trust::TRUST_EVENT_SCHEMA.to_string(),
+        seq: chain.len() as u64 + 1,
+        previous: chain.last().map(crate::trust::TrustEvent::digest),
+        kind: crate::trust::TrustEventKind::Pinned,
+        signer: record.fingerprint.clone(),
+        record_digest: record.content_digest(),
+        request_digest: lillux::cas::sha256_hex(b"fixture"),
+        operator: node_fingerprint,
+    };
+    let event_body = serde_yaml::to_string(&event).expect("serialize fixture key event");
+    std::fs::write(events.join(event.file_name()), sign(&event_body))
+        .expect("write fixture key event");
+    record.event = event.digest();
     let dir = crate::trust::signers_dir(app_root);
     std::fs::create_dir_all(&dir).expect("create fixture signer registry dir");
-    std::fs::write(
-        dir.join(record.file_name()),
-        record
-            .render_signed(node_key)
-            .expect("render fixture signer record"),
-    )
-    .expect("write fixture signer record");
+    let body = serde_yaml::to_string(&record).expect("serialize fixture signer record");
+    std::fs::write(dir.join(record.file_name()), sign(&body)).expect("write fixture signer record");
     record.fingerprint
 }

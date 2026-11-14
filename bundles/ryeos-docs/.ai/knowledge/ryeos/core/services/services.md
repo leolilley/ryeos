@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T00:21:02Z:6691121f3399f9457cb7c0fb5e452cda805d8178a3b4382ad2f51c1ef45ec2d8:e5D1xysweS6M4knsUnXZUCkXDGfM2tsNDf57c7fiZ1t2UVG2S/7h0aD288nsOtS5avLNlIilYMUHQ4UzLKllCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T01:40:30Z:d9af62a5384b977a844d27dfb0cd50641c834915929eafebf73d0e396845988e:SEBwRXRQptG1vQIvLi24P70mAET2iDv/lKRgJ/VGMD+LX3SFXbdPMJG4+YYeKQxg01TtQIdzTjz30mgTfHhcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -117,7 +117,7 @@ ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}
 | `objects/has` | `objects.has` | `ryeos.execute.service.objects/has` |
 | `objects/put` | `objects.put` | `ryeos.execute.service.objects/put` |
 | `objects/get` | `objects.get` | `ryeos.execute.service.objects/get` |
-| `objects/get-any` | `objects.get_any` | `ryeos.execute.service.objects/get-any` (operator only) |
+| `objects/get-any` | `objects.get-any` | `ryeos.execute.service.objects/get-any` (operator only) |
 | `objects/closure/get` | `objects.closure.get` | `ryeos.execute.service.objects/closure/get` |
 | `objects/closure/describe` | `objects.closure.describe` | `ryeos.execute.service.objects/closure/describe` |
 
