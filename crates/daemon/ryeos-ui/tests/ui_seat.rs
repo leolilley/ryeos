@@ -2575,7 +2575,7 @@ async fn an_executable_admission_the_signed_binding_does_not_declare_is_refused_
                     "kind": "view_set", "id": "current", "expected_revision": 0,
                     "surface_ref": "surface:ryeos/ui/base",
                 },
-                "invocation_origin": format!("seat:{presentation}:dock:left"),
+                "invocation_origin": format!("seat:{presentation}:dialog:left"),
                 "request": {
                     "binding_attachment_id": coordinate.binding_attachment_id,
                     "binding_generation": coordinate.binding_generation,

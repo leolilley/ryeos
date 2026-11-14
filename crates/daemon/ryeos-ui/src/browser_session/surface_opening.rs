@@ -34,9 +34,6 @@ pub(super) fn reconcile_tab_openings(
             }
         }
     }
-    for dock in replay.composition.docks().values() {
-        used.push(dock.view().binding().clone());
-    }
     for dialog in replay.composition.dialogs().values() {
         used.push(dialog.view().binding().clone());
     }

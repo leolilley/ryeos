@@ -367,7 +367,7 @@ impl RyeOsCore {
     }
 
     /// Management actions keep the originating set/destination even after
-    /// focus changes. Shared docks have no inferred current-tab destination.
+    /// focus changes. Shared mounts have no inferred current-tab destination.
     pub(crate) fn composition_destination(
         &self,
         instance: &RyeOsViewInstanceKey,

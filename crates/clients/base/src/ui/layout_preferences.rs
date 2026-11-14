@@ -297,7 +297,7 @@ impl RyeOsCore {
                     .values()
                     .any(|tile| &tile.instance_key == instance)
             }) {
-                continue; // Shared dock/dialog state is not part of tab persistence.
+                continue; // Shared dialog state is not part of tab persistence.
             }
             if self
                 .mounted_view_ref(instance)
@@ -858,24 +858,19 @@ impl RyeOsCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::model::{InputBufferKey, RyeOsDockEdge, RyeOsInputState};
+    use crate::ui::model::{InputBufferKey, RyeOsInputState};
     use crate::view_set::ViewSet;
     use serde_json::json;
 
     fn core() -> RyeOsCore {
         use crate::ui::reducer::test_support::*;
-        let mut session = session_with_surface_and_docks(
-            json!({
-                "name":"Work","view_sets":[{"schema":2,"id":"work","title":"Work",
-                    "root":{"type":"group","views":["view:test/one","view:test/two"],"active":0}}],"views":{
-                    "view:test/one":{"widget":"text","sources":{"default":{"ref":"service:test/one","params":{"subject":"@facet:selection.work.id"}}}},
-                    "view:test/two":{"widget":"text"},
-                    "view:test/subject-dock":{"widget":"rows","sources":{"default":{"ref":"service:test/subject-dock","params":{"thread":"@facet:selection.work.thread"}}}}
-                }
-            }),
-            json!({"left":{"content":"view:test/one","open":false,"size":24},
-            "bottom":{"content":"view:test/subject-dock","open":false,"size":9}}),
-        );
+        let mut session = session_with_surface(json!({
+            "name":"Work","view_sets":[{"schema":2,"id":"work","title":"Work",
+                "root":{"type":"group","views":["view:test/one","view:test/two"],"active":0}}],"views":{
+                "view:test/one":{"widget":"text","sources":{"default":{"ref":"service:test/one","params":{"subject":"@facet:selection.work.id"}}}},
+                "view:test/two":{"widget":"text"}
+            }
+        }));
         session.session_id = "session:test".into();
         session.user_principal_id = Some("fp:operator".into());
         session.binding_attachments[0].binding_attachment_id = "attachment:test".into();
@@ -908,17 +903,6 @@ mod tests {
                 .unwrap(),
         )
         .storage_key()
-    }
-
-    fn add_subject_dock(core: &mut RyeOsCore) -> crate::ids::RyeOsViewInstanceKey {
-        core.presentation
-            .as_mut()
-            .unwrap()
-            .dock_mut("bottom")
-            .unwrap()
-            .visible = true;
-        core.shared_dock_instance_key(RyeOsDockEdge::Bottom)
-            .unwrap()
     }
 
     #[test]
@@ -1074,20 +1058,19 @@ mod tests {
     fn management_capture_checks_shared_mount_and_preserves_tab_instances() {
         let mut source = core();
         let presentation = source.presentation.as_ref().unwrap().id();
-        let missing = crate::ids::RyeOsViewInstanceKey::shared_dock(presentation, "right").unwrap();
+        let missing =
+            crate::ids::RyeOsViewInstanceKey::shared_dialog(presentation, "absent").unwrap();
         assert!(
             source
                 .capture_view_set_template("saved".into(), "Saved".into(), Some(&missing))
                 .is_err()
         );
-        let instance = source
-            .shared_dock_instance_key(RyeOsDockEdge::Left)
-            .unwrap();
+        let instance = crate::ui::reducer::test_support::fixture_input(&mut source).unwrap();
         assert!(
             source
                 .capture_view_set_template("saved".into(), "Saved".into(), Some(&instance))
                 .is_err(),
-            "a global dock does not inherit the active tab as an insertion target"
+            "a shared mount does not inherit the active tab as an insertion target"
         );
         source.open_dialog("launcher");
         let instance = source.presentation.as_ref().unwrap().dialogs()["launcher"]
@@ -1282,12 +1265,12 @@ mod tests {
     }
 
     #[test]
-    fn shared_dock_subjects_never_enter_saved_tab_composition() {
+    fn shared_mount_subjects_never_enter_saved_tab_composition() {
         use crate::ui::reducer::test_support::{claim_fixture_producer, settle_pending_prefix};
         let mut source = core();
-        let dock = add_subject_dock(&mut source);
+        let shared = crate::ui::reducer::test_support::fixture_input(&mut source).unwrap();
         source.selection_attachments.insert(
-            dock.clone(),
+            shared.clone(),
             super::super::attachment::SelectionAttachment::RequiredSubject {
                 input: "shared_subject".into(),
                 facets: vec!["selection.work.thread".into()],
@@ -1306,8 +1289,7 @@ mod tests {
             .open_saved_view_set_template(&template, "attachment:test")
             .unwrap();
         settle_pending_prefix(&mut reopened, &producer);
-        assert!(!reopened.presentation.as_ref().unwrap().docks()["bottom"].visible);
-        assert!(source.selection_attachments.contains_key(&dock));
+        assert!(source.selection_attachments.contains_key(&shared));
     }
 
     #[test]

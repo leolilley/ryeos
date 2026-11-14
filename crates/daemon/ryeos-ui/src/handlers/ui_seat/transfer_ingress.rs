@@ -88,12 +88,6 @@ enum TransferRequest {
         preparation: TransferEvidence,
         surface_instance_id: SurfaceInstanceId,
     },
-    AcceptSharedDock {
-        transfer: TransferIdentity,
-        inbound: TransferEvidence,
-        preparation: TransferEvidence,
-        edge: String,
-    },
 }
 
 enum TransferAcceptanceTarget<'a> {
@@ -104,9 +98,6 @@ enum TransferAcceptanceTarget<'a> {
     },
     Tabs {
         surface_instance_id: &'a SurfaceInstanceId,
-    },
-    SharedDock {
-        edge: &'a str,
     },
 }
 
@@ -551,12 +542,6 @@ fn exact_accept_retry_target(
                 surface_instance_id,
             },
         ) => &manifest.surface_instance_id == *surface_instance_id,
-        (
-            UiTransferDestinationPlacement::SharedDock {
-                edge: retained_edge,
-            },
-            TransferAcceptanceTarget::SharedDock { edge },
-        ) => retained_edge.as_str() == *edge,
         _ => false,
     }
 }
@@ -782,17 +767,6 @@ fn accept_transfer(
             descriptors,
             max_record_bytes,
         ),
-        TransferAcceptanceTarget::SharedDock { edge } => {
-            UiTransferReservation::reserve_shared_dock(
-                transfer,
-                &export,
-                &destination.verified.replay,
-                edge,
-                &bindings,
-                descriptors,
-                max_record_bytes,
-            )
-        }
     }
     .map_err(HandlerError::Conflict)?;
     let reservation_value = serde_json::to_value(&reservation)?;
@@ -1441,8 +1415,7 @@ pub(super) async fn handle_transfer(
         | TransferRequest::Activate { transfer }
         | TransferRequest::Prepare { transfer, .. }
         | TransferRequest::AcceptView { transfer, .. }
-        | TransferRequest::AcceptTabs { transfer, .. }
-        | TransferRequest::AcceptSharedDock { transfer, .. } => transfer,
+        | TransferRequest::AcceptTabs { transfer, .. } => transfer,
     };
     TransferRecord {
         schema: TRANSFER_SCHEMA,
@@ -1559,16 +1532,6 @@ pub(super) async fn handle_transfer(
                     TransferAcceptanceTarget::Tabs {
                         surface_instance_id,
                     },
-                )),
-                TransferRequest::AcceptSharedDock {
-                    inbound,
-                    preparation,
-                    edge,
-                    ..
-                } => Some((
-                    inbound,
-                    preparation,
-                    TransferAcceptanceTarget::SharedDock { edge },
                 )),
                 _ => None,
             };
@@ -1823,7 +1786,6 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(accept("accept_shared_dock", json!({"edge": "left"})).is_ok());
         // The server allocates every destination coordinate: a client cannot
         // add its own binding or view-set allocation to a tabs acceptance.
         assert!(
@@ -1833,13 +1795,6 @@ mod tests {
                     "surface_instance_id": "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0",
                     "view_set_id": 7
                 })
-            )
-            .is_err()
-        );
-        assert!(
-            accept(
-                "accept_shared_dock",
-                json!({"edge": "left", "bindings": {}})
             )
             .is_err()
         );

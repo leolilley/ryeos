@@ -374,7 +374,7 @@ fn contact_observed(core: &RyeOsCore, operation_id: &str, action: &str) -> bool 
         return false;
     };
     match action {
-        "accept_view" | "accept_tabs" | "accept_shared_dock" => lifecycle.accepted().is_some(),
+        "accept_view" | "accept_tabs" => lifecycle.accepted().is_some(),
         "commit" => lifecycle.committed().is_some() || lifecycle.aborted().is_some(),
         "abort" => lifecycle.aborted().is_some() || lifecycle.committed().is_some(),
         "activate" => lifecycle.activated().is_some(),
@@ -403,8 +403,7 @@ mod tests {
     fn promotion_refuses_smaller_draft_budget_atomically_and_accepts_unicode_boundary() {
         for limit in [3, 4] {
             let (mut live, guard, mut candidate) = guarded();
-            live.focused_input =
-                live.shared_dock_instance_key(super::super::model::RyeOsDockEdge::Bottom);
+            live.focused_input = test_support::fixture_input(&mut live);
             test_support::set_focused_input(&mut live, "éλ");
             let (key, _) = live.focused_input_instance().unwrap();
             let id = live
@@ -444,8 +443,7 @@ mod tests {
     fn hidden_return_frame_draft_survives_reproof_or_refuses_whole_promotion() {
         for limit in [3, 4] {
             let (mut live, guard, mut candidate) = guarded();
-            live.focused_input =
-                live.shared_dock_instance_key(super::super::model::RyeOsDockEdge::Bottom);
+            live.focused_input = test_support::fixture_input(&mut live);
             let (mut key, _) = live.focused_input_instance().unwrap();
             let mut retained = live
                 .binding_context_for_instance(&key.view_instance_key)

@@ -77,7 +77,7 @@ pub struct Local {
 
 /// At or under this width the shell shows only the focused tile.
 pub(crate) const NARROW: f32 = 760.0;
-/// At or under this width side docks give up width to the view set.
+/// At or under this width the shell tightens the gap between tiles.
 pub(crate) const COMPACT: f32 = 980.0;
 
 impl Local {
@@ -247,18 +247,6 @@ pub(crate) fn input_key(address: &RyeOsInputAddress) -> String {
 }
 
 fn collect_inputs<'a>(vm: &'a RyeOsViewModel, out: &mut Vec<&'a RyeOsInputVm>) {
-    let docks = [
-        &vm.docks.top,
-        &vm.docks.bottom,
-        &vm.docks.left,
-        &vm.docks.right,
-    ];
-    out.extend(
-        docks
-            .into_iter()
-            .flatten()
-            .filter_map(|dock| dock.input.as_ref()),
-    );
     out.extend(vm.dialogs.iter().filter_map(|dialog| dialog.input.as_ref()));
     if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
         collect_tile_inputs(root, out);
@@ -275,7 +263,7 @@ fn collect_tile_inputs<'a>(node: &'a RyeOsLayoutNodeVm, out: &mut Vec<&'a RyeOsI
     }
 }
 
-/// Every view the presentation mounts: docks, dialogs and the tiles of the
+/// Every view the presentation mounts: dialogs and the tiles of the
 /// active view set, each with its instance key.
 fn mounted_views(
     vm: &RyeOsViewModel,
@@ -300,16 +288,7 @@ fn mounted_views(
             } => out.push((instance_key, view)),
         }
     }
-    let mut out: Vec<_> = [
-        &vm.docks.top,
-        &vm.docks.bottom,
-        &vm.docks.left,
-        &vm.docks.right,
-    ]
-    .into_iter()
-    .flatten()
-    .map(|dock| (&dock.instance_key, &dock.view))
-    .collect();
+    let mut out: Vec<_> = Vec::new();
     out.extend(
         vm.dialogs
             .iter()
@@ -548,7 +527,7 @@ impl App {
     }
 
     /// Send a UI event. An event addressed to a mounted view first focuses its
-    /// tile or dock, as a pointer press anywhere inside a frame does in the
+    /// tile, as a pointer press anywhere inside a frame does in the
     /// browser shell; Rune does not pass a press on a child to its frame.
     pub(crate) fn ui(&mut self, event: RyeOsUiEvent) {
         if let Some(focus) = addressed_instance(&event).and_then(|key| self.focus_for(key)) {
@@ -557,22 +536,9 @@ impl App {
         self.dispatch(RyeOsEvent::Ui { event });
     }
 
-    /// The event that focuses `instance`'s tile or dock, when it is not focused.
+    /// The event that focuses `instance`'s tile, when it is not focused.
     fn focus_for(&self, instance: &RyeOsViewInstanceKey) -> Option<RyeOsUiEvent> {
         let vm = self.view_model()?;
-        let docks = [
-            &vm.docks.top,
-            &vm.docks.bottom,
-            &vm.docks.left,
-            &vm.docks.right,
-        ];
-        if let Some(dock) = docks
-            .into_iter()
-            .flatten()
-            .find(|dock| &dock.instance_key == instance)
-        {
-            return (!dock.focused).then_some(RyeOsUiEvent::FocusDock { edge: dock.edge });
-        }
         fn tile(
             node: &RyeOsLayoutNodeVm,
             instance: &RyeOsViewInstanceKey,

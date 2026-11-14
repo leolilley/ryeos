@@ -108,7 +108,7 @@ fn root_attachment() -> UiBindingAttachment {
                 "config": {
                     "category": "ui",
                     "shared_presentation": {
-                        "schema": 1,
+                        "schema": 2,
                         "title": "RyeOS",
                         "launcher": "launch",
                         "dialogs": [{"id": "launch", "title": "Launch", "view": "view:test/work"}],

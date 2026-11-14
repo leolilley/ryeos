@@ -134,7 +134,7 @@ impl RyeOsCore {
             return Vec::new();
         };
         let owner = match mounted {
-            MountRef::SharedDock { .. } | MountRef::SharedDialog { .. } => {
+            MountRef::SharedDialog { .. } => {
                 crate::ui::composition_operation::CompositionOwner::Shared {
                     binding: presentation.root_binding().clone(),
                 }
@@ -196,7 +196,7 @@ impl RyeOsCore {
                 mutation,
             };
             if self.any_move_freeze(|freeze| {
-                // Exact mount-only mutations must not fence another dock or
+                // Exact mount-only mutations must not fence another
                 // View merely because it shares the same admitted owner.
                 match &request.mutation {
                     crate::ui::composition_operation::CompositionMutation::SetSubject { mount, .. }
@@ -564,16 +564,9 @@ impl RyeOsCore {
         }
         let mut preserved = replay
             .composition
-            .docks()
+            .dialogs()
             .values()
             .map(|mount| mount.view().instance_key().clone())
-            .chain(
-                replay
-                    .composition
-                    .dialogs()
-                    .values()
-                    .map(|mount| mount.view().instance_key().clone()),
-            )
             .chain(replay.subjects.keys().cloned())
             .filter(|instance| {
                 replay
@@ -718,16 +711,9 @@ impl RyeOsCore {
         staged.view_set_template_ids = replay.template_ids;
         let current_draft_mounts = replay
             .composition
-            .docks()
+            .dialogs()
             .values()
             .map(|mount| mount.view().instance_key().clone())
-            .chain(
-                replay
-                    .composition
-                    .dialogs()
-                    .values()
-                    .map(|mount| mount.view().instance_key().clone()),
-            )
             .chain(
                 replay
                     .composition

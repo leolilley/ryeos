@@ -59,12 +59,11 @@ pub struct SurfaceSpec {
     #[serde(default)]
     pub tiles: Vec<ViewKindSpec>,
     /// Explicit named initial compositions. When populated, each view set
-    /// owns its tree; surface-level tiles must be empty. Shared docks belong
-    /// to the admitted presentation Config, not this Surface or its tabs.
+    /// owns its tree; surface-level tiles must be empty.
     #[serde(default)]
     pub view_sets: Vec<view_sets::ViewSetSeedSpec>,
     /// Contextual ordinary Views available only to this live Surface instance.
-    /// Shared launcher/docks are owned by the presentation Config separately.
+    /// Shared launcher is owned by the presentation Config separately.
     #[serde(default)]
     pub dialogs: Vec<crate::presentation::PresentationDialogSpec>,
     /// Chrome style (border treatment).
@@ -243,62 +242,6 @@ fn default_master_count() -> usize {
 fn clamped_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
     let raw = f32::deserialize(deserializer)?;
     Ok(raw.clamp(0.1, 0.9))
-}
-
-// ---------------------------------------------------------------------------
-// Slots — fixed edge slots
-// ---------------------------------------------------------------------------
-
-/// Fixed edge slots. An absent edge has no slot at all (nothing to
-/// toggle); a closed slot keeps its content but frees its space.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[derive(Default)]
-pub struct SlotsSpec {
-    #[serde(default)]
-    pub top: Option<SlotSpec>,
-    #[serde(default)]
-    pub bottom: Option<SlotSpec>,
-    #[serde(default)]
-    pub left: Option<SlotSpec>,
-    #[serde(default)]
-    pub right: Option<SlotSpec>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SlotSpec {
-    pub content: SlotContentSpec,
-    #[serde(default)]
-    pub open: bool,
-    #[serde(default = "default_slot_size")]
-    pub size: u16,
-}
-
-fn default_slot_size() -> u16 {
-    8
-}
-
-/// Slot content: a bound `view:` ref, the one uniform content form.
-/// Input is no longer a slot literal — it is a view that declares an
-/// `input` block (`view:ryeos/input`). Unknown content errors — fail
-/// closed, like view kinds.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
-pub enum SlotContentSpec {
-    View(String),
-}
-
-impl<'de> Deserialize<'de> for SlotContentSpec {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        if raw.starts_with("view:") {
-            return Ok(SlotContentSpec::View(raw));
-        }
-        Err(serde::de::Error::custom(format!(
-            "unknown slot content `{raw}` (view: ref expected; `input` is now a view)"
-        )))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -981,25 +924,18 @@ mod tests {
     #[test]
     fn authored_view_refs_keep_string_wire_shapes_and_strict_readers() {
         let view = super::ViewKindSpec("view:test/content".into());
-        let slot = super::SlotContentSpec::View("view:test/content".into());
         let expected = serde_json::json!("view:test/content");
         assert_eq!(serde_json::to_value(&view).unwrap(), expected);
-        assert_eq!(serde_json::to_value(&slot).unwrap(), expected);
         assert_eq!(
-            serde_json::from_value::<super::ViewKindSpec>(expected.clone()).unwrap(),
+            serde_json::from_value::<super::ViewKindSpec>(expected).unwrap(),
             view
-        );
-        assert_eq!(
-            serde_json::from_value::<super::SlotContentSpec>(expected).unwrap(),
-            slot
         );
         for invalid in [
             serde_json::json!("service:test/content"),
             serde_json::json!({"View":"view:test/content"}),
             serde_json::json!(["view:test/content"]),
         ] {
-            assert!(serde_json::from_value::<super::ViewKindSpec>(invalid.clone()).is_err());
-            assert!(serde_json::from_value::<super::SlotContentSpec>(invalid).is_err());
+            assert!(serde_json::from_value::<super::ViewKindSpec>(invalid).is_err());
         }
     }
     use super::*;
@@ -1205,38 +1141,7 @@ style:
     }
 
     #[test]
-    fn slot_content_parses_view_refs_only() {
-        let slots: SlotsSpec = serde_yaml::from_str(
-            "bottom: { content: \"view:ryeos/input\" }\nleft: { content: \"view:a/b\" }\n",
-        )
-        .unwrap();
-        assert_eq!(
-            slots.bottom.as_ref().map(|s| &s.content),
-            Some(&SlotContentSpec::View("view:ryeos/input".into()))
-        );
-        assert_eq!(
-            slots.left.as_ref().map(|s| &s.content),
-            Some(&SlotContentSpec::View("view:a/b".into()))
-        );
-        // Unknown slot content fails closed.
-        let bad: Result<SlotsSpec, _> = serde_yaml::from_str("bottom: { content: status }\n");
-        assert!(bad.is_err(), "unknown slot content must be rejected");
-    }
-
-    #[test]
-    fn slot_content_input_literal_is_rejected() {
-        // CLEAN CUT: `content: input` is gone. The bottom input is a view
-        // (`view:ryeos/input`) that declares an `input` block.
-        let bad: Result<SlotsSpec, _> = serde_yaml::from_str("bottom: { content: input }\n");
-        let err = bad.expect_err("`content: input` must be rejected");
-        assert!(
-            err.to_string().contains("input"),
-            "error should mention the rejected literal: {err}"
-        );
-    }
-
-    #[test]
-    fn surface_cannot_own_shared_docks_or_a_separate_dialog_catalogue() {
+    fn surface_cannot_own_slots_or_a_separate_dialog_catalogue() {
         for field in ["slots: {}", "overlays: {}"] {
             let invalid = format!("name: x\n{field}\n");
             let error = serde_yaml::from_str::<SurfaceSpec>(&invalid).unwrap_err();

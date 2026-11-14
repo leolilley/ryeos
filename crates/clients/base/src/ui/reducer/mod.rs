@@ -344,31 +344,6 @@ impl RyeOsCore {
                     crate::ui::composition_operation::CompositionMutation::FocusView { mount },
                 )
             }
-            RyeOsUiEvent::FocusDock { edge } => {
-                let Some(key) = self.shared_dock_instance_key(edge) else {
-                    return Vec::new();
-                };
-                let Some(mount) = self
-                    .presentation
-                    .as_ref()
-                    .and_then(|presentation| presentation.mount(&key))
-                else {
-                    return Vec::new();
-                };
-                if !mount.visible() {
-                    return Vec::new();
-                }
-                let view_ref = mount.view_ref().to_owned();
-                if let Some(local) = self.mounted_local_state_mut(&key)
-                    && matches!(local, crate::view_set::ViewLocalState::None)
-                {
-                    *local = initial_list_local_state();
-                }
-                self.focused_input = Some(key.clone());
-                self.field_query_editing = None;
-                self.bump_generation();
-                self.emit_fetch_source_for_instance(key, &view_ref)
-            }
             RyeOsUiEvent::FocusDirection { direction } => {
                 let Some(mut preview) = self.active_view_set().cloned() else {
                     return Vec::new();
@@ -1227,55 +1202,11 @@ impl RyeOsCore {
                 self.bump_generation();
                 Vec::new()
             }
-            RyeOsUiIntent::ToggleDock { edge } => {
-                let Some(key) = self.shared_dock_instance_key(edge) else {
-                    return Vec::new();
-                };
-                let edge_name = match edge {
-                    super::model::RyeOsDockEdge::Top => "top",
-                    super::model::RyeOsDockEdge::Left => "left",
-                    super::model::RyeOsDockEdge::Right => "right",
-                    super::model::RyeOsDockEdge::Bottom => "bottom",
-                };
-                let Some(dock) = self
-                    .presentation
-                    .as_mut()
-                    .and_then(|presentation| presentation.dock_mut(edge_name))
-                else {
-                    return Vec::new();
-                };
-                dock.visible = !dock.visible;
-                let shown = dock.visible.then(|| dock.view().view_ref().to_string());
-                if shown.is_none() {
-                    if self.focused_input.as_ref() == Some(&key) {
-                        self.focused_input = None;
-                    }
-                    if self.field_query_editing.as_ref() == Some(&key) {
-                        self.field_query_editing = None;
-                    }
-                }
-                self.normalize_mounted_local_states();
-                self.bump_generation();
-                shown
-                    .map(|view| self.emit_fetch_source_for_instance(key, &view))
-                    .unwrap_or_default()
-            }
-            RyeOsUiIntent::ResizeFocused { direction } => {
-                if self.resize_focused_dock(direction) {
-                    self.bump_generation();
-                } else {
-                    self.notice(
-                        "Resize the exact split handle to retain a bounded composition edit.",
-                        super::view_model::RyeOsTone::Warn,
-                    );
-                }
-                Vec::new()
-            }
             // Inspection IS selection: a facet write on the seat braid.
             // Inspection IS selection: a facet write, peer to `input.route`.
             // The engine never opens or names the inspector — it's a view that
             // reads `@facet:selection.*` and refreshes `on_facet: selection`,
-            // shown as a slot or a lens like any other facet-bound view.
+            // shown in a tile or a lens like any other facet-bound view.
             RyeOsUiIntent::InspectItem { canonical_ref } => self.apply_ui_affordance(
                 super::seat::KEY_SELECTION.to_string(),
                 Some(serde_json::json!({ "item": canonical_ref })),
@@ -1836,67 +1767,6 @@ fn file_root_requires_project(root: &str) -> bool {
     matches!(root, "project" | "project_ai")
 }
 
-impl RyeOsCore {
-    fn resize_focused_dock(&mut self, direction: crate::view_set::FocusDirection) -> bool {
-        let Some(instance) = self.focused_view_instance_key() else {
-            return false;
-        };
-        let edge = [
-            super::model::RyeOsDockEdge::Top,
-            super::model::RyeOsDockEdge::Left,
-            super::model::RyeOsDockEdge::Right,
-            super::model::RyeOsDockEdge::Bottom,
-        ]
-        .into_iter()
-        .find(|edge| self.shared_dock_instance_key(*edge).as_ref() == Some(&instance));
-        let Some(edge) = edge else {
-            return false;
-        };
-        let edge_name = match edge {
-            super::model::RyeOsDockEdge::Top => "top",
-            super::model::RyeOsDockEdge::Left => "left",
-            super::model::RyeOsDockEdge::Right => "right",
-            super::model::RyeOsDockEdge::Bottom => "bottom",
-        };
-        let Some(slot) = self
-            .presentation
-            .as_mut()
-            .and_then(|presentation| presentation.dock_mut(edge_name))
-            .filter(|dock| dock.visible)
-        else {
-            return false;
-        };
-        let delta: i16 = match (edge, direction) {
-            (super::model::RyeOsDockEdge::Top, crate::view_set::FocusDirection::Down)
-            | (super::model::RyeOsDockEdge::Bottom, crate::view_set::FocusDirection::Up)
-            | (super::model::RyeOsDockEdge::Left, crate::view_set::FocusDirection::Right)
-            | (super::model::RyeOsDockEdge::Right, crate::view_set::FocusDirection::Left) => 1,
-            (super::model::RyeOsDockEdge::Top, crate::view_set::FocusDirection::Up)
-            | (super::model::RyeOsDockEdge::Bottom, crate::view_set::FocusDirection::Down)
-            | (super::model::RyeOsDockEdge::Left, crate::view_set::FocusDirection::Left)
-            | (super::model::RyeOsDockEdge::Right, crate::view_set::FocusDirection::Right) => -1,
-            _ => return false,
-        };
-        let next = (slot.size as i16 + delta).clamp(3, 18) as u16;
-        if next == slot.size {
-            return false;
-        }
-        slot.size = next;
-        true
-    }
-}
-
-fn initial_list_local_state() -> crate::view_set::ViewLocalState {
-    crate::view_set::ViewLocalState::GenericList {
-        cursor: 0,
-        scroll: 0,
-        collapsed: std::collections::BTreeSet::new(),
-        expanded_rows: std::collections::BTreeSet::new(),
-        collapsed_tree_rows: std::collections::BTreeSet::new(),
-        changed_rows: std::collections::BTreeMap::new(),
-    }
-}
-
 /// A route is the view's own ref — every view is addressable by ref
 /// (`#view:…`). The engine names no specific view.
 fn view_from_route(route: &str) -> Option<ViewSpec> {
@@ -1990,7 +1860,7 @@ mod tests {
 
     fn seed_input_view(core: &mut RyeOsCore) {
         crate::ui::reducer::test_support::seed_input_view(core);
-        core.focused_input = core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom);
+        core.focused_input = crate::ui::reducer::test_support::fixture_input(core);
         assert!(core.focused_input_instance().is_some());
     }
 
@@ -2054,9 +1924,7 @@ mod tests {
             .unwrap()
             .0
             .to_owned();
-        let bottom = core
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-            .unwrap();
+        let bottom = crate::ui::reducer::test_support::fixture_input(&mut core).unwrap();
         core.focused_input = Some(bottom);
         let effects = core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::Activate {
@@ -2093,153 +1961,6 @@ mod tests {
             Some(RyeOsFocusTarget::ViewSetTile {
                 tile_id: first.0.to_string()
             })
-        );
-    }
-
-    fn source_request(
-        effect: &crate::ui::effect::RyeOsEffect,
-    ) -> Option<(&str, &str, &str, &serde_json::Value)> {
-        let RyeOsEffectKind::FetchSource {
-            tile_id, request, ..
-        } = &effect.kind
-        else {
-            return None;
-        };
-        let crate::ui::binding::UiBindingCoordinate::Source { view_ref, channel } =
-            &request.coordinate
-        else {
-            return None;
-        };
-        let crate::ui::binding::UiBindingPayload::SourceParameters { params } = &request.payload
-        else {
-            return None;
-        };
-        Some((
-            tile_id.as_str(),
-            view_ref.as_str(),
-            channel.as_str(),
-            params,
-        ))
-    }
-
-    #[test]
-    fn command_overlay_includes_shared_dock_toggles() {
-        let core = test_support_core(writable_session());
-        let items = available_command_items(&core);
-
-        assert!(items.iter().any(|item| {
-            item.label == "Hide bottom slot"
-                && matches!(
-                    item.intent,
-                    RyeOsUiIntent::ToggleDock {
-                        edge: crate::ui::model::RyeOsDockEdge::Bottom
-                    }
-                )
-        }));
-        assert!(items.iter().any(|item| {
-            item.label == "Show left slot"
-                && matches!(
-                    item.intent,
-                    RyeOsUiIntent::ToggleDock {
-                        edge: crate::ui::model::RyeOsDockEdge::Left
-                    }
-                )
-        }));
-        // No surface-declared top slot → nothing to toggle there.
-        assert!(!items.iter().any(|item| matches!(
-            item.intent,
-            RyeOsUiIntent::ToggleDock {
-                edge: crate::ui::model::RyeOsDockEdge::Top
-            }
-        )));
-    }
-
-    #[test]
-    fn toggle_dock_updates_view_set_dock_vm() {
-        let mut core = test_support_core(writable_session());
-        seed_view_value(
-            &mut core,
-            "view:ryeos/threads/list",
-            serde_json::json!({
-                "widget": "rows",
-                "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" } }
-            }),
-        );
-        assert!(build_view_model(&core).docks.left.is_none());
-
-        let effects = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ToggleDock {
-                    edge: crate::ui::model::RyeOsDockEdge::Left,
-                },
-            },
-        });
-
-        assert!(build_view_model(&core).docks.left.is_some());
-        let source_key = crate::ui::source_key::RyeOsSourceInstanceKey::named(
-            core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Left)
-                .unwrap(),
-            "default",
-        )
-        .encode();
-        assert!(matches!(
-            effects.first().and_then(source_request),
-            Some((tile_id, "view:ryeos/threads/list", "default", _))
-                if tile_id == source_key
-        ));
-    }
-
-    #[test]
-    fn toggling_open_slot_closes_it_and_frees_its_space() {
-        let mut core = test_support_core(writable_session());
-        // The bottom input slot starts open.
-        assert!(build_view_model(&core).docks.bottom.is_some());
-
-        core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ToggleDock {
-                    edge: crate::ui::model::RyeOsDockEdge::Bottom,
-                },
-            },
-        });
-
-        // Closed slots vanish from the dock plane: renderers reserve no
-        // space for them. Content and size are retained for reopening.
-        assert!(build_view_model(&core).docks.bottom.is_none());
-        let bottom = core
-            .presentation
-            .as_ref()
-            .unwrap()
-            .docks()
-            .get("bottom")
-            .expect("slot retained");
-        assert!(!bottom.visible);
-        assert_eq!(bottom.size, 7);
-
-        // Toggling an absent edge is a no-op (no slot declared).
-        assert!(
-            !core
-                .presentation
-                .as_ref()
-                .unwrap()
-                .docks()
-                .contains_key("top")
-        );
-        let effects = core.dispatch(RyeOsEvent::Ui {
-            event: RyeOsUiEvent::Activate {
-                intent: RyeOsUiIntent::ToggleDock {
-                    edge: crate::ui::model::RyeOsDockEdge::Top,
-                },
-            },
-        });
-        assert!(effects.is_empty());
-        assert!(
-            !core
-                .presentation
-                .as_ref()
-                .unwrap()
-                .docks()
-                .contains_key("top")
         );
     }
 
@@ -2419,13 +2140,9 @@ mod tests {
             }),
         );
         // The refs land under the mention source key via the generic fetch.
+        let input = crate::ui::reducer::test_support::fixture_input(&mut core).unwrap();
         core.data.sources.insert(
-            crate::ui::source_key::RyeOsSourceInstanceKey::mention(
-                core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-                    .unwrap(),
-                "line",
-            )
-            .encode(),
+            crate::ui::source_key::RyeOsSourceInstanceKey::mention(input, "line").encode(),
             serde_json::json!({ "threads": [
                 { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
                 { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
@@ -2772,7 +2489,7 @@ mod tests {
         assert_eq!(active_selection(&core)["summary"]["title"], "failed — boom");
 
         // … and the inspector actually RENDERS it.
-        // A shared dock does not inherit this Surface's selection. Project
+        // A shared dialog does not inherit this Surface's selection. Project
         // the explicitly Surface-owned inspector instead.
         let view = crate::ui::view_model::view_vm_for_instance(&core, &instance).unwrap();
         let rows = match view {
@@ -2932,44 +2649,33 @@ mod tests {
     }
 
     #[test]
-    fn exact_tree_folding_uses_branch_identity_in_tiles_and_shared_docks() {
-        for dock in [false, true] {
-            let browser = session_with_surface_and_docks(
-                serde_json::json!({
-                    "name": "tree-pointer",
-                    "tiles": if dock { vec!["view:test/idle"] } else { vec!["view:test/tree", "view:test/idle"] },
-                    "views": {
-                        "view:test/idle": {"widget":"text", "body":{"lines":["Idle"]}},
-                        "view:test/tree": {
-                            "widget": "table",
-                            "sources": {"default":{"ref":"service:test/tree", "collection":"rows"}},
-                            "projections": {
-                                "hierarchy":{"id":"id", "parent":"parent"},
-                                "columns":[{"label":"Node", "field":"id"}]
-                            }
+    fn exact_tree_folding_uses_branch_identity_in_tiles() {
+        {
+            let browser = session_with_surface(serde_json::json!({
+                "name": "tree-pointer",
+                "tiles": ["view:test/tree", "view:test/idle"],
+                "views": {
+                    "view:test/idle": {"widget":"text", "body":{"lines":["Idle"]}},
+                    "view:test/tree": {
+                        "widget": "table",
+                        "sources": {"default":{"ref":"service:test/tree", "collection":"rows"}},
+                        "projections": {
+                            "hierarchy":{"id":"id", "parent":"parent"},
+                            "columns":[{"label":"Node", "field":"id"}]
                         }
                     }
-                }),
-                if dock {
-                    serde_json::json!({"right":{"content":"view:test/tree","open":true,"size":32}})
-                } else {
-                    serde_json::json!({})
-                },
-            );
+                }
+            }));
             let mut core = test_support_core(browser);
-            let instance = if dock {
-                core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Right)
-                    .unwrap()
-            } else {
-                core.active_view_set()
-                    .unwrap()
-                    .tiles
-                    .values()
-                    .find(|tile| tile.view.view_ref == "view:test/tree")
-                    .unwrap()
-                    .instance_key
-                    .clone()
-            };
+            let instance = core
+                .active_view_set()
+                .unwrap()
+                .tiles
+                .values()
+                .find(|tile| tile.view.view_ref == "view:test/tree")
+                .unwrap()
+                .instance_key
+                .clone();
             let idle = core
                 .active_view_set()
                 .unwrap()
@@ -3077,34 +2783,6 @@ mod tests {
                 )
                 .is_none()
             );
-            if dock {
-                core.data.sources.insert(
-                    source,
-                    serde_json::json!({"rows":[
-                        {"id":"parent#one"}, {"id":"child","parent":"parent#one"}
-                    ]}),
-                );
-                core.dispatch(RyeOsEvent::Ui {
-                    event: RyeOsUiEvent::Activate {
-                        intent: RyeOsUiIntent::ToggleDock {
-                            edge: crate::ui::model::RyeOsDockEdge::Right,
-                        },
-                    },
-                });
-                assert!(crate::ui::view_model::view_vm_for_instance(&core, &instance).is_none());
-                let generation = core.generation;
-                core.dispatch(RyeOsEvent::Ui {
-                    event: RyeOsUiEvent::SetViewTreeItemCollapsed {
-                        instance_key: instance,
-                        item_id: branch_id.into(),
-                        collapsed: true,
-                    },
-                });
-                assert_eq!(
-                    core.generation, generation,
-                    "late pointer cannot fold a closed dock"
-                );
-            }
         }
     }
 
@@ -3281,39 +2959,43 @@ mod tests {
     }
 
     #[test]
-    fn exact_dock_disclosure_mutates_the_named_mounted_record() {
-        let browser = session_with_surface_and_docks(
-            serde_json::json!({
-                "name": "dock-disclosure",
-                "views": {
-                    "view:test/dock": {
-                        "widget": "rows",
-                        "sources": {"default": {
-                            "ref": "service:test/dock-rows",
-                            "collection": "rows"
-                        }},
-                        "projections": {"primary": "id", "expand": {"fields": ["detail"]}}
-                    }
+    fn exact_view_disclosure_mutates_the_named_mounted_record() {
+        let browser = session_with_surface(serde_json::json!({
+            "name": "disclosure",
+            "tiles": ["view:test/rows"],
+            "views": {
+                "view:test/rows": {
+                    "widget": "rows",
+                    "sources": {"default": {
+                        "ref": "service:test/rows",
+                        "collection": "rows"
+                    }},
+                    "projections": {"primary": "id", "expand": {"fields": ["detail"]}}
                 }
-            }),
-            serde_json::json!({"right":{"content":"view:test/dock","open":true,"size":32}}),
-        );
+            }
+        }));
         let mut core = test_support_core(browser);
         let instance_key = core
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Right)
-            .unwrap();
+            .active_view_set()
+            .unwrap()
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
         let source_key =
             crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "default")
                 .encode();
         core.data.sources.insert(
             source_key,
-            serde_json::json!({"rows": [{"id": "dock-a", "detail": "exact"}]}),
+            serde_json::json!({"rows": [{"id": "row-a", "detail": "exact"}]}),
         );
         let item_id = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
-            .expect("mounted dock rows")
+            .expect("mounted rows")
         {
             crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows[0].id.clone(),
-            other => panic!("expected dock rows, got {other:?}"),
+            other => panic!("expected rows, got {other:?}"),
         };
 
         core.dispatch(RyeOsEvent::Ui {
@@ -3325,10 +3007,10 @@ mod tests {
         });
 
         let rows = match crate::ui::view_model::view_vm_for_instance(&core, &instance_key)
-            .expect("mounted dock rows")
+            .expect("mounted rows")
         {
             crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => rows,
-            other => panic!("expected dock rows, got {other:?}"),
+            other => panic!("expected rows, got {other:?}"),
         };
         assert!(rows[0].expanded);
         assert_eq!(rows[0].detail[0].value, "exact");

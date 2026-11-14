@@ -68,9 +68,9 @@ fn imported_tabs_wait_for_both_acks_and_keep_existing_and_shared_drafts() {
         .presentation
         .as_ref()
         .unwrap()
-        .docks()
+        .dialogs()
         .values()
-        .map(|dock| dock.view().instance_key().clone())
+        .map(|dialog| dialog.view().instance_key().clone())
         .collect::<Vec<_>>();
     let before = core.seat.events().len();
     assert!(
@@ -215,9 +215,9 @@ fn imported_tabs_wait_for_both_acks_and_keep_existing_and_shared_drafts() {
         core.presentation
             .as_ref()
             .unwrap()
-            .docks()
+            .dialogs()
             .values()
-            .map(|dock| dock.view().instance_key().clone())
+            .map(|dialog| dialog.view().instance_key().clone())
             .collect::<Vec<_>>(),
         shared_mounts
     );

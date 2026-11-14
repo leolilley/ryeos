@@ -7,7 +7,6 @@
 use serde::{Deserialize, Serialize};
 
 use super::event::{FieldStepDirection, RyeOsStackMoveDirection, RyeOsUiEvent, RyeOsUiIntent};
-use super::model::RyeOsDockEdge;
 use crate::view_set::FocusDirection;
 
 /// Descriptive help for this module's semantic matcher, not another keyboard registry.
@@ -121,9 +120,6 @@ pub struct RyeOsKeyContext {
     pub input_visible: bool,
     /// The focused view instance owns an input buffer.
     pub input_focused: bool,
-    /// The focused input was reached as a dock/input focus and can return to
-    /// the prior view with Esc.
-    pub input_blurrable: bool,
     /// The focused input has a non-empty buffer. Plain Enter then submits
     /// (the chat convention) rather than activating a row — terminals
     /// can't reliably send Shift+Enter, so it can't be the only submit.
@@ -287,17 +283,6 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         {
             ui(RyeOsUiEvent::FocusInput)
         }
-        RyeOsKey::Char(c)
-            if event.modifiers.none() && c.eq_ignore_ascii_case(&'s') && !context.input_focused =>
-        {
-            ui(RyeOsUiEvent::FocusDock {
-                edge: RyeOsDockEdge::Top,
-            })
-        }
-        RyeOsKey::ArrowUp if event.modifiers.ctrl_shift() => resize(FocusDirection::Up),
-        RyeOsKey::ArrowDown if event.modifiers.ctrl_shift() => resize(FocusDirection::Down),
-        RyeOsKey::ArrowLeft if event.modifiers.ctrl_shift() => resize(FocusDirection::Left),
-        RyeOsKey::ArrowRight if event.modifiers.ctrl_shift() => resize(FocusDirection::Right),
         RyeOsKey::ArrowUp if event.modifiers.ctrl_only() => {
             move_focused_tile(RyeOsStackMoveDirection::Up)
         }
@@ -317,9 +302,6 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             direction: RyeOsStackMoveDirection::Down,
         }),
         RyeOsKey::ArrowLeft if event.modifiers.alt_only() => ui(RyeOsUiEvent::PopLens),
-        RyeOsKey::Escape if event.modifiers.none() && context.input_blurrable => {
-            ui(RyeOsUiEvent::BlurInput)
-        }
         // Esc interrupts a running head thread (chat convention); otherwise it
         // closes the focused tile.
         RyeOsKey::Escape if event.modifiers.none() && context.head_thread_running => {
@@ -562,10 +544,6 @@ fn focus(direction: FocusDirection) -> RyeOsKeyCommand {
     ui(RyeOsUiEvent::FocusDirection { direction })
 }
 
-fn resize(direction: FocusDirection) -> RyeOsKeyCommand {
-    intent(RyeOsUiIntent::ResizeFocused { direction })
-}
-
 fn move_focused_tile(direction: RyeOsStackMoveDirection) -> RyeOsKeyCommand {
     intent(RyeOsUiIntent::MoveFocusedTile { direction })
 }
@@ -593,10 +571,6 @@ impl RyeOsKeyModifiers {
 
     fn ctrl_only(self) -> bool {
         self.ctrl && !self.shift && !self.alt && !self.meta
-    }
-
-    fn ctrl_shift(self) -> bool {
-        self.ctrl && self.shift && !self.alt && !self.meta
     }
 }
 
@@ -1192,19 +1166,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_blurs_focused_input() {
-        let mut ctx = context(false, true);
-        ctx.input_focused = true;
-        ctx.input_blurrable = true;
-        assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::Escape), ctx),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::BlurInput
-            }
-        ));
-    }
-
-    #[test]
     fn question_mark_types_into_focused_input() {
         let mut ctx = context(false, true);
         ctx.input_focused = true;
@@ -1273,18 +1234,6 @@ mod tests {
             ),
             RyeOsKeyCommand::CloseFocusedDialog
         );
-        assert!(matches!(
-            ryeos_key_command(
-                key(RyeOsKey::Escape),
-                RyeOsKeyContext {
-                    input_blurrable: true,
-                    ..Default::default()
-                }
-            ),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::BlurInput
-            }
-        ));
         assert!(matches!(
             ryeos_key_command(
                 key(RyeOsKey::Escape),

@@ -1,4 +1,4 @@
-//! The presentation shell: system bar, view-set strip, docks around the view
+//! The presentation shell: system bar, view-set strip, the view
 //! set, status bar, notices and dialogs. Layout and metrics follow the
 //! browser shell's stylesheet.
 
@@ -6,9 +6,9 @@ use rune::{El, Key, KeyEvent, col, el, row, text, text_input};
 use ryeos_client_base::layout::SplitBranch;
 use ryeos_client_base::ui::event::{RyeOsInputAction, RyeOsTransportFreshness};
 use ryeos_client_base::ui::view_model::{
-    RyeOsDialogVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm,
-    RyeOsSplitAxisVm, RyeOsStatusBarVm, RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone,
-    RyeOsTopBarVm, RyeOsViewModel, RyeOsViewSetVm,
+    RyeOsDialogVm, RyeOsInputVm, RyeOsLayoutNodeVm, RyeOsNoticeVm, RyeOsSplitAxisVm,
+    RyeOsStatusBarVm, RyeOsSurfaceChoiceVm, RyeOsTileIntentVm, RyeOsTone, RyeOsTopBarVm,
+    RyeOsViewModel, RyeOsViewSetVm,
 };
 use ryeos_client_base::ui::{RyeOsUiEvent, RyeOsUiIntent};
 
@@ -534,7 +534,6 @@ fn view_set(vm: &RyeOsViewModel, local: &Local) -> El {
             ..
         })
     );
-    let docks = &vm.docks;
     let gap = if maximized {
         0.0
     } else if local.width() <= crate::COMPACT {
@@ -542,70 +541,20 @@ fn view_set(vm: &RyeOsViewModel, local: &Local) -> El {
     } else {
         12.0
     };
-    let mut middle = row().w_full().grow(1.0).min_h(0.0).min_w(0.0).gap(gap);
-    if !maximized && let Some(left) = &docks.left {
-        middle = middle.child(dock(left, true, local));
-    }
-    middle = middle.child(center(vm.view_set.as_ref(), local));
-    if !maximized && let Some(right) = &docks.right {
-        middle = middle.child(dock(right, true, local));
-    }
-    let mut set = col().grow(1.0).h_full().min_w(0.0).min_h(0.0).gap(gap);
-    if !maximized && let Some(top) = &docks.top {
-        set = set.child(dock(top, false, local));
-    }
-    set = set.child(middle);
-    if !maximized && let Some(bottom) = &docks.bottom {
-        set = set.child(dock(bottom, false, local));
-    }
-    set
-}
-
-fn dock(tile: &RyeOsDockTileVm, side: bool, local: &Local) -> El {
-    let supplement = tile.supplement.as_ref();
-    let edge = tile.edge;
-    let focused = tile.focused;
-    let frame = views::frame(
-        views::FrameSpec {
-            key: format!("dock:{:?}", tile.edge),
-            instance: &tile.instance_key,
-            label: supplement
-                .map(|s| s.frame_label.as_str())
-                .filter(|label| !label.is_empty())
-                .unwrap_or(&tile.title),
-            detail: supplement
-                .map(|s| s.frame_detail.as_str())
-                .filter(|detail| !detail.is_empty()),
-            attachment: tile.attachment_label.as_deref(),
-            focused,
-            transparent: false,
-            chrome_hidden: false,
-            tile: None,
-            dock_edge: Some(format!("{:?}", tile.edge).to_lowercase()),
-            heading: tile.heading.as_ref(),
-            supplement,
-            view: &tile.view,
-            input: tile.input.as_ref(),
-        },
-        local,
-    );
-    let frame = if focused {
-        frame
-    } else {
-        frame.on_press(move |app: &mut App| app.ui(RyeOsUiEvent::FocusDock { edge }))
-    };
-    let size = f32::from(tile.size);
-    // A compact window caps side docks so the view set keeps its room.
-    let size = if side && local.width() <= crate::COMPACT {
-        size.min(local.width() * 0.28)
-    } else {
-        size
-    };
-    if side {
-        col().w(size).h_full().min_h(0.0).child(frame)
-    } else {
-        col().w_full().h(size).min_w(0.0).child(frame)
-    }
+    let middle = row()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .min_w(0.0)
+        .gap(gap)
+        .child(center(vm.view_set.as_ref(), local));
+    col()
+        .grow(1.0)
+        .h_full()
+        .min_w(0.0)
+        .min_h(0.0)
+        .gap(gap)
+        .child(middle)
 }
 
 /// The layout, or the bare backdrop when the set has none.
@@ -861,7 +810,6 @@ fn layout(
                         tabs,
                         grouped: group_label.is_some(),
                     }),
-                    dock_edge: None,
                     heading: heading.as_ref(),
                     supplement,
                     view,

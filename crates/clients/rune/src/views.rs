@@ -65,7 +65,7 @@ pub fn is_launcher_chord(event: &KeyEvent) -> bool {
     k && !mods.shift && !mods.logo && (mods.ctrl != mods.alt)
 }
 
-/// The uppercase data-face label used by tile and dock headers.
+/// The uppercase data-face label used by tile headers.
 pub fn header_label(label: &str, color: rune::Color) -> El {
     text(label.to_uppercase())
         .font(theme::data(9.0).tracking(1.0))
@@ -73,7 +73,7 @@ pub fn header_label(label: &str, color: rune::Color) -> El {
         .truncate()
 }
 
-/// What a tile adds to a frame's header beyond a dock's.
+/// What a tile adds to a frame's header beyond its title.
 pub struct TileChrome<'a> {
     pub tile_id: &'a str,
     pub maximized: bool,
@@ -83,7 +83,7 @@ pub struct TileChrome<'a> {
     pub grouped: bool,
 }
 
-/// One mounted view in its frame: a layout tile or a dock.
+/// One mounted view in its frame: a layout tile.
 pub struct FrameSpec<'a> {
     pub key: String,
     pub instance: &'a RyeOsViewInstanceKey,
@@ -93,9 +93,8 @@ pub struct FrameSpec<'a> {
     pub focused: bool,
     pub transparent: bool,
     pub chrome_hidden: bool,
-    /// `None` for a dock, whose header names its edge instead of tools.
+    /// `None` for a frame without tile tools.
     pub tile: Option<TileChrome<'a>>,
-    pub dock_edge: Option<String>,
     pub heading: Option<&'a RyeOsViewHeadingVm>,
     pub supplement: Option<&'a RyeOsViewSupplementVm>,
     pub view: &'a RyeOsViewVm,
@@ -174,12 +173,11 @@ fn frame_header(spec: &FrameSpec<'_>, local: &crate::Local) -> El {
         .gap(10.0)
         .child(identity.grow(1.0));
     let Some(tile) = &spec.tile else {
-        // A dock names its attachment, its detail, or else its edge.
+        // A frame without tile tools names its attachment or its detail.
         let aside = spec
             .attachment
             .or(spec.detail)
             .map(str::to_owned)
-            .or_else(|| spec.dock_edge.clone())
             .unwrap_or_default();
         return title_row
             .child(header_label(&aside, p.muted))
@@ -1730,7 +1728,7 @@ mod tests {
 
     fn instance() -> RyeOsViewInstanceKey {
         let presentation = PresentationId::try_new("11111111-1111-4111-8111-111111111111").unwrap();
-        RyeOsViewInstanceKey::shared_dock(&presentation, "left").unwrap()
+        RyeOsViewInstanceKey::shared_dialog(&presentation, "left").unwrap()
     }
 
     fn table_row(id: &str, cells: [&str; 2], extra: Value) -> Value {

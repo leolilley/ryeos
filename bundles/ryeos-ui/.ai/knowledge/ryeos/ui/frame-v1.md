@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-12T10:40:20Z:8b5f4414ec0432b1b6ff2d5f3c885b247850bce27fddc580a272260c7b59f48b:IUyyray/PDV2Emt3CTT0QnU/ado3JQP985FsHSZPOgoNLW1MHYur4YHev0TT2rtdF1J9ru+cluXMd6BV2NK9AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T02:44:25Z:e785671f8da41f89fca037f30804caf9b001e778502ea02a83dfad0baf10375b:zlZ/G2x3h+Jy+e7NBumiZtfMTHJ/evbcN1h8FOXuHAOGYH+yLJrdrxFalEQ6KfsZpsv5KT/ptl7tmjqurGxfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
 title: "RyeOS UI Frame Contract v1"
 description: "The closed widget-primitive set and view-binding schema renderers implement; content composes against this, never against client source"
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # RyeOS UI Frame Contract v1
@@ -32,9 +32,9 @@ mode flag.
 | `timeline` | append-ordered events | `{primary, meta?, tone?, role?, pair_key?, raw}` per event |
 | `field` | multi-source entity/relation evidence field | `ryeos.ui.field.facts.v1` documents |
 
-Engine chrome (not content-targetable in v1): notice, dock/tile chrome.
+Engine chrome (not content-targetable in v1): notice, tile chrome.
 Navigation is not chrome: a list of destinations is an ordinary view placed in
-the layout or a slot like any other, so surfaces declare no separate
+the layout like any other, so surfaces declare no separate
 navigation list and renderers draw no navigation rail.
 Input is no longer engine chrome: it is a content capability (the `input`
 block below), and a view's `completion` source drives the suggestion rows.
@@ -121,8 +121,8 @@ to display. The buffer is keyed layout-neutrally by
 `{view_instance_id, view_ref, input_id}`, so the same `view:` rendered
 twice has independent buffers. Printable keys edit the buffer of the
 **focused view instance** that declares `input`; otherwise they fall
-through to the keymap. No placement is special — initial focus (e.g. the
-bottom slot) is frame policy, not an input rule.
+through to the keymap. No placement is special — initial focus (e.g. a
+composer tile) is frame policy, not an input rule.
 
 Three submit modes, all from the one capability:
 

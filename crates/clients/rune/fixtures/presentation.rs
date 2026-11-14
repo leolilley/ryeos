@@ -28,7 +28,6 @@ use serde_json::{Value, json};
 const PRESENTATION: &str = "11111111-1111-4111-8111-111111111111";
 const SURFACE: &str = "22222222-2222-4222-8222-222222222222";
 
-const FILES: &str = include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/project/files.yaml");
 const THREADS: &str =
     include_str!("../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/history.yaml");
 const LAUNCHER: &str =
@@ -50,13 +49,6 @@ fn response(view_ref: &str, long: bool) -> Option<Value> {
         return long_response(view_ref);
     }
     Some(match view_ref {
-        "view:ryeos/project/files" => json!({ "entries": [
-            { "path": "Cargo.toml", "name": "Cargo.toml", "size": 6120, "is_dir": false },
-            { "path": "crates", "name": "crates", "size": 0, "is_dir": true },
-            { "path": "crates/clients/rune/src/field.rs", "name": "field.rs", "size": 51200, "is_dir": false },
-            { "path": "crates/clients/rune/src/shell.rs", "name": "shell.rs", "size": 40960, "is_dir": false },
-            { "path": "README.md", "name": "README.md", "size": 2048, "is_dir": false }
-        ]}),
         "view:ryeos/threads/history" => json!({ "threads": [
             { "thread_id": "T-7f3a", "kind": "directive_run", "item_ref": "directive:ryeos/ops/base",
               "project": { "name": "ryeos-next" }, "status": "running", "created_at": "2026-11-12T09:12:00Z" },
@@ -71,7 +63,7 @@ fn response(view_ref: &str, long: bool) -> Option<Value> {
             { "event_type": "cognition_out", "chain_seq": 2, "payload": { "content": "Reading the layout module first." } },
             { "event_type": "tool_call_start", "chain_seq": 3, "payload": { "tool": "read_file", "call_id": "c1" } },
             { "event_type": "tool_call_result", "chain_seq": 4, "payload": { "tool": "read_file", "call_id": "c1", "result_size_bytes": 4096 } },
-            { "event_type": "cognition_out", "chain_seq": 5, "payload": { "content": "The dock sizes are pixels in both renderers." } }
+            { "event_type": "cognition_out", "chain_seq": 5, "payload": { "content": "Tile sizes are pixels in both renderers." } }
         ]}),
         _ => return None,
     })
@@ -164,7 +156,7 @@ fn execution() -> Result<Value, String> {
     Ok(definition)
 }
 
-/// The presentation for `scene`: `"field"` docks the execution field,
+/// The presentation for `scene`: `"field"` tiles the execution field,
 /// `"launcher"` opens the launcher, anything else is the default shell.
 pub fn core(scene: &str) -> Result<RyeOsCore, String> {
     let field = scene == "field";
@@ -212,18 +204,11 @@ pub fn core(scene: &str) -> Result<RyeOsCore, String> {
         "subject": { "kind": "unregistered_project" }, "posture": "observation_only",
         "binding_request_bounds": { "max_request_bytes": 4096, "max_input_bytes": 1024, "max_seat_append_bytes": 65536 },
         "presentation": { "definition": { "kind": "shared_presentation", "config": {
-            "category": "ui", "shared_presentation": { "schema": 1, "title": "Fixture", "launcher": "launcher",
+            "category": "ui", "shared_presentation": { "schema": 2, "title": "Fixture", "launcher": "launcher",
                 "dialogs": [{ "id": "launcher", "title": "Launch", "view": "view:ryeos/ui/launcher" }],
-                "docks": {
-                    "left": { "content": "view:ryeos/project/files", "open": true, "size": 260 },
-                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 180 }
-                },
                 "capabilities": { "sources": [], "affordances": [] } }
         }}, "views": {
-            "view:ryeos/ui/launcher": view(LAUNCHER)?,
-            "view:ryeos/project/files": view(FILES)?,
-            "view:ryeos/input": { "widget": "text",
-                "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" } }
+            "view:ryeos/ui/launcher": view(LAUNCHER)?
         }}
     }))
     .map_err(|error| format!("shared fixture: {error}"))?;

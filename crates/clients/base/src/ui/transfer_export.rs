@@ -15,9 +15,9 @@ use super::attachment::SelectionAttachment;
 use super::binding::UiBindingAttachmentCoordinate;
 use super::composition_lens::RetainedLensFrame;
 use super::composition_operation::UiCompositionRouteAssignment;
-use super::model::{InputBufferKey, RyeOsDockEdge, RyeOsInputState};
+use super::model::{InputBufferKey, RyeOsInputState};
 
-pub const UI_TRANSFER_EXPORT_SCHEMA: u32 = 1;
+pub const UI_TRANSFER_EXPORT_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,12 +48,6 @@ pub enum UiTransferExportContent {
     },
     SurfaceMount {
         source_view_set_id: ViewSetId,
-        mount: UiTransferMountExport,
-    },
-    SharedDock {
-        edge: RyeOsDockEdge,
-        visible: bool,
-        size: u16,
         mount: UiTransferMountExport,
     },
 }
@@ -221,7 +215,6 @@ impl UiTransferExport {
             UiTransferExportContent::SurfaceMount {
                 source_view_set_id, ..
             } => BTreeSet::from([*source_view_set_id]),
-            UiTransferExportContent::SharedDock { .. } => BTreeSet::new(),
         };
         if replay.pending.values().any(|operation| {
             operation.composition().is_some_and(|request| {
@@ -304,31 +297,6 @@ impl UiTransferExport {
                 }
                 validate_snapshot_mount(self.mode, mount, replay)?;
             }
-            UiTransferExportContent::SharedDock {
-                edge,
-                visible,
-                size,
-                mount,
-            } => {
-                let canonical = replay
-                    .composition
-                    .mount(&mount.source_instance)
-                    .ok_or("exported shared dock is not canonically mounted")?;
-                let super::presentation_state::MountRef::SharedDock {
-                    edge: canonical_edge,
-                    mount: canonical_mount,
-                } = canonical
-                else {
-                    return Err("exported shared dock resolves to another mount kind".into());
-                };
-                if canonical_edge != edge_name(edge)
-                    || canonical_mount.visible != *visible
-                    || canonical_mount.size != *size
-                {
-                    return Err("exported shared dock differs from its canonical geometry".into());
-                }
-                validate_snapshot_mount(self.mode, mount, replay)?;
-            }
         }
 
         let incoming_subjects = replay
@@ -358,8 +326,7 @@ impl UiTransferExport {
             UiTransferExportContent::ViewSets { sets, .. } => {
                 sets.iter().flat_map(|set| set.mounts.iter()).collect()
             }
-            UiTransferExportContent::SurfaceMount { mount, .. }
-            | UiTransferExportContent::SharedDock { mount, .. } => vec![mount],
+            UiTransferExportContent::SurfaceMount { mount, .. } => vec![mount],
         }
     }
 
@@ -402,31 +369,6 @@ impl UiTransferExport {
                     || matches!(&mount.subject, SelectionAttachment::FollowViewSet { .. })
                 {
                     return Err("single Surface mount has an invalid owner or follower".into());
-                }
-                validate_mount(self.mode, mount, &mut instances, &mut draft_keys)?;
-            }
-            UiTransferExportContent::SharedDock {
-                edge, size, mount, ..
-            } => {
-                let Some(UiViewMountOwner::Shared { presentation_id }) =
-                    mount.source_instance.mount_owner()
-                else {
-                    return Err("shared dock has no exact shared owner".into());
-                };
-                let edge_name = match edge {
-                    RyeOsDockEdge::Top => "top",
-                    RyeOsDockEdge::Bottom => "bottom",
-                    RyeOsDockEdge::Left => "left",
-                    RyeOsDockEdge::Right => "right",
-                };
-                if RyeOsViewInstanceKey::shared_dock(&presentation_id, edge_name)
-                    .ok()
-                    .as_ref()
-                    != Some(&mount.source_instance)
-                    || *size == 0
-                    || matches!(&mount.subject, SelectionAttachment::FollowViewSet { .. })
-                {
-                    return Err("shared dock identity or follower is invalid".into());
                 }
                 validate_mount(self.mode, mount, &mut instances, &mut draft_keys)?;
             }
@@ -701,7 +643,6 @@ pub(crate) fn pending_request_affects_export(
             UiTransferExportContent::SurfaceMount { mount, .. } => {
                 mount.source_instance.mount_owner()
             }
-            UiTransferExportContent::SharedDock { .. } => None,
         };
         let Some(UiViewMountOwner::Surface {
             surface_instance_id,
@@ -741,9 +682,6 @@ pub(crate) fn pending_request_affects_export(
                 ..
             },
         ) if matches!(mount.source_instance.mount_owner(), Some(UiViewMountOwner::Surface { surface_instance_id: owner, .. }) if &owner == surface_instance_id) => {}
-        (UiTransferExportContent::SharedDock { .. }, CompositionOwner::Shared { .. }) => {
-            return true;
-        }
         _ => return false,
     }
     // A collection exports the source Surface's active-set identity as well
@@ -821,15 +759,6 @@ fn validate_incoming_followers<'a>(
         }
     }
     Ok(())
-}
-
-fn edge_name(edge: &RyeOsDockEdge) -> &'static str {
-    match edge {
-        RyeOsDockEdge::Top => "top",
-        RyeOsDockEdge::Bottom => "bottom",
-        RyeOsDockEdge::Left => "left",
-        RyeOsDockEdge::Right => "right",
-    }
 }
 
 fn stable_handle(value: &str) -> bool {
@@ -1380,30 +1309,6 @@ mod tests {
         mount.subject = SelectionAttachment::FollowViewSet {
             view_set_id: ViewSetId::new(3),
         };
-        assert!(value.validate(64 * 1024).is_err());
-    }
-
-    #[test]
-    fn shared_dock_requires_the_exact_declared_edge_and_no_surface_follower() {
-        let fixture = export(UiTransferExportMode::Move);
-        let mut mount = fixture.mounts()[0].clone();
-        let presentation = PresentationId::try_new("source-presentation").unwrap();
-        mount.source_instance = RyeOsViewInstanceKey::shared_dock(&presentation, "left").unwrap();
-        let mut value = UiTransferExport {
-            schema: UI_TRANSFER_EXPORT_SCHEMA,
-            mode: UiTransferExportMode::Move,
-            content: UiTransferExportContent::SharedDock {
-                edge: RyeOsDockEdge::Left,
-                visible: true,
-                size: 18,
-                mount,
-            },
-        };
-        value.validate(64 * 1024).unwrap();
-        let UiTransferExportContent::SharedDock { edge, .. } = &mut value.content else {
-            unreachable!()
-        };
-        *edge = RyeOsDockEdge::Right;
         assert!(value.validate(64 * 1024).is_err());
     }
 }

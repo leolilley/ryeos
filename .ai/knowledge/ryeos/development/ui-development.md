@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-13T13:05:39Z:c3e4be7267e2cd38283abbdadb1249063ad41375502802f2636130e4f50d2da1:vZpSd6462/SMbjzbhyamyBCHiyStea68UtM6xttMGFBF9agwIZHsZaoY+SbaC/Ezw/0CtlR2mkGDAEJNYCr7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T01:55:23Z:f10c74e90539188b7eb036c9b75630f09a0e4a5cfdeed68d487781c18ef49e7e:E2y2HniMoaN+MC1c0eaaEXasTLh7MYkvQlifrlWZiBy/mGC4IkUgXNQIN0TWst1J1/bCUzKHKNNppiOZ4DngDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
 description: "How to develop and qualify the RyeOS Rune renderer in the browser"
 entry_type: reference
-version: "4.0.0"
+version: "4.1.0"
 ```
 
 # Browser UI Development Workflow
@@ -26,8 +26,8 @@ local view selectors, not surface instance-level view-set tabs.
 
 The shared presentation is authored through a typed signed config item using
 the existing config kind. "Session shell" is an implementation responsibility,
-not a new kind or operator identity. It declares shared dialog View references,
-four optional dock mounts and initial Surface references. Resolve its selected
+not a new kind or operator identity. It declares shared dialog View references
+and initial Surface references. Resolve its selected
 default through existing launch/config owners and compile/admit its View closure
 through the existing binding compiler. A signature or installed bundle does not
 grant every referenced operation. No hidden Surface or union of open-Surface
@@ -95,12 +95,12 @@ exact compiled dispatch, not weaken the admission owner to accept a unit wrapper
 Validate independent source channels independently: a failed authenticated event
 observation invalidates its accumulated events, not a separately verified pulse.
 
-The top/left/right/bottom docks belong to shared presentation, outside any tab.
-Their visibility and temporary focus can change without detaching mounted Views.
+Shared presentation owns the launcher and shared dialogs, outside any tab. Edge
+placement is just ordinary splits of views and tiles inside a view set.
 In one document, Surface/tab changes do not recreate shared mounts. Additional
 documents require explicit mount/seat coordinates and producer ownership; they
 cannot share one mutable producer. Review that ownership before implementing
-cross-document shared state. Dock position never selects another View's target.
+cross-document shared state.
 
 The source composition owner keeps shared mounts outside Surface tab layouts.
 Dialogs render ordinary admitted Views; each input has an exact mount address.
@@ -112,7 +112,7 @@ Immediate scope is the reusable UI foundation and platform-aligned inspection
 through ordinary retained sources and admitted operations. Node operations and
 later ARC/application arrangements compose those same Views. Conversation history sharing,
 automatic context following, global assistant orchestration and provider chat
-integration are deferred. Keep existing composers explicitly bound. Shared dock
+integration are deferred. Keep existing composers explicitly bound. Shared dialog
 availability does not decide whether a future conversation follows a Surface or
 retains one subject across Surfaces.
 
@@ -411,10 +411,9 @@ Saving or duplicating an unresolved mount preserves only that relationship
 shape. Explicit upfront subject supply and particular-set resume remain strict:
 missing or partial inputs fail atomically and never degrade to unresolved.
 
-For the shared presentation migration, move dock declarations out of reusable
-view-set compositions and preserve their explicit mounted binding relationships
-under the shared owner. Advance schema, compiler, saved records and fixtures
-together; current per-set slot keys are not aliases for session mounts.
+Shared presentation declares only dialogs and initial Surface selections.
+Advance schema, compiler, saved records and fixtures together; per-set slot
+keys are not aliases for session mounts.
 
 Particular view sets have a separate revisioned principal-config collection.
 They retain reusable composition plus only a registered project `local_id` and
@@ -618,7 +617,7 @@ detail records already projected by Rust. Pointer disclosure names the exact
 mounted instance and stable item id; it must not synthesize a select-then-expand
 sequence against whichever row later has focus. Detail rendering is plain
 field/value text and never interprets evidence into renderer-owned status.
-Dock mounts use the same exact disclosure event and Rust-owned expansion state
+Dialog mounts use the same exact disclosure event and Rust-owned expansion state
 as center mounts. Tables retain native button semantics inside explicit ARIA
 rows and cells rather than assigning row semantics to a button.
 

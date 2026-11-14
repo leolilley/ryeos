@@ -1,9 +1,9 @@
-# ryeos:signed:2026-10-20T02:32:01Z:d51d7306b778a54dbfc8888a9bc643a12d776cd00574e715ec4eb8be01112ce6:6jplAK/44qbnWylk9IsNDEfWkZu/6UkPrx7/Lj/oapO3kPfYZ8q7djcj0zswW2r9+OXUgC03QBYIQSZ+uIJDAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T01:55:23Z:90d1d418f6163782d2a7c6097b82e53d0ee367f5d038fd939664254fe690cb11:w2FNMRwcHkKekcp24Ypx/H0NJ6R6mBzZ0vwk28daVpgkCwNdOoL2/mKym3KZw987iLOpYvIP6VEpFcShxJx6CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: Shared RyeOS browser presentation; Surface contents retain their own independent admission.
 shared_presentation:
-  schema: 1
+  schema: 2
   title: RyeOS
   launcher: launcher
   dialogs:
@@ -14,7 +14,6 @@ shared_presentation:
     - { id: surfaces, title: Surfaces, view: "view:ryeos/surfaces/list" }
     - { id: projects, title: Projects and Surfaces, view: "view:ryeos/projects/list" }
     - { id: view-sets, title: Saved view sets, view: "view:ryeos/view-sets/library" }
-  docks: {}
   initial_surfaces:
     - { id: home, title: Home, surface: "surface:ryeos/ui/base-observe" }
   capabilities:

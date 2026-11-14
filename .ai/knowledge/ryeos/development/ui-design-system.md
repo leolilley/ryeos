@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-13T03:26:28Z:263c7ae58da5dd094025018401f127d410684dd6eaf3c84f47a7160e4f128760:m21hFIypNEGLCemDO61q7HQMF/d9Fvvsa1Dsj3M5DKSya3AclHZcGm878ltybyeLqBvPL88Gi1H4bgSrJs2HBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T01:55:23Z:81869958735eaace5f0488809da077ec236a04fe37973c0c7ab735bf82bcd25f:2pj4MTyHSVoZ8NfJzMLH8n2iouqJzKOhmfenOTPO9xApURjiQ7wmRPv2iimawDmHe2UFxHF/TnxDMtIVprNkDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-design-system"
 title: "RyeOS UI Visual Language and Composition Rules"
 description: "Contributor specification for Gruvbox styling, nested tiled view sets, view groups, contextual input and renderer ownership"
 entry_type: reference
-version: "3.0.0"
+version: "3.1.0"
 ```
 
 # RyeOS UI visual language and composition rules
@@ -125,8 +125,8 @@ No additional Window entity, collection kind or browser application model.
 See `ui-development.md` for current implementation gaps and seat ownership.
 
 Use a typed signed config under the existing config kind to author shared
-presentation: shared dialog View references, four optional dock mounts and
-initial Surface references. "Session shell" names a responsibility, not another
+presentation: shared dialog View references and initial Surface
+references. "Session shell" names a responsibility, not another
 kind, user identity or execution owner. Shared launcher/shortcuts Views must
 remain available with no Surface open. Surface-specific dialog Views may be
 contributed with scoped identities and their own admitted bindings.
@@ -157,7 +157,7 @@ The current focus is presentation foundations and platform-aligned inspection;
 ARC and other application-specific arrangements are later consumers.
 Conversation continuity, automatic context following and provider chat
 integration are deferred. Existing conversation/input Views keep explicit
-routes; do not encode a preferred conversation-history model into dock geometry.
+routes; do not encode a preferred conversation-history model into layout geometry.
 
 A Surface normally opens as a fresh surface instance in the existing session;
 adding it to the existing surface instance is explicit. A single set normally opens in
@@ -181,8 +181,8 @@ shared layout machinery, not another UI framework.
 
 - A surface signs the available views, sources, actions and initial arrangements.
 - A view set owns its live layout, view groups and selection/focus. Top-level
-  tabs select view sets, not hardcoded product pages. Four optional docks are
-  mounted by shared presentation outside any one Surface or tab.
+  tabs select view sets, not hardcoded product pages. Edge placement is just
+  ordinary splits of views and tiles; there is no separate edge-mount concept.
 - A split allocates space. A group orders view-instance references, selects an
   active member, and may carry one bounded authored label for its stable role
   in the arrangement. The renderer presents that label separately from the
@@ -192,12 +192,11 @@ shared layout machinery, not another UI framework.
   arrange operation, not a second mutable ordered-layout authority.
 - Move preserves view identity, draft, local state and bound subject.
   Explicitly opening another instance creates independent local state.
-- Optional edge docks remain anchored supporting regions, using the same
-  view/group machinery where practical. Top/left/right/bottom remain available;
-  none is globally required or forbidden. Reveal, collapse and temporarily
-  focus them without losing their mounted attachment. Surface/tab changes
-  preserve shared mounts in the document; multiple documents need reviewed
-  independent mount/producer ownership before shared mutable state is exposed.
+- A supporting region at an edge is an ordinary split of views and tiles in the
+  view set's layout, using the same view/group machinery. Surface/tab changes
+  preserve shared dialog mounts in the document; multiple documents need
+  reviewed independent mount/producer ownership before shared mutable state is
+  exposed.
 - Contextual input belongs to the exact mounted view instance it serves. A
   bottom-slot conversation or terminal is still an ordinary view; it does not
   control whichever other view was most recently focused. Its subject and
@@ -239,7 +238,7 @@ do not silently persist sensitive message text with a saved arrangement.
 
 | Concern | Owner |
 |---|---|
-| Shared dialogs, four optional docks and initial Surface selections | Typed signed shared presentation config, existing config resolution and UI binding compiler |
+| Shared dialogs and initial Surface selections | Typed signed shared presentation config, existing config resolution and UI binding compiler |
 | Surface tab collections, available views, labels, context declarations, sources and actions | Signed surface/view contracts in the UI bundle and existing schema/compiler |
 | Layout tree, group edits, instance identity, focus, draft/target semantics | Existing shared client model and reducers |
 | Pixel geometry, fonts, DOM, pointer gestures, renderer tokens | Web client |

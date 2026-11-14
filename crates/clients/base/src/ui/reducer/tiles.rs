@@ -1589,19 +1589,19 @@ mod tests {
     }
 
     #[test]
-    fn exact_view_pointer_state_addresses_dock_instances() {
+    fn exact_view_pointer_state_addresses_mounted_instances() {
         let mut core = test_support_core(session());
-        core.presentation
-            .as_mut()
-            .unwrap()
-            .dock_mut("right")
-            .unwrap()
-            .visible = true;
         let instance_key = core
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Right)
-            .unwrap();
+            .active_view_set()
+            .unwrap()
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone();
         *core.mounted_local_state_mut(&instance_key).unwrap() =
-            ViewSpec::bound("view:test/dock").initial_local_state();
+            ViewSpec::bound("view:test/rows").initial_local_state();
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetViewCursor {
@@ -1621,7 +1621,7 @@ mod tests {
             cursor, collapsed, ..
         } = core.mounted_local_state(&instance_key).unwrap()
         else {
-            panic!("dock should retain generic list state");
+            panic!("the view should retain generic list state");
         };
         assert_eq!(*cursor, 7);
         assert_eq!(collapsed.iter().copied().collect::<Vec<_>>(), vec![2]);
@@ -2682,7 +2682,7 @@ mod tests {
             .insert(
                 "view:ryeos/input".into(),
                 serde_json::json!({
-                    "widget":"rows", "sources":{"default":{"ref":"service:test/dock",
+                    "widget":"rows", "sources":{"default":{"ref":"service:test/rows",
                         "params":{"thread":"@facet:selection.work.thread"}}}
                 }),
             );
@@ -2735,11 +2735,9 @@ mod tests {
             },
         );
         settle_structure(&mut core);
-        let source_dock = core
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-            .unwrap();
+        let source_shared = crate::ui::reducer::test_support::fixture_input(&mut core).unwrap();
         core.prepare_subject_operation(
-            source_dock.clone(),
+            source_shared.clone(),
             crate::ui::attachment::SelectionAttachment::RequiredSubject {
                 input: "subject_slot_bottom".into(),
                 facets: vec!["selection.work.thread".into()],
@@ -2790,15 +2788,13 @@ mod tests {
                 .count(),
             1
         );
-        let duplicate_dock = core
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-            .unwrap();
+        let duplicate_shared = crate::ui::reducer::test_support::fixture_input(&mut core).unwrap();
         assert_eq!(
-            duplicate_dock, source_dock,
+            duplicate_shared, source_shared,
             "duplicating a tab never duplicates shared mounts"
         );
         assert!(matches!(
-            core.selection_attachments.get(&duplicate_dock),
+            core.selection_attachments.get(&duplicate_shared),
             Some(crate::ui::attachment::SelectionAttachment::RequiredSubject {
                 input,
                 facets,
@@ -2810,7 +2806,7 @@ mod tests {
                 return true;
             };
             !crate::ui::source_key::RyeOsSourceInstanceKey::decode(tile_id)
-                .is_some_and(|key| key.belongs_to(&duplicate_dock))
+                .is_some_and(|key| key.belongs_to(&duplicate_shared))
         }));
     }
 
@@ -2954,30 +2950,22 @@ mod tests {
     }
 
     #[test]
-    fn view_set_switch_preserves_one_shared_dock_draft_and_focus() {
-        use crate::ui::model::{RyeOsDockEdge, RyeOsFocusTarget};
+    fn view_set_switch_preserves_one_shared_input_draft_and_focus() {
+        use crate::ui::model::RyeOsFocusTarget;
         let mut core = test_support_core(session());
         let producer = claim_fixture_producer(&mut core);
         settle_pending_prefix(&mut core, &producer);
-        core.focused_input = core.shared_dock_instance_key(RyeOsDockEdge::Bottom);
+        core.focused_input = crate::ui::reducer::test_support::fixture_input(&mut core);
         let original_focus = core.focus_target();
         assert_eq!(
             original_focus,
             Some(RyeOsFocusTarget::MountedView {
-                instance_key: core
-                    .shared_dock_instance_key(RyeOsDockEdge::Bottom)
-                    .unwrap()
+                instance_key: crate::ui::reducer::test_support::fixture_input(&mut core).unwrap()
             })
         );
         core.focused_input_buffer_mut()
             .expect("authored input")
             .text = "unsent original".into();
-        core.presentation
-            .as_mut()
-            .unwrap()
-            .dock_mut("bottom")
-            .unwrap()
-            .size = 11;
 
         core.new_view_set();
         settle_structure(&mut core);
@@ -2989,10 +2977,6 @@ mod tests {
         settle_structure(&mut core);
         assert_eq!(core.focus_target(), original_focus);
         assert_eq!(core.focused_input_buffer().unwrap().text, "unsent original");
-        assert_eq!(
-            core.presentation.as_ref().unwrap().docks()["bottom"].size,
-            11
-        );
     }
 
     #[test]
@@ -3000,9 +2984,7 @@ mod tests {
         let mut core = test_support_core(session());
         let producer = claim_fixture_producer(&mut core);
         settle_pending_prefix(&mut core, &producer);
-        let shared = core
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-            .unwrap();
+        let shared = crate::ui::reducer::test_support::fixture_input(&mut core).unwrap();
         core.focused_input = Some(shared.clone());
         let draft = core.focused_input_instance().unwrap().0.storage_key();
         core.focused_input_buffer_mut().unwrap().text = "shared unsent draft".into();
@@ -3012,7 +2994,7 @@ mod tests {
             .clone();
 
         // The retained center focus already names this tile. The explicit
-        // operation must still displace transient shared-dock input focus.
+        // operation must still displace transient shared input focus.
         core.prepare_composition_mutation(
             crate::ui::composition_operation::CompositionMutation::FocusView {
                 mount: destination.clone(),

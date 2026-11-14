@@ -113,16 +113,6 @@ pub enum UiViewMountOwner {
 pub struct RyeOsViewInstanceKey(String);
 
 impl RyeOsViewInstanceKey {
-    pub fn shared_dock(presentation_id: &PresentationId, edge: &str) -> Result<Self, &'static str> {
-        if !matches!(edge, "top" | "bottom" | "left" | "right") {
-            return Err("shared dock edge is invalid");
-        }
-        Ok(Self(format!(
-            "seat:{}:dock:{edge}",
-            presentation_id.as_str()
-        )))
-    }
-
     pub fn shared_dialog(
         presentation_id: &PresentationId,
         mount_id: &str,
@@ -167,7 +157,7 @@ impl RyeOsViewInstanceKey {
     pub fn mount_owner(&self) -> Option<UiViewMountOwner> {
         let parts = self.0.split(':').collect::<Vec<_>>();
         match parts.as_slice() {
-            ["seat", presentation, "dock" | "dialog", _] => Some(UiViewMountOwner::Shared {
+            ["seat", presentation, "dialog", _] => Some(UiViewMountOwner::Shared {
                 presentation_id: PresentationId::try_new(*presentation).ok()?,
             }),
             [
@@ -205,9 +195,6 @@ impl RyeOsViewInstanceKey {
     pub(crate) fn from_canonical(value: &str) -> Option<Self> {
         let parts = value.split(':').collect::<Vec<_>>();
         let scoped = match parts.as_slice() {
-            ["seat", presentation, "dock", edge] => {
-                Self::shared_dock(&PresentationId::try_new(*presentation).ok()?, edge).ok()
-            }
             ["seat", presentation, "dialog", mount] => {
                 Self::shared_dialog(&PresentationId::try_new(*presentation).ok()?, mount).ok()
             }
@@ -275,9 +262,8 @@ mod presentation_tests {
         let a = SurfaceInstanceId::try_new("a").unwrap();
         let b = SurfaceInstanceId::try_new("b").unwrap();
         let keys = [
-            RyeOsViewInstanceKey::shared_dock(&first, "left").unwrap(),
             RyeOsViewInstanceKey::shared_dialog(&first, "left").unwrap(),
-            RyeOsViewInstanceKey::shared_dock(&second, "left").unwrap(),
+            RyeOsViewInstanceKey::shared_dialog(&second, "left").unwrap(),
             RyeOsViewInstanceKey::surface_tile(&first, &a, TileId::new(1)),
             RyeOsViewInstanceKey::surface_tile(&first, &b, TileId::new(1)),
             RyeOsViewInstanceKey::surface_dialog(&first, &a, "left").unwrap(),
@@ -307,7 +293,7 @@ mod presentation_tests {
             "seat:p:surface:s:tile:01",
             "seat:p:surface:s:tile:+1",
             "seat:p:surface:s:tile:18446744073709551616",
-            "seat:p:dock:middle",
+            "seat:p:rail:left",
             "seat:p:dialog:",
             "seat::dialog:launch",
             "seat:p:dialog:launch:extra",

@@ -8,7 +8,7 @@
 //! Layout of this module mirrors the renderer's planes: `theme` is the
 //! only color authority (tone → palette; draw sites never invent
 //! colors); `text` is width-aware string shaping; `primitives` are raw
-//! surface ops; `chrome` is bars/frames/docks; `widgets/*` is one file
+//! surface ops; `chrome` is bars/frames; `widgets/*` is one file
 //! per widget primitive;
 //! `dialog`/`input` are compositions. This file orchestrates: layout
 //! traversal, view dispatch.
@@ -62,10 +62,7 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     let mut surface = TextSurface::new(width, height);
     surface.fill(Style::new().fg(FG).bg(BG));
 
-    // There is no "home" mode. Bars, ordinary docks and dialogs render in
-    // every state. A maximized tile is the one deliberate exception: the
-    // shared presentation layout projects it as the sole root and all clients
-    // give it the complete body rather than retaining supporting docks.
+    // There is no "home" mode. Bars and dialogs render in every state.
     let top_h = if vm.presentation.chrome.top_bar.visible && height >= 3 {
         chrome::draw_top_bar(&mut surface, vm);
         1
@@ -80,21 +77,9 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
     };
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
-    let maximized = matches!(
-        vm.view_set.as_ref().and_then(|set| set.root.as_ref()),
-        Some(RyeOsLayoutNodeVm::Tile {
-            maximized: true,
-            ..
-        })
-    );
-    let center = if maximized {
-        body
-    } else {
-        chrome::draw_docks(&mut surface, body, vm)
-    };
     if let Some(root) = vm.view_set.as_ref().and_then(|set| set.root.as_ref()) {
         let border = theme::border_for(&vm.presentation.chrome.border);
-        draw_layout_node(&mut surface, center, root, border, vm.now_ms);
+        draw_layout_node(&mut surface, body, root, border, vm.now_ms);
     }
 
     if let Some(active_dialog) = vm.dialogs.first() {
@@ -586,9 +571,8 @@ max_seat_append_bytes:64*1024,
             "root_generation":"shared-generation", "project_path":null, "subject":{"kind":"projectless"},
             "posture":"observation_only", "binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},
             "presentation":{"definition":{"kind":"shared_presentation","config":{
-                "category":"ui","shared_presentation":{"schema":1,"title":"Fixture","launcher":"launch",
+                "category":"ui","shared_presentation":{"schema":2,"title":"Fixture","launcher":"launch",
                     "dialogs":[{"id":"launch","title":"Launch","view":"view:test/launch"}],
-                    "docks":{"bottom":{"content":"view:ryeos/input","open":true,"size":7}},
                     "capabilities":{"sources":[],"affordances":[]}}
             }}, "views":{
                 "view:test/launch":{"widget":"text","body":"Fixture only"},
@@ -673,37 +657,5 @@ max_seat_append_bytes:64*1024,
             event: ryeos_client_base::ui::RyeOsUiEvent::FocusInput,
         });
         core
-    }
-
-    #[test]
-    fn empty_center_draws_bottom_input() {
-        let vm = build_view_model(&empty_center_core());
-        assert!(vm.view_set.as_ref().unwrap().center_is_empty);
-
-        let rendered = surface_text(&build_surface(&vm, 96, 28));
-        // The real bottom input slot renders in this state (the bug fix) as
-        // a minimal bordered box — no prompt sigil, route strip, or hint;
-        // the border + cursor are the whole signal. The bottom rows carry
-        // the box border.
-        let lines: Vec<&str> = rendered.lines().collect();
-        let tail = lines[lines.len().saturating_sub(8)..].join("\n");
-        assert!(
-            tail.contains('│') || tail.contains('┃'),
-            "the bottom input slot renders its bordered box"
-        );
-        assert!(
-            !rendered.contains("$ ") && !rendered.contains("Shift+Enter"),
-            "the minimal input box drops the prompt sigil and hint"
-        );
-    }
-
-    #[test]
-    fn bottom_slot_is_the_active_input_on_empty_center() {
-        // The bug's regression: on an empty center, the bottom slot is the
-        // focused/active input instance carrying the prompt VM.
-        let vm = build_view_model(&empty_center_core());
-        let bottom = vm.docks.bottom.expect("shared bottom input present");
-        let input = bottom.input.expect("bottom slot declares input");
-        assert_eq!(input.placeholder, "Ask or run a command");
     }
 }

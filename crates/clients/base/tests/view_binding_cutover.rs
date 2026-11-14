@@ -236,7 +236,7 @@ fn initialized_view_core(attachment: UiBindingAttachment) -> RyeOsCore {
         "subject":{"kind":"projectless"}, "posture":"observation_only",
         "binding_request_bounds":attachment.binding_request_bounds,
         "presentation":{"definition":{"kind":"shared_presentation","config":{
-            "category":"ui", "shared_presentation":{"schema":1,"title":"Cutover",
+            "category":"ui", "shared_presentation":{"schema":2,"title":"Cutover",
                 "launcher":"launch", "dialogs":[{"id":"launch","title":"Launch",
                     "view":"view:fixture/launcher"}],
                 "capabilities":{"sources":[],"affordances":[]}}}},

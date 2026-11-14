@@ -1,9 +1,9 @@
-# ryeos:signed:2026-10-20T02:32:01Z:dc7445a726793f1a24e8e75782f0a630a1623820e1ca1fc9f3bfc02c06769534:lLPQZOTIL1RXvXOXQF9WWSOHN2wZ2gmiFyWjmOjQ7f7vc6M1q9K+D4AjO7WcxpOHnUJ0B/WCuygxISDiM34rCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T01:55:23Z:96d04b28c7ea52ff9bf2281d9b3a5d411653dd2ec8e8595e03169cfb19c208b9:5Ql8+aWvmgND+FXBgX7hSwO9///XoFqE3GSgUuOCVwi0iHJ3VEAbe3Jjd7MY4ttNKilJpTDksZfA1rLuX0iQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: ryeos/ui
 version: "1.0.0"
 description: Shared terminal presentation with explicit admitted terminal Surface seeds and no ambient project selection.
 shared_presentation:
-  schema: 1
+  schema: 2
   title: RyeOS
   launcher: launcher
   dialogs:
@@ -14,7 +14,6 @@ shared_presentation:
     - { id: surfaces, title: Surfaces, view: "view:ryeos/surfaces/list" }
     - { id: projects, title: Projects and Surfaces, view: "view:ryeos/projects/list" }
     - { id: view-sets, title: Saved view sets, view: "view:ryeos/view-sets/library" }
-  docks: {}
   initial_surfaces:
     - { id: home, title: Home, surface: "surface:ryeos/ui/lens-observe" }
   capabilities:

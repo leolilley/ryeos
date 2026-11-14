@@ -1274,10 +1274,6 @@ mod tests {
             }
         }
         assert_eq!(
-            format!("{:?}", cold.composition.docks()),
-            format!("{:?}", live.composition.docks())
-        );
-        assert_eq!(
             format!("{:?}", cold.composition.dialogs()),
             format!("{:?}", live.composition.dialogs())
         );

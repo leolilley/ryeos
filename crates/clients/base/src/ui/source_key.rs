@@ -1,7 +1,7 @@
 //! Typed identity for one source channel owned by one mounted view instance.
 //!
 //! The platform effect boundary still carries an opaque string. Encoding and
-//! decoding live here so lifecycle code never parses tile, dock, or section
+//! decoding live here so lifecycle code never parses tile, dialog, or section
 //! suffixes independently.
 
 use crate::ids::{PresentationId, RyeOsViewInstanceKey, SurfaceInstanceId};
@@ -168,13 +168,13 @@ mod tests {
         let presentation = PresentationId::try_new("presentation-one").unwrap();
         let surface = SurfaceInstanceId::try_new("surface-one").unwrap();
         let tile = RyeOsViewInstanceKey::surface_tile(&presentation, &surface, TileId::new(7));
-        let dock = RyeOsViewInstanceKey::shared_dock(&presentation, "left").unwrap();
+        let dialog = RyeOsViewInstanceKey::shared_dialog(&presentation, "left").unwrap();
         let keys = [
             RyeOsSourceInstanceKey::named(tile.clone(), "default"),
             RyeOsSourceInstanceKey::named(tile.clone(), "project"),
             RyeOsSourceInstanceKey::named(tile, "execution/selected"),
-            RyeOsSourceInstanceKey::mention(dock.clone(), "line/with space"),
-            RyeOsSourceInstanceKey::completion(dock, "line/with space"),
+            RyeOsSourceInstanceKey::mention(dialog.clone(), "line/with space"),
+            RyeOsSourceInstanceKey::completion(dialog, "line/with space"),
         ];
         let encoded = keys
             .iter()
@@ -198,7 +198,7 @@ mod tests {
             "7#section0",
             "rsk1/tile%3A7/default/extra",
             "rsk1/tile%3A07/default",
-            "rsk1/dock%3Amiddle/default",
+            "rsk1/dialog%3A/default",
             "rsk1/tile%3A7/mention/%2f",
         ] {
             assert!(RyeOsSourceInstanceKey::decode(value).is_none(), "{value}");
@@ -218,7 +218,7 @@ mod tests {
         assert_ne!(
             encoded,
             RyeOsSourceInstanceKey::named(
-                RyeOsViewInstanceKey::shared_dock(&key.presentation_id, "left").unwrap(),
+                RyeOsViewInstanceKey::shared_dialog(&key.presentation_id, "left").unwrap(),
                 key.channel.clone(),
             )
             .encode()

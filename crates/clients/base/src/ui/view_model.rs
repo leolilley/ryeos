@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
 use super::event::{RyeOsTransportChannel, RyeOsTransportFreshness};
-use super::model::{RyeOsCore, RyeOsDockEdge};
+use super::model::RyeOsCore;
 use super::seat::InvokeTemplate;
 use crate::ids::{RyeOsViewInstanceKey, TileId};
 use crate::layout::{LayoutTree, SplitAxis};
@@ -38,7 +38,6 @@ pub struct RyeOsViewModel {
     pub chrome: RyeOsChromeVm,
     pub presentation: RyeOsPresentationVm,
     pub view_set: Option<RyeOsViewSetVm>,
-    pub docks: RyeOsDockPlaneVm,
     pub dialogs: Vec<RyeOsDialogVm>,
     pub notices: Vec<RyeOsNoticeVm>,
     pub transport: RyeOsTransportVm,
@@ -114,7 +113,7 @@ pub struct RyeOsThemeVm {
 pub struct RyeOsPresentationChromeVm {
     pub title: String,
     pub version_label: String,
-    /// Surface-declared border treatment for tiles, dock tiles, and
+    /// Surface-declared border treatment for tiles and
     /// panels: thick | thin | hidden | none. Renderers map the name to
     /// local glyphs/pixels — content declares, renderers map.
     pub border: String,
@@ -222,40 +221,8 @@ pub struct RyeOsViewSetVm {
     pub lens_label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct RyeOsDockPlaneVm {
-    pub top: Option<RyeOsDockTileVm>,
-    pub bottom: Option<RyeOsDockTileVm>,
-    pub left: Option<RyeOsDockTileVm>,
-    pub right: Option<RyeOsDockTileVm>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RyeOsDockTileVm {
-    pub instance_key: RyeOsViewInstanceKey,
-    pub edge: RyeOsDockEdge,
-    pub title: String,
-    pub attachment_label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heading: Option<RyeOsViewHeadingVm>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supplement: Option<RyeOsViewSupplementVm>,
-    pub size: u16,
-    #[serde(default)]
-    pub focused: bool,
-    /// The bound view (every slot is a view instance; input is no longer a
-    /// dock-content variant).
-    pub view: RyeOsViewVm,
-    /// Present when this instance declares an `input` block: the prompt
-    /// renderers draw (target strip, buffer, cursor, completion). Any
-    /// widget may carry a prompt — input is an orthogonal capability.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<RyeOsInputVm>,
-}
-
-/// The projection of a view instance's active input buffer. Shape
-/// preserved from the deleted Input dock variant; re-sourced from the
-/// instance's transient buffer rather than a dock content variant.
+/// The projection of a view instance's active input buffer, sourced from the
+/// instance's transient buffer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RyeOsInputVm {
     pub address: super::model::RyeOsInputAddress,
@@ -296,7 +263,7 @@ pub enum RyeOsLayoutNodeVm {
         instance_key: RyeOsViewInstanceKey,
         tile_id: String,
         /// The set's current tile: the one a narrow page shows. It stays
-        /// current while a dock or dialog holds focus.
+        /// current while a dialog holds focus.
         #[serde(default)]
         current: bool,
         /// Whether this tile holds the shared focus (at most one mount does).
@@ -800,7 +767,6 @@ pub fn build_view_model(core: &RyeOsCore) -> RyeOsViewModel {
         session,
         chrome,
         view_set,
-        docks: dock_plane_vm(core),
         dialogs: mounted_dialogs(core),
         notices: core.notices_vm(),
         transport: transport_vm(core),
@@ -1085,73 +1051,6 @@ fn view_set_vm(core: &RyeOsCore) -> Option<RyeOsViewSetVm> {
     })
 }
 
-fn dock_plane_vm(core: &RyeOsCore) -> RyeOsDockPlaneVm {
-    RyeOsDockPlaneVm {
-        top: dock_tile_vm(
-            core,
-            RyeOsDockEdge::Top,
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("top")),
-        ),
-        bottom: dock_tile_vm(
-            core,
-            RyeOsDockEdge::Bottom,
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("bottom")),
-        ),
-        left: dock_tile_vm(
-            core,
-            RyeOsDockEdge::Left,
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("left")),
-        ),
-        right: dock_tile_vm(
-            core,
-            RyeOsDockEdge::Right,
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("right")),
-        ),
-    }
-}
-
-fn dock_tile_vm(
-    core: &RyeOsCore,
-    edge: RyeOsDockEdge,
-    state: Option<&super::presentation_state::SharedDockMount>,
-) -> Option<RyeOsDockTileVm> {
-    let state = state?;
-    if !state.visible {
-        return None;
-    }
-    let view_ref = state.view().view_ref();
-    let instance_key = state.view().instance_key();
-    let focused = matches!(
-        core.focus_target(),
-        Some(super::model::RyeOsFocusTarget::MountedView { instance_key: focused }) if &focused == instance_key
-    );
-    Some(RyeOsDockTileVm {
-        instance_key: instance_key.clone(),
-        edge,
-        title: view_title(core, instance_key, view_ref).to_owned(),
-        attachment_label: selection_attachment_label(core, instance_key),
-        heading: view_heading(core, instance_key, view_ref),
-        supplement: view_supplement(core, instance_key, view_ref),
-        size: state.size,
-        focused,
-        view: bound_view_vm_keyed(
-            core,
-            instance_key,
-            dock_selected_state(core, instance_key),
-            view_ref,
-        ),
-        input: instance_input_vm(core, instance_key, view_ref),
-    })
-}
-
 /// Per-instance row-local UI state a bound view projects with — named
 /// fields so the two BTreeSet-shaped members can't be transposed.
 #[derive(Clone, Copy, Default)]
@@ -1163,7 +1062,7 @@ struct RowLocalState<'a> {
     changed_rows: Option<&'a std::collections::BTreeMap<String, crate::view_set::RowFlash>>,
 }
 
-fn dock_selected_state<'a>(
+fn mounted_selected_state<'a>(
     core: &'a RyeOsCore,
     instance_key: &RyeOsViewInstanceKey,
 ) -> RowLocalState<'a> {
@@ -1995,7 +1894,7 @@ pub(crate) fn field_vm_for_instance(
     })
 }
 
-/// Project the exact currently mounted tile-or-dock view instance. Pointer
+/// Project the exact currently mounted view instance. Pointer
 /// reducers use this to validate semantic item identity against current Rust
 /// state rather than trusting a browser frame's position or intent payload.
 pub(crate) fn view_vm_for_instance(
@@ -2013,7 +1912,7 @@ pub(crate) fn view_vm_for_instance(
         _ => Some(bound_view_vm_keyed(
             core,
             instance_key,
-            dock_selected_state(core, instance_key),
+            mounted_selected_state(core, instance_key),
             mount.view_ref(),
         )),
     }
@@ -2799,51 +2698,6 @@ fn collect_required_facet_refs(value: &serde_json::Value, out: &mut Vec<String>)
     }
 }
 
-fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsCommandChoice> {
-    // Only surface-declared slots are toggleable; absent edges have no
-    // slot and offer nothing. Labels stay mechanism words (edge names).
-    [
-        (
-            RyeOsDockEdge::Bottom,
-            "bottom",
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("bottom")),
-        ),
-        (
-            RyeOsDockEdge::Left,
-            "left",
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("left")),
-        ),
-        (
-            RyeOsDockEdge::Right,
-            "right",
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("right")),
-        ),
-        (
-            RyeOsDockEdge::Top,
-            "top",
-            core.presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get("top")),
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(edge, name, slot)| slot.map(|slot| (edge, name, slot.visible)))
-    .map(|(edge, name, visible)| RyeOsCommandChoice {
-        label: format!("{} {name} slot", if visible { "Hide" } else { "Show" }),
-        hint: "toggle edge slot".to_string(),
-        intent: RyeOsUiIntent::ToggleDock { edge },
-        secondary_intent: None,
-        enabled: true,
-    })
-    .collect()
-}
-
 fn transfer_contact_command_items(core: &RyeOsCore) -> Vec<RyeOsCommandChoice> {
     use super::event::UiTransferContactIntent as Contact;
     use super::transfer_export::{UiTransferExport, UiTransferExportContent};
@@ -3000,27 +2854,6 @@ fn transfer_contact_command_items(core: &RyeOsCore) -> Vec<RyeOsCommandChoice> {
                         }
                     }
                 }
-                UiTransferExportContent::SharedDock { .. } => {
-                    if let crate::presentation::UiCompositionDefinition::SharedPresentation {
-                        config,
-                    } = &descriptor.presentation.definition
-                    {
-                        for (edge, authored) in [
-                            ("top", config.shared_presentation.docks.top.is_some()),
-                            ("bottom", config.shared_presentation.docks.bottom.is_some()),
-                            ("left", config.shared_presentation.docks.left.is_some()),
-                            ("right", config.shared_presentation.docks.right.is_some()),
-                        ] {
-                            if authored && !presentation.docks().contains_key(edge) {
-                                push(
-                                    transfer,
-                                    Contact::AcceptSharedDock { edge: edge.into() },
-                                    format!("Accept dock at {edge}"),
-                                );
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -3092,16 +2925,6 @@ fn transfer_begin_command_items(core: &RyeOsCore) -> Vec<RyeOsCommandChoice> {
             }
         }
     }
-    for (name, edge) in [
-        ("top", RyeOsDockEdge::Top),
-        ("bottom", RyeOsDockEdge::Bottom),
-        ("left", RyeOsDockEdge::Left),
-        ("right", RyeOsDockEdge::Right),
-    ] {
-        if presentation.docks().contains_key(name) {
-            sources.push((Source::SharedDock { edge }, format!("{name} shared dock")));
-        }
-    }
     let destinations = session
         .presentations
         .iter()
@@ -3164,7 +2987,7 @@ fn focused_row_command_items(
     let Some(instance_key) = focused.cloned() else {
         return Vec::new();
     };
-    // Focus may be a shared dock or a captured mount, not the active tile.
+    // Focus may be a shared dialog or a captured mount, not the active tile.
     // Its affordances must come from that exact mounted View and binding.
     let Some(view_ref) = core.mounted_view_ref(&instance_key).map(str::to_owned) else {
         return Vec::new();
@@ -3301,7 +3124,6 @@ pub(crate) fn available_command_items_with_focus(
     focused: Option<&RyeOsViewInstanceKey>,
 ) -> Vec<RyeOsCommandChoice> {
     let mut items = context_command_items(core, focused);
-    items.extend(dock_command_items(core));
     items.extend(transfer_begin_command_items(core));
     items.extend(transfer_contact_command_items(core));
     items.extend(core.releasable_binding_attachment_items());
@@ -3981,7 +3803,6 @@ mod tests {
     use super::*;
     use crate::ui::content::{ProjectedRecord, TimelineRole};
     use crate::ui::reducer::test_support::core as test_support_core;
-    use crate::ui::reducer::test_support::session_with_surface_and_docks;
     use crate::ui::reducer::test_support::*;
     use crate::ui::{RyeOsEvent, RyeOsUiEvent};
     use serde_json::json;
@@ -4051,12 +3872,24 @@ mod tests {
         .encode()
     }
 
-    fn dock_default_source_key(core: &RyeOsCore, edge: RyeOsDockEdge) -> String {
-        super::super::source_key::RyeOsSourceInstanceKey::named(
-            core.shared_dock_instance_key(edge).unwrap(),
-            "default",
-        )
-        .encode()
+    fn input_tile_key(core: &RyeOsCore) -> RyeOsViewInstanceKey {
+        core.active_view_set()
+            .unwrap()
+            .tiles
+            .values()
+            .next()
+            .unwrap()
+            .instance_key
+            .clone()
+    }
+
+    fn tile_input(vm: &RyeOsViewModel) -> RyeOsInputVm {
+        let Some(RyeOsLayoutNodeVm::Tile { input, .. }) =
+            vm.view_set.as_ref().and_then(|set| set.root.as_ref())
+        else {
+            panic!("one tile")
+        };
+        input.clone().expect("the tile declares input")
     }
 
     #[test]
@@ -4302,27 +4135,26 @@ mod tests {
     }
 
     #[test]
-    fn status_view_in_top_dock_includes_notice_rows() {
-        let session = session_with_surface_and_docks(
-            json!({
-                "name": "ryeos-base",
-
-                "views": {
-                    "view:ryeos/node/status": {
-                        "title": "Status",
-                        "widget": "key_value",
-                        "sources": { "default": { "ref": "service:node/status" } },
-                        "projections": { "detail": ["version"] }
-                    }
+    fn status_view_includes_notice_rows() {
+        let session = session_with_surface(json!({
+            "name": "ryeos-base",
+            "tiles": ["view:ryeos/node/status"],
+            "views": {
+                "view:ryeos/node/status": {
+                    "title": "Status",
+                    "widget": "key_value",
+                    "sources": { "default": { "ref": "service:node/status" } },
+                    "projections": { "detail": ["version"] }
                 }
-            }),
-            serde_json::json!({
-                "top": { "content": "view:ryeos/node/status", "open": true, "size": 3 }
-            }),
-        );
+            }
+        }));
         let mut core = test_support_core(session);
         core.data.sources.insert(
-            dock_default_source_key(&core, RyeOsDockEdge::Top),
+            super::super::source_key::RyeOsSourceInstanceKey::named(
+                input_tile_key(&core),
+                "default",
+            )
+            .encode(),
             json!({ "version": "0.1.0" }),
         );
         core.notice(
@@ -4331,18 +4163,18 @@ mod tests {
         );
 
         let vm = build_view_model(&core);
-        let dock = vm
-            .docks
-            .top
-            .expect("authored top status slot should render");
-        assert_eq!(
-            dock.instance_key,
-            core.shared_dock_instance_key(RyeOsDockEdge::Top).unwrap()
-        );
-        assert_eq!(dock.edge, RyeOsDockEdge::Top);
-        assert_eq!(dock.title, "Status");
-        assert_eq!(dock.size, 3);
-        match dock.view {
+        let Some(RyeOsLayoutNodeVm::Tile {
+            instance_key,
+            title,
+            view,
+            ..
+        }) = vm.view_set.as_ref().and_then(|set| set.root.as_ref())
+        else {
+            panic!("the status tile should render")
+        };
+        assert_eq!(instance_key, &input_tile_key(&core));
+        assert_eq!(title, "Status");
+        match view.as_ref() {
             RyeOsViewVm::Rows { rows, .. } => {
                 assert!(rows.iter().any(|row| row.primary == "version: 0.1.0"));
                 let version = rows
@@ -4361,7 +4193,7 @@ mod tests {
                 assert_eq!(notice.tone, RyeOsTone::Accent);
                 assert!(!notice.selected);
             }
-            other => panic!("expected rows status dock, got {other:?}"),
+            other => panic!("expected rows status view, got {other:?}"),
         }
     }
 
@@ -5258,7 +5090,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_dock_row_uses_its_own_view_binding_not_the_active_tile() {
+    fn captured_dialog_row_uses_its_own_view_binding_not_the_active_tile() {
         let mut session = session();
         let root_attachment_id = session.root_attachment_id.clone();
         let shared = session
@@ -5267,7 +5099,7 @@ mod tests {
             .find(|entry| entry.binding_attachment_id == root_attachment_id)
             .unwrap();
         shared.presentation.views.insert(
-            "view:ryeos/threads/list".into(),
+            "view:ryeos/launcher".into(),
             json!({
                 "widget":"table",
                 "sources":{"default":{"ref":"service:ui/ryeos-ui/threads/list","collection":"threads"}},
@@ -5283,22 +5115,26 @@ mod tests {
         core.presentation
             .as_mut()
             .unwrap()
-            .dock_mut("left")
-            .unwrap()
-            .visible = true;
-        let dock = core.shared_dock_instance_key(RyeOsDockEdge::Left).unwrap();
-        assert_ne!(core.mounted_view_ref(&dock), Some("view:test/home"));
-        let source_key = dock_default_source_key(&core, RyeOsDockEdge::Left);
+            .open_dialog("launcher", None)
+            .unwrap();
+        let shared = core.presentation.as_ref().unwrap().dialogs()["launcher"]
+            .view()
+            .instance_key()
+            .clone();
+        assert_ne!(core.mounted_view_ref(&shared), Some("view:test/home"));
+        let source_key =
+            super::super::source_key::RyeOsSourceInstanceKey::named(shared.clone(), "default")
+                .encode();
         core.data
             .sources
-            .insert(source_key, json!({"threads":[{"thread_id":"T-dock"}]}));
-        let items = available_command_items_with_focus(&core, Some(&dock));
+            .insert(source_key, json!({"threads":[{"thread_id":"T-dialog"}]}));
+        let items = available_command_items_with_focus(&core, Some(&shared));
         assert!(items.iter().any(|item| matches!(&item.intent,
             RyeOsUiIntent::InvokeAffordance { instance_key, view_ref, affordance_id, record }
-                if instance_key == &dock
-                    && view_ref == "view:ryeos/threads/list"
+                if instance_key == &shared
+                    && view_ref == "view:ryeos/launcher"
                     && affordance_id == "cancel"
-                    && record["thread_id"] == "T-dock"
+                    && record["thread_id"] == "T-dialog"
         )));
     }
 
@@ -5533,28 +5369,24 @@ mod tests {
     }
 
     fn input_session(view: serde_json::Value) -> crate::ui::model::RyeOsCore {
-        let session = session_with_surface_and_docks(
-            json!({
-                "name": "t",
-
-                "views": { "view:ryeos/input": view }
-            }),
-            serde_json::json!({ "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 } }),
-        );
+        let session = session_with_surface(json!({
+            "name": "t",
+            "tiles": ["view:ryeos/input"],
+            "views": { "view:ryeos/input": view }
+        }));
         let mut core = test_support_core(session);
-        core.focused_input = core.shared_dock_instance_key(RyeOsDockEdge::Bottom);
+        core.focused_input = Some(input_tile_key(&core));
         core
     }
 
     #[test]
-    fn input_view_renders_prompt_in_bottom_slot() {
+    fn input_view_renders_its_prompt() {
         let core = input_session(json!({
             "widget": "text",
             "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
         }));
         let vm = build_view_model(&core);
-        let bottom = vm.docks.bottom.expect("bottom slot");
-        let input = bottom.input.expect("bottom instance declares input");
+        let input = tile_input(&vm);
         assert_eq!(input.placeholder, "Ask or run a command");
     }
 
@@ -5604,7 +5436,7 @@ mod tests {
             "input": { "id": "line", "target_label": "thread input", "submit": "route" }
         }));
         let vm = build_view_model(&core);
-        let input = vm.docks.bottom.unwrap().input.unwrap();
+        let input = tile_input(&vm);
         assert_eq!(input.route_label, "→ thread input");
     }
 
@@ -5620,7 +5452,7 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-                core.shared_dock_instance_key(RyeOsDockEdge::Bottom).unwrap(),
+                input_tile_key(&core),
                 "line",
             )
             .encode(),
@@ -5639,7 +5471,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.docks.bottom.unwrap().input.unwrap();
+        let input = tile_input(&vm);
         assert!(
             input
                 .completion
@@ -5658,8 +5490,7 @@ mod tests {
         }));
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-                core.shared_dock_instance_key(RyeOsDockEdge::Bottom)
-                    .unwrap(),
+                input_tile_key(&core),
                 "line",
             )
             .encode(),
@@ -5675,7 +5506,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.docks.bottom.unwrap().input.unwrap();
+        let input = tile_input(&vm);
         assert!(
             input.completion.is_empty(),
             "no completion source -> no suggestions"
@@ -5698,12 +5529,8 @@ mod tests {
             }
         }));
         core.data.sources.insert(
-            crate::ui::source_key::RyeOsSourceInstanceKey::mention(
-                core.shared_dock_instance_key(RyeOsDockEdge::Bottom)
-                    .unwrap(),
-                "line",
-            )
-            .encode(),
+            crate::ui::source_key::RyeOsSourceInstanceKey::mention(input_tile_key(&core), "line")
+                .encode(),
             json!({ "threads": [
                 { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
                 { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
@@ -5717,7 +5544,7 @@ mod tests {
             ..Default::default()
         };
         let vm = build_view_model(&core);
-        let input = vm.docks.bottom.unwrap().input.unwrap();
+        let input = tile_input(&vm);
         assert!(
             input
                 .completion

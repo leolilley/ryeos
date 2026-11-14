@@ -32,7 +32,7 @@ mod tests {
         let presentation = if surface {
             serde_json::json!({"definition":{"kind":"surface","surface":{"name":"test-work","title":"Work","tiles":["view:test/work"]}},"views":{"view:test/work":{}}})
         } else {
-            serde_json::json!({"definition":{"kind":"shared_presentation","config":{"category":"ui","shared_presentation":{"schema":1,"title":"RyeOS","launcher":"launch","dialogs":[{"id":"launch","title":"Launch","view":"view:test/work"}],"capabilities":{"sources":[],"affordances":[]}}}},"views":{"view:test/work":{}}})
+            serde_json::json!({"definition":{"kind":"shared_presentation","config":{"category":"ui","shared_presentation":{"schema":2,"title":"RyeOS","launcher":"launch","dialogs":[{"id":"launch","title":"Launch","view":"view:test/work"}],"capabilities":{"sources":[],"affordances":[]}}}},"views":{"view:test/work":{}}})
         };
         serde_json::from_value(serde_json::json!({"binding_attachment_id":id,"binding_generation":1,"binding_digest":"a".repeat(64),"root_ref":if surface{"surface:test/work"}else{"config:test/shared"},"root_generation":"generation","project_path":null,"subject":{"kind":"projectless"},"posture":"observation_only","binding_request_bounds":{"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536},"presentation":presentation})).unwrap()
     }

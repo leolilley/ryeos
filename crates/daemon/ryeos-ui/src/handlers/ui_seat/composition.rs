@@ -966,7 +966,7 @@ mod tests {
                 "request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":131072},
                 "body":{"kind":"admission","purpose":"resume_particular_surface","surface_open_target":null,
                     "particular_selection":{"kind":"surface","id":"workspace","expected_revision":4},
-                    "invocation_origin":format!("seat:{presentation}:dock:left"),
+                    "invocation_origin":format!("seat:{presentation}:dialog:left"),
                     "request":{"binding_attachment_id":"root","binding_generation":1,"binding_digest":"cd".repeat(32),
                         "coordinate":{"kind":"affordance","view_ref":"view:test/open","affordance_id":"open"},
                         "payload":{"kind":"selection","record":{"creation_request_id":"untrusted-self-id","selected":"work"}}},

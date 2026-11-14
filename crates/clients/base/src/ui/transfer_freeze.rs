@@ -54,7 +54,6 @@ impl UiMoveFreezeRequest {
             UiTransferExportContent::SurfaceMount {
                 source_view_set_id, ..
             } => BTreeSet::from([*source_view_set_id]),
-            UiTransferExportContent::SharedDock { .. } => BTreeSet::new(),
         };
         if self.instances != instances.into_iter().collect::<Vec<_>>()
             || self.view_sets != sets.into_iter().collect::<Vec<_>>()
@@ -128,7 +127,7 @@ mod tests {
             binding_digest: "ab".repeat(32),
         };
         let export = UiTransferExport {
-            schema: 1,
+            schema: 2,
             mode: UiTransferExportMode::Move,
             content: UiTransferExportContent::ViewSets {
                 active_set: Some("empty".into()),
