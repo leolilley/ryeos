@@ -86,6 +86,12 @@ pub enum AuthorItemRefusal {
          run `ryeos init` on the stopped node to create and pin it"
     )]
     AuthoringKeyUnavailable { path: String, reason: String },
+    #[error(
+        "author_item refused: the authored item extends the aliased parent `{parent}`, whose \
+         capabilities cannot be bounded; author the canonical ref (`kind:path`) of the parent \
+         instead of an `@alias`"
+    )]
+    AliasedExtendsParent { parent: String },
 }
 
 impl AuthorItemRefusal {
@@ -97,6 +103,7 @@ impl AuthorItemRefusal {
             }
             Self::AuthoredCapabilityNotCovered { .. } => "authored_capability_not_covered",
             Self::AuthoringKeyUnavailable { .. } => "author_item_authoring_key_unavailable",
+            Self::AliasedExtendsParent { .. } => "author_item_aliased_extends_parent",
         }
     }
 }
@@ -536,10 +543,10 @@ fn enforce_authored_capability_ceiling(
 /// child's kind the way the extends walk does.
 fn authored_parent_ref(parent: &str, kind: &str) -> Result<CanonicalRef> {
     if parent.starts_with('@') {
-        bail!(
-            "authored item extends the aliased parent `{parent}`; author the canonical ref so \
-             its capabilities can be bounded"
-        );
+        return Err(AuthorItemRefusal::AliasedExtendsParent {
+            parent: parent.to_owned(),
+        }
+        .into());
     }
     let canonical = if parent.contains(':') {
         parent.to_owned()
@@ -1436,7 +1443,12 @@ mod tests {
 
     #[test]
     fn aliased_extends_parent_is_refused() {
-        assert!(authored_parent_ref("@base", "directive").is_err());
+        let err = authored_parent_ref("@base", "directive").unwrap_err();
+        let refusal = err
+            .downcast_ref::<AuthorItemRefusal>()
+            .expect("typed refusal");
+        assert_eq!(refusal.code(), "author_item_aliased_extends_parent");
+        assert!(refusal.to_string().contains("author the canonical ref"));
         assert_eq!(
             authored_parent_ref("base/wide", "directive")
                 .unwrap()

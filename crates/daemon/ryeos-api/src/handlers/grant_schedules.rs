@@ -490,6 +490,7 @@ mod enabled {
                         source_node_fingerprint: source.clone(),
                         source_node_grant_hash: old.clone(),
                         delegation_digest: None,
+                        delegation_not_after: None,
                     },
                 );
             }

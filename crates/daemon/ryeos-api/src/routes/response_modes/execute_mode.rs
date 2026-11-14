@@ -1006,19 +1006,29 @@ pub fn preauthorize_execution_policy(
     caller_scopes: &[String],
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<()> {
+    preauthorize_execution_policy_with(policy, caller_scopes, state.authorizer.as_ref())
+}
+
+/// [`preauthorize_execution_policy`] over the authorizer alone, for callers
+/// that hold no [`ryeos_app::state::AppState`].
+pub fn preauthorize_execution_policy_with(
+    policy: &ExecutionPolicy,
+    caller_scopes: &[String],
+    authorizer: &ryeos_runtime::authorizer::Authorizer,
+) -> anyhow::Result<()> {
     policy.validate()?;
     // An environment that reads the operator's vault is operator authority,
     // not a consequence of holding execute rights on the item. Refuse it here,
     // before any capture, launch reservation, or secret read.
     ryeos_app::execution_policy::authorize_operator_vault_exposure(
-        state.authorizer.as_ref(),
+        authorizer,
         caller_scopes,
         &policy.environment,
     )?;
     if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
         let required_capability = access.required_capability();
         ryeos_app::execution_policy::authorize_live_project_access(
-            state.authorizer.as_ref(),
+            authorizer,
             caller_scopes,
             *access,
         )
@@ -1037,8 +1047,7 @@ pub fn preauthorize_execution_policy(
             ..
         }
     ) {
-        state
-            .authorizer
+        authorizer
             .authorize(
                 caller_scopes,
                 &AuthorizationPolicy::require(
