@@ -2911,8 +2911,8 @@ mod tests {
         let authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
             project.path(),
             vec![
-                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
                 ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY.to_string(),
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
             ],
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )

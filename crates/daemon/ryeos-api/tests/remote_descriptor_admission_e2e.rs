@@ -709,9 +709,6 @@ fn remote_identity() -> RemoteIdentity {
     }
 }
 
-/// The site the test-state composition gives every node.
-const TEST_SITE_ID: &str = "site:testhost";
-
 fn public_key_response(remote: &RemoteIdentity) -> Value {
     let signing_key = format!(
         "ed25519:{}",
@@ -723,7 +720,7 @@ fn public_key_response(remote: &RemoteIdentity) -> Value {
         "fingerprint": remote.identity.fingerprint(),
         "signing_key": signing_key,
         "vault_fingerprint": "vault-test-fingerprint",
-        "site_id": TEST_SITE_ID,
+        "site_id": remote.identity.site_id(),
     })
 }
 

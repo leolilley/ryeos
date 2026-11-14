@@ -36,17 +36,14 @@ pub const REPLAY_INDEXES_CLASS: &str = "replay-indexes";
 pub const EXTERNAL_CONTENT_BINDINGS_CLASS: &str = "external-content-bindings";
 
 /// Load the complete node-signed policy generation, trusting only this
-/// node's operator signer, never installed publishers or applications.
+/// node's own key, never installed publishers or applications.
 pub(crate) fn load_signed_maintenance_snapshot(
     config: &Config,
     identity: &NodeIdentity,
 ) -> Result<NodePolicySnapshot> {
     let trust =
-        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
-            fingerprint: identity.fingerprint().to_owned(),
-            verifying_key: *identity.verifying_key(),
-            label: Some("offline maintenance node operator".to_owned()),
-        }]);
+        ryeos_engine::trust::TrustStore::from_registry(*identity.verifying_key(), Vec::new())
+            .context("build node-only trust for offline maintenance")?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         &config.app_root,
         &trust,

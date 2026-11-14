@@ -3726,13 +3726,9 @@ mod tests {
                 &source,
             )
             .unwrap();
-        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
-            ryeos_engine::trust::TrustedSigner {
-                fingerprint: identity.fingerprint().to_owned(),
-                verifying_key: *identity.verifying_key(),
-                label: None,
-            },
-        ]);
+        let trust =
+            ryeos_engine::trust::TrustStore::from_registry(*identity.verifying_key(), Vec::new())
+                .unwrap();
         let lock = StateLock::acquire(&default_lock_path(&config.app_root)).unwrap();
         publish_policy_update(
             &config.app_root,
