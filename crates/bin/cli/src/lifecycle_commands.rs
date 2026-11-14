@@ -3221,6 +3221,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce
                     }),
                 ));
+                checks.extend(central_auth_state_relocated_check(&config.app_root));
                 if !args.no_bundles {
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification
@@ -4819,6 +4820,52 @@ fn bundle_state_checks(
         ),
     });
     checks
+}
+
+/// Realm state an earlier central-auth kept directly under the app root is
+/// not read any more: the bundle's code opens only its bundle state home. Name
+/// each leftover realm with the move that puts it where the code looks.
+fn central_auth_state_relocated_check(
+    app_root: &std::path::Path,
+) -> Option<ryeos_core_tools::actions::doctor::CheckResult> {
+    let old_realms = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("central-auth")
+        .join("realms");
+    let mut realms: Vec<String> = std::fs::read_dir(&old_realms)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .collect();
+    realms.sort();
+    let new_root = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("bundle-state")
+        .join("central-auth");
+    let moves: Vec<String> = realms
+        .iter()
+        .map(|realm| {
+            format!(
+                "mv {}/* {}/",
+                old_realms.join(realm).display(),
+                new_root.join(realm).display()
+            )
+        })
+        .collect();
+    Some(check(
+        "central_auth_state_relocated",
+        ryeos_core_tools::actions::doctor::WARN,
+        serde_json::json!({
+            "realms": realms,
+            "note": "central-auth now keeps each realm in its bundle state home and no longer reads this directory",
+            "fix": format!(
+                "grant the realm's caller `ryeos.use.bundle-state.central-auth/<realm>` and run one central-auth tool for the realm (for example list-principals) so the node creates its state home, stop the node, then move the old contents in under {}: {}; finally remove the old realm directory",
+                new_root.display(),
+                moves.join("; ")
+            ),
+        }),
+    ))
 }
 
 fn check(
