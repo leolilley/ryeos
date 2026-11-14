@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 
 use ryeos_bundle::manifest::{
     BundleEventOperation, BundleManifest, BundleManifestSource, ProjectSnapshotOperation,
-    RuntimeVaultOperation,
+    RuntimeVaultOperation, StateHomeNamespaces,
 };
 
 /// Relative risk of a single authority change. Ordered highest-to-lowest so a
@@ -248,6 +248,46 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
         "project_snapshots",
         &mut findings,
     );
+
+    // ── state_home (node-owned bundle state) ──
+    let state_home_names = |manifest: &BundleManifest| -> Vec<String> {
+        match manifest
+            .runtime_authority
+            .state_home
+            .as_ref()
+            .map(|decl| &decl.namespaces)
+        {
+            Some(StateHomeNamespaces::Fixed { names }) => names.clone(),
+            _ => Vec::new(),
+        }
+    };
+    let state_home_open = |manifest: &BundleManifest| {
+        matches!(
+            manifest
+                .runtime_authority
+                .state_home
+                .as_ref()
+                .map(|decl| &decl.namespaces),
+            Some(StateHomeNamespaces::LaunchParam)
+        )
+    };
+    diff_kind_list(
+        &state_home_names(old),
+        &state_home_names(new),
+        "state_home fixed namespaces",
+        &mut findings,
+    );
+    match (state_home_open(old), state_home_open(new)) {
+        (false, true) => findings.push(AuditFinding {
+            risk: Risk::NewWildcard,
+            message: "state_home: +[any launch-chosen namespace]".to_string(),
+        }),
+        (true, false) => findings.push(AuditFinding {
+            risk: Risk::Removed,
+            message: "state_home: -[any launch-chosen namespace]".to_string(),
+        }),
+        _ => {}
+    }
 
     // ── operator_vault (handler-route bound) ──
     match (
@@ -631,6 +671,43 @@ mod tests {
         assert!(removed.iter().any(|finding| {
             finding.risk == Risk::Removed
                 && finding.message == "project_snapshots: -[create, status]"
+        }));
+    }
+
+    #[test]
+    fn state_home_declaration_is_audited() {
+        use ryeos_bundle::manifest::StateHomeDecl;
+        let none = manifest("arc", RuntimeAuthorityDecls::default());
+        let fixed = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                state_home: Some(StateHomeDecl {
+                    namespaces: StateHomeNamespaces::Fixed {
+                        names: vec!["realm-a".into()],
+                    },
+                }),
+                ..Default::default()
+            },
+        );
+        let open = manifest(
+            "arc",
+            RuntimeAuthorityDecls {
+                state_home: Some(StateHomeDecl {
+                    namespaces: StateHomeNamespaces::LaunchParam,
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(diff_authority(&none, &fixed).iter().any(|finding| {
+            finding.risk == Risk::Added && finding.message == "state_home fixed namespaces: +realm-a"
+        }));
+        assert!(diff_authority(&none, &open).iter().any(|finding| {
+            finding.risk == Risk::NewWildcard
+                && finding.message == "state_home: +[any launch-chosen namespace]"
+        }));
+        assert!(diff_authority(&open, &none).iter().any(|finding| {
+            finding.risk == Risk::Removed
+                && finding.message == "state_home: -[any launch-chosen namespace]"
         }));
     }
 

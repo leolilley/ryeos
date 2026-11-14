@@ -13,6 +13,7 @@ pub mod admitted_program_trust;
 pub mod authoritative_root_fact;
 pub mod build_info;
 pub mod bundle_event_service;
+pub mod bundle_state_home;
 pub mod bundle_publication;
 pub mod bundle_set_transaction;
 pub mod bundle_transaction;
