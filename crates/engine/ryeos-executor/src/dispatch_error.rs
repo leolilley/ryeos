@@ -76,11 +76,12 @@ pub enum DispatchError {
         space: String,
         candidates: Vec<String>,
     },
-    /// A project file sits inside a namespace an installed bundle owns. The
+    /// A project file sits inside a namespace an installed bundle owns or is
+    /// named for. The
     /// project cannot shadow it; the file moves to the project's own
     /// namespace and whatever named it is repointed.
     #[error(
-        "project file {project_path} for '{item_ref}' is inside namespace '{namespace}' owned by bundle '{bundle}'; a project cannot shadow an owned namespace"
+        "project file {project_path} for '{item_ref}' is inside namespace '{namespace}' owned by (or named for) installed bundle '{bundle}'; a project cannot shadow an installed bundle's namespace or name"
     )]
     ReservedNamespaceShadow {
         item_ref: String,

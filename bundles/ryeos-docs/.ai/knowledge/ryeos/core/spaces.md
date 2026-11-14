@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T11:09:13Z:0d545bffeec5eb2ca8f3a53d2b73783daa077ad3f77065174af4b92f46535dd2:Y2A8JRTZrlJnBtGiys+CB446k4yRxtsjhhrwxBQdCnXg2o9nBBvu696BLXPRxxtcy0+YDn0G0uQsYVFq1wQlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:55:49Z:512eafeeddbf98f64598720afac2661d8dd8830ff39bd29566cc9d0357444970:PFYXXIaiTk7rBt2fBfrlbLVWG2svgO1iu+ePPGTcEDQK8l3zgVnUWCEOFEXHrgsDTSM8YTyOWnwvJV4PvYwsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -171,6 +171,18 @@ runtime in an owned namespace gets that runtime from the bundle only. To
 customize, put your copy in your own namespace (for example
 `.ai/tools/<project>/runtimes/python/function.yaml`) and point `executor_id`
 at it.
+
+An installed bundle's own name is reserved the same way. The first segment of
+an item ref names the bundle that owns the item's runtime authority, so a
+project item whose first segment equals an installed bundle's name (for
+example `.ai/tools/core/x.yaml` while the `core` bundle is installed) is
+refused with the same 409 `reserved_namespace_shadow`. A project may still be
+a bundle in its own right, for developing a bundle before publishing it, as
+long as its manifest `name` and item namespace are unique among installed
+bundles. A project item that would mint runtime authority from a project
+manifest named after an installed bundle (or the root of one of its owned
+namespaces) is refused with `project_bundle_id_collision`; the cure is to
+rename the project bundle's manifest `name` and its item namespace.
 
 Two installed bundles cannot claim overlapping namespaces: bundle install and
 `ryeos bundle verify` refuse the candidate, and a node refuses to start on an

@@ -4,6 +4,10 @@ use ryeos_engine::contracts::ResolvedItem;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// Code a refusal of a project manifest carrying an installed bundle's id
+/// begins with.
+pub const PROJECT_BUNDLE_ID_COLLISION: &str = "project_bundle_id_collision";
+
 pub fn mint_runtime_capability_caps(
     requires_value: Option<&Value>,
     resolved_item: &ResolvedItem,
@@ -202,6 +206,16 @@ fn authoritative_manifest(
                 return Err(format!(
                     "project runtime capability requirements need TrustedProject provenance; \
                      effective trust class is {effective_trust_class:?}"
+                ));
+            }
+            if let Some(installed) = engine.installed_bundle_reserving_id(effective_bundle_id) {
+                return Err(format!(
+                    "{PROJECT_BUNDLE_ID_COLLISION}: project item `{}` carries the bundle id \
+                     `{effective_bundle_id}`, which installed bundle `{installed}` reserves; a \
+                     project manifest cannot mint runtime authority under an installed \
+                     bundle's id. Rename the project bundle's manifest `name` and its item \
+                     namespace to a name no installed bundle uses",
+                    resolved_item.canonical_ref
                 ));
             }
             let project_root = resolved_item

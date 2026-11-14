@@ -213,8 +213,9 @@ pub struct ResolutionRoot {
 pub struct ResolutionRoots {
     /// Search roots in resolution priority order (first match wins)
     pub ordered: Vec<ResolutionRoot>,
-    /// Namespaces installed bundles own. A project candidate inside one is
-    /// refused; only bundle space can supply it.
+    /// Namespaces installed bundles own, including each installed bundle's
+    /// own name. A project candidate inside one is refused; only bundle space
+    /// can supply it.
     pub owned_namespaces: Vec<OwnedNamespace>,
     /// The logical project of the project root, when it differs from the
     /// root's own path (a pinned or COW checkout). Signer project scopes
@@ -316,16 +317,23 @@ impl ResolutionRoots {
             ai_root: bundle.canonical_root.join(crate::AI_DIR),
             content_root: Some(bundle.canonical_root.clone()),
         }));
+        // A bundle's name is reserved alongside its declared namespaces: the
+        // first segment of an item ref names the bundle that owns its runtime
+        // authority, so a project item under an installed bundle's name would
+        // read as that bundle.
         let owned_namespaces = bundles
             .iter()
             .flat_map(|bundle| {
-                bundle
-                    .owned_namespaces
-                    .iter()
-                    .map(|namespace| OwnedNamespace {
+                std::iter::once(OwnedNamespace {
+                    bundle: bundle.name.clone(),
+                    namespace: bundle.name.clone(),
+                })
+                .chain(bundle.owned_namespaces.iter().map(|namespace| {
+                    OwnedNamespace {
                         bundle: bundle.name.clone(),
                         namespace: namespace.clone(),
-                    })
+                    }
+                }))
             })
             .collect();
         Self {
@@ -1310,6 +1318,36 @@ mod tests {
             namespace: "ryeos/core".to_owned(),
         }];
         roots
+    }
+
+    #[test]
+    fn project_candidate_under_an_installed_bundle_name_is_refused() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        let project_ai = project.join(crate::AI_DIR);
+        write_item(&project_ai, "tools", "core/x", ".yaml", "executor_id: run");
+        write_item(&project_ai, "tools", "mine/x", ".yaml", "executor_id: run");
+        let installed = vec![RegisteredBundleRoot {
+            name: "core".to_owned(),
+            canonical_root: bundle.clone(),
+            owned_namespaces: vec!["ryeos/core".to_owned()],
+        }];
+        let roots = ResolutionRoots::from_registered(Some(project.clone()), &installed);
+        let item = CanonicalRef::parse("tool:core/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::ReservedNamespaceShadow {
+                namespace, bundle, ..
+            }) => {
+                assert_eq!(namespace, "core");
+                assert_eq!(bundle, "core");
+            }
+            other => panic!("expected reserved_namespace_shadow, got {other:?}"),
+        }
+        let unique = CanonicalRef::parse("tool:mine/x").unwrap();
+        assert!(resolve_item_full(&roots, &schema, &unique).is_ok());
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
     }
 
     #[test]
