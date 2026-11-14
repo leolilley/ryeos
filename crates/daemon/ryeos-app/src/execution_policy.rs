@@ -190,6 +190,11 @@ pub fn resolve_local_live_authority(
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     environment: LocalLiveEnvironment,
 ) -> anyhow::Result<ResolvedStandardLocalLiveAuthority> {
+    // The sealed ceiling is a sorted set; callers hand over the caller's scopes
+    // in whatever order the grant listed them.
+    let mut capability_ceiling = capability_ceiling;
+    capability_ceiling.sort_unstable();
+    capability_ceiling.dedup();
     authorize_local_live_execution(&capability_ceiling, environment)?;
     let policy = environment.policy();
     policy.validate()?;

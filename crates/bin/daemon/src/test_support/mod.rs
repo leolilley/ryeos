@@ -724,26 +724,15 @@ pub fn pin_signer(
         );
     }
     let node_key = lillux::crypto::load_signing_key(&key_path).expect("load fixture node key");
-    let mut record = ryeos_engine::trust::SignerRecord::new(
+    ryeos_engine::test_support::pin_signer_chained(
+        app_root,
+        &node_key,
         verifying_key,
         &label,
         role,
         scope,
-        ryeos_engine::trust::SignerStatus::Active,
-    );
-    record.event = lillux::cas::sha256_hex(format!("fixture:{}", record.fingerprint).as_bytes());
-    let body = serde_yaml::to_string(&record).expect("serialize fixture signer record");
-    let signed = lillux::signature::sign_content_at(
-        &body,
-        &node_key,
-        "#",
-        None,
-        fast_fixture::FAST_FIXTURE_TIME,
-    );
-    let dir = ryeos_engine::trust::signers_dir(app_root);
-    std::fs::create_dir_all(&dir).expect("create fixture signer registry dir");
-    std::fs::write(dir.join(record.file_name()), signed).expect("write fixture signer record");
-    record.fingerprint
+        Some(fast_fixture::FAST_FIXTURE_TIME),
+    )
 }
 
 /// Pin the fixture bundle signers (the keys in `tests/fixtures/trusted_signers`)

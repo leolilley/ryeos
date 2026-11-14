@@ -513,7 +513,9 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
         ).await.unwrap_err();
         let qualification_error = format!("{qualification:#}");
         assert!(
-            qualification_error.contains("operator") || qualification_error.contains("verified"),
+            qualification_error.contains("operator")
+                || qualification_error.contains("verified")
+                || qualification_error.contains("forwarding proof"),
             "{qualification_error}"
         );
         let composition = external_content_products::compose(

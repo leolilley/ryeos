@@ -142,7 +142,9 @@ pub fn plant_probe_tool(
     )?;
     let mut tool = format!(
         "category: \"{PROBE_BUNDLE}\"\nversion: \"1.0.0\"\ntool_type: \"subprocess\"\n\
-         executor_id: \"@subprocess\"\ndescription: \"callback probe fixture\"\n\
+         executor_id: \"@subprocess\"\n\
+         execution_protocol: \"protocol:ryeos/core/tool_callback\"\n\
+         description: \"callback probe fixture\"\n\
          config:\n  command: {command}\n  input_data: \"${{params_json}}\"\n  timeout_secs: 60\n\
          requires:\n  capabilities:\n"
     );

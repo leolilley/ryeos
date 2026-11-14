@@ -31,7 +31,12 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let client = named_remote_client(&state, &req.remote, &ctx)?;
-    let result = client.threads_list(req.limit).await;
+    let result = client.threads_list(req.limit).await.map_err(|error| {
+        anyhow::Error::new(crate::remote::client::map_remote_call_error(
+            error,
+            "remote threads",
+        ))
+    });
     drop(client);
     result
 }

@@ -1037,7 +1037,6 @@ fn run_doctor(
                 .expect("could not determine XDG data directory")
         });
     let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
-    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
 
     let config =
         ryeos_node_runtime::config::Config::load(&ryeos_node_runtime::config::ConfigSources {
@@ -1095,7 +1094,7 @@ fn run_doctor(
             .map_err(|_| isolation_err.as_str()),
         &source_path,
         &dependency_roots,
-        &operator_config_root,
+        &app_root,
     );
 
     let ok = report.ok;
@@ -1273,7 +1272,7 @@ fn run_bundle_verify(
     let preflight_report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         &source_path,
         &dependency_roots,
-        &ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config(),
+        &app_root,
         isolation,
     )
     .context("bundle verify failed")?;

@@ -419,12 +419,13 @@ fn doctor_shows_the_provider_of_every_proof_and_of_every_met_entry() -> Result<(
 }
 
 #[test]
-fn isolation_policy_version_9_is_refused_as_foreign() -> Result<()> {
+fn a_previous_isolation_policy_version_is_refused_as_foreign() -> Result<()> {
     // The version belongs to the policy document that holds the host
     // classes, not to any one class. A foreign document version is refused
     // when the initialized state is sealed, before any daemon can start on
     // it; the refusal is the policy section's own text, and no restart
     // inhibition is written because no start was attempted.
+    let current = u64::from(ryeos_engine::isolation::ISOLATION_POLICY_VERSION);
     let error = match Launch::spawn_with_policy_document(|document| {
         let policy = document
             .get_mut("policy")
@@ -435,21 +436,24 @@ fn isolation_policy_version_9_is_refused_as_foreign() -> Result<()> {
             "fixture isolation policy document has no host_classes map"
         );
         anyhow::ensure!(
-            policy.get("version") == Some(&json!(10)),
-            "fixture isolation policy document is not version 10: {:?}",
+            policy.get("version") == Some(&json!(current)),
+            "fixture isolation policy document is not version {current}: {:?}",
             policy.get("version")
         );
-        policy.insert("version".to_owned(), json!(9));
+        policy.insert("version".to_owned(), json!(current - 1));
         Ok(())
     }) {
         Ok(mut launch) => {
             let (status, stderr) = launch.wait_exit()?;
-            anyhow::bail!("a version 9 policy was sealed and started: {status}\n{stderr}");
+            anyhow::bail!("a previous-version policy was sealed and started: {status}\n{stderr}");
         }
         Err(error) => format!("{error:#}"),
     };
     assert!(
-        error.contains("unsupported node isolation policy version 9 (expected 10)"),
+        error.contains(&format!(
+            "unsupported node isolation policy version {} (expected {current})",
+            current - 1
+        )),
         "{error}"
     );
     Ok(())

@@ -331,7 +331,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 
 pub const ANY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:objects/get-any",
-    endpoint: "objects.get_any",
+    endpoint: "objects.get-any",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/get-any"],
     handler: |params, ctx, state| {
