@@ -50,6 +50,7 @@ fn caller_scopes(lent: &[&'static str]) -> Vec<&'static str> {
         "ryeos.execute.graph.declares",
         ryeos_app::execution_policy::LIVE_PROJECT_READ_CAPABILITY,
         ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
+        ryeos_app::execution_policy::OPERATOR_VAULT_CAPABILITY,
     ];
     scopes.extend_from_slice(lent);
     scopes
@@ -214,6 +215,10 @@ async fn an_accepted_launch_admits_a_covering_caller() {
 /// A live-direct schedule registration for `graph:declares` under `project`.
 #[cfg(all(unix, feature = "scheduling"))]
 fn schedule_registration(schedule_id: &str, project: &Path, capabilities: &[&str]) -> Value {
+    // The scheduler requires a sorted, unique capability subset.
+    let mut capabilities = capabilities.to_vec();
+    capabilities.sort_unstable();
+    capabilities.dedup();
     json!({
         "schedule_id": schedule_id,
         "item_ref": "graph:declares",

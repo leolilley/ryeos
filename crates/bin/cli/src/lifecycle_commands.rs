@@ -3068,8 +3068,6 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                 ));
                 checks.push(remote_content_testimonies_check(&config.app_root));
                 if !args.no_bundles {
-                    let operator_config_root =
-                        ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification
                         // still uses the node's immutable isolation snapshot.
@@ -3081,7 +3079,7 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                                 .map_err(String::as_str),
                             &record.path,
                             &roots,
-                            &operator_config_root,
+                            &config.app_root,
                         );
                         checks.push(check(
                             &format!("bundle:{}", record.name),

@@ -28,7 +28,12 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let client = named_remote_client(&state, &req.remote, &ctx)?;
-    let result = client.vault_delete(&req.name).await;
+    let result = client.vault_delete(&req.name).await.map_err(|error| {
+        anyhow::Error::new(crate::remote::client::map_remote_call_error(
+            error,
+            "remote vault-delete",
+        ))
+    });
     drop(client);
     result
 }

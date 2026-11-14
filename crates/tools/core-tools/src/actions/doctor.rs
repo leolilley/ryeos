@@ -65,14 +65,14 @@ pub fn run_doctor(
     isolation: Result<Arc<IsolationRuntime>, &str>,
     source: &Path,
     dependency_roots: &[PathBuf],
-    operator_config_root: &Path,
+    app_root: &Path,
 ) -> DoctorReport {
     let mut checks = vec![
         check_manifest(source),
         check_verify(
             source,
             dependency_roots,
-            operator_config_root,
+            app_root,
             isolation.as_ref().map(Arc::clone).map_err(|reason| *reason),
         ),
     ];
@@ -247,7 +247,7 @@ fn check_manifest(source: &Path) -> CheckResult {
 fn check_verify(
     source: &Path,
     dependency_roots: &[PathBuf],
-    operator_config_root: &Path,
+    app_root: &Path,
     isolation: Result<Arc<IsolationRuntime>, &str>,
 ) -> CheckResult {
     let isolation = match isolation {
@@ -280,7 +280,7 @@ fn check_verify(
         source,
         &declared_name,
         dependency_roots,
-        operator_config_root,
+        app_root,
         isolation,
     ) {
         Ok(report) => {
