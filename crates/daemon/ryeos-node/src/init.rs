@@ -1142,7 +1142,15 @@ fn run_init_under_lock_on_storage(
             })
             .and_then(|profile| profile.host_classes().ok())
             .unwrap_or_default();
-        enforced_admission_refusal(isolation_policy, &declared, error)
+        let recorded_host_class = load_substrate_identity_record(&opts.app_root)
+            .ok()
+            .and_then(|identity| identity.host_class);
+        enforced_admission_refusal(
+            isolation_policy,
+            &declared,
+            recorded_host_class.as_deref(),
+            error,
+        )
     })?;
 
     // Re-init inherits the existing immutable node policy, but resolves its
@@ -2248,9 +2256,14 @@ const UNCONFINED_HOST_CLASS: &str = "local_unconfined";
 /// Under an enforced lane the cause is usually the host's sandbox probe: the
 /// message says so and, when the profile declares the explicit unconfined
 /// class, names it as the opt-out. Initialization never falls back to it.
+/// `recorded_host_class` is the host class the app root's substrate identity
+/// already records, if any. A recorded class never changes, so when it differs
+/// from the unconfined class the opt-out is a different, empty app root, not a
+/// re-run against this one.
 fn enforced_admission_refusal(
     policy: &ryeos_engine::isolation::IsolationPolicy,
     declared_host_classes: &[String],
+    recorded_host_class: Option<&str>,
     cause: anyhow::Error,
 ) -> anyhow::Error {
     if policy.mode != ryeos_engine::isolation::IsolationMode::Enforce {
@@ -2262,10 +2275,19 @@ fn enforced_admission_refusal(
             .iter()
             .any(|declared| declared == UNCONFINED_HOST_CLASS)
     {
-        format!(
-            " To run jobs unconfined as the daemon user, re-run with `--host-class \
-             {UNCONFINED_HOST_CLASS}`; initialization does not select it for you."
-        )
+        match recorded_host_class {
+            Some(recorded) if recorded != UNCONFINED_HOST_CLASS => format!(
+                " This app root is already initialized with host class `{recorded}`, and a \
+                 node's host class does not change, so `--host-class {UNCONFINED_HOST_CLASS}` \
+                 is refused here. To run jobs unconfined as the daemon user, initialize a new, \
+                 empty app root with `--host-class {UNCONFINED_HOST_CLASS}`; initialization \
+                 does not select it for you."
+            ),
+            _ => format!(
+                " To run jobs unconfined as the daemon user, re-run with `--host-class \
+                 {UNCONFINED_HOST_CLASS}`; initialization does not select it for you."
+            ),
+        }
     } else {
         String::new()
     };
@@ -3192,7 +3214,7 @@ mod tests {
         let declared = ["local".to_owned(), "local_unconfined".to_owned()];
         let text = format!(
             "{:#}",
-            enforced_admission_refusal(&policy, &declared, anyhow!("no user namespace"))
+            enforced_admission_refusal(&policy, &declared, None, anyhow!("no user namespace"))
         );
         assert!(
             text.starts_with("enforced_lane_admission_refused:"),
@@ -3200,17 +3222,43 @@ mod tests {
         );
         assert!(text.contains("no user namespace"), "{text}");
         assert!(text.contains("--host-class local_unconfined"), "{text}");
+        // An app root already initialized with another class cannot take the
+        // unconfined class; the refusal names a new app root instead.
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(
+                &policy,
+                &declared,
+                Some("local"),
+                anyhow!("no user namespace")
+            )
+        );
+        assert!(
+            text.starts_with("enforced_lane_admission_refused:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("already initialized with host class `local`"),
+            "{text}"
+        );
+        assert!(text.contains("new, empty app root"), "{text}");
+        assert!(!text.contains("re-run with"), "{text}");
         // A profile that declares no unconfined class offers none.
         let text = format!(
             "{:#}",
-            enforced_admission_refusal(&policy, &["local".to_owned()], anyhow!("probe failed"))
+            enforced_admission_refusal(
+                &policy,
+                &["local".to_owned()],
+                Some("local"),
+                anyhow!("probe failed")
+            )
         );
         assert!(!text.contains("local_unconfined"), "{text}");
         // A disabled lane keeps the plain admission failure.
         policy.mode = ryeos_engine::isolation::IsolationMode::Disabled;
         let text = format!(
             "{:#}",
-            enforced_admission_refusal(&policy, &declared, anyhow!("bad bundle"))
+            enforced_admission_refusal(&policy, &declared, None, anyhow!("bad bundle"))
         );
         assert!(!text.contains("local_unconfined"), "{text}");
         assert!(text.contains("bad bundle"), "{text}");
