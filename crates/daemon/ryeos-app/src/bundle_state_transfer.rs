@@ -120,7 +120,10 @@ fn validated_relative_path(path: &str) -> Result<PathBuf> {
         "file path `{path}` is not a plain relative path"
     );
     ensure!(
-        !path.contains('\\') && !path.ends_with('/'),
+        !path.contains('\\')
+            && path
+                .split('/')
+                .all(|segment| !segment.is_empty() && segment != "." && segment != ".."),
         "file path `{path}` is not canonical"
     );
     Ok(candidate.to_path_buf())
