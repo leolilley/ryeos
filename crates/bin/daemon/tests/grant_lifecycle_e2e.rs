@@ -557,6 +557,12 @@ async fn revoke_cancels_live_threads_of_principal() {
         "ryeos.write.project.live",
         "ryeos.execute.service.threads/get",
     ];
+    // A granter can only issue authority it holds, so it holds the grantee's
+    // caps as well; it needs them to authorize the grantee again below.
+    let granter_caps: Vec<&str> = [AUTHORIZE_KEY_CAP, REVOKE_KEY_CAP, LIST_CAP]
+        .into_iter()
+        .chain(sleeper_caps)
+        .collect();
     let project = tempfile::tempdir().expect("project tempdir");
     let (harness, fixture) = DaemonHarness::start_fast_with(
         |state_path, _user, fixture| {
@@ -565,7 +571,7 @@ async fn revoke_cancels_live_threads_of_principal() {
                 state_path,
                 fixture,
                 &granter,
-                &[AUTHORIZE_KEY_CAP, REVOKE_KEY_CAP, LIST_CAP],
+                &granter_caps,
                 &fixture.user,
                 GrantExpiry::At(4_102_444_800),
             )?;
