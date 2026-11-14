@@ -94,6 +94,13 @@ pub fn revalidate_scheduled_execution(
                 state.threads.site_id(),
                 &state.authorizer,
             )?;
+            check_pinned_delegation(
+                execution,
+                &ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone())
+                    .delegation_revocations_dir(),
+                &state.identity,
+                lillux::time::unix_secs_now(),
+            )?;
             Ok(HandlerContext::new_with_grant_authority(
                 principal_id.clone(),
                 execution.capabilities.clone(),
@@ -204,6 +211,54 @@ pub fn pinned_schedule_grants(
         ));
     }
     Ok(Some((grant, Some(source))))
+}
+
+/// Prove the principal-signed delegation a forwarded schedule was registered
+/// under still admits it: unexpired at `now` and not tombstoned on this node.
+/// This node retains only the delegation's digest and end time (the signed
+/// delegation itself travels with each request), so those are what is
+/// re-checked. A schedule that was not registered under a delegation passes.
+pub fn check_pinned_delegation(
+    execution: &ScheduleExecution,
+    revocations_dir: &Path,
+    node_identity: &NodeIdentity,
+    now: u64,
+) -> anyhow::Result<()> {
+    let ScheduleExecutionAuthority::Authenticated {
+        grant_authority, ..
+    } = &execution.authority
+    else {
+        return Ok(());
+    };
+    let Some(forwarding) = &grant_authority.forwarding else {
+        return Ok(());
+    };
+    let (Some(digest), Some(not_after)) = (
+        forwarding.delegation_digest.as_deref(),
+        forwarding.delegation_not_after,
+    ) else {
+        return Ok(());
+    };
+    if ryeos_node_runtime::remote_delegation::is_revoked(revocations_dir, digest, node_identity)? {
+        return Err(refused(
+            ScheduledAuthorityRefusalKind::DelegationRevoked,
+            format!(
+                "the delegation {digest} this schedule was registered under was revoked; \
+                 sign a new delegation with `ryeos remote delegate` and re-register the schedule"
+            ),
+        ));
+    }
+    if now > not_after {
+        return Err(refused(
+            ScheduledAuthorityRefusalKind::DelegationExpired,
+            format!(
+                "the delegation {digest} this schedule was registered under expired at unix \
+                 time {not_after}; sign a new delegation with `ryeos remote delegate` and \
+                 re-register the schedule"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Prove an authenticated schedule's pinned grants still admit it on this
@@ -504,5 +559,83 @@ mod tests {
         .unwrap();
         let kind = refusal_kind(fixture.check_on(&execution, SITE));
         assert_eq!(kind, ScheduledAuthorityRefusalKind::GrantRevoked);
+    }
+
+    fn delegated_execution(
+        fixture: &Fixture,
+        digest: &str,
+        not_after: u64,
+    ) -> ScheduleExecution {
+        let mut execution = fixture.pinned_execution();
+        if let ScheduleExecutionAuthority::Authenticated {
+            principal_class,
+            grant_authority,
+            ..
+        } = &mut execution.authority
+        {
+            *principal_class = AuthorizedKeyPrincipalClass::RemotePrincipal;
+            grant_authority.forwarding = Some(
+                ryeos_engine::principal_contract::ForwardingAuthorityEvidence {
+                    source_node_fingerprint: "66".repeat(32),
+                    source_node_grant_hash: "77".repeat(32),
+                    delegation_digest: Some(digest.to_owned()),
+                    delegation_not_after: Some(not_after),
+                },
+            );
+        }
+        execution
+    }
+
+    #[test]
+    fn delegation_pin_is_admitted_until_expired_or_tombstoned() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let digest = "ab".repeat(32);
+        let revocations = fixture._root.path().join("revocations");
+        let execution = delegated_execution(&fixture, &digest, 2_000);
+
+        check_pinned_delegation(&execution, &revocations, &fixture.node, 1_000).unwrap();
+        let kind = refusal_kind(check_pinned_delegation(
+            &execution,
+            &revocations,
+            &fixture.node,
+            2_001,
+        ));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::DelegationExpired);
+        assert_eq!(kind.fire_outcome(), "authority_expired");
+
+        ryeos_node_runtime::remote_delegation::write_tombstone(
+            &revocations,
+            &digest,
+            &format!("fp:{}", fixture.principal_fp),
+            &format!("fp:{}", fixture.principal_fp),
+            None,
+            None,
+            &fixture.node,
+            1_500,
+        )
+        .unwrap();
+        let kind = refusal_kind(check_pinned_delegation(
+            &execution,
+            &revocations,
+            &fixture.node,
+            1_600,
+        ));
+        assert_eq!(kind, ScheduledAuthorityRefusalKind::DelegationRevoked);
+        assert_eq!(kind.fire_outcome(), "authority_revoked");
+    }
+
+    #[test]
+    fn a_schedule_without_a_delegation_pin_passes_the_delegation_check() {
+        let fixture = Fixture::new();
+        fixture.grant(&[CAPABILITY], "2026-11-13T00:00:00Z");
+        let execution = fixture.pinned_execution();
+        check_pinned_delegation(
+            &execution,
+            &fixture._root.path().join("revocations"),
+            &fixture.node,
+            u64::MAX,
+        )
+        .unwrap();
     }
 }
