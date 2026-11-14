@@ -44,7 +44,9 @@ fn signed_command_selects_node_service_without_a_private_key_tool_bridge() {
 async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
     let (_node, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let client_dir = tempfile::tempdir().unwrap();
     let client = NodeIdentity::create(&client_dir.path().join("client.pem")).unwrap();
     let public_key =
@@ -136,7 +138,9 @@ async fn local_operator_merges_exact_scopes_without_changing_remote_identity() {
 async fn non_operator_callers_are_rejected_before_decoding_or_grant_access() {
     let (_node, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     for context in [
         HandlerContext::new_with_authority(
             operator.principal_id(),
@@ -182,7 +186,9 @@ async fn non_operator_callers_are_rejected_before_decoding_or_grant_access() {
 async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
     let (_node, state_owner, state) = test_state::build_test_state();
     let mut state = Arc::new(state);
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let client_dir = tempfile::tempdir().unwrap();
     let client = NodeIdentity::create(&client_dir.path().join("client.pem")).unwrap();
     let public_key =
@@ -248,7 +254,9 @@ async fn semantic_conversion_borrows_only_the_exact_standalone_lock() {
 async fn authorize_client_refuses_to_rewrite_the_operator_grant() {
     let (_node, _state_owner, state) = test_state::build_test_state();
     let state = Arc::new(state);
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let context = HandlerContext::new_with_authority(
         operator.principal_id(),
         vec!["*".into()],

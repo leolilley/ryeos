@@ -75,13 +75,14 @@ impl NativeTestState {
             uds_path: app_root.join("test.sock"),
             app_root: app_root.to_path_buf(),
             node_signing_key_path: key_path.clone(),
-            operator_signing_key_path: app_root.join("user-key.pem"),
             authorized_keys_dir: app_root.join("auth"),
         };
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)
             .context("create test node identity")?;
-        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
-            .context("create test operator identity")?;
+        identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(app_root))
+            .context("write test node public identity")?;
+        ryeos_node_runtime::operator_identity::test_support::install_operator(app_root, &identity);
         let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
         let mut head_trust = ryeos_state::refs::TrustStore::new();
         head_trust.insert(

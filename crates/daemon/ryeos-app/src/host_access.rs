@@ -20,7 +20,7 @@
 use ryeos_engine::isolation::{
     IsolationHostDirect, IsolationHostDirectContainment, IsolationHostDirectGrant, IsolationRuntime,
 };
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 pub use ryeos_node_runtime::node_policy::sections::host_access::{
     HostAccessContainment, HostAccessOrigin, HostAccessRefusal, HostAccessSubject,
     NodeHostAccessPolicy,
@@ -113,12 +113,13 @@ pub fn admit(
         ));
     }
     let operator =
-        NodeIdentity::load(&state.config.operator_signing_key_path).map_err(|error| {
-            HostAccessRefusal::new(
-                HostAccessRefusal::PRINCIPAL_REFUSED,
-                format!("the configured local operator identity cannot be loaded: {error:#}"),
-            )
-        })?;
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .map_err(|error| {
+                HostAccessRefusal::new(
+                    HostAccessRefusal::PRINCIPAL_REFUSED,
+                    format!("the configured local operator identity cannot be loaded: {error:#}"),
+                )
+            })?;
     let operator_principal = operator.principal_id();
     require_no_remote_path(subject, caller)?;
     if caller.acting_principal != operator_principal {
@@ -349,7 +350,7 @@ mod tests {
     }
 
     fn operator(state: &AppState) -> String {
-        NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap()
             .principal_id()
     }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::handler_context::HandlerContext;
 use crate::state::AppState;
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 
 /// Exact target-node operator grant retained by a remotely adopted execution.
 /// The node-signed grant remains revocable; this value binds admission and the
@@ -97,8 +97,9 @@ pub fn require_local_configured_operator(
     {
         bail!("action requires a local_client configured operator");
     }
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path)
-        .context("load configured local operator identity")?;
+    let operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .context("load configured local operator identity")?;
     if context.fingerprint != operator.principal_id() {
         bail!("local action requires the configured local operator");
     }
@@ -161,7 +162,10 @@ pub fn admitted_operator_authority_digest(
     .ok_or_else(|| anyhow::anyhow!("operator grant was revoked"))?;
     match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
-            let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            let local_operator =
+                ryeos_node_runtime::operator_identity::test_support::load_operator(
+                    &state.config.app_root,
+                )
                 .context("load configured local operator identity")?;
             if local_operator.fingerprint() != operator_fingerprint {
                 bail!("local durable operation no longer belongs to the configured operator");
@@ -224,7 +228,10 @@ fn admitted_operator_authority_for_named_role(
     .ok_or_else(|| anyhow::anyhow!("{role} operator grant was revoked"))?;
     let origin_site_id = match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
-            let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            let local_operator =
+                ryeos_node_runtime::operator_identity::test_support::load_operator(
+                    &state.config.app_root,
+                )
                 .context("load configured local operator identity")?;
             if local_operator.fingerprint() != operator_fingerprint {
                 bail!("{role} local_client is not the configured operator");
@@ -290,7 +297,10 @@ pub fn retained_admitted_operator_authority(
     .ok_or_else(|| anyhow::anyhow!("retained operator grant was revoked"))?;
     match grant.principal_class {
         AuthorizedKeyPrincipalClass::LocalClient => {
-            let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+            let local_operator =
+                ryeos_node_runtime::operator_identity::test_support::load_operator(
+                    &state.config.app_root,
+                )
                 .context("load configured local operator identity")?;
             if local_operator.fingerprint() != operator_fingerprint {
                 bail!("retained local owner is not the configured local operator");

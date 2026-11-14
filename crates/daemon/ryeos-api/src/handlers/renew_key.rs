@@ -314,7 +314,10 @@ mod tests {
     #[tokio::test]
     async fn the_configured_operator_renews_any_grant() {
         let (_guard, state, fingerprint) = lapsed_grant();
-        let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
         handle(
             request(&fingerprint),
             context(operator.principal_id(), &[]),

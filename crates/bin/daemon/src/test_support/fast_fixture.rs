@@ -523,6 +523,13 @@ pub fn populate_initialized_state_with_profile_and_identities(
     )
     .with_context(|| format!("write operator signing key under {}", state_path.display()))?;
 
+    // The operator's public genesis, which the daemon reads in place of the key.
+    ryeos_node_runtime::operator_identity::test_support::write_genesis(
+        state_path,
+        &ryeos_engine::trust::compute_fingerprint(&user.verifying_key()),
+        &user,
+    );
+
     // ── Authoring Ed25519 identity ──
     let authoring_key_path = ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf())
         .authoring_signing_key_path();
@@ -738,9 +745,6 @@ pub fn write_harness_bootstrap_config(
         node_signing_key_path: state_path
             .join(AI_DIR)
             .join("node/identity/private_key.pem"),
-        operator_signing_key_path: state_path
-            .join(AI_DIR)
-            .join("node/operator/signing/private_key.pem"),
         authorized_keys_dir: state_path.join(AI_DIR).join("node/auth/authorized_keys"),
     };
     fs::write(

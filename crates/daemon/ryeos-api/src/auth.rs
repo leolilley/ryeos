@@ -449,7 +449,7 @@ pub(crate) fn verify_request(
     )
     .map_err(|e| format!("{e:#}"))?;
     if auth_key.principal_class == AuthorizedKeyPrincipalClass::RemoteNode {
-        let configured_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+        let configured_operator = OperatorPublicIdentity::load(&state.config.app_root)
             .map_err(|error| format!("load configured operator identity: {error:#}"))?;
         if configured_operator.fingerprint() == fingerprint {
             return Err(
@@ -484,7 +484,7 @@ pub(crate) fn verify_request(
         .ensure_unexpired(lillux::time::unix_secs_now())
         .map_err(RequestAuthError::Grant)?;
     if auth_key.grant.expires_at == GrantExpiry::Never {
-        let configured_operator = NodeIdentity::load(&state.config.operator_signing_key_path)
+        let configured_operator = OperatorPublicIdentity::load(&state.config.app_root)
             .map_err(|error| format!("load configured operator identity: {error:#}"))?;
         if configured_operator.fingerprint() != fingerprint {
             return Err(RequestAuthError::Grant(
@@ -1200,7 +1200,6 @@ mod tests {
             uds_path: tmpdir.path().join("test.sock"),
             app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
-            operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             authorized_keys_dir: tmpdir.path().join("auth"),
         };
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
@@ -1765,7 +1764,14 @@ mod tests {
         let (_tmp, _store_owner, state) = build_test_state();
         let operator_key = SigningKey::from_bytes(&[27u8; 32]);
         let pem = operator_key.to_pkcs8_pem(Default::default()).unwrap();
-        std::fs::write(&state.config.operator_signing_key_path, pem.as_bytes()).unwrap();
+        let operator_pem = _tmp.path().join("operator-27.pem");
+        std::fs::write(&operator_pem, pem.as_bytes()).unwrap();
+        let operator = NodeIdentity::load(&operator_pem).unwrap();
+        ryeos_node_runtime::operator_identity::test_support::write_operator_records(
+            &state.config.app_root,
+            &state.identity,
+            &operator,
+        );
         let operator_fp = register_remote_node_key(&state, &operator_key, "site:source");
         let audience = state.identity.principal_id();
         let uri: axum::http::Uri = "/execute".parse().unwrap();
@@ -1919,9 +1925,6 @@ mod tests {
     impl Delegated {
         fn new(seed: u8) -> Self {
             let (tmp, store_owner, state) = build_test_state();
-            // Request verification reads the configured operator's identity to
-            // refuse its key in a `remote_node` grant.
-            NodeIdentity::create(&state.config.operator_signing_key_path).unwrap();
             let user_key = SigningKey::from_bytes(&[seed; 32]);
             let node_key = SigningKey::from_bytes(&[seed + 1; 32]);
             let scopes: Vec<String> = GRANT_SCOPES.iter().map(|s| (*s).to_owned()).collect();

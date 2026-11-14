@@ -124,10 +124,11 @@ pub async fn handle(
             "fingerprint must be a lowercase SHA-256 digest".into(),
         ));
     }
-    let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-        &state.config.operator_signing_key_path,
-    )
-    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
+    let operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .map_err(|error| {
+                HandlerError::Internal(format!("load configured operator: {error:#}"))
+            })?;
     if fingerprint == operator.fingerprint() {
         return Err(super::grant_terms::revocation_refusal(
             &AuthorizedKeyRevokeError::OperatorGrantIsOfflineOnly,
@@ -393,7 +394,10 @@ mod tests {
     #[tokio::test]
     async fn operator_grant_revoke_is_offline_only() {
         let (_guard, state) = fixture();
-        let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
         for principal in [operator.principal_id(), granter()] {
             let error = handle(
                 request(operator.fingerprint()),
@@ -451,7 +455,10 @@ mod tests {
     async fn revoke_converges_on_rerun_for_the_operator() {
         let (_guard, state) = fixture();
         let grantee = issue(&state, 31, &granter());
-        let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
         for _ in 0..2 {
             let response = handle(
                 request(&grantee),

@@ -154,7 +154,7 @@ pub fn predict_large_manifest(
 /// operator-owned qualification step may run.
 pub fn install_operator_grant(state: &ryeos_app::state::AppState) {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let scopes = vec!["*".to_owned()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
@@ -184,7 +184,7 @@ pub fn operator_context(
     state: &ryeos_app::state::AppState,
 ) -> ryeos_app::handler_context::HandlerContext {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
@@ -582,7 +582,7 @@ pub fn bind_typed_manifests_to_tool(
     )
     .unwrap();
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),

@@ -151,9 +151,10 @@ async fn lists_only_owner_metadata_with_stable_pagination() {
 #[tokio::test]
 async fn empty_list_works_for_configured_local_operator() {
     let (_tmp, _state_owner, state) = test_state::build_test_state();
-    let owner = NodeIdentity::load(&state.config.operator_signing_key_path)
-        .unwrap()
-        .principal_id();
+    let owner =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap()
+            .principal_id();
     let ctx = HandlerContext::new_with_authority(
         owner,
         vec![LIST_CAP.to_owned()],

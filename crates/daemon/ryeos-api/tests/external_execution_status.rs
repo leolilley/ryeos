@@ -14,9 +14,10 @@ use serde_json::{Value, json};
 const CAP: &str = "ryeos.execute.service.external-execution/status";
 
 fn local_operator(state: &AppState) -> HandlerContext {
-    let owner = NodeIdentity::load(&state.config.operator_signing_key_path)
-        .unwrap()
-        .principal_id();
+    let owner =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap()
+            .principal_id();
     HandlerContext::new_with_authority(
         owner,
         vec![CAP.to_owned()],

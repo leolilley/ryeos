@@ -484,11 +484,11 @@ pub mod test_support {
             uds_path: root.join("test.sock"),
             app_root: root.to_path_buf(),
             node_signing_key_path: key_path.clone(),
-            operator_signing_key_path: root.join("identity/operator-key.pem"),
             authorized_keys_dir: root.join("auth"),
         };
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path)?;
-        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)?;
+        identity.write_public_identity(&ryeos_engine::trust::node_public_identity_path(root))?;
+        ryeos_node_runtime::operator_identity::test_support::install_operator(root, &identity);
         // `runtime.author_item` signs with the node's authoring key, which
         // `ryeos init` creates; a composed test node holds one too.
         // A root composed twice keeps the key it already has.

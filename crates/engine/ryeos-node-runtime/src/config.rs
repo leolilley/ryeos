@@ -30,9 +30,6 @@ pub struct Config {
     /// Daemon-internal signing key.
     /// Defaults to `<app_root>/.ai/node/identity/private_key.pem`.
     pub node_signing_key_path: PathBuf,
-    /// Operator signing key — used for operator edits in project/config space.
-    /// Defaults to `<app_root>/.ai/node/operator/signing/private_key.pem`.
-    pub operator_signing_key_path: PathBuf,
     pub authorized_keys_dir: PathBuf,
 }
 
@@ -58,7 +55,6 @@ struct PartialConfig {
     uds_path: Option<PathBuf>,
     app_root: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
-    operator_signing_key_path: Option<PathBuf>,
     authorized_keys_dir: Option<PathBuf>,
 }
 
@@ -261,19 +257,6 @@ impl Config {
         };
 
         let resolved_runtime_root = RuntimeRoot::new(app_root.clone());
-        let canonical_operator_key_path = resolved_runtime_root.operator_signing_key_path();
-        if let Some(path) = file_cfg
-            .as_ref()
-            .and_then(|cfg| cfg.operator_signing_key_path.as_ref())
-            && path != &canonical_operator_key_path
-        {
-            bail!(
-                "operator_signing_key_path must be {}; got {}",
-                canonical_operator_key_path.display(),
-                path.display()
-            );
-        }
-
         let file_uds = file_cfg.as_ref().and_then(|cfg| cfg.uds_path.clone());
         let uds_path = match (file_uds, sources.uds_path.clone()) {
             (None, None) => default_uds_path(&app_root),
@@ -309,10 +292,6 @@ impl Config {
                 .as_ref()
                 .and_then(|cfg| cfg.node_signing_key_path.clone())
                 .unwrap_or_else(|| resolved_runtime_root.node_signing_key_path()),
-            operator_signing_key_path: file_cfg
-                .as_ref()
-                .map(|_| canonical_operator_key_path.clone())
-                .unwrap_or(canonical_operator_key_path),
             authorized_keys_dir: sources
                 .authorized_keys_dir
                 .clone()

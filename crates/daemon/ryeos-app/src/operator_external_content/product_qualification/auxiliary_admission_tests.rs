@@ -634,7 +634,7 @@ fn fixture() -> Result<Fixture> {
         ]),
     );
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)?;
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)?;
     let scopes = vec!["ryeos.execute.service.external-content/launch-product-qualification".into()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,

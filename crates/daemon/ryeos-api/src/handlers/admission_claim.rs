@@ -177,10 +177,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     }
 
     let (key_b64, verifying_key, fingerprint) = parse_public_key(&req.public_key)?;
-    let configured_operator = ryeos_node_runtime::identity::NodeIdentity::load(
-        &state.config.operator_signing_key_path,
-    )
-    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
+    let configured_operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .map_err(|error| {
+                HandlerError::Internal(format!("load configured operator: {error:#}"))
+            })?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(HandlerError::Forbidden(
             "the configured operator cannot be admitted by token; its grant is managed by init and the stopped-daemon offline conversion path"

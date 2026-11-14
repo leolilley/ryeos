@@ -551,7 +551,7 @@ pub fn local_operator_context(
     scopes: Vec<String>,
 ) -> ryeos_app::handler_context::HandlerContext {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .expect("load fixture operator");
     ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),

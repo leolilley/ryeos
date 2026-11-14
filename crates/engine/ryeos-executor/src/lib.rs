@@ -204,8 +204,8 @@ pub mod test_support {
         use ryeos_state::external_content::products::composition::EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY;
 
         ryeos_app::external_placement::test_support::install_test_placement_vault(state);
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
         )?;
         let scopes = vec!["*".to_owned()];
         let site = state.threads.site_id().to_owned();
@@ -531,8 +531,8 @@ pub mod test_support {
                 &dependency.resolution.restore(),
                 subject,
             )?;
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
         )?;
         let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
             operator.fingerprint(),
