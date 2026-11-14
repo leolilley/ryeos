@@ -2528,6 +2528,7 @@ async fn run_release_graph(
             ryeos_app::execution_policy::resolve_standard_local_live_authority(
                 &project_path,
                 context.scopes.clone(),
+                &context.fingerprint,
                 &state.isolation,
             )?;
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(

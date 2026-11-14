@@ -1687,6 +1687,7 @@ async fn execute_prepared_item_ref(
     let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
         &project_root,
         authority_scopes.to_vec(),
+        &exec_ctx.principal_fingerprint,
         &state.isolation,
     )
     .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;
