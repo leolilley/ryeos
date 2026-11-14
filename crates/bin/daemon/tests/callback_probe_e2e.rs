@@ -95,8 +95,6 @@ async fn a_tool_appends_a_bundle_event_and_reads_it_back_attributed_to_the_calle
 
 // ── item authoring ──────────────────────────────────────────────────────
 
-const COVERED_CAP: &str = "ryeos.execute.tool.read/file";
-
 fn graph_body(extra: &str) -> String {
     format!(
         "category: authored\nversion: \"1.0.0\"\n{extra}config:\n  start: done\n  nodes:\n    done:\n      node_type: return\n"
@@ -129,14 +127,14 @@ async fn start_authoring_daemon(
 fn authoring_authority() -> ProbeAuthority {
     ProbeAuthority::new()
         .item_authoring("graph", "authored/*")
-        .declared_cap("ryeos.execute.tool.read/*")
+        .bundle_event(EVENT_KIND, &["append"])
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_covered_author_writes_a_machine_draft_item() {
     let (h, fixture, _guard, project) = start_authoring_daemon(&authoring_authority()).await;
     let body = graph_body(&format!(
-        "requires:\n  capabilities:\n    declared:\n      - {COVERED_CAP}\n"
+        "requires:\n  capabilities:\n    manifest:\n      runtime_authority:\n        bundle_events:\n          - event_kind: {EVENT_KIND}\n            operations: [append]\n"
     ));
 
     let authored = run_callback(
@@ -197,9 +195,9 @@ async fn a_covered_author_writes_a_machine_draft_item() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_author_is_refused_a_capability_it_does_not_hold() {
     let (h, _fixture, _guard, project) = start_authoring_daemon(&authoring_authority()).await;
-    let body = graph_body(
-        "requires:\n  capabilities:\n    declared:\n      - ryeos.execute.tool.shell/run\n",
-    );
+    let body = graph_body(&format!(
+        "requires:\n  capabilities:\n    manifest:\n      runtime_authority:\n        bundle_events:\n          - event_kind: {EVENT_KIND}\n            operations: [scan]\n"
+    ));
 
     let outcome = run_callback(
         &h,
@@ -215,7 +213,7 @@ async fn an_author_is_refused_a_capability_it_does_not_hold() {
         unreachable!("refusal_code returned for a refusal")
     };
     assert!(
-        message.contains("ryeos.execute.tool.shell/run"),
+        message.contains(EVENT_KIND) && message.contains("scan"),
         "the refusal must name the uncovered capability: {message}"
     );
     assert!(

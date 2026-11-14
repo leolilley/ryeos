@@ -207,6 +207,25 @@ where
 
 // ── Signer registry fixtures ────────────────────────────────────────
 
+/// Write the minimal public identity document for `node_key` under
+/// `app_root` unless the node already has one, so a fixture that created
+/// only the private key can load the signer registry.
+pub fn write_node_public_identity(app_root: &std::path::Path, node_vk: &VerifyingKey) {
+    let public_path = crate::trust::node_public_identity_path(app_root);
+    if public_path.exists() {
+        return;
+    }
+    let doc = serde_json::json!({
+        "kind": "identity/v1",
+        "principal_id": format!("fp:{}", crate::trust::compute_fingerprint(node_vk)),
+        "signing_key": format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(node_vk.as_bytes())
+        ),
+    });
+    std::fs::write(&public_path, doc.to_string()).expect("write fixture public identity");
+}
+
 /// Pin `verifying_key` in the node signer registry under `app_root`, the
 /// way the trust operations do, so fixtures exercise the real loader.
 ///
@@ -228,19 +247,7 @@ pub fn pin_signer(
     } else {
         lillux::crypto::create_signing_key(&key_path).expect("create fixture node key")
     };
-    let public_path = crate::trust::node_public_identity_path(app_root);
-    if !public_path.exists() {
-        let node_vk = node_key.verifying_key();
-        let doc = serde_json::json!({
-            "kind": "identity/v1",
-            "principal_id": format!("fp:{}", crate::trust::compute_fingerprint(&node_vk)),
-            "signing_key": format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(node_vk.as_bytes())
-            ),
-        });
-        std::fs::write(&public_path, doc.to_string()).expect("write fixture public identity");
-    }
+    write_node_public_identity(app_root, &node_key.verifying_key());
     pin_signer_with_node_key(app_root, &node_key, verifying_key, label, role, scope)
 }
 
