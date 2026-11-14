@@ -1,8 +1,12 @@
-# ryeos:signed:2026-11-13T09:44:35Z:60d7af84fa51df6f8e380268620a33d6352ac21b6be5af34b2a6a5f2edcbcdbc:3H9WPSph9gtoPHrh390d2mE5dfbQ6gIbnHx3yuG4Zsucv1XKYG1df5W0qo+xbjR/YahX7ovt+0YEvHfrZTx1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T06:21:39Z:667a7be795fbfb1401083f5980b30f17b11e607279a424785a8e8d10b10a85a0:fSp8yNbakB9T7y7LKmvt+in8FhyQjUEs0IJo45chpMf90d0qvwzfh/2e8ypnUL3+gsq8ETZeC7aBlf9/5o6UAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-execution, status]
 description: List what still holds external capacity or a credential profile on this node, with the step that releases each
 help:
-  usage: ryeos external-execution status
+  usage: ryeos external-execution status [--json]
 dispatch:
   kind: execute_ref
   execute: service:external-execution/status
+control_flags:
+- flag: json
+  help: "Print the buffered JSON result"
+  binding: stream_off

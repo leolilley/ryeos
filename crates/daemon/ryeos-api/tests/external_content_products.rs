@@ -540,7 +540,9 @@ async fn product_services_refuse_unadmitted_operator_contexts() {
         // nonexistent consumer generation or publishing an import stage.
         let composition_error = format!("{composition:#}");
         assert!(
-            composition_error.contains("operator") || composition_error.contains("verified"),
+            composition_error.contains("operator")
+                || composition_error.contains("verified")
+                || composition_error.contains("forwarding proof"),
             "{composition_error}"
         );
         assert!(

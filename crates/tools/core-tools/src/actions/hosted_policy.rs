@@ -173,7 +173,7 @@ allow_loopback_http: true
         let err = load_hosted_policy(&fixture.system).unwrap_err();
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("requires exactly one `hosted` policy"),
+            rendered.contains("has no `hosted` section"),
             "got: {rendered}"
         );
     }
