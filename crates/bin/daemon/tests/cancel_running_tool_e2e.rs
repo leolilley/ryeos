@@ -284,12 +284,7 @@ async fn run_probe(emit_frames: bool) {
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_workflow_bundles(state_path, fixture)?;
-            register_config_fixture_bundle(
-                state_path,
-                "fixture-cancel-probe-model-config",
-                fixture,
-                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
-            )
+            register_mock_provider_bundle(state_path, &mock_url, fixture)
         };
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
         .await
