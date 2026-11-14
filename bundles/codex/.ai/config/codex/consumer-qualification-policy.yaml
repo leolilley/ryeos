@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:54:31Z:1e88b01615131d53d9e33bf49585ad43e3600101434b99f2d315c06fc8bb1f5c:cM4kR9PYyc+EoFjRgl6sjk1fUY/zU+hJJUY5hojrUZ3ExXX13eJ6FwsXhkgylAc4GWzAHQEwNtwNbDXlEV11BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T01:32:46Z:d3b7347df028c864d69e383da578aabc0694c8f35d110b8467cb9c8d10e17338:CO612AJARcprWeetZbrfURmj78CgeTFr9GUY9OXDDftj19l79GqIGcHqTEuduE3dfZbQyb8rHGQR02K24Va6Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Contained variant of the independent consumer qualification of the exact
@@ -61,12 +61,12 @@ product_qualification_policy:
       expected_final_content_b64: YWZ0ZXI=
     external_candidate_qualification_context:
       execution_environment_digest: a6f0451781461fe0def70c674db8b70bd6897f8d1243f0c4d821650bfa73f801
-      profile_hash: 6135090b89dce50129b9973f2b22d8f6b7846b362ef0203b0877bcc1618b9672
+      profile_hash: 7cc79942a56b83a5facaf4944c2579c750562791c02359824d0892e107d82c01
       provider_executable_manifest_hash: 713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff
       requirement_digest: 91ffdc42fb17a1e89ac933b177d7d7212ec556ebe15779fd81d993101de0a395
       schema: ryeos.external_candidate_qualification_context.v3
-      source_binding_hash: 7cfacb77498fe7f2238817248405d1339c9d05a4d81fb17100801654ee646fe1
-      source_content_manifest_hash: a563b92b318ec133ed0a846cac95943c8936087b3584d9fb0bf643ee73c8bb67
+      source_binding_hash: 008d8f5464365e06a6363bd585b1751a17292b5c9e748903b88a950456b4100f
+      source_content_manifest_hash: d27da37177e506f6068764c9a96a8fce9ceb71b7d17abfff8cbb617beeb9de48
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
     product_declaration_id: guest-runtime

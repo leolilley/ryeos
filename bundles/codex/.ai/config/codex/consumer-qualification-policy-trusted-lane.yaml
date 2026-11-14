@@ -1,15 +1,17 @@
-# ryeos:signed:2026-11-13T12:54:31Z:bf48286969f0c51c1326c82f202a6f8e026540346af264e217c219b886713a88:03oVH0/Iq3nktLhrTuQiXEp+M5LqT4BwknrrUmqBp26zmC7iBCpUCBvlQ130paySjLrt63iI9SLilxxwrde3Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T01:32:46Z:4297c5a99621a36ee633be9fd55af0d449a72f5d3854a28f9783cce0a614969a:d/t69s2vX2k53ljlRES3TtBTSQO87UBiM9B1ECyWj8BblaUaH124Ksz3ES+ZxkGyYeXU51bH0gV18h4IvTwJCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Trusted variant of consumer-qualification-policy, for a node that does not enforce isolation and accepts trusted process-group sessions; independent consumer qualification of the exact Codex guest runtime;
-  the node-derived external candidate context is merged into verifier_parameters before
-  signing
+description: Trusted variant of consumer-qualification-policy, for a node that does
+  not enforce isolation and accepts trusted process-group sessions; independent consumer
+  qualification of the exact Codex guest runtime; the node-derived external candidate
+  context is merged into verifier_parameters before signing
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:codex/qualification/consumer-runtime-verifier-trusted-lane
   requires_guarantees:
   - name: sessions:trusted_process_group
-    accept: [trusted]
+    accept:
+    - trusted
   subject_declaration_id: subject
   allowed_claims:
   - bounded_candidate_capture
@@ -53,12 +55,12 @@ product_qualification_policy:
       expected_final_content_b64: YWZ0ZXI=
     external_candidate_qualification_context:
       execution_environment_digest: a6f0451781461fe0def70c674db8b70bd6897f8d1243f0c4d821650bfa73f801
-      profile_hash: d54fc0be06c3ddb713680d04b3a14201d1b2094145036ae290f31f93bd5cbc25
+      profile_hash: 7cc79942a56b83a5facaf4944c2579c750562791c02359824d0892e107d82c01
       provider_executable_manifest_hash: 713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff
       requirement_digest: 91ffdc42fb17a1e89ac933b177d7d7212ec556ebe15779fd81d993101de0a395
       schema: ryeos.external_candidate_qualification_context.v3
-      source_binding_hash: 12594cecd95cb1020b6b9159e72105067c5f8864337c784ca534f1996139f9ef
-      source_content_manifest_hash: 9d71f124e1f8d4458edf4f9222efb0a84eec631f5c05ab528ddc0b2c893dc652
+      source_binding_hash: 6e012a0dd023d8ddfaa702c065e9c3c3404315cafdf05a12e8a02d629eb0c90c
+      source_content_manifest_hash: d27da37177e506f6068764c9a96a8fce9ceb71b7d17abfff8cbb617beeb9de48
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring-trusted-lane
     product_declaration_id: guest-runtime
