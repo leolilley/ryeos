@@ -82,6 +82,12 @@ async fn a_node_without_event_storage_refuses_to_start_until_the_policy_reset() 
         .as_str()
         .context("the node's substrate identity records no host class")?
         .to_owned();
+    // The fast fixture records no verified initialization completion, so the
+    // image digest cannot be defaulted from it; name it as the operator would.
+    let image_digest = substrate["image_digest"]
+        .as_str()
+        .context("the node's substrate identity records no image digest")?
+        .to_owned();
     ryeos_offline(
         &h,
         &[
@@ -92,6 +98,8 @@ async fn a_node_without_event_storage_refuses_to_start_until_the_policy_reset() 
             OsStr::new("core"),
             OsStr::new("--host-class"),
             OsStr::new(&host_class),
+            OsStr::new("--substrate-image-digest"),
+            OsStr::new(&image_digest),
             OsStr::new("--source"),
             authored.path().as_os_str(),
             OsStr::new("--app-root"),

@@ -262,6 +262,30 @@ fn store_root(state_path: &Path) -> PathBuf {
         .join("large-objects")
 }
 
+/// Every path under `root` that names `needle` or a `large-objects` store,
+/// for a refusal that must say where the object went.
+fn paths_naming(root: &Path, needle: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains(needle) || name == "large-objects" {
+                found.push(path.display().to_string());
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 fn quarantined_names(state_path: &Path) -> Result<Vec<String>> {
     let directory = store_root(state_path).join("quarantine/objects");
     if !directory.exists() {
@@ -347,7 +371,9 @@ async fn scrub_quarantines_rotten_object_launch_refuses_reimport_heals_and_purge
             .join("objects")
             .join(&file_sha256)
             .is_file(),
-        "the import did not publish the object into the large-object store"
+        "the import did not publish the object into the large-object store; \
+         paths under the app root naming the object or a large-object store: {:?}; import result: {imported}",
+        paths_naming(&h.state_path, &file_sha256)
     );
     write_consumer_tool(project.path(), &fixture, &manifest_hash)?;
     let snapshot_hash = snapshot_project(&h, project.path()).await?;

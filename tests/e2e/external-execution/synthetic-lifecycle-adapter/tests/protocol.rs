@@ -5862,7 +5862,7 @@ async fn evaluate_integrate_and_publish_candidate(
             Err(error) => error,
         };
         assert!(
-            format!("{error:#}").contains("publication conflict"),
+            format!("{error:#}").contains("base_superseded"),
             "stale B→D publication failed at the wrong boundary: {error:#}"
         );
         assert_eq!(
