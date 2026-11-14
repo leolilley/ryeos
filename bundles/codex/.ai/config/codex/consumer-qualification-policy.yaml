@@ -1,10 +1,10 @@
-# ryeos:signed:2026-11-14T12:59:02Z:b06e729b5a2001972c89fedfd265bd5633bfbb00b6f71edcbea2af363ff8901d:fpEZnlGTRdvxBUJXm0SxJMuckMoSP7PwZDbdSAjeg2L/SX4g1YWB+DovlecFthDXyz+1dI66ryJ89C4V3hYVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T16:27:04Z:129f0f42a8ebd86b7e2742730949e228b3251f582df7deb5977d79dc978589ca:0rzO4qcohFbxyMTr0JtfelKUw7/FRHj33XIGr510DU7rv3l3sCj11wXI3DAGwcy7QfIgX/bYBhcKLtpBhLfeBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
-description: Independent consumer qualification of the exact Codex guest runtime. One policy for every
-  node. The holding it runs under is selected by the node from the protocols the Worker and verifier
-  list, not named here. The node-derived external candidate context is merged into verifier_parameters
-  before signing
+description: Independent consumer qualification of the exact Codex guest runtime.
+  One policy for every node. The holding it runs under is selected by the node from
+  the protocols the Worker and verifier list, not named here. The node-derived external
+  candidate context is merged into verifier_parameters before signing
 product_qualification_policy:
   schema: ryeos.product_qualification_policy.v5
   verifier_ref: tool:codex/qualification/consumer-runtime-verifier
@@ -54,7 +54,7 @@ product_qualification_policy:
       provider_executable_manifest_hash: 713c3d1985ca438d8c309631d665c14f8fa0afedfce8b73dc93d0646edfe11ff
       requirement_digest: 91ffdc42fb17a1e89ac933b177d7d7212ec556ebe15779fd81d993101de0a395
       schema: ryeos.external_candidate_qualification_context.v3
-      source_binding_hash: 008d8f5464365e06a6363bd585b1751a17292b5c9e748903b88a950456b4100f
+      source_binding_hash: 7682f5f6b6a85d994e9a8aa82bf70982cc01714d50d3dfa4066ba618d9b54c31
       source_content_manifest_hash: d27da37177e506f6068764c9a96a8fce9ceb71b7d17abfff8cbb617beeb9de48
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
