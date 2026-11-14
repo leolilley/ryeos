@@ -8217,10 +8217,10 @@ fn ensure_runtime_paths(config: &Config) -> Result<()> {
 /// stopped-node bootstrap. A principal string alone is not authentication;
 /// keep this proof here, never infer it in the generic service executor.
 fn standalone_operator_handler_context(
-    operator: &ryeos_node_runtime::operator_identity::OperatorPublicIdentity,
+    operator_principal: String,
 ) -> ryeos_app::handler_context::HandlerContext {
     ryeos_app::handler_context::HandlerContext::new_with_authority(
-        operator.principal_id(),
+        operator_principal,
         vec![], // Existing standalone filesystem authority does not mint live scopes.
         true,
         Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
@@ -8344,7 +8344,8 @@ async fn run_service_standalone(
         ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&config.app_root)
             .context("load configured local operator identity for standalone service")?;
     let standalone_principal = standalone_operator.principal_id();
-    let standalone_handler_context = standalone_operator_handler_context(&standalone_operator);
+    let standalone_handler_context =
+        standalone_operator_handler_context(standalone_principal.clone());
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
         logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
@@ -9387,7 +9388,7 @@ mod shutdown_mapping_tests {
         let operator =
             ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("operator.pem"))
                 .unwrap();
-        let context = super::standalone_operator_handler_context(&operator);
+        let context = super::standalone_operator_handler_context(operator.principal_id());
         assert!(context.verified);
         assert_eq!(context.fingerprint, operator.principal_id());
         assert!(context.scopes.is_empty());

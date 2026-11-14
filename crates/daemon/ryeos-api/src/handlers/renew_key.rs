@@ -185,9 +185,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
     use base64::Engine as _;
-    use ryeos_node_runtime::identity::{
-        AuthorizedBy, AuthorizedKeyPrincipalClass, GrantExpiry, NodeIdentity,
-    };
+    use ryeos_node_runtime::identity::{AuthorizedBy, AuthorizedKeyPrincipalClass, GrantExpiry};
 
     const SCOPE: &str = "ryeos.execute.service.vault/list";
 

@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -691,7 +691,6 @@ fn load_node_config_two_phase_with_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_node_runtime::identity::NodeIdentity;
 
     #[test]
     fn every_optional_cargo_feature_is_reported_when_compiled() {

@@ -8,7 +8,7 @@ use ryeos_app::state::AppState;
 use ryeos_app::state_store::{
     DedicatedCandidateDisposition, NewCredentialProfile, NewDedicatedSession,
 };
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use serde_json::{Value, json};
 
 const CAP: &str = "ryeos.execute.service.external-execution/status";

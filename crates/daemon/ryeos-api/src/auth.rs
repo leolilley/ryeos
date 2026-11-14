@@ -12,6 +12,7 @@ use ryeos_app::state::AppState;
 use ryeos_node_runtime::identity::{
     AuthorizedKeyError, AuthorizedKeyPrincipalClass, GrantExpiry, NodeIdentity,
 };
+use ryeos_node_runtime::operator_identity::OperatorPublicIdentity;
 use ryeos_node_runtime::remote_delegation::DelegationError;
 
 const TIMESTAMP_MAX_AGE_SECS: u64 = 300;

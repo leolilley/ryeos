@@ -18,7 +18,7 @@ use ryeos_api::handlers::{
 use ryeos_api::remote::config::{self, PinSource, RemoteConfig, RemoteProjectBinding};
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(Clone)]

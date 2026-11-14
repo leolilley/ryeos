@@ -1110,9 +1110,7 @@ mod tests {
     async fn cancelled_release_request_retains_snapshot_until_protected_refusal_settles() {
         use base64::Engine as _;
         use ryeos_app::handler_context::HandlerContext;
-        use ryeos_node_runtime::identity::{
-            AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy,
-        };
+        use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, WildcardPolicy};
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 
