@@ -13,8 +13,11 @@ use crate::ScheduleAutoPauseReason;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduledAuthorityRefusalKind {
-    /// The principal's authorized-key grant no longer exists.
+    /// The principal's authorized-key grant no longer exists, or carries a
+    /// revocation tombstone.
     GrantRevoked,
+    /// The principal's authorized-key grant has lapsed.
+    GrantExpired,
     /// The grant exists but is not the generation pinned at registration.
     GrantGenerationChanged,
     /// The pinned grant's principal class or origin site no longer matches.
@@ -37,6 +40,7 @@ impl ScheduledAuthorityRefusalKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GrantRevoked => "grant_revoked",
+            Self::GrantExpired => "grant_expired",
             Self::GrantGenerationChanged => "grant_generation_changed",
             Self::ClassOrOriginChanged => "class_or_origin_changed",
             Self::CapabilityNoLongerCovered => "capability_no_longer_covered",
@@ -53,6 +57,7 @@ impl ScheduledAuthorityRefusalKind {
             Self::GrantRevoked | Self::ForwardingGrantRevoked => {
                 ScheduleAutoPauseReason::AuthorityRevoked
             }
+            Self::GrantExpired => ScheduleAutoPauseReason::AuthorityExpired,
             Self::GrantGenerationChanged
             | Self::ClassOrOriginChanged
             | Self::ForwardingGrantChanged
@@ -64,7 +69,7 @@ impl ScheduledAuthorityRefusalKind {
     }
 
     /// The outcome recorded on the refused fire: `authority_revoked`,
-    /// `authority_changed` or `authority_narrowed`.
+    /// `authority_expired`, `authority_changed` or `authority_narrowed`.
     pub fn fire_outcome(self) -> &'static str {
         self.pause_reason().as_str()
     }
@@ -133,6 +138,7 @@ mod tests {
         use ScheduledAuthorityRefusalKind::*;
         for (kind, outcome) in [
             (GrantRevoked, "authority_revoked"),
+            (GrantExpired, "authority_expired"),
             (ForwardingGrantRevoked, "authority_revoked"),
             (GrantGenerationChanged, "authority_changed"),
             (ClassOrOriginChanged, "authority_changed"),

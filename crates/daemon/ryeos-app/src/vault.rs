@@ -555,9 +555,14 @@ fn read_authorized_secret_values(
         // effect here), judged against the principal and the scopes sealed
         // at admission. What is not re-checked: the principal's scopes
         // themselves. They are frozen into the authority at admission, so a
-        // grant revoked after admission does not withdraw a name from this
+        // grant that lapses after admission does not withdraw a name from this
         // lineage, and a launch, child or callback running with narrower
-        // capabilities still receives what its admission was granted.
+        // capabilities still receives what its admission was granted. Lapse
+        // leaves running work alone by design. A revocation does not rely on
+        // this check: it cancels the live threads running under the revoked
+        // grant (unless the operator asked to leave them running), so no
+        // later delivery reaches a revoked principal's lineage; a lineage
+        // deliberately left running keeps what it was admitted with.
         let withdrawn = sources.provider_env.refused_recipient_names(
             required_secrets,
             principal,

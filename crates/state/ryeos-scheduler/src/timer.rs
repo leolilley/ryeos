@@ -1222,6 +1222,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_grant_records_authority_expired_and_pauses() {
+        let store = crate::test_native::TestSchedulerDb::open();
+        let ctx = Arc::new(MockContext::new(store.shared()));
+        *ctx.refuse_authority.lock().unwrap() =
+            Some(ryeos_scheduler_contract::ScheduledAuthorityRefusalKind::GrantExpired);
+        let spec = make_spec("expired-owner", "skip");
+        ctx.db.upsert_spec(&spec).unwrap();
+        let fire_id = types::fire_id(&spec.schedule_id, 1000);
+
+        dispatch_fire(&ctx, &fire_id, &spec, 1000, "normal", false)
+            .await
+            .unwrap();
+        finish_detached_work(&ctx).await;
+
+        let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire recorded");
+        assert_eq!(fire.status, "failed");
+        assert_eq!(fire.outcome.as_deref(), Some("authority_expired"));
+        assert_eq!(
+            *ctx.auto_pauses.lock().unwrap(),
+            vec![(
+                spec.schedule_id.clone(),
+                spec.spec_hash.clone(),
+                ScheduleAutoPauseReason::AuthorityExpired
+            )]
+        );
+        assert!(!ctx.db.get_spec(&spec.schedule_id).unwrap().unwrap().enabled);
+    }
+
+    #[tokio::test]
     async fn untyped_dispatch_failure_stays_dispatch_failed_and_does_not_pause() {
         let store = crate::test_native::TestSchedulerDb::open();
         let ctx = Arc::new(MockContext::new(store.shared()));

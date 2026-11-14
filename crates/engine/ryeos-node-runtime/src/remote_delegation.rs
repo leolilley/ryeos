@@ -396,7 +396,7 @@ fn validate_remote_name(remote: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_node_signed(
+pub(crate) fn read_node_signed(
     directory: &lillux::PinnedDirectory,
     name: &str,
     node: &NodeIdentity,
@@ -429,7 +429,7 @@ fn read_node_signed(
     Ok(Some(body))
 }
 
-fn write_node_signed(
+pub(crate) fn write_node_signed(
     directory: &lillux::PinnedDirectory,
     name: &str,
     body: &str,
