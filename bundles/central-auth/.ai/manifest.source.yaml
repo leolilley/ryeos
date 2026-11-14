@@ -5,3 +5,7 @@ requires_kinds:
   - tool
   - config
 uses_kinds: []
+runtime_authority:
+  state_home:
+    namespaces:
+      kind: launch_param

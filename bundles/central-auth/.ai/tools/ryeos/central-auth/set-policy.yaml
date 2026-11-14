@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T00:43:18Z:1c404325486ef898357191f64c84fbad98b0c51e9657acfa1e92751e05f9bf98:c/XpwOAjrLSWNjy5Vo3e5HTC+2JNrTJ3UO0Ia6eufipdgYLPoXE2v+vy4JgVcByxJCUXkl8QHp+2SFUJxVcjCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:05:20Z:32ff58bb3fdccb7a99e24501bc551500c5f1029bcfcd4130793a3cf41e483e1e:AhcCc6BQ/9bxPJOkj87wvwAkcLx27vuR4NEu/pb6FHjTBptlseOLPcvOao0fteS+hu8/1KdnLefIlID5hNTEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "set-policy"
@@ -6,6 +6,15 @@ executor_id: "@subprocess"
 execution_protocol: "protocol:ryeos/core/tool_callback"
 required_caps: ["ryeos.execute.tool.ryeos.central-auth.set-policy"]
 description: "Store the central-auth role/capability policy for a realm."
+
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        state_home:
+          namespace:
+            from_param: realm_id
+          access: read_write
 
 config:
   command: "python3"
