@@ -302,7 +302,11 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             direction: RyeOsStackMoveDirection::Down,
         }),
         RyeOsKey::ArrowLeft if event.modifiers.alt_only() => ui(RyeOsUiEvent::PopLens),
-        // Esc interrupts a running head thread (chat convention); otherwise it
+        // Esc leaves a focused input first.
+        RyeOsKey::Escape if event.modifiers.none() && context.input_focused => {
+            ui(RyeOsUiEvent::BlurInput)
+        }
+        // Otherwise Esc interrupts a running head thread (chat convention); else it
         // closes the focused tile.
         RyeOsKey::Escape if event.modifiers.none() && context.head_thread_running => {
             ui(RyeOsUiEvent::InterruptHead)
@@ -1161,6 +1165,18 @@ mod tests {
             ryeos_key_command(key(RyeOsKey::Char('i')), context(false, true)),
             RyeOsKeyCommand::Ui {
                 event: RyeOsUiEvent::FocusInput
+            }
+        ));
+    }
+
+    #[test]
+    fn escape_blurs_focused_input() {
+        let mut ctx = context(false, true);
+        ctx.input_focused = true;
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::Escape), ctx),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::BlurInput
             }
         ));
     }
