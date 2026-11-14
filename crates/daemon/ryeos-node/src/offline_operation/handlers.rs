@@ -37,7 +37,6 @@ use ryeos_app::node_config::sections::runtime_snapshot_qualification::compose::{
 };
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::config::{Config, ConfigSources};
-use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -465,6 +464,14 @@ fn config(ctx: &HandlerContext<'_>) -> Result<Config> {
     Ok(config)
 }
 
+/// The configured operator's public identity. The node never needs the
+/// operator's key to know who the operator is.
+fn operator_public(
+    ctx: &HandlerContext<'_>,
+) -> Result<ryeos_node_runtime::operator_identity::OperatorPublicIdentity> {
+    Ok(ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(ctx.app_root)?)
+}
+
 /// The local operator key on this node's volume.
 fn operator_key(ctx: &HandlerContext<'_>) -> Result<SigningKey> {
     let path = RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path();
@@ -642,8 +649,7 @@ fn run_trust_change(
     ctx: &HandlerContext<'_>,
     change: crate::trust_registry::Change,
 ) -> Result<Value> {
-    let operator = operator_key(ctx)?;
-    let operator_fp = ryeos_engine::trust::compute_fingerprint(&operator.verifying_key());
+    let operator_fp = operator_public(ctx)?.fingerprint().to_owned();
     let outcome = crate::trust_registry::apply_change(
         ctx.app_root,
         ctx.state_lock,
@@ -1343,10 +1349,8 @@ pub(super) fn authorize_client(ctx: &HandlerContext<'_>) -> Result<Value> {
     let fingerprint = lillux::crypto::fingerprint(&public_key);
     // The configured operator's grant never lapses and is managed by init and
     // the authorization reset; a delegated grant must not rewrite it.
-    let operator = NodeIdentity::load(
-        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
-    )
-    .context("load operator identity to guard the operator grant")?;
+    let operator =
+        operator_public(ctx).context("load operator identity to guard the operator grant")?;
     ensure!(
         fingerprint != operator.fingerprint(),
         "grant_is_operator: the configured operator's grant is managed by `ryeos init` and \
@@ -1734,8 +1738,8 @@ pub(super) fn authorization_reset_prepare(ctx: &HandlerContext<'_>) -> Result<Pr
             digests.push(digest);
         }
     }
-    // The operator must be loadable before the receipt promises the swap.
-    operator_key(ctx)?;
+    // The operator must be known before the receipt promises the swap.
+    operator_public(ctx)?;
     Ok(Prepared {
         discarded_grant_digests: digests,
     })
@@ -1743,10 +1747,8 @@ pub(super) fn authorization_reset_prepare(ctx: &HandlerContext<'_>) -> Result<Pr
 
 pub(super) fn authorization_reset_effect(ctx: &HandlerContext<'_>) -> Result<Value> {
     let node = ctx.node;
-    let operator = NodeIdentity::load(
-        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
-    )
-    .context("load operator identity for authorization reset")?;
+    let operator =
+        operator_public(ctx).context("load operator identity for authorization reset")?;
     let authorized_keys_dir = super::envelope::authorized_keys_dir(ctx.app_root);
     let parent = authorized_keys_dir
         .parent()
@@ -1848,10 +1850,8 @@ fn revocation_plan(
     ctx: &HandlerContext<'_>,
     arguments: &AuthorizationRevokeArguments,
 ) -> Result<Vec<ryeos_node_runtime::identity::PlannedRevocation>> {
-    let operator = NodeIdentity::load(
-        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
-    )
-    .context("load operator identity to protect its grant from a cascade")?;
+    let operator = operator_public(ctx)
+        .context("load operator identity to protect its grant from a cascade")?;
     let auth_dir = super::envelope::authorized_keys_dir(ctx.app_root);
     ryeos_node_runtime::identity::plan_revocation_cascade(
         &auth_dir,
@@ -1901,10 +1901,8 @@ pub(super) fn authorization_revoke_prepare(ctx: &HandlerContext<'_>) -> Result<P
 pub(super) fn authorization_revoke_effect(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: AuthorizationRevokeArguments = ctx.arguments()?;
     arguments.validate()?;
-    let operator = NodeIdentity::load(
-        &RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path(),
-    )
-    .context("load operator identity to protect its grant from a cascade")?;
+    let operator = operator_public(ctx)
+        .context("load operator identity to protect its grant from a cascade")?;
     let revoked = ryeos_node_runtime::identity::revoke_authorized_key_cascade(
         &super::envelope::authorized_keys_dir(ctx.app_root),
         &arguments.fingerprint,
@@ -1938,6 +1936,7 @@ mod tests {
     use crate::offline_operation::contract::{REQUEST_SCHEMA, RequestBody};
     use crate::offline_operation::host::BareHost;
     use crate::offline_operation::table::VerifiedInputs;
+    use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
     #[test]

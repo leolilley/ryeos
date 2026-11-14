@@ -32,6 +32,13 @@ fn fixture() -> Fixture {
     let node = NodeIdentity::create(&runtime.node_signing_key_path()).unwrap();
     let operator =
         lillux::crypto::create_signing_key(&runtime.operator_signing_key_path()).unwrap();
+    node.write_public_identity(&ryeos_engine::trust::node_public_identity_path(root.path()))
+        .unwrap();
+    ryeos_node_runtime::operator_identity::test_support::write_operator_records_for_key(
+        root.path(),
+        node.signing_key(),
+        &operator,
+    );
     std::fs::create_dir_all(runtime.state()).unwrap();
     let store = Store::for_app_root(root.path());
     store.create_layout().unwrap();

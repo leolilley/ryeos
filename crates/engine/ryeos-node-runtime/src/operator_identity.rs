@@ -150,7 +150,7 @@ impl OperatorPublicIdentity {
 pub mod test_support {
     use super::*;
     use crate::identity::NodeIdentity;
-    use ryeos_engine::trust::{SignerRecord, SignerScope, SignerStatus};
+    use ryeos_engine::trust::SignerScope;
 
     /// Create the operator key under the layout path, its genesis, and its
     /// node-signed registry record. The node public identity must already be
@@ -190,23 +190,29 @@ pub mod test_support {
 
     /// Write the genesis and registry record for `operator`.
     pub fn write_operator_records(app_root: &Path, node: &NodeIdentity, operator: &NodeIdentity) {
-        write_genesis(app_root, operator.fingerprint(), operator.signing_key());
+        write_operator_records_for_key(app_root, node.signing_key(), operator.signing_key());
+    }
 
-        let mut record = SignerRecord::new(
-            operator.verifying_key(),
+    /// [`write_operator_records`] for bare keys.
+    pub fn write_operator_records_for_key(
+        app_root: &Path,
+        node_key: &lillux::crypto::SigningKey,
+        operator_key: &lillux::crypto::SigningKey,
+    ) {
+        let verifying = operator_key.verifying_key();
+        write_genesis(
+            app_root,
+            &lillux::sha256_hex(verifying.as_bytes()),
+            operator_key,
+        );
+        ryeos_engine::test_support::pin_signer_with_node_key(
+            app_root,
+            node_key,
+            &verifying,
             "operator",
             SignerRole::Operator,
             SignerScope::operator_default(),
-            SignerStatus::Active,
         );
-        record.event = "test-fixture".to_owned();
-        let dir = signers_dir(app_root);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join(record.file_name()),
-            record.render_signed(node.signing_key()).unwrap(),
-        )
-        .unwrap();
     }
 }
 
