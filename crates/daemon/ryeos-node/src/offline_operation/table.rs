@@ -929,6 +929,7 @@ mod tests {
                 "node.remote.pin",
                 "node.bundle.replace",
                 "node.reset.authorization",
+                "node.authorization.revoke",
                 "node.trust.pin",
                 "node.trust.scope",
                 "node.trust.retire",
@@ -976,7 +977,7 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 8);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 9);
     }
 
     #[test]
