@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:37:06Z:0b47cb77d386988cc288365c5f4e7ac7ae6bb3fef1a551ab46f19a99f51aa79f:/pMmFkKHtYajyPdYLu21YwD4BU1nSNYLanZXP101AEZn8++DllIvcAMN6BZc90wZiV6vHdCgn7zLcPaASZ+GBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T22:15:51Z:eeeae93b63458b7e7b641497e1f3dd5df3da898df05809fbdfd09f48696250d8:Pv9sLFi6eWM/7VdxgW/pnfxvysW0MKCNSIu6TDDbcw6L+8Xp2cXEyy0cUJbK6j6f2GSEpQTi3i2IUF0gEYylBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -157,7 +157,7 @@ state:
 | Bundle registrations | `<system>/.ai/node/bundles/` | node key |
 | Any other node config under the app root (routes, commands, external execution, runtime snapshots) | `<system>/.ai/node/<section>/` | node key |
 | Authorized-key grants | `<system>/.ai/node/auth/authorized_keys/` | node key |
-| Init completion record | `<system>/.ai/config/onboarding/init-completion.json` | the local operator key (`.ai/config/keys/signing/`) |
+| Init completion record | `<system>/.ai/config/onboarding/init-completion.json` | the local operator key (`.ai/node/operator/signing/`) |
 | Offline operation requests | request envelope | the local operator key, or an operator granted by the node |
 
 Routes and commands shipped inside a bundle root keep their publisher
