@@ -76,6 +76,7 @@ mod tests {
             item_ref: crate::canonical_ref::CanonicalRef::parse("tool:test/id").unwrap(),
             thread_id: "T-test-thread".to_string(),
             project_path: PathBuf::from("/tmp"),
+            bundle_state_home: None,
             runtime_state_root: PathBuf::from("/tmp"),
             acting_principal: "fp:test".to_string(),
             cas_root: PathBuf::from("/tmp/cas"),

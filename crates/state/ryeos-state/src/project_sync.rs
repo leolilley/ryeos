@@ -811,6 +811,39 @@ mod tests {
     }
 
     #[test]
+    fn bundle_state_is_node_owned_never_synced() {
+        for path in [
+            ".ai/state/bundle-state",
+            ".ai/state/bundle-state/central-auth/realm-a/session.json",
+            ".ai/state/bundle-state/central-auth/.home.json",
+        ] {
+            assert!(
+                is_project_snapshot_floor_excluded(path),
+                "{path} must never be captured or deployed"
+            );
+            assert!(
+                is_durable_content_capture_floor_excluded(path),
+                "{path} must never be copied into CAS"
+            );
+            assert!(
+                live_execution_denied_control_paths()
+                    .iter()
+                    .any(|denied| path.starts_with(denied.as_str())),
+                "{path} is outside the live-execution denied control paths"
+            );
+            assert!(matches!(
+                classify_project_ai_path(path, None),
+                ProjectAiPathClass::NodeOwned {
+                    prefix: ".ai/state"
+                }
+            ));
+        }
+        // The project manifest validator refuses a manifest that carries a home.
+        let m = manifest(&[".ai/state/bundle-state/central-auth/realm-a/x"]);
+        assert!(validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None).is_err());
+    }
+
+    #[test]
     fn live_execution_denies_the_node_trust_registry_outside_the_snapshot_floor() {
         assert!(
             live_execution_denied_control_paths()

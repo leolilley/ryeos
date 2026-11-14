@@ -67,6 +67,10 @@ pub struct SubprocessBuildRequest {
     /// Directory this launch may write its own state into; see
     /// `EnvInjectionSource::RuntimeStateRoot`.
     pub runtime_state_root: PathBuf,
+    /// The launch's bundle state namespace as the workload must see it; see
+    /// `EnvInjectionSource::BundleStateHome`. `None` when the launch opened
+    /// no state home.
+    pub bundle_state_home: Option<PathBuf>,
     pub acting_principal: String,
     pub cas_root: PathBuf,
     pub callback_token: Option<String>,

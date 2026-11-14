@@ -1989,6 +1989,7 @@ impl PreparedItemPlan {
             isolation_network_authority_ceiling: network_authority_ceiling,
             isolation_live_access_authority: None,
             isolation_state_root: state_root.map(Path::to_path_buf),
+            isolation_bundle_state_home: None,
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
@@ -3664,6 +3665,7 @@ pub fn spawn_item(
                 ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
             isolation_live_access_authority,
             isolation_state_root: state_root.map(std::path::Path::to_path_buf),
+            isolation_bundle_state_home: None,
             isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
             isolation_checkpoint_authority: allocated_checkpoint_authority,
             isolation_daemon_socket_path: isolation_daemon_socket_path

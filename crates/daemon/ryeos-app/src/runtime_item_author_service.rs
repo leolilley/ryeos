@@ -509,6 +509,12 @@ fn enforce_authored_capability_ceiling(
                  authoring run has no effective bundle"
             );
         }
+        if authority.state_home.is_some() {
+            bail!(
+                "authored item `{target}` requests a bundle state home; a state home is opened \
+                 only by items the bundle itself ships and signs"
+            );
+        }
         carried.extend(ryeos_bundle::runtime_authority::requested_runtime_caps(
             &requirements,
             bundle_id.unwrap_or_default(),

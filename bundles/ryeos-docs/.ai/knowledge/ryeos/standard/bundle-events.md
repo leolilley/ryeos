@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T04:15:23Z:5f3a54f98bd9310cf88a88b1f0a1ba622510b1517a14bcf8f397cf5239d4a167:8H1vEOAOLZRj3iKEmj4YRpeNhEUR17F4Z5QedbaXtqQ2cjwDgrOZXK5X4BtfDNdFeSnCqNGk1RX7Zme3FXWjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:6a142ad1bf2344cac341a7c59d34f4e241d8faecda011f5568f3a7317b268fa2:9MJb9ar96sLw3gGd6W18ak1sHwUhOcH/o2mW/VcgvBMOsVK9hpd2kwqtq2i/7GUnQwI1SLMhOSa0Irko16NeCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]
@@ -27,7 +27,9 @@ Access is gated by capabilities. The important rule:
 
 This is the manifest runtime-authority model — see
 `ryeos/future/tool-runtime-authority`. Authority is always minted by the daemon
-from signed metadata, never accepted from runtime-declared input.
+from signed metadata, never accepted from runtime-declared input. The family set
+also includes the node-owned bundle state home, whose declaration, caller grant
+and isolation mount are described in `ryeos/standard/bundle-state-home`.
 
 ## Capability shape
 

@@ -11,6 +11,7 @@
 //! This module is the single source of truth for that vocabulary:
 //!
 //! - the cap `kind` segments (`bundle-events`, `vault`, `project-snapshots`,
+//!   `bundle-state`,
 //!   and ordinary item kinds),
 //! - the typed cap constructors the manifest declarations and the daemon
 //!   callback services both use to build/require caps, and
@@ -29,7 +30,8 @@ use serde_json::Value;
 
 use crate::manifest::{
     BundleEventDecl, BundleEventOperation, ItemAuthorDecl, ProjectSnapshotOperation,
-    RuntimeAuthorityDecls, RuntimeVaultDecl, RuntimeVaultOperation,
+    RuntimeAuthorityDecls, RuntimeVaultDecl, RuntimeVaultOperation, StateHomeDecl,
+    StateHomeNamespaces,
 };
 
 /// Capability `kind` segment for bundle-event authority.
@@ -38,6 +40,14 @@ pub const CAP_KIND_BUNDLE_EVENTS: &str = "bundle-events";
 pub const CAP_KIND_RUNTIME_VAULT: &str = "vault";
 /// Capability `kind` segment for project-snapshot authority.
 pub const CAP_KIND_PROJECT_SNAPSHOTS: &str = "project-snapshots";
+/// Capability `kind` segment for bundle state home authority. The same kind
+/// carries the daemon-minted access caps (verbs `read` and `write`, item side)
+/// and the caller's `use` cap (verb `use`, from the caller's grant).
+pub const CAP_KIND_BUNDLE_STATE: &str = "bundle-state";
+/// Capability verb a caller must hold to reach one bundle state namespace.
+pub const BUNDLE_STATE_USE_VERB: &str = "use";
+/// Longest bundle state namespace segment.
+pub const MAX_STATE_HOME_NAMESPACE_LEN: usize = 128;
 /// Capability verb of the node operator-vault exposure capability
 /// (`ryeos.use.vault.operator`).
 pub const OPERATOR_VAULT_CAP_VERB: &str = "use";
@@ -67,6 +77,13 @@ fn authority_surfaces() -> &'static [(&'static str, &'static str)] {
         // reaches it only through its signed route plus the manifest bound
         // (`runtime_authority.operator_vault`); a composed grant never does.
         surfaces.push((OPERATOR_VAULT_CAP_VERB, CAP_KIND_RUNTIME_VAULT));
+        // Bundle state: the access caps are minted from the manifest and the
+        // `use` cap is lent only by the caller's own grant, so no composed item
+        // grant may carry either.
+        for access in StateHomeAccess::ALL {
+            surfaces.push((access.cap_verb(), CAP_KIND_BUNDLE_STATE));
+        }
+        surfaces.push((BUNDLE_STATE_USE_VERB, CAP_KIND_BUNDLE_STATE));
         surfaces
     })
 }
@@ -159,6 +176,213 @@ pub fn project_snapshot_cap(op: &ProjectSnapshotOperation) -> String {
     canonical_cap(CAP_KIND_PROJECT_SNAPSHOTS, "live", op.cap_verb())
 }
 
+/// Build the access capability the daemon mints into a launch whose item
+/// requested a state home the signed manifest backs (item side).
+pub fn bundle_state_access_cap(
+    bundle_id: &str,
+    namespace: &str,
+    access: StateHomeAccess,
+) -> String {
+    canonical_cap(
+        CAP_KIND_BUNDLE_STATE,
+        &format!("{bundle_id}/{namespace}"),
+        access.cap_verb(),
+    )
+}
+
+/// Build the capability a caller must hold, from its own grant, to launch work
+/// that opens `bundle_id`'s `namespace` (caller side).
+pub fn bundle_state_use_cap(bundle_id: &str, namespace: &str) -> String {
+    canonical_cap(
+        CAP_KIND_BUNDLE_STATE,
+        &format!("{bundle_id}/{namespace}"),
+        BUNDLE_STATE_USE_VERB,
+    )
+}
+
+/// The `(bundle id, namespace, access)` a daemon-minted access cap names, or
+/// `None` when `cap` is not one. Launch derives the mount from the sealed
+/// effective caps this way, so a recovered launch needs no second source.
+pub fn parse_bundle_state_access_cap(cap: &str) -> Option<(String, String, StateHomeAccess)> {
+    let mut parts = cap.splitn(4, '.');
+    if parts.next()? != "ryeos" {
+        return None;
+    }
+    let verb = parts.next()?;
+    if parts.next()? != CAP_KIND_BUNDLE_STATE {
+        return None;
+    }
+    let access = StateHomeAccess::ALL
+        .iter()
+        .copied()
+        .find(|access| access.cap_verb() == verb)?;
+    let (bundle, namespace) = parts.next()?.split_once('/')?;
+    validate_state_home_segment("namespace", namespace).ok()?;
+    if bundle.is_empty() || bundle.contains(['/', '*', '?']) {
+        return None;
+    }
+    Some((bundle.to_owned(), namespace.to_owned(), access))
+}
+
+/// Whether `namespace` is a valid state home segment: `[a-z0-9][a-z0-9._-]{0,127}`.
+pub fn validate_state_home_segment(label: &str, namespace: &str) -> Result<(), String> {
+    let mut bytes = namespace.bytes();
+    let first_ok = bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    let rest_ok = bytes.all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+    });
+    if !first_ok || !rest_ok || namespace.len() > MAX_STATE_HOME_NAMESPACE_LEN {
+        return Err(format!(
+            "{label} {namespace:?} is not a state home segment \
+             (`[a-z0-9][a-z0-9._-]{{0,{}}}`)",
+            MAX_STATE_HOME_NAMESPACE_LEN - 1
+        ));
+    }
+    Ok(())
+}
+
+/// Why a bundle state home could not be admitted for a launch. Every variant
+/// names the fix; `code` is the stable wire code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateHomeRefusal {
+    /// The signed manifest does not back the requested state home.
+    Undeclared { bundle_id: String, detail: String },
+    /// The namespace is not a valid segment, or its launch parameter is absent
+    /// or not a string.
+    NamespaceInvalid { detail: String },
+    /// The caller's grant does not carry the `use` cap for the namespace.
+    NamespaceDenied {
+        bundle_id: String,
+        namespace: String,
+        caller: String,
+    },
+    /// The namespace directory cannot be created, verified or pinned.
+    Unavailable { detail: String },
+}
+
+impl StateHomeRefusal {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Undeclared { .. } => "bundle_state_home_undeclared",
+            Self::NamespaceInvalid { .. } => "bundle_state_namespace_invalid",
+            Self::NamespaceDenied { .. } => "bundle_state_namespace_denied",
+            Self::Unavailable { .. } => "bundle_state_home_unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for StateHomeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Undeclared { bundle_id, detail } => write!(
+                f,
+                "bundle `{bundle_id}` does not back a state home for this launch: {detail}. \
+                 Declare `runtime_authority.state_home` in the bundle's signed manifest, sign it \
+                 and republish the bundle"
+            ),
+            Self::NamespaceInvalid { detail } => write!(
+                f,
+                "state home namespace is invalid: {detail}. Pass a namespace that is a \
+                 `[a-z0-9][a-z0-9._-]{{0,127}}` segment"
+            ),
+            Self::NamespaceDenied {
+                bundle_id,
+                namespace,
+                caller,
+            } => {
+                let cap = bundle_state_use_cap(bundle_id, namespace);
+                write!(
+                    f,
+                    "caller `{caller}` does not hold `{cap}`, which opening state namespace \
+                     `{namespace}` of bundle `{bundle_id}` requires. Grant it with `ryeos \
+                     authorize-key --public-key <key> --label <label> --scopes {cap}`"
+                )
+            }
+            Self::Unavailable { detail } => write!(
+                f,
+                "the bundle state home cannot be opened: {detail}. Check that the node's state \
+                 directory is writable by the daemon user and run `ryeos node doctor`"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StateHomeRefusal {}
+
+/// How an item may use its state home. `read_write` mints a `write` access cap,
+/// `read_only` a `read` one; isolation mounts the namespace accordingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StateHomeAccess {
+    ReadWrite,
+    ReadOnly,
+}
+
+impl StateHomeAccess {
+    /// Every variant, so reserved-surface derivation stays exhaustive.
+    pub const ALL: &'static [StateHomeAccess] =
+        &[StateHomeAccess::ReadWrite, StateHomeAccess::ReadOnly];
+
+    /// The capability `verb` the daemon mints for this access.
+    pub fn cap_verb(&self) -> &'static str {
+        match self {
+            StateHomeAccess::ReadWrite => "write",
+            StateHomeAccess::ReadOnly => "read",
+        }
+    }
+}
+
+impl StateHomeNamespaces {
+    /// Whether this declaration backs `namespace`.
+    pub fn backs(&self, namespace: &str) -> bool {
+        match self {
+            StateHomeNamespaces::Fixed { names } => names.iter().any(|name| name == namespace),
+            StateHomeNamespaces::LaunchParam => true,
+        }
+    }
+}
+
+impl StateHomeDecl {
+    /// The caps this declaration bounds for `bundle_id`: the exact caps of every
+    /// fixed name, or one pattern per access for `launch_param` (a concrete
+    /// request is backed by glob match, exactly as item-authoring patterns are).
+    pub fn runtime_authority_caps<'a>(
+        &'a self,
+        bundle_id: &'a str,
+    ) -> impl Iterator<Item = String> + 'a {
+        let names: Vec<&str> = match &self.namespaces {
+            StateHomeNamespaces::Fixed { names } => names.iter().map(String::as_str).collect(),
+            StateHomeNamespaces::LaunchParam => vec!["*"],
+        };
+        names.into_iter().flat_map(move |name| {
+            StateHomeAccess::ALL
+                .iter()
+                .map(move |access| bundle_state_access_cap(bundle_id, name, *access))
+        })
+    }
+
+    /// Structural rules beyond serde shape: fixed names are non-empty, unique
+    /// valid segments, and never wildcards.
+    pub fn validate(&self) -> Result<(), String> {
+        if let StateHomeNamespaces::Fixed { names } = &self.namespaces {
+            if names.is_empty() {
+                return Err("state_home fixed namespaces list no names".to_string());
+            }
+            let mut seen = BTreeSet::new();
+            for name in names {
+                reject_authority_wildcards("state_home namespace", name)?;
+                validate_state_home_segment("state_home namespace", name)?;
+                if !seen.insert(name.as_str()) {
+                    return Err(format!("state_home namespace {name:?} is listed twice"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl BundleEventDecl {
     /// The exact caps this declaration grants the bundle `bundle_id`.
     pub fn runtime_authority_caps<'a>(
@@ -197,6 +421,7 @@ impl RuntimeAuthorityDecls {
             && self.runtime_vault.is_empty()
             && self.item_authoring.is_empty()
             && self.project_snapshots.is_empty()
+            && self.state_home.is_none()
             && !self.operator_vault
             && self.route_capabilities.is_empty()
     }
@@ -246,6 +471,9 @@ impl RuntimeAuthorityDecls {
             caps.extend(decl.runtime_authority_caps());
         }
         caps.extend(self.project_snapshots.iter().map(project_snapshot_cap));
+        if let Some(decl) = &self.state_home {
+            caps.extend(decl.runtime_authority_caps(bundle_id));
+        }
         caps
     }
 
@@ -283,14 +511,17 @@ impl RuntimeAuthorityDecls {
         for decl in &self.item_authoring {
             validate_item_author_pattern(&decl.kind, &decl.namespace)?;
         }
+        if let Some(decl) = &self.state_home {
+            decl.validate()?;
+        }
         for pattern in &self.route_capabilities {
             validate_scope_pattern(pattern)
                 .map_err(|reason| format!("route_capabilities entry {pattern:?}: {reason}"))?;
             if composed_grant_overlaps_manifest_runtime_authority(pattern) {
                 return Err(format!(
                     "route_capabilities entry {pattern:?} overlaps manifest runtime authority; \
-                     bundle-event, vault, item-authoring and project-snapshot capabilities are \
-                     minted from their own manifest families, and operator-vault exposure is \
+                     bundle-event, vault, item-authoring, project-snapshot and bundle-state \
+                     capabilities are minted from their own manifest families, and operator-vault exposure is \
                      bounded by `operator_vault`"
                 ));
             }
@@ -511,6 +742,87 @@ pub struct RuntimeAuthorityRequirements {
     pub item_authoring: Vec<ItemAuthorRequirement>,
     #[serde(default)]
     pub project_snapshots: Vec<ProjectSnapshotOperation>,
+    /// The one node-owned state namespace the item opens, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_home: Option<StateHomeRequirement>,
+}
+
+/// An item's request for its bundle's node-owned state home: which namespace,
+/// and whether it may write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateHomeRequirement {
+    pub namespace: StateHomeNamespaceSource,
+    pub access: StateHomeAccess,
+}
+
+/// Where a state home requirement takes its namespace from: a literal segment,
+/// or a named launch parameter read after the launch's parameters validate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StateHomeNamespaceSource {
+    Literal(String),
+    FromParam(StateHomeParamRef),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateHomeParamRef {
+    pub from_param: String,
+}
+
+impl StateHomeRequirement {
+    /// Resolve the namespace for one launch. A `from_param` source reads the
+    /// named string parameter of `params`; either source must be a valid
+    /// segment.
+    pub fn resolve_namespace(&self, params: &Value) -> Result<String, StateHomeRefusal> {
+        let namespace = match &self.namespace {
+            StateHomeNamespaceSource::Literal(name) => name.clone(),
+            StateHomeNamespaceSource::FromParam(reference) => params
+                .get(&reference.from_param)
+                .and_then(Value::as_str)
+                .ok_or_else(|| StateHomeRefusal::NamespaceInvalid {
+                    detail: format!(
+                        "launch parameter `{}` is absent or not a string",
+                        reference.from_param
+                    ),
+                })?
+                .to_owned(),
+        };
+        validate_state_home_segment("namespace", &namespace)
+            .map_err(|detail| StateHomeRefusal::NamespaceInvalid { detail })?;
+        Ok(namespace)
+    }
+
+    /// The access cap this requirement asks the daemon to mint for `bundle_id`
+    /// and `namespace` (as resolved by [`Self::resolve_namespace`]).
+    pub fn requested_cap(&self, bundle_id: &str, namespace: &str) -> String {
+        bundle_state_access_cap(bundle_id, namespace, self.access)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match &self.namespace {
+            StateHomeNamespaceSource::Literal(name) => {
+                reject_authority_wildcards("state_home namespace", name)?;
+                validate_state_home_segment("state_home namespace", name)
+            }
+            StateHomeNamespaceSource::FromParam(reference) => {
+                let valid = !reference.from_param.is_empty()
+                    && reference
+                        .from_param
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+                if valid {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "state_home from_param {:?} is not a parameter name",
+                        reference.from_param
+                    ))
+                }
+            }
+        }
+    }
 }
 
 /// One bundle-event requirement: an event kind plus the operations the item
@@ -573,6 +885,7 @@ impl RuntimeAuthorityRequirements {
             && self.runtime_vault.is_empty()
             && self.item_authoring.is_empty()
             && self.project_snapshots.is_empty()
+            && self.state_home.is_none()
     }
 
     /// Whether the item declares any manifest-backed runtime authority at all —
@@ -582,7 +895,9 @@ impl RuntimeAuthorityRequirements {
     }
 
     /// The exact caps this requirement requests for `bundle_id` — the union
-    /// across every family. `declared` caps are not part of this set.
+    /// across every family except the state home, whose namespace may come from
+    /// the launch's parameters (see [`Self::requested_state_home_cap`]).
+    /// `declared` caps are not part of this set.
     pub fn requested_caps(&self, bundle_id: &str) -> BTreeSet<String> {
         let mut caps = BTreeSet::new();
         for req in &self.bundle_events {
@@ -596,6 +911,22 @@ impl RuntimeAuthorityRequirements {
         }
         caps.extend(self.project_snapshots.iter().map(project_snapshot_cap));
         caps
+    }
+
+    /// The state home access cap this requirement requests for one launch, or
+    /// `None` when the item requests no state home.
+    pub fn requested_state_home_cap(
+        &self,
+        bundle_id: &str,
+        params: &Value,
+    ) -> Result<Option<String>, StateHomeRefusal> {
+        self.state_home
+            .as_ref()
+            .map(|requirement| {
+                let namespace = requirement.resolve_namespace(params)?;
+                Ok(requirement.requested_cap(bundle_id, &namespace))
+            })
+            .transpose()
     }
 
     /// Structural rules a type alone cannot enforce: non-empty event
@@ -627,6 +958,9 @@ impl RuntimeAuthorityRequirements {
         }
         for req in &self.item_authoring {
             validate_item_author_pattern(&req.kind, &req.namespace)?;
+        }
+        if let Some(req) = &self.state_home {
+            req.validate()?;
         }
         Ok(())
     }
@@ -795,7 +1129,8 @@ impl std::fmt::Display for ComposedGrantError {
             ComposedGrantError::Reserved { grant } => write!(
                 f,
                 "capability '{grant}' is reserved: bundle-event, runtime-vault, item-authoring, \
-                 and project-snapshot capabilities are manifest-backed runtime authority. \
+                 project-snapshot and bundle-state capabilities are manifest-backed runtime \
+                 authority. \
                  Declare them under \
                  `requires.capabilities.manifest.runtime_authority`, not `requires.capabilities.declared` — the \
                  signed manifest is the authority upper bound and the item selects the subset it \
@@ -1403,5 +1738,222 @@ mod tests {
             &manifest,
             "ryeos.author.knowledge.runtime-authored/*"
         ));
+    }
+
+    // ── bundle state home ────────────────────────────────────────────
+
+    fn state_home_requirement(namespace: serde_json::Value) -> RuntimeCapabilityRequirements {
+        parse_runtime_requires(&json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "state_home": { "namespace": namespace, "access": "read_write" }
+            }}}
+        }))
+        .unwrap()
+    }
+
+    fn state_home_manifest(namespaces: StateHomeNamespaces) -> RuntimeAuthorityDecls {
+        RuntimeAuthorityDecls {
+            state_home: Some(StateHomeDecl { namespaces }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn state_home_requirement_minted_only_when_manifest_declares() {
+        let reqs = state_home_requirement(json!("realm-a"));
+        let requested = reqs
+            .manifest
+            .runtime_authority
+            .requested_state_home_cap("central-auth", &json!({}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(requested, "ryeos.write.bundle-state.central-auth/realm-a");
+
+        // No declaration backs nothing; a fixed list backs only its names; the
+        // launch-param form backs any concrete segment.
+        let none = RuntimeAuthorityDecls::default().declared_caps("central-auth");
+        assert!(!manifest_backs_requested_cap(&none, &requested));
+        let fixed = state_home_manifest(StateHomeNamespaces::Fixed {
+            names: vec!["realm-a".into()],
+        })
+        .declared_caps("central-auth");
+        assert!(manifest_backs_requested_cap(&fixed, &requested));
+        assert!(!manifest_backs_requested_cap(
+            &fixed,
+            "ryeos.write.bundle-state.central-auth/realm-b"
+        ));
+        let open =
+            state_home_manifest(StateHomeNamespaces::LaunchParam).declared_caps("central-auth");
+        assert!(manifest_backs_requested_cap(&open, &requested));
+        assert!(!manifest_backs_requested_cap(
+            &open,
+            "ryeos.write.bundle-state.other-bundle/realm-a"
+        ));
+        // A request that itself carries a wildcard is backed only by an
+        // identical declaration, never by the launch-param pattern.
+        assert!(!manifest_backs_requested_cap(
+            &fixed,
+            "ryeos.write.bundle-state.central-auth/*"
+        ));
+        // An item that requests no state home mints nothing.
+        let absent = parse_runtime_requires(&json!({})).unwrap();
+        assert_eq!(
+            absent
+                .manifest
+                .runtime_authority
+                .requested_state_home_cap("central-auth", &json!({}))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn state_home_use_cap_cannot_be_self_granted() {
+        let use_cap = bundle_state_use_cap("central-auth", "realm-a");
+        assert_eq!(use_cap, "ryeos.use.bundle-state.central-auth/realm-a");
+        for grant in [
+            use_cap.as_str(),
+            "ryeos.use.bundle-state.*",
+            "ryeos.use.bundle-state.central-auth/*",
+            "ryeos.write.bundle-state.central-auth/realm-a",
+            "ryeos.read.bundle-state.central-auth/realm-a",
+            "ryeos.*.bundle-state.*",
+            "ryeos.write.bundle-state",
+        ] {
+            assert!(
+                composed_grant_overlaps_manifest_runtime_authority(grant),
+                "a composed grant must not carry {grant}"
+            );
+            assert!(matches!(
+                reject_disallowed_composed_grants(&[grant.to_owned()]),
+                Err(ComposedGrantError::Reserved { .. })
+            ));
+        }
+        // A route principal cannot be lent the surface either.
+        let routed = RuntimeAuthorityDecls {
+            route_capabilities: vec![use_cap],
+            ..Default::default()
+        };
+        assert!(routed.validate().is_err());
+        // The parse helper round-trips only daemon-minted access caps.
+        assert_eq!(
+            parse_bundle_state_access_cap("ryeos.write.bundle-state.central-auth/realm-a"),
+            Some((
+                "central-auth".to_owned(),
+                "realm-a".to_owned(),
+                StateHomeAccess::ReadWrite
+            ))
+        );
+        assert_eq!(
+            parse_bundle_state_access_cap("ryeos.use.bundle-state.central-auth/realm-a"),
+            None
+        );
+    }
+
+    #[test]
+    fn state_home_launch_param_namespace_validated() {
+        let reqs = state_home_requirement(json!({ "from_param": "realm" }));
+        let requirement = reqs.manifest.runtime_authority.state_home.unwrap();
+        assert_eq!(
+            requirement
+                .resolve_namespace(&json!({ "realm": "app-a.v2_x" }))
+                .unwrap(),
+            "app-a.v2_x"
+        );
+        for bad in [
+            json!({}),
+            json!({ "realm": 7 }),
+            json!({ "realm": "" }),
+            json!({ "realm": "Upper" }),
+            json!({ "realm": "../x" }),
+            json!({ "realm": "a/b" }),
+            json!({ "realm": "-a" }),
+            json!({ "realm": "a".repeat(129) }),
+        ] {
+            let refusal = requirement.resolve_namespace(&bad).unwrap_err();
+            assert_eq!(refusal.code(), "bundle_state_namespace_invalid", "{bad}");
+        }
+        // A literal namespace is held to the same grammar at parse time.
+        assert!(
+            parse_runtime_requires(&json!({
+                "capabilities": { "manifest": { "runtime_authority": {
+                    "state_home": { "namespace": "Bad/ns", "access": "read_write" }
+                }}}
+            }))
+            .is_err()
+        );
+        assert!(
+            parse_runtime_requires(&json!({
+                "capabilities": { "manifest": { "runtime_authority": {
+                    "state_home": { "namespace": { "from_param": "a-b" }, "access": "read_only" }
+                }}}
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn state_home_wildcard_namespace_refused() {
+        for names in [
+            vec!["realm-*".to_owned()],
+            vec!["*".to_owned()],
+            vec!["a?".to_owned()],
+            vec![],
+            vec!["a".to_owned(), "a".to_owned()],
+            vec!["Upper".to_owned()],
+        ] {
+            let decls = state_home_manifest(StateHomeNamespaces::Fixed {
+                names: names.clone(),
+            });
+            assert!(
+                decls.validate().is_err(),
+                "must refuse fixed names {names:?}"
+            );
+        }
+        assert!(
+            state_home_manifest(StateHomeNamespaces::Fixed {
+                names: vec!["realm-a".into(), "realm-b".into()]
+            })
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            state_home_manifest(StateHomeNamespaces::LaunchParam)
+                .validate()
+                .is_ok()
+        );
+        let literal_wildcard = parse_runtime_requires(&json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "state_home": { "namespace": "realm-*", "access": "read_write" }
+            }}}
+        }));
+        assert!(literal_wildcard.is_err());
+    }
+
+    #[test]
+    fn state_home_declaration_round_trips_through_yaml() {
+        let decls: RuntimeAuthorityDecls = serde_yaml::from_str(
+            "state_home:\n  namespaces:\n    kind: fixed\n    names: [realm-a]\n",
+        )
+        .unwrap();
+        assert!(!decls.is_empty());
+        assert_eq!(
+            decls.state_home.as_ref().unwrap().namespaces,
+            StateHomeNamespaces::Fixed {
+                names: vec!["realm-a".into()]
+            }
+        );
+        let open: RuntimeAuthorityDecls =
+            serde_yaml::from_str("state_home:\n  namespaces:\n    kind: launch_param\n").unwrap();
+        assert_eq!(
+            open.state_home.unwrap().namespaces,
+            StateHomeNamespaces::LaunchParam
+        );
+        assert!(
+            serde_yaml::from_str::<RuntimeAuthorityDecls>(
+                "state_home:\n  namespaces:\n    kind: any\n"
+            )
+            .is_err()
+        );
     }
 }

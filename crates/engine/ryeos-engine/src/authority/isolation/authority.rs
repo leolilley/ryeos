@@ -817,6 +817,21 @@ impl IsolationTargetChannelAuthority {
     }
 }
 
+/// Where an enforced launch sees its one node-owned bundle state namespace.
+pub const BUNDLE_STATE_ISOLATION_DESTINATION: &str = "/run/ryeos/bundle-state";
+
+/// One node-owned bundle state namespace admitted for a launch. The daemon
+/// derives it from the launch's sealed access capability; isolation mounts
+/// exactly this directory, never its siblings or its parents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationBundleStateHome {
+    /// The namespace directory on the host, one exact child of a bundle's home
+    /// beneath `<app_root>/.ai/state/bundle-state/`.
+    pub namespace_dir: PathBuf,
+    /// Whether the workload may write; read-only access mounts it read-only.
+    pub writable: bool,
+}
+
 /// Per-launch facts used to resolve policy placeholders and record provenance.
 #[derive(Debug, Clone, Copy)]
 pub struct IsolationLaunchContext<'a> {
@@ -836,6 +851,10 @@ pub struct IsolationLaunchContext<'a> {
     pub network_authority_ceiling: IsolationNetworkAuthorityCeiling,
     pub live_access: Option<&'a IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
+    /// The one bundle state namespace this launch may use, mounted at
+    /// [`BUNDLE_STATE_ISOLATION_DESTINATION`]. Independent of `state_root`:
+    /// both may be present on one launch.
+    pub bundle_state_home: Option<&'a IsolationBundleStateHome>,
     pub checkpoint_dir: Option<&'a Path>,
     pub checkpoint_authority: Option<&'a lillux::PinnedDirectory>,
     pub daemon_socket_path: Option<&'a Path>,

@@ -59,6 +59,26 @@ pub struct ItemAuthorDecl {
     pub namespace: String,
 }
 
+/// Which namespaces a bundle may open under its node-owned state home.
+///
+/// `fixed` closes the list in the signed manifest. `launch_param` lets each
+/// launch name any valid segment through a declared parameter, for bundles
+/// whose partitions are open-ended; the caller's own `use` grant still bounds
+/// which segments that launch may reach.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StateHomeNamespaces {
+    Fixed { names: Vec<String> },
+    LaunchParam,
+}
+
+/// The manifest's declaration of a node-owned bundle state home.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StateHomeDecl {
+    pub namespaces: StateHomeNamespaces,
+}
+
 /// The single manifest-declared runtime-authority surface: the closed set of
 /// daemon callback authority families a signed bundle manifest may grant its own
 /// running code. One field per family, each a typed declaration list that owns
@@ -77,6 +97,10 @@ pub struct RuntimeAuthorityDecls {
     pub item_authoring: Vec<ItemAuthorDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub project_snapshots: Vec<ProjectSnapshotOperation>,
+    /// Node-owned durable state this bundle's own code may open, one
+    /// namespace per launch. Absent means the bundle has no state home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_home: Option<StateHomeDecl>,
     /// Upper bound for this bundle's handler routes: a route may run its
     /// fixed handler with the node operator's vault exposed only when its own
     /// signed route declares `authority.operator_vault: true` **and** this

@@ -75,12 +75,32 @@ struct RuntimeSourceAuthorityDecls {
     item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
     #[serde(default, rename = "project_snapshots")]
     _project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
+    /// Node-owned bundle state home; judged by the launch that opens it.
+    #[serde(default, rename = "state_home")]
+    _state_home: Option<RuntimeSourceStateHomeDecl>,
     /// Handler-route operator-vault bound; judged by route dispatch, not here.
     #[serde(default, rename = "operator_vault")]
     _operator_vault: bool,
     /// Route-principal authority bound; judged by route dispatch, not here.
     #[serde(default, rename = "route_capabilities")]
     _route_capabilities: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceStateHomeDecl {
+    #[serde(rename = "namespaces")]
+    _namespaces: RuntimeSourceStateHomeNamespaces,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeSourceStateHomeNamespaces {
+    Fixed {
+        #[serde(rename = "names")]
+        _names: Vec<String>,
+    },
+    LaunchParam,
 }
 
 #[derive(serde::Deserialize)]
