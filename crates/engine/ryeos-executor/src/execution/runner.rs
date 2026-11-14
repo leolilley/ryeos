@@ -3156,17 +3156,44 @@ fn promoted_scoped_producer_commands(
     Ok((commands, requires_ingress_handoff))
 }
 
+/// The containment the sealed root demands, under the holding of the protocol
+/// the launch was admitted with. The holding is read from the retained
+/// descriptor in the admitted closure, so the wait path, the detached task and
+/// a recovered launch all apply the one protocol selected at admission and none
+/// selects again.
 fn admitted_root_requires_process_scope(
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
 ) -> Result<ryeos_app::thread_lifecycle::ProcessContainmentRequirement> {
-    metadata
-        .sealed_root_request
-        .as_ref()
-        .map(|sealed| sealed.process_containment_for_qualification())
-        .transpose()
-        .map(|required| {
-            required.unwrap_or(ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None)
-        })
+    let Some(sealed) = metadata.sealed_root_request.as_ref() else {
+        return Ok(ryeos_app::thread_lifecycle::ProcessContainmentRequirement::None);
+    };
+    let holding = retained_protocol_holding(metadata)?;
+    sealed.process_containment_for_qualification_under(holding.as_ref())
+}
+
+/// The holding declared by the signed protocol descriptor retained in the
+/// admitted closure, if the launch has a closure and the protocol declares one.
+fn retained_protocol_holding(
+    metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+) -> Result<Option<ryeos_engine::protocols::ProtocolHolding>> {
+    use ryeos_state::objects::AdmittedExecutionClosure;
+    let Some(
+        AdmittedExecutionClosure::DirectItemExecutor {
+            protocol_descriptor_document: document,
+            ..
+        }
+        | AdmittedExecutionClosure::ManagedRuntime {
+            protocol_descriptor_document: document,
+            ..
+        },
+    ) = metadata.admitted_execution_closure.as_ref()
+    else {
+        return Ok(None);
+    };
+    let body = lillux::signature::strip_signature_lines(document);
+    let descriptor: ryeos_engine::protocols::ProtocolDescriptor = serde_yaml::from_str(&body)
+        .context("decode retained protocol descriptor for qualification containment")?;
+    Ok(descriptor.holding)
 }
 
 /// A host-direct grant that requires a scope seals the launch's containment

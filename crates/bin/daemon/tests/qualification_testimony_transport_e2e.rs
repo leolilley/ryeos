@@ -41,11 +41,12 @@ use ryeos_state::external_content::products::publication::{
     ProductCaptureCoordinate, publish_product_witness,
 };
 use ryeos_state::external_content::products::qualification::{
-    PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, PRODUCT_QUALIFICATION_POLICY_SCHEMA,
+    OriginHolding, PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA, PRODUCT_QUALIFICATION_POLICY_SCHEMA,
     PRODUCT_QUALIFICATION_RESULT_SCHEMA, ProductQualificationEvidence,
-    ProductQualificationExecutionProof, ProductQualificationPolicy,
-    ProductQualificationPolicySource, ProductQualificationProjectorIdentity,
-    ProductQualificationResult, ProductQualificationVerifier, VerifierProcessSettlementAuthority,
+    ProductQualificationExecutionProof, ProductQualificationOriginHoldings,
+    ProductQualificationPolicy, ProductQualificationPolicySource,
+    ProductQualificationProjectorIdentity, ProductQualificationResult,
+    ProductQualificationVerifier, VerifierProcessSettlementAuthority,
 };
 use ryeos_state::external_content::products::qualification_publication::PRODUCT_QUALIFICATION_HEAD_NAMESPACE;
 use ryeos_state::external_content::products::qualification_testimony::{
@@ -459,10 +460,9 @@ fn qualification_policy() -> ProductQualificationPolicy {
         verifier_ref: "tool:fixtures/qualify_runtime".into(),
         subject_declaration_id: "runtime".into(),
         allowed_claims: vec![CLAIM.into(), "extension_probe".into()],
-        minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+        minimum_verifier_process_settlement: Some(VerifierProcessSettlementAuthority::ScopeEmpty),
         verifier_parameters: json!({"scope": "bounded_fixture"}),
         consumer_execution_context: None,
-        requires_guarantees: Vec::new(),
         producer_scenarios: BTreeMap::new(),
     }
 }
@@ -491,6 +491,14 @@ fn verifier_artifact_identity() -> AdmittedLaunchArtifactIdentity {
             runtime_bundle_manifest_hash: Some("8".repeat(64)),
             runtime_bundle_signer_fingerprint: Some("2".repeat(64)),
         },
+    }
+}
+
+fn verifier_origin_holding() -> OriginHolding {
+    OriginHolding {
+        execution_protocol: "protocol:fixtures/qualified".into(),
+        filesystem_authority: "node_policy".into(),
+        process_settlement_authority: VerifierProcessSettlementAuthority::ScopeEmpty,
     }
 }
 
@@ -574,6 +582,10 @@ fn qualification_evidence(
             result_digest: result.digest()?,
         },
         policy_source,
+        origin_holdings: ProductQualificationOriginHoldings {
+            verifier: verifier_origin_holding(),
+            worker: None,
+        },
         consumer_content: None,
         qualification_worker_transcript_manifest_hash: None,
         verifier_root_selections: None,
@@ -609,7 +621,7 @@ fn acceptance_policy_value(
     lanes: &[&str],
 ) -> Value {
     json!({
-        "schema": "ryeos.remote_qualification_acceptance_policy.v2",
+        "schema": "ryeos.remote_qualification_acceptance_policy.v3",
         "qualification_policy_ref": QUALIFICATION_POLICY_REF,
         "trusted_attesters": [{
             "principal": attester_principal,
@@ -619,6 +631,7 @@ fn acceptance_policy_value(
         "allowed_claims": [CLAIM, "extension_probe"],
         "accepted_verifier_definition_digests": definition_digests,
         "accepted_verifier_artifact_digests": artifact_digests,
+        "accepted_origin_holdings": [verifier_origin_holding()],
         "allowed_lanes": lanes,
         "max_testimony_age_seconds": 86400,
         "max_clock_skew_seconds": 300,

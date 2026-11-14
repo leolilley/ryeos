@@ -550,6 +550,15 @@ fn seed_auxiliary_qualification_in_context(
             result_digest: result.digest()?,
         },
         policy_source,
+        origin_holdings: ProductQualificationOriginHoldings {
+            verifier: OriginHolding {
+                execution_protocol: protocol_ref.clone(),
+                filesystem_authority: "node_policy".into(),
+                process_settlement_authority:
+                    VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent,
+            },
+            worker: None,
+        },
         consumer_content: None,
         qualification_worker_transcript_manifest_hash: None,
         verifier_root_selections: root_selections,

@@ -125,7 +125,7 @@ where
 /// Exact sealed root execution request contract. Absent optional fields are
 /// meaningful and are never inferred on recovery; a stored request of any
 /// other version is refused before nested decoding.
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 22;
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 23;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -804,7 +804,10 @@ impl SealedRootExecutionRequest {
     /// qualified mechanism (cgroup scope or PID-namespace init). The weaker
     /// `trusted_process_group_absent` demands none. This is read from the
     /// sealed root, never a later policy lookup or an executor-selected
-    /// optional resource.
+    /// optional resource. A policy that names no minimum settlement (a consumer
+    /// policy) takes its requirement from the selected protocol's holding, so
+    /// this form refuses it: use
+    /// [`Self::process_containment_for_qualification_under`].
     pub fn process_containment_for_qualification(
         &self,
     ) -> Result<super::ProcessContainmentRequirement> {
@@ -812,28 +815,32 @@ impl SealedRootExecutionRequest {
     }
 
     /// The containment a qualification verifier must run under, given the
-    /// holding of the protocol the node selected for it. The sealed policy's
-    /// minimum settlement and the selected holding's root settlement each name
-    /// a requirement; the stricter stands, so neither can weaken the other.
+    /// holding of the protocol the node selected for it. A policy minimum and
+    /// the selected holding's root settlement each name a requirement; the
+    /// stricter stands, so neither can weaken the other. A policy with no
+    /// minimum is held to the holding alone, and is refused without one.
     pub fn process_containment_for_qualification_under(
         &self,
         selected_holding: Option<&ryeos_engine::protocols::ProtocolHolding>,
     ) -> Result<super::ProcessContainmentRequirement> {
         use super::ProcessContainmentRequirement as Requirement;
         self.validate_qualification_purpose()?;
-        let from_holding =
-            selected_holding.map_or(Requirement::None, |holding| {
-                Requirement::for_settlement(holding.root_settlement)
-            });
-        Ok(self.qualification.as_ref().map_or(Requirement::None, |purpose| {
-            Requirement::for_settlement(
-                purpose
-                    .policy_source
-                    .policy
-                    .minimum_verifier_process_settlement,
-            )
-            .at_least(from_holding)
-        }))
+        let Some(purpose) = self.qualification.as_ref() else {
+            return Ok(Requirement::None);
+        };
+        let from_holding = selected_holding
+            .map(|holding| Requirement::for_settlement(holding.root_settlement));
+        match (
+            purpose.policy_source.policy.minimum_verifier_process_settlement,
+            from_holding,
+        ) {
+            (Some(minimum), from_holding) => Ok(Requirement::for_settlement(minimum)
+                .at_least(from_holding.unwrap_or(Requirement::None))),
+            (None, Some(from_holding)) => Ok(from_holding),
+            (None, None) => bail!(
+                "a qualification policy that names no minimum settlement takes its containment from the selected protocol's holding, and none was supplied"
+            ),
+        }
     }
 
     /// Whether the sealed root demands any retained containment.
@@ -2556,7 +2563,7 @@ mod authority_tests {
                 .unwrap()
                 .policy_source
                 .policy
-                .minimum_verifier_process_settlement = minimum;
+                .minimum_verifier_process_settlement = Some(minimum);
             assert_eq!(
                 sealed.process_containment_for_qualification().unwrap(),
                 expected,
@@ -2574,6 +2581,59 @@ mod authority_tests {
                 .unwrap(),
             Requirement::None
         );
+    }
+
+    #[test]
+    fn selected_holding_cannot_weaken_the_signed_minimum_and_can_strengthen_it() {
+        use crate::thread_lifecycle::ProcessContainmentRequirement as Requirement;
+        use ryeos_state::external_content::products::qualification::VerifierProcessSettlementAuthority as Settlement;
+        let holding = |settlement: &str| -> ryeos_engine::protocols::ProtocolHolding {
+            serde_json::from_value(json!({
+                "requires_guarantees": ["isolation:enforced"],
+                "filesystem_authority": "captured_execution",
+                "root_settlement": settlement,
+            }))
+            .unwrap()
+        };
+        let mut sealed = qualified_product_sealed_fixture();
+        // (signed minimum, selected holding, containment the launch must run under)
+        for (minimum, selected, expected) in [
+            (
+                Settlement::TrustedProcessGroupAbsent,
+                "containment_empty",
+                Requirement::AnyQualifiedContainment,
+            ),
+            (
+                Settlement::ScopeEmpty,
+                "trusted_process_group_absent",
+                Requirement::CgroupScope,
+            ),
+            (
+                Settlement::ContainmentEmpty,
+                "scope_empty",
+                Requirement::CgroupScope,
+            ),
+            (
+                Settlement::TrustedProcessGroupAbsent,
+                "trusted_process_group_absent",
+                Requirement::None,
+            ),
+        ] {
+            sealed
+                .qualification
+                .as_mut()
+                .unwrap()
+                .policy_source
+                .policy
+                .minimum_verifier_process_settlement = Some(minimum);
+            assert_eq!(
+                sealed
+                    .process_containment_for_qualification_under(Some(&holding(selected)))
+                    .unwrap(),
+                expected,
+                "{minimum:?} under {selected}"
+            );
+        }
     }
 
     #[test]

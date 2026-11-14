@@ -419,8 +419,19 @@ impl<'a> Fixture<'a> {
             .conn
             .with_sql(|connection| qualification_local_start::transition(connection, &local, &next))
             .unwrap();
-        self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8)",
+        self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_process(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_identity_json,daemon_generation_id,phase,attached_at_ms,provider_configuration_json,selected_protocol_ref,selected_filesystem_authority) VALUES(?1,?2,?3,?4,?5,?6,?7,'retained-generation','attached',1,?8,'protocol:fixtures/retained','node_policy')",
             params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,canonical(&identity),canonical(&configuration)])?)).unwrap();
+        // The selected holding is retained and read back with the row.
+        let retained = self
+            .db
+            .qualification_worker_process(placement)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.selected_holding.protocol_ref(),
+            "protocol:fixtures/retained"
+        );
+        assert_eq!(retained.selected_holding.filesystem_authority(), "node_policy");
         self.db.conn.with_sql(|connection| Ok(connection.execute("INSERT INTO external_qualification_worker_command(placement_thread_id,accepted_root_id,accepted_capsule_hash,qualification_operation_id,qualification_occurrence_id,channel_binding_digest,process_incarnation_digest,setup_request_digest,request_digest,state,reserved_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reserved',1)",
             params![placement,owner.coordinate.accepted_root_id,owner.coordinate.accepted_capsule_hash,owner.qualification_operation_id,owner.qualification_occurrence.occurrence_id,digest,identity.owner_incarnation_digest().unwrap(),"1".repeat(64),"2".repeat(64)])?)).unwrap();
         self.db.conn.with_sql(|connection| Ok(connection.execute("UPDATE external_qualification_worker_command SET state='setup_possible_contact',setup_contacted_at_ms=2 WHERE placement_thread_id=?1",[placement])?)).unwrap();

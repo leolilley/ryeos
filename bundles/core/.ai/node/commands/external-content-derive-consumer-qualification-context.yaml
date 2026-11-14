@@ -1,18 +1,18 @@
-# ryeos:signed:2026-11-11T19:29:06Z:c7aa18e5b80f8c16b41eebe37ee6b944a2806180b6b45f638bd4f6d51a663b16:IbIBJeVhcnuh5UinIqqdTCMtXnEyWAOEHbxPSFM6OA7qxX4QZtpyj0TyGj7PlesrCXTYbNaq82SsMm2+YwLgDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T14:13:43Z:bbb64be8ad69946e0eceb598f42b43929a0300f218ea5f297a31ff279db67860:BtXspgxQcP59No78xLlTszNUX8EMTLbkuXUXxYJROVsS3yDn+ldzMqPpAsGnczofo56ZZ4XV62Z+jV4rOmoJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, derive-consumer-qualification-context]
-description: Derive the consumer qualification context for an exact subject manifest from a signed variant set (the guarantees this node reports select exactly one variant) and relationship without writing state; the response's consumer_verifier_selections map (scenario id to scenario_source_digest, verifier_artifact_hash and a proposed archive_budget computed from the exact delivery inventory) is the content of the file given to snapshot-qualification-compose --consumer-verifiers
+description: Derive the consumer qualification context for an exact subject manifest from a signed qualification policy and the relationship Config that joins its Worker to it (the relationship is derived: the unique one whose consumer is the policy's Worker and whose qualification policy is that policy) without writing state; the response's consumer_verifier_selections map (scenario id to scenario_source_digest, verifier_artifact_hash and a proposed archive_budget computed from the exact delivery inventory) is the content of the file given to snapshot-qualification-compose --consumer-verifiers
 forms:
   - slots:
-      - field: variants_ref
+      - field: policy_ref
       - field: relationship_ref
       - field: subject_manifest_hash
   - slots:
       - field: policy_ref
       - field: subject_manifest_hash
 help:
-  usage: "ryeos external-content derive-consumer-qualification-context <variants-ref> <relationship-ref> <subject-manifest-hash> | <probe-policy-ref> <subject-manifest-hash>"
+  usage: "ryeos external-content derive-consumer-qualification-context <policy-ref> <relationship-ref> <subject-manifest-hash> | <probe-policy-ref> <subject-manifest-hash>"
   examples:
-    - "ryeos external-content derive-consumer-qualification-context <variants-ref> <relationship-ref> <subject-manifest-hash> | jq .consumer_verifier_selections > consumer-verifiers.json"
+    - "ryeos external-content derive-consumer-qualification-context <policy-ref> <relationship-ref> <subject-manifest-hash> | jq .consumer_verifier_selections > consumer-verifiers.json"
     - "ryeos external-content derive-consumer-qualification-context config:codex/guest-wire-qualification-policy <subject-manifest-hash> | jq .consumer_verifier_selections"
 dispatch:
   kind: execute_ref

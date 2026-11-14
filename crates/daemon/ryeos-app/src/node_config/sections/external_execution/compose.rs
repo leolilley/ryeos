@@ -1070,10 +1070,14 @@ pub(crate) mod tests {
     const TEST_SIGNER_KEY: [u8; 32] = [91; 32];
 
     fn identity_in(root: &Path) -> ryeos_node_runtime::identity::NodeIdentity {
-        ryeos_node_runtime::identity::NodeIdentity::create(
+        let identity = ryeos_node_runtime::identity::NodeIdentity::create(
             &root.join(".ai/node/identity/private_key.pem"),
         )
-        .unwrap()
+        .unwrap();
+        identity
+            .write_public_identity(&root.join(".ai/node/identity/public-identity.json"))
+            .unwrap();
+        identity
     }
 
     fn program() -> AdmittedExternalCandidateProgram {

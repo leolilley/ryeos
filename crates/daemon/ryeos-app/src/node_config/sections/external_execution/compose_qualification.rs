@@ -579,6 +579,8 @@ mod tests {
         ryeos_node_runtime::identity::NodeIdentity::create(
             &root.path().join(".ai/node/identity/private_key.pem"),
         )
+        .unwrap()
+        .write_public_identity(&root.path().join(".ai/node/identity/public-identity.json"))
         .unwrap();
         let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
             &ryeos_node_runtime::state_lock::default_lock_path(root.path()),

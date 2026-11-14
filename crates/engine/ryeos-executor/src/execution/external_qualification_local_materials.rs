@@ -25,6 +25,9 @@ pub(crate) struct PreparedExternalQualificationLocalSession {
     pub(crate) lifecycle: PersistentSessionLifecycleContract,
     pub(crate) wire: PersistentSessionWireContract,
     pub(crate) protocol: PersistentSessionProtocol,
+    /// The protocol the node selected for this Worker and its holding's
+    /// filesystem authority, retained with the process row at attachment.
+    pub(crate) selected_holding: ryeos_app::external_qualification_local::QualificationWorkerSelectedHolding,
 }
 
 /// The plan, privately copied inputs, and exact source/cache/workspace lifelines stay
@@ -150,7 +153,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
     ryeos_app::thread_lifecycle::with_prepared_external_qualification_local_worker_plan(
         state,
         root,
-        |mut plan, declaration, signed_protocol, composed| {
+        |mut plan, declaration, signed_protocol, composed, selected_holding| {
             let mut declaration = declaration.clone();
             super::persistent_session::apply_resource_overrides(&mut declaration, composed)?;
             let session = PreparedExternalQualificationLocalSession {
@@ -161,6 +164,7 @@ pub(crate) fn prepare_external_qualification_local_materials(
                 )
                 .map_err(anyhow::Error::msg)?
                 .clone(),
+                selected_holding,
             };
             if enforced {
                 require_contained_worker_launch(state, &session.protocol)?;

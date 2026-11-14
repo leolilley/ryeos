@@ -50,10 +50,9 @@ fn policy() -> ProductQualificationPolicy {
         verifier_ref: "tool:fixtures/qualify_runtime".into(),
         subject_declaration_id: "runtime".into(),
         allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
-        minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+        minimum_verifier_process_settlement: Some(VerifierProcessSettlementAuthority::ScopeEmpty),
         verifier_parameters: json!({"scope":"bounded_fixture"}),
         consumer_execution_context: None,
-        requires_guarantees: Vec::new(),
         producer_scenarios: BTreeMap::new(),
     }
 }
@@ -68,6 +67,7 @@ fn consumer_execution_context_requires_typed_canonical_refs() {
         worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
         environment_binding: "environment".into(),
     });
+    policy.minimum_verifier_process_settlement = None;
     policy.validate().unwrap();
     let relationship_consumer = ProductRelationshipConsumer {
         canonical_ref: "worker:codex/external-hosted-authoring".into(),
@@ -141,6 +141,10 @@ fn consumer_execution_requires_remote_consumer_proof() {
             worker_execution_ref: "worker_execution:codex/bounded-turn".into(),
             environment_binding: "environment".into(),
         });
+    evidence
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
     let error = validate_qualification_execution(
         &evidence.policy_source,
         &evidence.verifier,
@@ -167,6 +171,10 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
         environment_binding: "environment".into(),
     };
     purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+    purpose
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
     purpose.policy_source.policy.producer_scenarios.insert(
         "direct_codex".into(),
         ProductQualificationProducerScenario {
@@ -798,7 +806,10 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
         .as_object_mut()
         .unwrap()
         .remove("minimum_verifier_process_settlement");
-    assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
+    assert!(
+        ProductQualificationPolicy::from_value(&policy_wire).is_err(),
+        "a policy without a consumer context requires a minimum"
+    );
     policy_wire["minimum_verifier_process_settlement"] = json!("unknown");
     assert!(ProductQualificationPolicy::from_value(&policy_wire).is_err());
     policy_wire["minimum_verifier_process_settlement"] = json!("scope_empty");
@@ -807,18 +818,58 @@ fn signed_policy_distinguishes_scope_from_trusted_process_group_settlement() {
     let mut evidence = evidence();
     evidence.verifier.process_settlement_authority =
         Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    evidence.origin_holdings.verifier.process_settlement_authority =
+        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
     assert!(evidence.validate().is_err());
     evidence
         .policy_source
         .policy
         .minimum_verifier_process_settlement =
-        VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
     evidence.validate().unwrap();
     evidence.verifier.process_settlement_authority =
         Some(VerifierProcessSettlementAuthority::ScopeEmpty);
+    evidence.origin_holdings.verifier.process_settlement_authority =
+        VerifierProcessSettlementAuthority::ScopeEmpty;
     evidence.validate().unwrap();
     evidence.verifier.process_settlement_authority = None;
     assert!(evidence.validate().is_err());
+}
+
+#[test]
+fn minimum_settlement_is_present_exactly_when_the_policy_has_no_consumer_context() {
+    let mut probe = policy();
+    probe.validate().unwrap();
+    probe.minimum_verifier_process_settlement = None;
+    assert!(
+        probe
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires a minimum verifier settlement")
+    );
+
+    let mut consumer = policy();
+    consumer.consumer_execution_context = Some(test_consumer_context());
+    assert!(
+        consumer
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("names no minimum")
+    );
+    consumer.minimum_verifier_process_settlement = None;
+    consumer.validate().unwrap();
+    let wire = serde_json::to_value(&consumer).unwrap();
+    assert!(wire.get("minimum_verifier_process_settlement").is_none());
+    assert!(wire.get("requires_guarantees").is_none());
+    assert_eq!(
+        ProductQualificationPolicy::from_value(&wire).unwrap(),
+        consumer
+    );
+    let mut stale = wire;
+    stale["requires_guarantees"] = json!(["isolation:enforced"]);
+    assert!(ProductQualificationPolicy::from_value(&stale).is_err());
 }
 
 #[test]
@@ -855,7 +906,7 @@ fn containment_empty_settlement_is_ordered_between_the_trusted_group_and_a_scope
         ProductQualificationPolicy::from_value(&policy_wire)
             .unwrap()
             .minimum_verifier_process_settlement,
-        ContainmentEmpty
+        Some(ContainmentEmpty)
     );
 }
 
@@ -872,6 +923,7 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
     graph.verifier.artifact_identity = graph_artifact_identity();
     graph.verifier.process_settlement_witness_digest = None;
     graph.verifier.process_settlement_authority = None;
+    graph.origin_holdings.verifier.execution_protocol = "protocol:fixtures/graph".into();
     graph.execution_proof = execution_proof(&graph.verifier.artifact_identity);
     let mut child = direct.verifier.clone();
     child.chain_root_id = "T-probe".into();
@@ -899,6 +951,13 @@ fn execution_proof_requires_exact_bounded_participants_and_contract_identity() {
         .policy_source
         .policy
         .minimum_verifier_process_settlement =
+        Some(VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent);
+    // The managed verifier's holding may claim no more than a participant proved.
+    assert!(weak_participant.validate().is_err());
+    weak_participant
+        .origin_holdings
+        .verifier
+        .process_settlement_authority =
         VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent;
     weak_participant.validate().unwrap();
     for mutate in [
@@ -1223,6 +1282,14 @@ pub(crate) fn evidence() -> ProductQualificationEvidence {
             effective_definition_digest: "6".repeat(64),
             publisher_fingerprint: "7".repeat(64),
             policy,
+        },
+        origin_holdings: ProductQualificationOriginHoldings {
+            verifier: OriginHolding {
+                execution_protocol: "protocol:fixtures/qualified".into(),
+                filesystem_authority: "node_policy".into(),
+                process_settlement_authority: VerifierProcessSettlementAuthority::ScopeEmpty,
+            },
+            worker: None,
         },
         consumer_content: None,
         qualification_worker_transcript_manifest_hash: None,
@@ -1658,6 +1725,10 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
     let local = consumer_launch_purpose_fixture();
     purpose.policy_source.policy.consumer_execution_context =
         local.policy_source.policy.consumer_execution_context;
+    purpose
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
     purpose.consumer_definitions = local.consumer_definitions;
     purpose.consumer_content = local.consumer_content;
     let content = purpose.consumer_content.as_mut().unwrap();
@@ -1861,6 +1932,7 @@ fn product_evidence_refuses_predecessor_use_retention_schema() {
         "ryeos.product_qualification_evidence.v10",
         "ryeos.product_qualification_evidence.v12",
         "ryeos.product_qualification_evidence.v13",
+        "ryeos.product_qualification_evidence.v14",
     ] {
         predecessor["schema"] = json!(schema);
         assert!(ProductQualificationEvidence::from_value(&predecessor).is_err());
@@ -1992,6 +2064,7 @@ fn remote_subordinate_proof_binds_root_occurrence_and_timely_observation() {
 fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
     let mut value = policy();
     value.consumer_execution_context = Some(test_consumer_context());
+    value.minimum_verifier_process_settlement = None;
     let mut scenario = ProductQualificationProducerScenario {
         remote_probe_input: None,
         recipe_ref: Some("config:fixtures/recipe".into()),
@@ -2136,6 +2209,7 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
 fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source() {
     let mut policy = policy();
     policy.consumer_execution_context = Some(test_consumer_context());
+    policy.minimum_verifier_process_settlement = None;
     let scenario = ProductQualificationProducerScenario {
         remote_probe_input: None,
         recipe_ref: Some("config:fixtures/recipe".into()),
@@ -2614,6 +2688,15 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
     let purpose = consumer_launch_purpose_fixture();
     evidence.policy_source.policy.consumer_execution_context =
         purpose.policy_source.policy.consumer_execution_context;
+    evidence
+        .policy_source
+        .policy
+        .minimum_verifier_process_settlement = None;
+    evidence.origin_holdings.worker = Some(OriginHolding {
+        execution_protocol: "protocol:fixtures/worker_session".into(),
+        filesystem_authority: "captured_execution".into(),
+        process_settlement_authority: VerifierProcessSettlementAuthority::ContainmentEmpty,
+    });
     evidence.consumer_content = purpose.consumer_content;
     evidence
         .consumer_content
@@ -2905,6 +2988,7 @@ fn policy_remote_scenarios_must_match_the_consumer_context() {
 
     let mut with_context = worker_free.clone();
     with_context.consumer_execution_context = Some(test_consumer_context());
+    with_context.minimum_verifier_process_settlement = None;
     assert!(with_context.validate().is_err());
 
     let mut worker_scenario = probe_scenario();
@@ -2917,6 +3001,7 @@ fn policy_remote_scenarios_must_match_the_consumer_context() {
     assert!(missing_probe.validate().is_err());
     let mut missing_worker = policy();
     missing_worker.consumer_execution_context = Some(test_consumer_context());
+    missing_worker.minimum_verifier_process_settlement = None;
     missing_worker
         .producer_scenarios
         .insert("remote".into(), worker_scenario.clone());
@@ -3083,22 +3168,72 @@ fn portable_consumer_identity_ignores_only_the_generation_identity() {
 }
 
 #[test]
-fn policy_required_guarantees_are_declared_data_and_absent_when_unset() {
-    let unset = serde_json::to_value(policy()).unwrap();
-    assert!(unset.get("requires_guarantees").is_none());
-    let mut declared = policy();
-    declared.requires_guarantees = serde_json::from_value(json!([
-        "isolation:enforced",
-        {"name": "sessions:trusted_process_group", "accept": ["trusted"]},
-    ]))
-    .unwrap();
-    let value = serde_json::to_value(&declared).unwrap();
-    assert_eq!(value["requires_guarantees"][0], "isolation:enforced");
+fn origin_holdings_are_required_exact_and_part_of_the_semantic_identity() {
+    let valid = evidence();
+    valid.validate().unwrap();
+    let wire = serde_json::to_value(&valid).unwrap();
     assert_eq!(
-        ProductQualificationPolicy::from_value(&value).unwrap(),
-        declared
+        wire["origin_holdings"]["verifier"]["execution_protocol"],
+        "protocol:fixtures/qualified"
     );
-    let mut malformed = value;
-    malformed["requires_guarantees"] = json!([""]);
-    assert!(ProductQualificationPolicy::from_value(&malformed).is_err());
+    assert!(wire["origin_holdings"]["worker"].is_null());
+    assert_eq!(
+        ProductQualificationEvidence::from_value(&wire).unwrap(),
+        valid
+    );
+
+    let mut missing = wire.clone();
+    missing.as_object_mut().unwrap().remove("origin_holdings");
+    assert!(ProductQualificationEvidence::from_value(&missing).is_err());
+    let mut missing_worker = wire.clone();
+    missing_worker["origin_holdings"]
+        .as_object_mut()
+        .unwrap()
+        .remove("worker");
+    assert!(ProductQualificationEvidence::from_value(&missing_worker).is_err());
+    let mut unknown = wire.clone();
+    unknown["origin_holdings"]["verifier"]["extra"] = json!(true);
+    assert!(ProductQualificationEvidence::from_value(&unknown).is_err());
+
+    let mut wrong_protocol = valid.clone();
+    wrong_protocol.origin_holdings.verifier.execution_protocol =
+        "protocol:fixtures/other".into();
+    assert!(
+        wrong_protocol
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("differs from the verifier's admitted protocol")
+    );
+    let mut wrong_settlement = valid.clone();
+    wrong_settlement
+        .origin_holdings
+        .verifier
+        .process_settlement_authority = VerifierProcessSettlementAuthority::ContainmentEmpty;
+    assert!(
+        wrong_settlement
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("differs from the verifier's settlement")
+    );
+    let mut malformed = valid.clone();
+    malformed.origin_holdings.verifier.filesystem_authority = "Node Policy".into();
+    assert!(malformed.validate().is_err());
+    let mut unowned_worker = valid.clone();
+    unowned_worker.origin_holdings.worker = Some(unowned_worker.origin_holdings.verifier.clone());
+    assert!(unowned_worker.validate().is_err());
+
+    let consumer = consumer_q_evidence_fixture();
+    consumer.validate().unwrap();
+    let mut no_worker = consumer.clone();
+    no_worker.origin_holdings.worker = None;
+    assert!(no_worker.validate().is_err());
+
+    let mut changed_holding = valid.clone();
+    changed_holding.origin_holdings.verifier.filesystem_authority = "captured_execution".into();
+    assert_ne!(
+        valid.semantic_identity_value().unwrap(),
+        changed_holding.semantic_identity_value().unwrap()
+    );
 }

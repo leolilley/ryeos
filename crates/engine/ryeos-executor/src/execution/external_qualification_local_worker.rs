@@ -933,9 +933,11 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         }
                     };
                     let process_identity = held.process_identity.clone();
-                    if let Err(error) = owner
-                        .attach_worker_process(&held.process_identity, &configuration_observation)
-                    {
+                    if let Err(error) = owner.attach_worker_process(
+                        &held.process_identity,
+                        &configuration_observation,
+                        &session.selected_holding,
+                    ) {
                         let reaped = held.abort_and_reap();
                         // No Worker row names this scope, so nothing else
                         // will retire it: prove it empty and remove it.

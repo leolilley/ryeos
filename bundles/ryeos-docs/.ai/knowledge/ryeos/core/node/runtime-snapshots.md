@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T21:39:36Z:4292514865b17ed910b493a3c8d951266e552fb6cfabc0a9b71f387021e4dd40:2L7YaBrsJuxYpC2opT9m8lWpHvqYKIkNC3ZkEFn9Aq20C3jOCxw7ATelTp8VQEWx7iHkOUuBu0aCOOR+i05ICg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T14:13:43Z:05278ed91e946635d2c67f4d47e0cbc4327e2e55526b8b618d18e0e3b7ef0673:ILf9d+2b3UKkZZRmzNC+BV9XtrCwOba8jL44Nxpi8pCzb7SPyVcIRPdMJ003Q2qNhCXzRVLelW4hZ9AAtDMrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, external-execution, runtime-snapshot, qualification, recompose, operator]
@@ -39,7 +39,9 @@ back in line in this order:
    what is installed.
 2. **Derive consumer selections, if any.** When the qualification binding
    selects consumer verifiers, start the node, run
-   `ryeos external-content derive-consumer-qualification-context`, save the
+   `ryeos external-content derive-consumer-qualification-context <policy-ref>
+   <relationship-ref> <subject-manifest-hash>` (the relationship is the one in
+   that Config joining the policy's Worker to the policy), save the
    response's `consumer_verifier_selections` map (scenario id to selection) as
    a JSON file, and stop the node again. The scenario source
    digest is only known to a running node.

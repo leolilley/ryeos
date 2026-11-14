@@ -2944,7 +2944,7 @@ pub fn prepare_external_qualification_local_worker_plan(
     state: &crate::state::AppState,
     root: &crate::operator_external_content::product_qualification::PreparedExternalQualificationRoot,
 ) -> Result<PreparedItemPlan> {
-    with_prepared_external_qualification_local_worker_plan(state, root, |plan, _, _, _| Ok(plan))
+    with_prepared_external_qualification_local_worker_plan(state, root, |plan, _, _, _, _| Ok(plan))
 }
 
 /// Keep one checked signed Bundle generation through local Q material binding.
@@ -2958,6 +2958,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
         &ryeos_engine::kind_registry::PersistentSessionDecl,
         &ryeos_engine::protocols::VerifiedProtocol,
         &Value,
+        crate::external_qualification_local::QualificationWorkerSelectedHolding,
     ) -> Result<T>,
 ) -> Result<T> {
     state.engine.with_checked_bundle_generation(|generation| {
@@ -3034,6 +3035,18 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
         )?
         .context("qualification-only Worker has no subprocess session terminator")?;
         let signed_protocol = selected.protocol;
+        let selected_holding = {
+            let holding = selected.holding.context(
+                "qualification-only Worker's selected protocol declares no holding",
+            )?;
+            let authority = serde_json::to_value(holding.filesystem_authority)?;
+            crate::external_qualification_local::QualificationWorkerSelectedHolding::new(
+                &signed_protocol.canonical_ref,
+                authority
+                    .as_str()
+                    .context("selected holding filesystem authority is not a name")?,
+            )?
+        };
         let session = ryeos_engine::protocols::validate_persistent_session_protocol(
             &signed_protocol.descriptor,
         )
@@ -3131,6 +3144,7 @@ pub fn with_prepared_external_qualification_local_worker_plan<T>(
             declaration,
             signed_protocol,
             &resolution.composed.composed,
+            selected_holding,
         )
     })
 }
