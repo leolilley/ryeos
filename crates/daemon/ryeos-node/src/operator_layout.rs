@@ -47,7 +47,8 @@ impl std::fmt::Display for OperatorKeyOldLayout {
             f,
             "operator_key_old_layout: operator key material is still at an old location ({found}). \
              Nothing reads it there and `ryeos init` will not create a second operator key beside \
-             it. With the node stopped, move it: {}",
+             it. With the node stopped, move it: {}. If `.ai/node/config.yaml` sets \
+             `operator_signing_key_path`, change it to the new location or delete the line.",
             self.cure()
         )
     }
