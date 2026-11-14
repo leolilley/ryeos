@@ -91,7 +91,7 @@ impl ProjectScheduleCaller for ProjectScheduleCallerAdapter {
         &self,
         execution: &ryeos_scheduler_contract::ScheduleExecution,
     ) -> Result<()> {
-        crate::handlers::scheduler_register::refuse_authority_that_cannot_hold_at_fire(
+        crate::schedule_admission::refuse_authority_that_cannot_hold_at_fire(
             &self.authority,
             execution,
         )

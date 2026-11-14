@@ -25,6 +25,7 @@ pub mod registry;
 pub mod remote;
 pub mod route_error;
 pub mod routes;
+pub mod schedule_admission;
 pub mod scheduler_selection;
 pub mod surface_views;
 #[cfg(feature = "test-support")]

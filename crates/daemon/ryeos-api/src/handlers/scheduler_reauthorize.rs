@@ -163,7 +163,7 @@ pub async fn handle(
         authority: current.clone(),
         ..spec.execution.clone()
     };
-    super::scheduler_register::refuse_authority_that_cannot_hold_at_fire(
+    crate::schedule_admission::refuse_authority_that_cannot_hold_at_fire(
         &ryeos_app::scheduled_execution_authority::ScheduleAuthorityParts::from_state(
             state.as_ref(),
         ),
