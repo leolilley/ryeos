@@ -13,12 +13,17 @@
 //! The grant file is rewritten between requests; the daemon re-reads and
 //! re-verifies it on every authenticated request.
 //!
-//! Every scenario runs on two lanes. The local lane signs as a local client.
+//! Every scenario runs on three lanes. The local lane signs as a local client.
 //! The forwarded lane is the remote-principal path: the grant has class
 //! `remote_principal` bound to an origin site, and each request carries the
 //! origin node's forwarding co-signature, exactly as an origin node's
 //! configured-operator client sends it, so the request passes through
 //! `require_admitted_operator` with its source-node forwarding proof.
+//! The delegated lane is how an origin node calls the controller as a stored
+//! caller delegation: the origin node signs the request itself and attaches the
+//! operator's signed delegation. The effective authority is the operator's
+//! grant on the controller intersected with what the delegation lends, so the
+//! delegation must lend the same list the grant holds.
 //!
 //! Any worker execution needs `ryeos.execute.worker_execution.<id>` plus the
 //! three dedicated-session caps. The hosted turn is exercised here through
@@ -37,6 +42,9 @@ use common::DaemonHarness;
 use common::fast_fixture::{FastFixture, write_authorized_key_with_scopes};
 use lillux::crypto::SigningKey;
 use ryeos_node_runtime::identity::NodeIdentity;
+use ryeos_node_runtime::remote_delegation::{
+    DELEGATION_HEADER, DelegationBody, DelegationParties, SignedDelegation,
+};
 use serde_json::{Value, json};
 
 const TURN_ITEM: &str = "worker_execution:codex/bounded-turn";
@@ -161,9 +169,15 @@ fn is_capability_refusal(status: reqwest::StatusCode, body: &Value) -> bool {
 enum Lane {
     /// Signed by a local-client grant.
     Local,
-    /// Signed by a remote-operator grant bound to an origin site and
+    /// Signed by a remote-principal grant bound to an origin site and
     /// co-signed by the origin node as the forwarding authority.
     Forwarded {
+        operator: SigningKey,
+        origin_node: SigningKey,
+    },
+    /// Signed by the origin node under the operator's delegation. The
+    /// operator holds the same remote-principal grant as on the forwarded lane.
+    Delegated {
         operator: SigningKey,
         origin_node: SigningKey,
     },
@@ -172,6 +186,13 @@ enum Lane {
 impl Lane {
     fn forwarded() -> Self {
         Lane::Forwarded {
+            operator: common::fast_fixture::user_signing_key(),
+            origin_node: common::fast_fixture::node_signing_key(),
+        }
+    }
+
+    fn delegated() -> Self {
+        Lane::Delegated {
             operator: common::fast_fixture::user_signing_key(),
             origin_node: common::fast_fixture::node_signing_key(),
         }
@@ -256,14 +277,22 @@ fn authorize_remote_principal(
 
 /// POST as the origin's configured-operator client does: the operator signs
 /// the request and the origin node co-signs it as the forwarding authority.
+/// With `delegation`, the origin node is the primary signer, as when it
+/// forwards under a caller's stored delegation, and the delegation rides along.
 async fn post_forwarded(
     base: &str,
     audience: &str,
     operator: &SigningKey,
     origin_node: &SigningKey,
+    delegation: Option<&SignedDelegation>,
     path: &str,
     body: &Value,
 ) -> Result<(reqwest::StatusCode, Value)> {
+    let operator = if delegation.is_some() {
+        origin_node
+    } else {
+        operator
+    };
     let body_bytes = serde_json::to_vec(body)?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
@@ -284,7 +313,7 @@ async fn post_forwarded(
     );
     let forwarded_hash = lillux::cas::sha256_hex(forwarded.as_bytes());
     let forwarding_signature = lillux::crypto::Signer::sign(origin_node, forwarded_hash.as_bytes());
-    let response = reqwest::Client::new()
+    let mut request = reqwest::Client::new()
         .post(format!("{base}{path}"))
         .header("content-type", "application/json")
         .header("x-ryeos-key-id", key_id)
@@ -297,9 +326,11 @@ async fn post_forwarded(
             "x-ryeos-forwarding-signature",
             base64::engine::general_purpose::STANDARD.encode(forwarding_signature.to_bytes()),
         )
-        .body(body_bytes)
-        .send()
-        .await?;
+        .body(body_bytes);
+    if let Some(delegation) = delegation {
+        request = request.header(DELEGATION_HEADER, delegation.to_header_value()?);
+    }
+    let response = request.send().await?;
     let status = response.status();
     let value: Value = response.json().await.unwrap_or_else(|_| json!({}));
     Ok((status, value))
@@ -310,6 +341,23 @@ struct Controller {
     fixture: FastFixture,
     project: tempfile::TempDir,
     lane: Lane,
+    /// What the delegated lane's delegation lends. It defaults to every
+    /// capability any scenario grants, so the operator's grant is the only
+    /// limit unless a scenario narrows the delegation itself.
+    lent: std::sync::Mutex<Vec<String>>,
+}
+
+/// The delegation's ceiling: the derived grant, the project scaffolding the
+/// harness needs, and the two capabilities outside the operator set that some
+/// scenarios add to the grant.
+fn delegation_ceiling() -> Vec<String> {
+    let mut lent = derived_grant();
+    lent.extend(PROJECT_SCAFFOLD.map(str::to_owned));
+    lent.push(OPERATOR_VAULT_CAP.to_owned());
+    lent.push(LIVE_PROJECT_WRITE.to_owned());
+    lent.sort();
+    lent.dedup();
+    lent
 }
 
 impl Controller {
@@ -332,6 +380,10 @@ impl Controller {
                     Lane::Forwarded {
                         operator,
                         origin_node,
+                    }
+                    | Lane::Delegated {
+                        operator,
+                        origin_node,
                     } => {
                         authorize_forwarding_node(state_path, fixture, origin_node)?;
                         authorize_remote_principal(
@@ -348,7 +400,7 @@ impl Controller {
             Lane::Local => DaemonHarness::start_fast_with(plant, |_| {}).await,
             // The controller has its own node and operator identities, so the
             // origin's operator is a remote principal on it, never its local one.
-            Lane::Forwarded { .. } => {
+            Lane::Forwarded { .. } | Lane::Delegated { .. } => {
                 DaemonHarness::start_fast_with_node_and_user_keys(
                     SigningKey::from_bytes(&[71_u8; 32]),
                     SigningKey::from_bytes(&[72_u8; 32]),
@@ -364,6 +416,7 @@ impl Controller {
             fixture,
             project: tempfile::tempdir().expect("project tempdir"),
             lane,
+            lent: std::sync::Mutex::new(delegation_ceiling()),
         }
     }
 
@@ -378,6 +431,10 @@ impl Controller {
                 &all,
             ),
             Lane::Forwarded {
+                operator,
+                origin_node,
+            }
+            | Lane::Delegated {
                 operator,
                 origin_node,
             } => authorize_remote_principal(
@@ -411,6 +468,23 @@ impl Controller {
                     &format!("fp:{}", self.fixture.node_fp()),
                     operator,
                     origin_node,
+                    None,
+                    "/execute",
+                    &body,
+                )
+                .await
+            }
+            Lane::Delegated {
+                operator,
+                origin_node,
+            } => {
+                let delegation = self.sign_delegation(operator, origin_node);
+                post_forwarded(
+                    &format!("http://{}", self.harness.bind),
+                    &format!("fp:{}", self.fixture.node_fp()),
+                    operator,
+                    origin_node,
+                    Some(&delegation),
                     "/execute",
                     &body,
                 )
@@ -418,6 +492,33 @@ impl Controller {
             }
         }
         .expect("post to the controller")
+    }
+
+    /// Narrow what the operator's delegation lends (delegated lane only).
+    fn lend(&self, scopes: &[String]) {
+        *self.lent.lock().expect("lent scopes") = scopes.to_vec();
+    }
+
+    /// The operator's delegation to the origin node for this controller, as
+    /// `ryeos remote delegate` stores it on the origin.
+    fn sign_delegation(&self, operator: &SigningKey, origin_node: &SigningKey) -> SignedDelegation {
+        let not_after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_secs()
+            + 600;
+        let body = DelegationBody::new(
+            &format!("fp:{}", fingerprint(operator)),
+            DelegationParties {
+                delegate_site: &site_of(origin_node),
+                delegate_node: &format!("fp:{}", fingerprint(origin_node)),
+                audience_site: &self.fixture.site_id(),
+                audience_node: &format!("fp:{}", self.fixture.node_fp()),
+            },
+            &self.lent.lock().expect("lent scopes"),
+            not_after,
+        );
+        SignedDelegation::sign(body, operator).expect("sign the operator delegation")
     }
 
     /// Launch with the operator's execution policy: a live project whose
@@ -717,4 +818,65 @@ async fn a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy
         Lane::forwarded(),
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps_under_the_operators_delegation()
+ {
+    the_hosted_turn_needs_exactly_its_execute_environment_and_session_caps(Lane::delegated()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_trusted_worker_is_resolved_data_and_needs_no_execute_cap_under_the_operators_delegation()
+ {
+    the_trusted_worker_is_resolved_data_and_needs_no_execute_cap(Lane::delegated()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trusted_login_needs_exactly_its_execute_and_session_caps_under_the_operators_delegation() {
+    trusted_login_needs_exactly_its_execute_and_session_caps(Lane::delegated()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_publication_service_also_needs_live_project_write_under_the_operators_delegation() {
+    the_publication_service_also_needs_live_project_write(Lane::delegated()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_operator_service_needs_exactly_its_own_execute_cap_under_the_operators_delegation() {
+    each_operator_service_needs_exactly_its_own_execute_cap(Lane::delegated()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy_avoids_under_the_operators_delegation()
+ {
+    a_vault_overlay_launch_needs_the_operator_vault_cap_the_operator_policy_avoids(
+        Lane::delegated(),
+    )
+    .await;
+}
+
+/// The delegation is a ceiling on top of the grant: lending less than the
+/// grant holds narrows the controller, and lending the full list restores it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegation_lending_less_than_the_grant_refuses_what_it_omits() {
+    let controller = Controller::start(Lane::delegated()).await;
+    let grant = derived_grant();
+    controller.grant(&grant);
+
+    let mut lent = delegation_ceiling();
+    lent.retain(|cap| cap != TURN_EXECUTE_CAP);
+    controller.lend(&lent);
+    let (status, body) = controller.launch_worker(TURN_ITEM, turn_bindings()).await;
+    assert!(
+        is_capability_refusal(status, &body) && body.to_string().contains(TURN_EXECUTE_CAP),
+        "a delegation that omits {TURN_EXECUTE_CAP} must refuse the turn: {status} {body:#}"
+    );
+
+    controller.lend(&delegation_ceiling());
+    let (status, body) = controller.launch_worker(TURN_ITEM, turn_bindings()).await;
+    assert!(
+        !is_capability_refusal(status, &body),
+        "a delegation lending the derived list admits the turn: {status} {body:#}"
+    );
 }
