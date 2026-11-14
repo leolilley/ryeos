@@ -1340,8 +1340,8 @@ fn restart_draft() -> LocalDraft {
 #[test]
 fn the_local_path_signs_applies_and_chains_receipts() {
     let fx = fixture();
-    let first = apply_local(fx.path(), &BareHost, restart_draft()).unwrap();
-    let second = apply_local(fx.path(), &BareHost, restart_draft()).unwrap();
+    let first = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap();
+    let second = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap();
     assert_eq!(first.receipt.body.sequence, 1);
     assert_eq!(second.receipt.body.sequence, 2);
     assert_eq!(
@@ -1357,7 +1357,7 @@ fn the_local_path_signs_applies_and_chains_receipts() {
 fn the_local_path_refuses_while_the_node_runs() {
     let fx = fixture();
     let _held = StateLock::acquire(&default_lock_path(fx.path())).unwrap();
-    let error = apply_local(fx.path(), &BareHost, restart_draft()).unwrap_err();
+    let error = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap_err();
     assert!(format!("{error:#}").contains("stopped node"), "{error:#}");
 }
 
@@ -1366,7 +1366,7 @@ fn the_local_path_refuses_an_unknown_operation() {
     let fx = fixture();
     let mut draft = restart_draft();
     draft.operation = "node.nothing".to_owned();
-    assert!(apply_local(fx.path(), &BareHost, draft).is_err());
+    assert!(apply_local(fx.path(), &BareHost, &fx.operator, draft).is_err());
 }
 
 #[test]
@@ -1374,7 +1374,7 @@ fn the_local_path_refuses_what_the_envelope_refuses() {
     let fx = fixture();
     let mut draft = restart_draft();
     draft.arguments = json!({ "force": true });
-    let error = apply_local(fx.path(), &BareHost, draft).unwrap_err();
+    let error = apply_local(fx.path(), &BareHost, &fx.operator, draft).unwrap_err();
     assert!(
         format!("{error:#}").contains("invalid_arguments"),
         "{error:#}"
@@ -1400,7 +1400,7 @@ fn the_local_path_hands_a_handler_only_verified_inputs() {
         .insert("policy_generation".to_owned(), "e".repeat(64));
     let error = format!(
         "{:#}",
-        apply_local(fx.path(), &BareHost, draft).unwrap_err()
+        apply_local(fx.path(), &BareHost, &fx.operator, draft).unwrap_err()
     );
     assert!(
         !error.contains("is not in the inbox") && !error.contains("does not hash"),
@@ -1533,7 +1533,7 @@ fn the_local_path_finishes_an_interrupted_operation_before_its_own() {
     let digest = interrupted.digest().unwrap();
     let pending = pending_for(&fx, interrupted, Phase::Committed);
     fx.store.save_pending(&pending).unwrap();
-    let applied = apply_local(fx.path(), &BareHost, restart_draft()).unwrap();
+    let applied = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap();
     assert_eq!(applied.receipt.body.sequence, 2);
     assert!(fx.ledger().request_digests.contains(&digest));
     assert!(fx.store.pending_digests().unwrap().is_empty());

@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
-use lillux::crypto::SigningKey;
 use ryeos_app::execution_history_reset::{
     ExecutionHistoryResetOptions, ExecutionHistorySchemaCut, ExecutionHistoryScratchRepairOptions,
     repair_execution_history_scratch_locked, run_execution_history_reset_with_progress_locked,
@@ -35,7 +34,6 @@ use ryeos_app::node_config::sections::runtime_snapshot_qualification::compose::{
     QualificationComposeRequest, QualificationLimits,
     compose_runtime_snapshot_qualification_binding,
 };
-use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::config::{Config, ConfigSources};
 use ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram;
 use serde::{Deserialize, Serialize};
@@ -472,13 +470,6 @@ fn operator_public(
     Ok(ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(ctx.app_root)?)
 }
 
-/// The local operator key on this node's volume.
-fn operator_key(ctx: &HandlerContext<'_>) -> Result<SigningKey> {
-    let path = RuntimeRoot::new(ctx.app_root.to_path_buf()).operator_signing_key_path();
-    lillux::crypto::load_signing_key(&path)
-        .with_context(|| format!("load the local operator key {}", path.display()))
-}
-
 /// A path named inside the image seed: relative, without `.` or `..`.
 fn seed_relative(root: &Path, relative: &str) -> Result<PathBuf> {
     let path = Path::new(relative);
@@ -759,6 +750,10 @@ pub(super) fn trust_succeed(ctx: &HandlerContext<'_>) -> Result<Value> {
 fn rotate_key(ctx: &HandlerContext<'_>, key: crate::key_rotation::RotatedKey) -> Result<Value> {
     let _: EmptyArguments = ctx.arguments()?;
     let statement = utf8(ctx.inputs.require("succession")?, "succession statement")?;
+    let genesis = match key {
+        crate::key_rotation::RotatedKey::Operator => Some(ctx.inputs.require("genesis")?),
+        crate::key_rotation::RotatedKey::Authoring => None,
+    };
     crate::key_rotation::rotate(
         key,
         crate::key_rotation::RotationRequest {
@@ -767,7 +762,9 @@ fn rotate_key(ctx: &HandlerContext<'_>, key: crate::key_rotation::RotatedKey) ->
             node_key: ctx.node.signing_key(),
             request_digest: ctx.request_digest,
             signer_fingerprint: &ctx.request.signer_fingerprint,
+            signer: ctx.sealing_signer(),
             statement,
+            genesis,
         },
     )
 }
@@ -827,6 +824,7 @@ pub(super) fn reset_policy_generation(ctx: &HandlerContext<'_>) -> Result<Value>
         },
         ctx.state_lock,
         Some(expected),
+        crate::init::InitAuthority::Request(ctx.sealing_signer()),
     )
     .context("replace the node policy generation in a locked initialization")?;
     // The pinned generation was checked before anything changed.
@@ -956,12 +954,11 @@ pub(super) fn policy_apply(ctx: &HandlerContext<'_>) -> Result<Value> {
         let policy: ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy =
             serde_json::from_value(body.clone())
                 .context("parse the prepared native_capacity policy")?;
-        let operator_key = operator_key(ctx)?;
         Some(crate::native_capacity::amend_capacity_policy(
             crate::native_capacity::CapacityPolicyAmendmentRequest {
                 app_root: ctx.app_root,
                 state_lock: ctx.state_lock,
-                operator_key: &operator_key,
+                signer: ctx.operator_authorized()?,
                 policy: &policy,
                 reason: &format!("node policy generation {expected}"),
                 command: &ctx.command_label(),
@@ -978,10 +975,11 @@ pub(super) fn policy_apply(ctx: &HandlerContext<'_>) -> Result<Value> {
         ctx.state_lock,
     )
     .context("atomically publish signed node policy generation")?;
-    crate::seal_init_completion_after_policy_update(
+    crate::init::seal_init_completion_after_policy_update(
         ctx.app_root,
         update.generation().digest(),
         ctx.state_lock,
+        ctx.sealing_signer(),
     )
     .context("commit updated node policy generation into initialized state")?;
     Ok(json!({
@@ -1213,13 +1211,12 @@ pub(super) fn recompose(ctx: &HandlerContext<'_>) -> Result<Value> {
 
 pub(super) fn capacity_reissue(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: CapacityArguments = ctx.arguments()?;
-    let operator_key = operator_key(ctx)?;
     let command = ctx.command_label();
     let report =
         crate::native_capacity::reissue_capacity(crate::native_capacity::ReissueRequest {
             app_root: ctx.app_root,
             state_lock: ctx.state_lock,
-            operator_key: &operator_key,
+            signer: ctx.operator_authorized()?,
             reason: &arguments.reason,
             command: &command,
         })?;
@@ -1228,13 +1225,12 @@ pub(super) fn capacity_reissue(ctx: &HandlerContext<'_>) -> Result<Value> {
 
 pub(super) fn capacity_reanchor(ctx: &HandlerContext<'_>) -> Result<Value> {
     let arguments: CapacityArguments = ctx.arguments()?;
-    let operator_key = operator_key(ctx)?;
     let command = ctx.command_label();
     let report =
         crate::native_capacity::reanchor_capacity(crate::native_capacity::ReanchorRequest {
             app_root: ctx.app_root,
             state_lock: ctx.state_lock,
-            operator_key: &operator_key,
+            signer: ctx.operator_authorized()?,
             reason: &arguments.reason,
             command: &command,
         })?;
@@ -1670,7 +1666,7 @@ pub(super) fn bundle_state_import(ctx: &HandlerContext<'_>) -> Result<Value> {
 }
 
 /// Receipt first: the receipt lists one digest, the sha256 of the canonical
-/// listing of every file the removal will delete, so the ledger names exactly
+/// listing of every file the removal will delete, so the receipt names exactly
 /// what was discarded before anything is.
 pub(super) fn bundle_state_remove_prepare(ctx: &HandlerContext<'_>) -> Result<Prepared> {
     let arguments: BundleStateRemoveArguments = ctx.arguments()?;
@@ -1933,9 +1929,10 @@ pub(super) fn authorization_revoke_effect(ctx: &HandlerContext<'_>) -> Result<Va
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::offline_operation::contract::{REQUEST_SCHEMA, RequestBody};
+    use crate::offline_operation::contract::{REQUEST_SCHEMA, RequestBody, SignedRequest};
     use crate::offline_operation::host::BareHost;
     use crate::offline_operation::table::VerifiedInputs;
+    use ryeos_engine::roots::RuntimeRoot;
     use ryeos_node_runtime::identity::NodeIdentity;
     use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
 
@@ -2016,6 +2013,10 @@ mod tests {
                 app_root: &state,
                 state_lock: &lock,
                 request,
+                signed: &SignedRequest {
+                    body: request.clone(),
+                    signature: String::new(),
+                },
                 request_digest: &"c".repeat(64),
                 inputs: &inputs,
                 host: &BareHost,
@@ -2099,6 +2100,10 @@ mod tests {
             app_root: &state,
             state_lock: &lock,
             request: &request,
+            signed: &SignedRequest {
+                body: request.clone(),
+                signature: String::new(),
+            },
             request_digest: &"c".repeat(64),
             inputs: &inputs,
             host: &BareHost,

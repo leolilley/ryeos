@@ -1,12 +1,16 @@
 //! Stopped-node amendments of the capacity account's issuance: re-anchoring
 //! it to another filesystem, and replacing the policy it runs under. Both
-//! are operator-signed documents in one chain over the original issuance.
+//! are documents in one chain over the original, operator-signed issuance. A
+//! document is signed by the operator's own key in the operator's process, or
+//! by the node key carrying the operator-signed offline-operation request that
+//! authorized it; the daemon holds no operator key, so a document produced
+//! while applying a queued operation is the second kind.
 //!
 //! A durable identity names the filesystem's own identity plus the inode, so a
 //! volume re-attached under another device number needs nothing. Moving the
 //! data to a different filesystem is a different act: every recorded identity
 //! then names a place the node no longer is. That move must be explicit and
-//! signed. The operator key signs one document that names the exact prior
+//! signed. One document names the exact prior
 //! binding (by digest), the original issuance the account records still carry,
 //! and the newly measured root, runtime, account-directory and account
 //! identities. Boot accepts the account at the new place only through that
@@ -44,7 +48,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine as _;
-use lillux::crypto::{Signature, Signer, SigningKey, Verifier};
+use lillux::crypto::{Signature, Verifier};
 use lillux::{PinnedDirectory, PinnedDirectoryIdentity, PinnedRegularFileIdentity};
 use ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy;
 use ryeos_node_runtime::state_lock::StateLock;
@@ -53,14 +57,21 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
 use super::OperatorLineage;
+use crate::apply_authority::{Authority, DocumentSigner};
+use crate::offline_operation::contract::SignedRequest;
 
 use super::reissue::StoppedCapacityAccount;
-use super::{NativeCapacityAccountBinding, digest, hex_digest};
+use super::{NativeCapacityAccountBinding, digest, hex_digest, refuse_old_capacity_document};
 
 const DOCUMENT_PREFIX: &str = "native-capacity-reanchor.";
 const DOCUMENT_SUFFIX: &str = ".json";
-const REANCHOR_DOCUMENT_BOUND: u64 = 16 * 1024;
-const REANCHOR_SCHEMA: &str = "ryeos/native-capacity-reanchor/v2";
+/// The document embeds the signed request that authorized it.
+const REANCHOR_DOCUMENT_BOUND: u64 = 96 * 1024;
+const REANCHOR_SCHEMA: &str = "ryeos/native-capacity-reanchor/v3";
+/// Offline operations whose request may authorize a move.
+const MOVE_OPERATIONS: &[&str] = &["node.capacity.reanchor"];
+/// Offline operations whose request may authorize a policy amendment.
+const AMENDMENT_OPERATIONS: &[&str] = &["node.policy-apply", "node.reset.policy-generation"];
 /// Longest chain of documents a node will walk.
 const MAX_CHAIN: usize = 64;
 /// Bound on directory entries scanned for documents.
@@ -135,12 +146,17 @@ pub(crate) struct ReanchorBody {
     policy: Option<NodeNativeCapacityPolicy>,
     reason: String,
     anchored_at: String,
+    /// Which key signed the document and what vouches for the operator.
+    authority: Authority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReanchorDocument {
     body: ReanchorBody,
+    /// The operator-signed request the node applied, when the node signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<SignedRequest>,
     signature: String,
 }
 
@@ -163,13 +179,9 @@ fn verify_document(
         u64::try_from(bytes.len())? <= REANCHOR_DOCUMENT_BOUND,
         "capacity re-anchor document exceeds its bound"
     );
+    refuse_old_capacity_document(bytes, REANCHOR_SCHEMA, "the capacity re-anchor document")?;
     let document: ReanchorDocument = serde_json::from_slice(bytes)?;
     let body = document.body;
-    ensure!(
-        body.schema == REANCHOR_SCHEMA,
-        "foreign capacity re-anchor schema"
-    );
-    let operator = lineage.resolve(&body.operator_fingerprint)?;
     ensure!(
         body.node_fingerprint == node_fingerprint,
         "capacity re-anchor belongs to another node"
@@ -191,15 +203,17 @@ fn verify_document(
             .validate()
             .context("capacity amendment names an invalid policy")?;
     }
-    let encoded = document
-        .signature
-        .strip_prefix("ed25519:")
-        .context("capacity re-anchor signature encoding invalid")?;
-    let signature =
-        Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(encoded)?)?;
-    operator.verify(
+    lineage.verify_document(
         lillux::canonical_json(&serde_json::to_value(&body)?)?.as_bytes(),
-        &signature,
+        &document.signature,
+        &body.authority,
+        document.request.as_ref(),
+        if body.policy.is_some() {
+            AMENDMENT_OPERATIONS
+        } else {
+            MOVE_OPERATIONS
+        },
+        &body.operator_fingerprint,
     )?;
     Ok(body)
 }
@@ -466,8 +480,10 @@ pub struct ReanchorRequest<'a> {
     pub app_root: &'a Path,
     /// Held for the whole operation: a running daemon holds the same lock.
     pub state_lock: &'a StateLock,
-    /// The operator key that signed the issuance; any other key is foreign.
-    pub operator_key: &'a SigningKey,
+    /// What signs the document and vouches for the operator: the operator's
+    /// own key in the operator's process, or the node key under the
+    /// operator-signed request being applied.
+    pub signer: DocumentSigner<'a>,
     pub reason: &'a str,
     /// The command name recorded in the evidence log.
     pub command: &'a str,
@@ -505,7 +521,7 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
     let ReanchorRequest {
         app_root,
         state_lock,
-        operator_key,
+        signer,
         reason,
         command,
     } = request;
@@ -521,11 +537,13 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
     );
     let report = crate::init::verify_init_completion_before_capacity_install(app_root)?
         .context("re-anchoring requires completed initialization")?;
-    let operator_fingerprint =
-        ryeos_engine::trust::compute_fingerprint(&operator_key.verifying_key());
+    let operator_fingerprint = signer.operator_fingerprint().context(
+        "a capacity re-anchor needs the operator's consent: sign it with the operator key or \
+         apply it under the operator's signed request",
+    )?;
     ensure!(
         operator_fingerprint == report.operator_fingerprint,
-        "operator key differs from the one that initialized this node"
+        "operator differs from the one that initialized this node"
     );
     let lineage = super::OperatorLineage::load(app_root)?;
     lineage.require_member(&operator_fingerprint)?;
@@ -613,6 +631,7 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
         policy: None,
         reason: reason.to_owned(),
         anchored_at: lillux::time::iso8601_now(),
+        authority: signer.authority()?,
     };
     // An interrupted run leaves a document no completion names yet; a rerun
     // measures the same facts and adopts it instead of publishing another.
@@ -628,13 +647,10 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
         Some(digest) => digest,
         None => {
             let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
-            let signature = operator_key.sign(canonical.as_bytes());
             let document = ReanchorDocument {
+                request: signer.request(),
+                signature: signer.sign(canonical.as_bytes()),
                 body,
-                signature: format!(
-                    "ed25519:{}",
-                    base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
-                ),
             };
             let document_bytes = serde_json::to_vec(&document)?;
             ensure!(
@@ -658,7 +674,7 @@ pub fn reanchor_capacity(request: ReanchorRequest<'_>) -> Result<ReanchorReport>
     };
     // The completion now embeds the re-anchored binding and names the
     // document; until it is resealed boot still honours the previous one.
-    crate::init::seal_current_init_completion(app_root, None)?;
+    crate::init::seal_current_init_completion(app_root, None, signer, None)?;
     append_evidence_once(
         &state,
         &CapacityReanchorEvidence {
@@ -685,8 +701,10 @@ pub struct CapacityPolicyAmendmentRequest<'a> {
     /// Held by the command for the whole operation: a running daemon holds
     /// the same lock, so acquiring it is the proof that the node is stopped.
     pub state_lock: &'a StateLock,
-    /// The operator key that signed the issuance; any other key is foreign.
-    pub operator_key: &'a SigningKey,
+    /// What signs the document and vouches for the operator: the operator's
+    /// own key in the operator's process, or the node key under the
+    /// operator-signed request being applied.
+    pub signer: DocumentSigner<'a>,
     pub policy: &'a NodeNativeCapacityPolicy,
     pub reason: &'a str,
     /// The command name recorded in the evidence log.
@@ -722,7 +740,7 @@ pub struct CapacityPolicyAmendmentEvidence {
 
 /// The authenticated operator and node an amendment acts for.
 pub(super) struct AmendmentIdentity<'a> {
-    pub(super) operator_key: &'a SigningKey,
+    pub(super) signer: DocumentSigner<'a>,
     pub(super) operator_fingerprint: String,
     /// The operators whose earlier documents the amendment chain may carry.
     pub(super) lineage: OperatorLineage,
@@ -755,7 +773,7 @@ pub fn amend_capacity_policy(
     let CapacityPolicyAmendmentRequest {
         app_root,
         state_lock,
-        operator_key,
+        signer,
         policy,
         reason,
         command,
@@ -772,14 +790,20 @@ pub fn amend_capacity_policy(
         lineage,
         operator_fingerprint,
         node_fingerprint,
-    } = amendment_inputs(app_root, operator_key)?;
+    } = amendment_inputs(
+        app_root,
+        &signer.operator_fingerprint().context(
+            "a capacity policy amendment needs the operator's consent: sign it with the operator \
+             key or apply it under the operator's signed request",
+        )?,
+    )?;
     state_lock.ensure_protects_app_root(app_root)?;
     amend_policy_at(
         places,
         &prior,
         policy,
         &AmendmentIdentity {
-            operator_key,
+            signer,
             operator_fingerprint,
             lineage,
             node_fingerprint,
@@ -808,11 +832,11 @@ pub enum CapacityPolicyAmendmentCheck {
 pub fn check_capacity_policy_amendment(
     app_root: &Path,
     state_lock: &StateLock,
-    operator_key: &SigningKey,
+    operator_fingerprint: &str,
     policy: &NodeNativeCapacityPolicy,
 ) -> Result<CapacityPolicyAmendmentCheck> {
     state_lock.ensure_protects_app_root(app_root)?;
-    let AmendmentInputs { prior, places, .. } = amendment_inputs(app_root, operator_key)?;
+    let AmendmentInputs { prior, places, .. } = amendment_inputs(app_root, operator_fingerprint)?;
     let check = check_policy_amendment_at(&places, &prior, policy)?;
     state_lock.ensure_protects_app_root(app_root)?;
     Ok(check)
@@ -828,9 +852,8 @@ struct AmendmentInputs {
     node_fingerprint: String,
 }
 
-fn amendment_inputs(app_root: &Path, operator_key: &SigningKey) -> Result<AmendmentInputs> {
-    let operator = operator_key.verifying_key();
-    let operator_fingerprint = ryeos_engine::trust::compute_fingerprint(&operator);
+fn amendment_inputs(app_root: &Path, operator_fingerprint: &str) -> Result<AmendmentInputs> {
+    let operator_fingerprint = operator_fingerprint.to_owned();
     let lineage = super::OperatorLineage::load(app_root)?;
     lineage.require_member(&operator_fingerprint)?;
     let node_identity_path = app_root
@@ -1010,6 +1033,7 @@ pub(super) fn amend_policy_at(
         policy: Some(policy.clone()),
         reason: reason.to_owned(),
         anchored_at: lillux::time::iso8601_now(),
+        authority: identity.signer.authority()?,
     };
     let document_digest = publish_or_adopt(&places.onboarding, body, identity)?;
     append_policy_evidence_once(
@@ -1053,13 +1077,10 @@ fn publish_or_adopt(
         return Ok(digest);
     }
     let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
-    let signature = identity.operator_key.sign(canonical.as_bytes());
     let document = ReanchorDocument {
+        request: identity.signer.request(),
+        signature: identity.signer.sign(canonical.as_bytes()),
         body,
-        signature: format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
-        ),
     };
     let document_bytes = serde_json::to_vec(&document)?;
     ensure!(
@@ -1248,6 +1269,7 @@ mod controls {
     //! admission.
 
     use super::*;
+    use lillux::crypto::{Signer as _, SigningKey};
     use ryeos_node_runtime::node_policy::sections::native_capacity::{
         NativeCapacityUnits, NativeIncarnationEnvelope, NativeRecoveryEnvelope,
         NativeRenewalEnvelope, NodeNativeCapacityPolicy,
@@ -1363,6 +1385,7 @@ mod controls {
                 policy: None,
                 reason: "controls".to_owned(),
                 anchored_at: "fixture".to_owned(),
+                authority: Authority::Operator,
             }
         }
 
@@ -1371,6 +1394,7 @@ mod controls {
             let signature = key.sign(canonical.as_bytes());
             serde_json::to_vec(&ReanchorDocument {
                 body,
+                request: None,
                 signature: format!(
                     "ed25519:{}",
                     base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
@@ -1448,6 +1472,112 @@ mod controls {
             chain.effective.reanchor.as_ref().unwrap().document_digest,
             second
         );
+    }
+
+    impl Fixture {
+        /// Publish `body` as the daemon writes it: signed by the node key,
+        /// carrying `request`.
+        fn publish_under(
+            &self,
+            mut body: ReanchorBody,
+            request: &crate::offline_operation::contract::SignedRequest,
+        ) -> String {
+            let node = OperatorLineage::test_node_key();
+            let signer = DocumentSigner::Request {
+                node: &node,
+                request,
+            };
+            body.authority = signer.authority().unwrap();
+            let canonical = lillux::canonical_json(&serde_json::to_value(&body).unwrap()).unwrap();
+            let bytes = serde_json::to_vec(&ReanchorDocument {
+                request: signer.request(),
+                signature: signer.sign(canonical.as_bytes()),
+                body,
+            })
+            .unwrap();
+            self.publish_bytes(&bytes)
+        }
+    }
+
+    #[test]
+    fn an_apply_time_document_is_node_signed_with_the_request_digest_and_verifies() {
+        let f = Fixture::new();
+        let node = OperatorLineage::test_node_key();
+        let request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reanchor");
+        let digest = f.publish_under(f.body(&f.original, None, 2, 1, 0), &request);
+        let chain = f
+            .chain(&digest)
+            .expect("verifies through the operator's request");
+        assert_eq!(chain.length, 1);
+        let document: ReanchorDocument =
+            serde_json::from_slice(&read_named(&f.onboarding, &digest).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            document.body.authority,
+            Authority::NodeUnderRequest {
+                request_digest: request.digest().unwrap()
+            }
+        );
+        assert_eq!(document.request.as_ref(), Some(&request));
+        // A policy amendment is authorized by a policy request, a move is not.
+        let amend = ReanchorBody {
+            policy: Some(f.original.policy.clone()),
+            ..f.body(&f.original, None, 2, 1, 0)
+        };
+        let amend_request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.policy-apply");
+        let amend_digest = f.publish_under(amend.clone(), &amend_request);
+        assert!(f.chain(&amend_digest).is_ok());
+        let move_request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reanchor");
+        let mismatched = f.publish_under(amend, &move_request);
+        let error = f.chain(&mismatched).err().expect("wrong operation");
+        assert!(
+            format!("{error:#}").contains("apply_authority_request_operation"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_document_whose_request_is_not_operator_signed_is_refused_and_never_a_tip() {
+        let f = Fixture::new();
+        let node = OperatorLineage::test_node_key();
+        let stranger = SigningKey::from_bytes(&[9; 32]);
+        let by_stranger =
+            crate::apply_authority::test_request(&node, &stranger, "node.capacity.reanchor");
+        let digest = f.publish_under(f.body(&f.original, None, 2, 1, 0), &by_stranger);
+        let error = f.chain(&digest).err().expect("a stranger's request");
+        assert!(
+            format!("{error:#}").contains("apply_authority_request_not_operator"),
+            "{error:#}"
+        );
+        assert!(f.best().is_none());
+        // A request under a delegated grant is not the operator's consent.
+        let mut delegated =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reanchor");
+        delegated.body.signer_grant_digest = Some("a".repeat(64));
+        delegated =
+            crate::offline_operation::contract::SignedRequest::sign(delegated.body, &f.operator)
+                .unwrap();
+        let digest = f.publish_under(f.body(&f.original, None, 2, 1, 0), &delegated);
+        assert!(f.chain(&digest).is_err());
+    }
+
+    #[test]
+    fn a_reanchor_document_of_the_old_shape_is_refused_by_name_with_its_cure() {
+        let f = Fixture::new();
+        let mut body = serde_json::to_value(ReanchorDocument {
+            body: f.body(&f.original, None, 2, 1, 0),
+            request: None,
+            signature: "ed25519:AA==".to_owned(),
+        })
+        .unwrap();
+        body["body"]["schema"] = "ryeos/native-capacity-reanchor/v2".into();
+        let digest = f.publish_bytes(&serde_json::to_vec(&body).unwrap());
+        let error = f.chain(&digest).err().expect("the old shape");
+        let text = format!("{error:#}");
+        assert!(text.contains("capacity_document_old_shape"), "{text}");
+        assert!(text.contains("ryeos init"), "{text}");
     }
 
     #[test]
@@ -1709,7 +1839,7 @@ mod controls {
                 prior,
                 policy,
                 &AmendmentIdentity {
-                    operator_key: &self.operator,
+                    signer: DocumentSigner::Operator(&self.operator),
                     operator_fingerprint: self.operator_fingerprint.clone(),
                     lineage: OperatorLineage::single(
                         &self.operator_fingerprint,
