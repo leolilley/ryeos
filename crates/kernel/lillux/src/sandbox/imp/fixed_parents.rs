@@ -101,6 +101,16 @@ pub(super) fn validate(request: &LinuxSandboxRequest) -> Result<(), String> {
             .filter(|mount| mount.destination != view.destination)
             .map(|mount| mount.source_fd)
             .collect::<BTreeSet<_>>();
+        let destination_of = |fd| {
+            request
+                .mounts
+                .iter()
+                .find(|mount| mount.source_fd == fd && mount.destination != view.destination)
+                .map_or_else(
+                    || "<overlay>".into(),
+                    |m| m.destination.display().to_string(),
+                )
+        };
         if let Some(overlay) = &request.overlay {
             other_sources.insert(
                 overlay
@@ -122,8 +132,10 @@ pub(super) fn validate(request: &LinuxSandboxRequest) -> Result<(), String> {
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|_| "<unlocatable>".into());
                 return Err(format!(
-                    "unfiltered mount aliases a fixed-parent source: {alias} aliases {}",
-                    source_path.display()
+                    "unfiltered mount aliases a fixed-parent source: {alias} (mounted at {}) aliases {} (mounted at {})",
+                    destination_of(fd),
+                    source_path.display(),
+                    view.destination.display()
                 ));
             }
             if mount_source_is_sealed(raw_fd(fd)?)? {
