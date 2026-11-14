@@ -6662,7 +6662,11 @@ async fn run_claimed_thread_row_inner(
         super::source_closure::SourceMountPlacement::Project,
         false,
     )
-    .map_err(BuildAndLaunchError::Internal)?;
+    .map_err(|error| {
+        super::external_content::classify_quarantined_large_object(&error)
+            .map(BuildAndLaunchError::from)
+            .unwrap_or_else(|| BuildAndLaunchError::Internal(error))
+    })?;
     let post_publication_timer = launch_timings
         .as_ref()
         .map(|timings| timings.top_level("post_publication_launch_setup"));
