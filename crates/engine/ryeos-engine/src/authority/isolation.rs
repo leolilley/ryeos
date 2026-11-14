@@ -10104,8 +10104,8 @@ mod tests {
             .expect("the namespace is mounted at its fixed destination");
         assert_eq!(state_mount["access"], "writable");
         // Neither the sibling namespace, the other bundle's home, the bundle
-        // directory, the root of all homes, nor the app root is mounted or even
-        // named as a destination.
+        // directory, nor the root of all homes is mounted or even named as a
+        // destination.
         let bundle_state_root = fixture
             .app_root
             .path()
@@ -10118,7 +10118,6 @@ mod tests {
             ns1.parent().unwrap(),
             bundle_state_root.as_path(),
             ns1.as_path(),
-            fixture.app_root.path(),
         ] {
             assert!(
                 !destinations
@@ -10128,6 +10127,10 @@ mod tests {
                 hidden.display()
             );
         }
+
+        // The app root itself is never a destination (the launch's scratch
+        // project legitimately lives beneath it).
+        assert!(!destinations.contains(&fixture.app_root.path().to_str().unwrap()));
 
         // Read-only access mounts the same directory read-only.
         let read_only = IsolationBundleStateHome {
