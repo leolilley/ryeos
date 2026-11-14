@@ -304,6 +304,7 @@ pub fn pin_signer_chained(
         record_digest: record.content_digest(),
         request_digest: lillux::cas::sha256_hex(b"fixture"),
         operator: node_fingerprint,
+        predecessor: None,
     };
     let event_body = serde_yaml::to_string(&event).expect("serialize fixture key event");
     std::fs::write(events.join(event.file_name()), sign(&event_body))
