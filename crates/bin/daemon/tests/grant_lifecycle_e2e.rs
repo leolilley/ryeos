@@ -585,7 +585,19 @@ async fn revoke_cancels_live_threads_of_principal() {
     plant_sleeper_tool(project.path(), &fixture.publisher).expect("plant the sleeper tool");
     let project_path = project.path().canonicalize().unwrap();
 
-    // The grantee starts the sleeper without waiting for it.
+    // The grantee starts the sleeper without waiting for it. It holds read
+    // access to the live project and no operator-vault capability, so its
+    // launch reads the project and does not overlay the operator vault.
+    let mut sleeper_policy = serde_json::to_value(
+        ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Accepted,
+        )
+        .exclude_operator_vault(),
+    )
+    .expect("serialize the sleeper execution policy");
+    *sleeper_policy
+        .pointer_mut("/project/access")
+        .expect("a live policy names its project access") = serde_json::json!("read_only");
     let (status, json) = call(
         &harness,
         &fixture,
@@ -597,12 +609,7 @@ async fn revoke_cancels_live_threads_of_principal() {
             "ref_bindings": {},
             "project_path": project_path.display().to_string(),
             "parameters": {},
-            // The grantee holds no operator-vault capability, so its launch
-            // does not overlay the operator vault.
-            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
-                ryeos_app::execution_policy::ExecutionResponse::Accepted,
-            )
-            .exclude_operator_vault(),
+            "execution_policy": sleeper_policy,
         }),
     )
     .await;
