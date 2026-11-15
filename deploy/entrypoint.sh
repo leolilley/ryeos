@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Entrypoint for ryeosd-full container.
+# Entrypoint for RyeOS daemon containers.
 #
 # Ordinary mode seeds an absent installed generation exactly once. Subsequent
 # boots never reconcile installed bundles from image contents: native bundle

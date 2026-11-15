@@ -65,7 +65,10 @@ skip_tests=0
 refresh_bundles=0
 skip_crash_qualification=0
 crash_qualification_only=0
-bundle_set="full"
+# The gate refreshes the widest installable set, development (standard plus
+# central-auth, environment-qualification and render-sandbox), so every test
+# composition finds its prepared bundles.
+bundle_set="development"
 nextest_archive=""
 nextest_run_archive=""
 crash_archive=""
@@ -165,8 +168,8 @@ if [[ "$crash_qualification_only" == "1" ]]; then
         gate_fail "--crash-qualification-only conflicts with --no-tests"
         exit 2
     fi
-    if [[ "$refresh_bundles" != "1" || "$bundle_set" != "full" ]]; then
-        gate_fail "--crash-qualification-only requires --refresh-bundles with the full bundle set"
+    if [[ "$refresh_bundles" != "1" || "$bundle_set" != "development" ]]; then
+        gate_fail "--crash-qualification-only requires --refresh-bundles with the development bundle set"
         exit 2
     fi
     if [[ ${#nextest_args[@]} -ne 0 ]]; then
@@ -408,7 +411,7 @@ fi
 # refreshed source gate has the exact signed runtime bytes required by the
 # process-kill qualification and must execute every durable cut before release.
 if [[ "$refresh_bundles" == "1" \
-    && "$bundle_set" == "full" \
+    && "$bundle_set" == "development" \
     && "$skip_crash_qualification" != "1" \
     && ${#nextest_args[@]} -eq 0 ]]; then
     crash_qualification_features="scheduling,model-provider-setup,crash-qualification-test-support,handoff-test-support"

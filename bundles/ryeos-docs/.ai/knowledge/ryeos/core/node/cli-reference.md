@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:37:06Z:b08b11ef72d634973d8038c5466d2988d79781b60c22e1db67ea3a2966b07b1b:i5121BVidvMiLmnXZ8Hc9XG634Vn7dXMrORL2zW4qXnPZf4Q/Oz7DfgjwpRaWzjo7atxxMbAmw6vvDswyuGAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:66db52be7d0e686ca7f08a4bc665c16709f0c1b10fd72aef099b1d8350a526ae:QJNUiuf8CPwrHCrT2a9yfuqxyNJWh308VQCvcgxTuXkjt4nhBYR9Cnfrld5W/DhB17UF7cdbw/lwyR/uaXoMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -56,17 +56,17 @@ Signed command aliases still use their declared selector-to-service mappings.
 ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
 ```
 
-Packaged installs use `/usr/share/ryeos` by default. The full package selects
+Packaged installs use `/usr/share/ryeos` by default. The standard package selects
 its exact complete seed explicitly:
 
 ```bash
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ```
 
 Fresh init refuses an absent selector; bundle presence never implies one.
 `--host-class` is given exactly when `--node-profile` is, and names one of the
-profile's declared host classes (`full` declares `local` and
-`local_unconfined`). `local` enforces the sandbox lane: init refuses when the
+profile's declared host classes (`standard` declares `hosted`, `local`
+and `local_unconfined`). `local` enforces the sandbox lane: init refuses when the
 host's sandbox probe cannot prove it, and the refusal names
 `--host-class local_unconfined`, the explicit opt-out that runs jobs as the
 daemon user. Init never selects the opt-out for you, and `ryeos node doctor`
@@ -74,7 +74,7 @@ warns while a node runs it.
 Development usage:
 
 ```bash
-ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --source bundles --node-profile standard --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
 ### `ryeos start`

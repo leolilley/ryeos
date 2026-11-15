@@ -160,7 +160,7 @@ while IFS= read -r bundle; do
         ryeos_term_fail "bundle archive is missing $bundle/.ai/"
         exit 2
     }
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_bundle_set_names standard)
 
 node_init_prefix="$bundle_root/.ai/node/init/"
 actual_node_init_children="$(awk -v prefix="$node_init_prefix" '

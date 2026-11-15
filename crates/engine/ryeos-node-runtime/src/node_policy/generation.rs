@@ -1216,7 +1216,7 @@ mod tests {
         assert!(!local.required_process_scope_capabilities().is_empty());
         // A profile without a hosted variant declares its local classes only.
         assert_eq!(
-            authored_profile("full").host_classes().unwrap(),
+            authored_profile("local-inference").host_classes().unwrap(),
             ["local", "local_unconfined"]
         );
         assert_eq!(
@@ -1237,7 +1237,7 @@ mod tests {
         let directory = policy_directory(root.path());
         std::fs::create_dir_all(&directory).unwrap();
         let profile_path = ryeos_engine::test_support::workspace_root()
-            .join("bundles/.ai/node/init/profiles/full.yaml");
+            .join("bundles/.ai/node/init/profiles/standard.yaml");
         let profile: NodeInitProfile =
             serde_yaml::from_str(&std::fs::read_to_string(profile_path).unwrap()).unwrap();
         let mut policies = profile.for_host_class("local").unwrap().policies;
@@ -1376,7 +1376,7 @@ mod tests {
             let identity = NodeIdentity::create(&identity_path).unwrap();
             let trust = TrustStore::from_registry(*identity.verifying_key(), Vec::new()).unwrap();
             let table = NodePolicyTable::new();
-            let profile = authored_profile("full")
+            let profile = authored_profile("standard")
                 .for_host_class("local")
                 .unwrap()
                 .validated_generation(&table, Path::new("profile.yaml"))

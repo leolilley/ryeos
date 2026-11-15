@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:49:28Z:8f8d286a1219691bec4329149d1c27d7107c36c75b14a9705601a633f488758f:fzmKmQ+vABuLujV8ZJl2dRwZ53gBwijZWE/JS3hIEQP8PexeySyleXd6OfUc9NZlfSdBzIJXoAdo6nus9lhMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:2534eb88fb8e057db095218e271af611ed07613eb68540a7774b19c0d0f58509:hRVhRBcxd0/Vj9FTw6gVhRjKh7kMEDjgeHJgwgC8BamQX7PhonKn8JqctRbcC5r7pcMk8yFi8/aGkgMmxCNVDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -16,16 +16,16 @@ description: >
 ```bash
 # Install package, then initialize packaged bundles from /usr/share/ryeos
 yay -S ryeos
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ryeos start
 ryeos node status
 ```
 
-For packaged installs, `ryeos init --node-profile full --host-class local` is the required
+For packaged installs, `ryeos init --node-profile standard --host-class local` is the required
 setup command. It
 uses `/usr/share/ryeos` as the default bundle source. Package install
 hooks validate `/usr/share/ryeos/*/.ai` and print `Initialize with:
-ryeos init --node-profile full --host-class local`.
+ryeos init --node-profile standard --host-class local`.
 
 ## Lifecycle surface
 
@@ -80,8 +80,8 @@ invalid names are skipped; bundle names are not hardcoded.
 ```bash
 cargo build
 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner "RyeOS Development" --bundle-set full --all
-ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+  --owner "RyeOS Development" --bundle-set standard --all
+ryeos init --source bundles --node-profile standard --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ryeos start
 ```
 
