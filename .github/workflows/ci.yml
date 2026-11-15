@@ -51,7 +51,11 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # next is pushed every half hour or so by several threads and a full run takes
+  # hours: cancelling there meant no run ever finished. On next a newer push
+  # waits (GitHub keeps one pending run per group and replaces older pending
+  # ones), so every started run completes. Other refs still cancel superseded runs.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/next' }}
 
 env:
   CARGO_TERM_COLOR: always
