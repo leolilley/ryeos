@@ -3950,13 +3950,13 @@ async fn run(
     }
     if let Some(service) = &host_service {
         // Refuse a root or wrong-account process before init checks,
-        // state-lock creation, tracing or lifecycle metadata writes. Only the
-        // exact account is required here: the standalone subcommands below run
-        // from an operator session on a stopped node, which keeps its
-        // supplementary groups and never took the no-new-privileges
-        // transition. The supervised route proves the full credential drop
-        // together with placement (`require_current_process_placed`).
-        service.binding.runtime.account.require_current_identity()?;
+        // state-lock creation, tracing or lifecycle metadata writes, and take
+        // the no-new-privileges transition so no child can escalate. The
+        // standalone subcommands below run from an operator session on a
+        // stopped node, which keeps its supplementary groups. The supervised
+        // route proves the supervisor's full credential drop together with
+        // placement (`require_current_process_placed`).
+        service.binding.runtime.account.enter_current_process()?;
     }
     if let Some(runtime) = &external_host_runtime {
         runtime.binding().account.require_current_process()?;

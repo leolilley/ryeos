@@ -381,6 +381,25 @@ impl ControllerAccount {
         anyhow::bail!("controller account observation is unavailable on this OS")
     }
 
+    /// Entry for any process on a supervised app root: exact non-root account,
+    /// then the no-new-privileges transition taken here (idempotent, needs no
+    /// privilege) and corroborated. An operator-session standalone run keeps
+    /// its supplementary groups, but neither it nor any child it spawns can
+    /// gain privilege through a setuid/setgid or file-capability exec.
+    pub fn enter_current_process(&self) -> anyhow::Result<()> {
+        self.require_current_identity()?;
+        #[cfg(target_os = "linux")]
+        {
+            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) } != 1 {
+                anyhow::bail!("process did not take the no-new-privileges transition");
+            }
+        }
+        Ok(())
+    }
+
     /// Corroborate the account after controller exec. Account selection alone
     /// is not evidence that credential drop actually happened.
     pub fn require_current_process(&self) -> anyhow::Result<()> {
