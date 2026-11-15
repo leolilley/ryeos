@@ -600,6 +600,10 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
         .expect("the destination Surface")
         .view_sets()
         .len();
+    let exported_sets = match &export.content {
+        UiTransferExportContent::ViewSets { sets, .. } => sets.len(),
+        _ => unreachable!("the helper exports view sets"),
+    };
     let export_value = serde_json::to_value(&export).unwrap();
     let identity = TransferIdentity {
         operation_id: uuid::Uuid::new_v4().to_string(),
@@ -672,7 +676,7 @@ async fn one_session_drives_every_presentation_step_through_the_real_handlers() 
                 .len();
             assert_eq!(
                 imported,
-                destination_sets_before + 2,
+                destination_sets_before + exported_sets,
                 "the destination Surface gained the copied sets"
             );
         }
