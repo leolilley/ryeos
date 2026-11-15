@@ -350,9 +350,13 @@ impl ControllerAccount {
         }
     }
 
-    /// Corroborate the account after controller exec. Account selection alone
-    /// is not evidence that credential drop actually happened.
-    pub fn require_current_process(&self) -> anyhow::Result<()> {
+    /// The current process runs as exactly this non-root account (real,
+    /// effective and saved uid and gid). This is what an operator-session
+    /// standalone run on a stopped supervised node must hold: it may never
+    /// write the node's app root as root or as another account. It says
+    /// nothing about how the process got there, so it is not evidence of a
+    /// supervisor's credential drop; see `require_current_process`.
+    pub fn require_current_identity(&self) -> anyhow::Result<()> {
         self.validate().map_err(anyhow::Error::msg)?;
         #[cfg(unix)]
         {
@@ -371,6 +375,37 @@ impl ControllerAccount {
             {
                 anyhow::bail!("controller process does not run as its selected non-root account");
             }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("controller account observation is unavailable on this OS")
+    }
+
+    /// Entry for any process on a supervised app root: exact non-root account,
+    /// then the no-new-privileges transition taken here (idempotent, needs no
+    /// privilege) and corroborated. An operator-session standalone run keeps
+    /// its supplementary groups, but neither it nor any child it spawns can
+    /// gain privilege through a setuid/setgid or file-capability exec.
+    pub fn enter_current_process(&self) -> anyhow::Result<()> {
+        self.require_current_identity()?;
+        #[cfg(target_os = "linux")]
+        {
+            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            if unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) } != 1 {
+                anyhow::bail!("process did not take the no-new-privileges transition");
+            }
+        }
+        Ok(())
+    }
+
+    /// Corroborate the account after controller exec. Account selection alone
+    /// is not evidence that credential drop actually happened.
+    pub fn require_current_process(&self) -> anyhow::Result<()> {
+        self.require_current_identity()?;
+        #[cfg(unix)]
+        {
             let supplementary = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
             if supplementary != 0 {
                 if supplementary < 0 {

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-10-06T01:00:58Z:bea591d8d6620fe56348225f6c2a89ada5002dd0b38c0af7c8ad27c6a0c61613:0lUxhd81rjMqnsHldlqZleElmTkKb4LLJ/Iucm1AArsVRP0InqIx0fZQSwZwdOHf6bLSF8v8ZZKGNM1FfzfbBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T06:28:53Z:95c87c651a43f251e520d985008e860fb2f75c5fab2065ee21eb629512d15823:u92A3rIEIYrbqCMtYV34ZDvFRvIjW8CJMwZ5VwbTemFAiC7LES9/VEDLR9Saq47THsYVbviqnUFCoMED80ErAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
 title: Native Bundle Publication and Node Composition
 description: Scheduled direction for independently publishing exact RyeOS bundle generations and composing nodes without rebuilding the substrate image
 entry_type: design
-version: "0.5.1"
+version: "0.6.0"
 status: implementation_under_qualification
 ```
 
@@ -54,6 +54,20 @@ The original acceptance properties below remain mandatory. Full worker developme
 Stage1 reproduction, durable cache optimization and self-hosted CI migration
 remain separate work. The dated execution-closure implementation plan owns the
 remaining sequence, while this document retains the architectural boundaries.
+
+State on 2026-11-15: the `release-authority` profile declares only the `local`
+host class (enforced namespace sandbox, required delegated process scopes). The
+`bundle-source` profile declares `hosted` (a hosting provider's container, no
+sandbox), `local` (enforced sandbox) and `local_unconfined` (no sandbox).
+No image, bake target or workflow produces a release-authority node. The shared
+entrypoint seeds the installed generation from the image only when it is absent
+and never fetches bundles. Consumers update through the stopped-node
+`ryeos node bundle-set update`, which accepts a set for exactly one target
+triple and refuses any other. The publisher runs as a separate process reached
+over its closed HTTP operations. No complete set and single-bundle successor
+have yet run end to end on a deployed target, so the pipeline remains
+unqualified. [Hosting topology](#hosting-topology) and
+[Rollout](#rollout-first-hosted-cut-and-end-state) record where each role runs.
 
 ## Purpose
 
@@ -190,6 +204,40 @@ continuity for old releases after revocation. Under the current fail-closed
 model, revocation may invalidate historical recovery. Recording the old policy
 digest preserves evidence of the prior decision; it does not preserve present
 authority to activate or recover under that policy.
+
+## Hosting topology
+
+A host class names the kind of host a node runs on, and each profile owns the
+floor and isolation lane of every class it declares. The roles above place
+differently:
+
+- **Release authority** runs only on a host that proves the enforced namespace
+  sandbox and delegated per-job process scopes: an operator-run host under the
+  `local` class. Release materialization executes captured source, and its
+  tools refuse a disabled isolation lane. A hosting provider's container
+  cannot prove those scopes, so the release authority does not run there. A
+  weaker hosted class with unsandboxed builds would move build integrity onto
+  reproducible rebuild cross-checks, and those need an isolated builder anyway.
+  It is not planned.
+- **Bundle-source** runs on a hosting provider's container under a `hosted`
+  class: the `hosted` floor (durable root, trusted-init recovery and
+  termination, accounting or proven swap absence, time) with no sandbox. It
+  executes no captured source. Consumers verify publisher evidence against
+  their own pinned policy, so a hostile host can withhold, delay or serve an
+  older head. That affects availability and freshness, not integrity. Consumers
+  select exact publications rather than whatever head is served, and the
+  newest-seen checkpoints described below are what refuse a replayed older
+  head.
+- **Publisher custody** stays beside the release authority on the operator-run
+  host. The publisher private key is never placed on a hosting provider's
+  container.
+- **Separate nodes.** The release authority and bundle-source node stay
+  separate. The release authority reaches the hosted bundle-source through the
+  authenticated named-remote upload route. Local staging for a combined node
+  remains an unused optional profile.
+- **Target triples.** A bundle set names exactly one target triple, so each
+  served triple has its own set and catalog lineage. The first cut serves one
+  triple.
 
 ## Durable identities
 
@@ -579,6 +627,46 @@ into native generations. During rollout they remain external recovery artifacts
 under the current release process, outside the native catalog's authority and
 lineage.
 
+## Rollout: first hosted cut and end state
+
+The topology above lands in two steps. The first removes image rebuilds from
+bundle updates using what exists. The second removes the remaining dependence
+on the operator's workstation and on GitHub.
+
+### First hosted cut
+
+- The release authority runs on the operator's own enforced `local` host, with
+  the publisher on loopback beside it.
+- One bundle-source node runs in a hosting provider's container under the new
+  `hosted` class of the `bundle-source` profile.
+- Publication uses the development key until one complete set and one
+  single-bundle successor run end to end and a consumer updates and restarts.
+  Official publisher authority comes only after that qualification.
+- Consumers run the existing stopped-node `bundle-set update` pinned to an
+  exact set publication. A hosted consumer runs it as a one-shot step before
+  the daemon starts; the next incarnation start is the stopped moment.
+- Every current release image stays published. Nothing is retired until
+  consumers fetch their sets.
+- One target triple is served.
+
+### End state
+
+- The release authority runs on a dedicated operator-run host that proves the
+  `local` floor, so releases no longer depend on the operator's workstation.
+  Publisher custody moves with it.
+- The release authority also produces substrate images through an admitted
+  Graph. GitHub is at most an optional source mirror and bootstrap-recovery
+  adapter.
+- The registry carries only substrate images, one per target triple, plus
+  variants whose packaging is a real containment or hardware boundary.
+  Composition images whose differences are bundle selection are retired.
+- A consumer's set change is a signed offline operation: authored against the
+  node's facts, queued on the running node, and applied by the daemon before
+  startup checks at the next incarnation. No entrypoint shell step and no
+  redeploy is needed to move a pin. Any automatic advance remains a
+  deployment-authority decision, never an unpinned `latest`.
+- More target triples are served, each with its own set lineage.
+
 ## Delivery stages
 
 ### Stage 1 — immutable publication contracts
@@ -628,8 +716,8 @@ lineage.
 
 ### Stage 6 — stable substrate deployment
 
-- Publish and deploy one general substrate image carrying a small bootstrap seed
-  closure. Profile selection activates the bundle-source service where needed;
+- Publish and deploy one general substrate image per target triple carrying a
+  small bootstrap seed closure. Profile selection activates the bundle-source service where needed;
   the persistent catalog is seeded only when absent.
 - Move normal deployment coordinates to image digest plus deployment-authorized
   node-bundle selection, consuming bundle-publication policy-section digest,
@@ -641,7 +729,9 @@ lineage.
 
 ### Stage 7 — RyeOS-primary release execution
 
-- Make the RyeOS development node the primary release executor.
+- Make a release-authority node on a dedicated operator-run host the primary
+  release executor.
+- Move consumer set changes onto signed offline operations.
 - Project results back to GitHub rather than treating Actions as authority.
 - Add native scheduling, review, and release surfaces only from observed need.
 - Connect published set selection to reflexive deployment when that owner is

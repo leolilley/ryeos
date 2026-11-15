@@ -984,7 +984,13 @@ fn resolve_command_for_daemon_with_commands(
         Some(&cwd),
         load_command_input,
     )
-    .map_err(command_compilation_error)?;
+    .map_err(|error| {
+        command_compilation_error(relabel_invoked_command(
+            error,
+            &matched.command,
+            &rest[..matched.consumed],
+        ))
+    })?;
     let control = compiled.controls;
     Ok(CliResolvedExecute {
         item_ref: compiled.item_ref,
@@ -1010,6 +1016,24 @@ fn resolve_command_for_daemon_with_commands(
         state_root: control.state_root.map(PathBuf::from),
         command_label,
     })
+}
+
+/// Binder errors name the descriptor's canonical tokens (`s`); show the
+/// tokens the caller actually typed (`sign`) instead.
+fn relabel_invoked_command(
+    error: ryeos_app::command_invocation::CommandProjectPolicyError,
+    command: &CommandDef,
+    invoked: &[String],
+) -> ryeos_app::command_invocation::CommandProjectPolicyError {
+    use ryeos_app::command_invocation::CommandProjectPolicyError;
+    let canonical = format!("{:?}", command.tokens.join(" "));
+    let typed = format!("{:?}", invoked.join(" "));
+    match error {
+        CommandProjectPolicyError::Invalid(detail) => {
+            CommandProjectPolicyError::Invalid(detail.replace(&canonical, &typed))
+        }
+        other => other,
+    }
 }
 
 fn command_compilation_error(
@@ -3825,5 +3849,152 @@ dispatch:
             assert_eq!(display, expected);
             assert!(!display.contains("super-secret"));
         }
+    }
+
+    fn vault_set_command() -> CommandDef {
+        let mut command = command(
+            &["vault", "set"],
+            vec![vec![
+                ("name", CommandArgumentKind::String),
+                ("value", CommandArgumentKind::String),
+            ]],
+            CommandProjectResolution::None,
+        );
+        command.project = None;
+        command.sensitive_fields = vec!["value".into()];
+        command
+    }
+
+    #[test]
+    fn positional_slots_bind_with_selector_anywhere() {
+        let commands = vec![vault_set_command()];
+        for argv in [
+            s(&["vault", "set", "NAME", "VALUE"]),
+            s(&["vault", "set", "NAME", "VALUE", "--no-project"]),
+            s(&["vault", "set", "--no-project", "NAME", "VALUE"]),
+            s(&["vault", "set", "NAME", "--no-project", "VALUE"]),
+            rest_with_global_no_project(&s(&["vault", "set", "NAME", "VALUE"]), true),
+        ] {
+            let resolved = resolve_command_for_daemon_with_commands(
+                &argv,
+                &commands,
+                &ryeos_runtime::CommandRegistrationPolicy::default(),
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            assert_eq!(
+                resolved.parameters,
+                serde_json::json!({"name": "NAME", "value": "VALUE"}),
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_backed_form_binds_with_selector_before_positionals() {
+        let mut cmd = command(
+            &["sign"],
+            vec![vec![("item_refs", CommandArgumentKind::String)]],
+            CommandProjectResolution::Optional,
+        );
+        cmd.project.as_mut().unwrap().no_project_flag = true;
+        let commands = vec![cmd];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["sign", "--no-project", "tool:a/b"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.parameters,
+            serde_json::json!({"item_refs": "tool:a/b"})
+        );
+        assert!(resolved.project_path.is_none());
+
+        let dir = std::env::temp_dir();
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["sign", "--project", dir.to_str().unwrap(), "tool:a/b"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.parameters,
+            serde_json::json!({"item_refs": "tool:a/b"})
+        );
+    }
+
+    #[test]
+    fn direct_execute_selectors_and_json_before_item_ref() {
+        let commands = vec![direct_execute_command()];
+        let dir = std::env::temp_dir();
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "--project",
+                dir.to_str().unwrap(),
+                "--json",
+                "tool:x/y",
+                "--task_id",
+                "T",
+                "--dry_run",
+                "true",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.item_ref, "tool:x/y");
+        assert_eq!(resolved.stream, Some(false));
+        assert_eq!(resolved.parameters["task_id"], serde_json::json!("T"));
+        assert_eq!(resolved.parameters["dry_run"], serde_json::json!("true"));
+        assert!(resolved.project_path.is_some());
+    }
+
+    #[test]
+    fn direct_execute_item_ref_after_other_flags() {
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "--task_id", "T", "tool:x/y", "--no-project"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.item_ref, "tool:x/y");
+        assert_eq!(resolved.parameters["task_id"], serde_json::json!("T"));
+    }
+
+    #[test]
+    fn missing_slots_error_names_typed_alias_and_keeps_values_out() {
+        let mut cmd = command(
+            &["s"],
+            vec![vec![("item_refs", CommandArgumentKind::String)]],
+            CommandProjectResolution::None,
+        );
+        cmd.aliases = vec![ryeos_runtime::command::CommandAliasDef {
+            tokens: s(&["sign"]),
+            description: None,
+            deprecated: None,
+            replacement_tokens: None,
+            removed_in: None,
+        }];
+        let error = match resolve_command_for_daemon_with_commands(
+            &s(&["sign", "--input", "file.json"]),
+            &[cmd],
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        ) {
+            Ok(_) => panic!("missing slot must fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("command \"sign\" requires <item_refs>"),
+            "{error}"
+        );
+        assert!(!error.contains("[\""), "{error}");
     }
 }
