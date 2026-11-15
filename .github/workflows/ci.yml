@@ -250,6 +250,9 @@ jobs:
       - name: Check dependency advisories, licenses, and sources
         run: cargo deny check
 
+      - name: Check client and daemon-side crate layering
+        run: python3 .ai/tools/ryeos/development/repository-validation/client-layering.py --project-path "$PWD"
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
