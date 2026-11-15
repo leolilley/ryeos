@@ -3949,9 +3949,14 @@ async fn run(
         anyhow::bail!("native and external host-runtime authorities are both present");
     }
     if let Some(service) = &host_service {
-        // Refuse a misconfigured root/wrong-account daemon before init checks,
-        // state-lock creation, tracing or lifecycle metadata writes.
-        service.binding.runtime.account.require_current_process()?;
+        // Refuse a root or wrong-account process before init checks,
+        // state-lock creation, tracing or lifecycle metadata writes. Only the
+        // exact account is required here: the standalone subcommands below run
+        // from an operator session on a stopped node, which keeps its
+        // supplementary groups and never took the no-new-privileges
+        // transition. The supervised route proves the full credential drop
+        // together with placement (`require_current_process_placed`).
+        service.binding.runtime.account.require_current_identity()?;
     }
     if let Some(runtime) = &external_host_runtime {
         runtime.binding().account.require_current_process()?;

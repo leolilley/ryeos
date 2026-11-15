@@ -350,9 +350,13 @@ impl ControllerAccount {
         }
     }
 
-    /// Corroborate the account after controller exec. Account selection alone
-    /// is not evidence that credential drop actually happened.
-    pub fn require_current_process(&self) -> anyhow::Result<()> {
+    /// The current process runs as exactly this non-root account (real,
+    /// effective and saved uid and gid). This is what an operator-session
+    /// standalone run on a stopped supervised node must hold: it may never
+    /// write the node's app root as root or as another account. It says
+    /// nothing about how the process got there, so it is not evidence of a
+    /// supervisor's credential drop; see `require_current_process`.
+    pub fn require_current_identity(&self) -> anyhow::Result<()> {
         self.validate().map_err(anyhow::Error::msg)?;
         #[cfg(unix)]
         {
@@ -371,6 +375,18 @@ impl ControllerAccount {
             {
                 anyhow::bail!("controller process does not run as its selected non-root account");
             }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("controller account observation is unavailable on this OS")
+    }
+
+    /// Corroborate the account after controller exec. Account selection alone
+    /// is not evidence that credential drop actually happened.
+    pub fn require_current_process(&self) -> anyhow::Result<()> {
+        self.require_current_identity()?;
+        #[cfg(unix)]
+        {
             let supplementary = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
             if supplementary != 0 {
                 if supplementary < 0 {
