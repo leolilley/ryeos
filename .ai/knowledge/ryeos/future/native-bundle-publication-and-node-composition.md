@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T06:22:52Z:18c4dd18949e67134c9be8e44ddf60a74a05c009dd05874fe3b17dc0dd1bbc45:QEOE8P2566ie3RzHZw+8S3eAY7G0emXSwxqpBbe0vYnGhUSV3thKg6BvmO8gjLFLqmVi0Giub05YgcSA8Rt/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T06:28:53Z:95c87c651a43f251e520d985008e860fb2f75c5fab2065ee21eb629512d15823:u92A3rIEIYrbqCMtYV34ZDvFRvIjW8CJMwZ5VwbTemFAiC7LES9/VEDLR9Saq47THsYVbviqnUFCoMED80ErAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: native-bundle-publication-and-node-composition
@@ -57,8 +57,8 @@ remaining sequence, while this document retains the architectural boundaries.
 
 State on 2026-11-15: the `release-authority` profile declares only the `local`
 host class (enforced namespace sandbox, required delegated process scopes). The
-`bundle-source` profile declares `local` (enforced sandbox) and
-`local_unconfined` (no sandbox); neither is a hosting provider's container.
+`bundle-source` profile declares `hosted` (a hosting provider's container, no
+sandbox), `local` (enforced sandbox) and `local_unconfined` (no sandbox).
 No image, bake target or workflow produces a release-authority node. The shared
 entrypoint seeds the installed generation from the image only when it is absent
 and never fetches bundles. Consumers update through the stopped-node
@@ -227,8 +227,7 @@ differently:
   older head. That affects availability and freshness, not integrity. Consumers
   select exact publications rather than whatever head is served, and the
   newest-seen checkpoints described below are what refuse a replayed older
-  head. The profile needs
-  this class added; today it declares only operator-run classes.
+  head.
 - **Publisher custody** stays beside the release authority on the operator-run
   host. The publisher private key is never placed on a hosting provider's
   container.
