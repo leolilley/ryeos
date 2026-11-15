@@ -80,7 +80,7 @@ fn session_context(
     principal: Option<String>,
 ) -> ryeos_ui::browser_session::LaunchContext {
     // A real, signed Config root; never a Surface masquerading as Config.
-    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: []\n    affordances: []\n";
+    let body = "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/home'\n  capabilities:\n    sources: []\n    affordances: []\n";
     let key = lillux::crypto::load_signing_key(
         &ryeos_engine::test_support::workspace_root().join(".dev-keys/PUBLISHER_DEV.pem"),
     )
@@ -2039,7 +2039,7 @@ fn set_export(
 }
 
 fn empty_export(mode: &str) -> Value {
-    json!({"schema": 1, "mode": mode,
+    json!({"schema": 2, "mode": mode,
         "content": {"kind": "view_sets", "active_set": null, "sets": []}})
 }
 
