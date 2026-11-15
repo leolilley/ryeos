@@ -1,0 +1,15 @@
+# ryeos:signed:2026-11-13T16:31:53Z:c2eeecb92dcc7cab9cb4adaa1ccbc0080de51a570ea923deacb754809971148e:xPWwxdVnXXQo4UaS/ViJVXhou4scK4uW6TvXU57QFU6kiK/wWLUKzfhO8R2QcEiJZXBiCgTayH63Tu/mwLfhCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: core/renew-key
+path: /renew-key
+methods:
+  - POST
+auth: ryeos_signed
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 10
+response:
+  mode: json
+  source: service:identity/renew-key

@@ -424,6 +424,7 @@ mod tests {
                 body: RawRequestBody::None,
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
+            authority: None,
         }
     }
 
@@ -452,6 +453,7 @@ mod tests {
                 body: RawRequestBody::None,
             },
             source_file: std::path::PathBuf::from("/test/r.yaml"),
+            authority: None,
         }
     }
 

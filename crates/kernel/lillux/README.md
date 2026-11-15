@@ -79,11 +79,11 @@ lillux cas verify --root /tmp/cas --hash <sha256>
 echo "raw bytes" | lillux cas store --root /tmp/cas --blob
 
 # Identity — signing
-lillux identity sign --key-dir ~/.local/share/ryeos/.ai/config/keys/signing --hash <sha256>
+lillux identity sign --key-dir ~/.local/share/ryeos/.ai/node/operator/signing --hash <sha256>
 lillux identity verify --hash <sha256> --signature <base64url> --public-key public_key.pem
 
 # Identity — keypairs
-lillux identity keypair generate --key-dir ~/.local/share/ryeos/.ai/config/keys/signing
+lillux identity keypair generate --key-dir ~/.local/share/ryeos/.ai/node/operator/signing
 lillux identity keypair fingerprint --public-key public_key.pem
 lillux identity keypair box-fingerprint --public-key box_pub.pem
 

@@ -758,6 +758,7 @@ impl RetainedExternalExecutionBinding {
             &header,
             &envelope,
             &trust,
+            &ryeos_engine::trust::SignerContext::node("node_config"),
         )
         .context("verify retained placement signature")?;
         ensure!(

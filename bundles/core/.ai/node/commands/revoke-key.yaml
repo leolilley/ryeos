@@ -1,0 +1,12 @@
+# ryeos:signed:2026-11-14T05:54:19Z:1568011250ea43bd8d108b7cefeca659603b225f428b9a74bb37be5c64959ddb:xM6xMo8fyNt+fdtEa5ojJwEY0XbYVi1q9IY1sDphIx+3mpByc9S62Jn0z8uq1LQysjakSxo0MGY4f4Xb1Uy4AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- revoke-key
+description: Revoke an authorized-key grant and stop work running under it
+help:
+  usage: "ryeos revoke-key --fingerprint <grant-fingerprint> --reason <text> [--leave-running] [--keep-delegates]"
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
+dispatch:
+  kind: execute_ref
+  execute: service:identity/revoke-key

@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-11-14T07:05:20Z:50a5b3711d5ad77f1855331648ff89fe8455fd5a6afb17f9dfdfc4672836e0da:Yc2LUmfDlkNRF/pkrfRpI7MCzcfUkBHRYXcdx43xO/LeoDdATLbhnZkcFONW7WorWigEWObIze0PBWBiog6bAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Central Auth Bundle
 
 `central-auth` provides small, reusable web-app auth primitives for RyeOS
@@ -25,11 +26,14 @@ integration. Browsers should not call RyeOS daemon/tool endpoints directly.
 
 ## State layout
 
-Realm state belongs to the node, not to a project or a caller. It lives under
-the app root the daemon hands every launch as `RYEOS_APP_ROOT`:
+Realm state belongs to the node, not to a project or a caller. Each realm is one
+namespace of central-auth's bundle state home, which the daemon creates and
+mounts for the tool (the manifest declares `runtime_authority.state_home` with
+`launch_param` namespaces, and every tool requests the namespace named by its
+`realm_id` parameter, read-write). The realm directory is the home itself:
 
 ```text
-<app_root>/.ai/state/central-auth/realms/<realm_id>/
+<app_root>/.ai/state/bundle-state/central-auth/<realm_id>/
   policy.json
   principals/
     alice.json
@@ -43,15 +47,30 @@ the app root the daemon hands every launch as `RYEOS_APP_ROOT`:
   lock
 ```
 
-A run cannot choose this location: requests carrying `project_path` or
-`runtime_state_dir` are refused with `caller_state_location_refused`, and a
-launch without an absolute `RYEOS_APP_ROOT` is refused with
-`app_root_unavailable`. Under enforced execution isolation the app root is not a
-writable root, so central-auth needs a node whose isolation mode lets the tool
-write it (the `central-host` profile runs with isolation disabled).
+The tools read the directory from `RYEOSD_BUNDLE_STATE_HOME`. A run cannot
+choose this location: requests carrying `project_path` or `runtime_state_dir` are
+refused with `caller_state_location_refused`, and a launch the daemon gave no
+state home is refused with `state_home_unavailable` (check the tool's
+`state_home` declaration). Under enforced execution isolation the realm's
+directory is mounted at `/run/ryeos/bundle-state` and nothing else of the app
+root is visible.
 
 `realm_id` must match `[a-z0-9][a-z0-9._-]{0,127}`. This avoids collisions
 when one node hosts multiple apps or environments.
+
+### Realm access
+
+Whoever calls a central-auth tool must hold, in its own grant, the use
+capability for that realm's namespace. Grant each app backend its own realm only:
+
+```bash
+ryeos authorize-key --public-key <ed25519:...> --label app-backend \
+  --scopes ryeos.use.bundle-state.central-auth/<realm_id>
+```
+
+A backend granted `app-a` is refused with `bundle_state_namespace_denied` when it
+names `app-b`. Back up, move or delete a realm with
+`ryeos node bundle-state export|import|remove --bundle central-auth`.
 
 ## Tool API
 

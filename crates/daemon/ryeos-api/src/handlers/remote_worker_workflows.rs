@@ -105,7 +105,7 @@ struct Operation {
     admitted_start_request: Value,
     admitted_start_request_digest: String,
     operator_fingerprint: String,
-    operator_authority_digest: String,
+    delegation_digest: String,
     remote: String,
     remote_url: String,
     target_site_id: String,
@@ -506,6 +506,9 @@ pub async fn start(
     if resolved_local_path != local_project_path {
         bail!("recorded workflow project identity changed during route resolution");
     }
+    let delegation_digest = RemoteClient::from_remote_cfg_as_delegated(&state, &remote, &ctx)?
+        .delegation_digest()
+        .context("delegated client carries no delegation")?;
     let source_work_id = derive_source_work_id(&invocation_root)?;
     let operation = Operation {
         operation_type: OPERATION_TYPE.to_owned(),
@@ -518,13 +521,9 @@ pub async fn start(
         )?,
         admitted_start_request,
         operator_fingerprint: operator_fingerprint.clone(),
-        operator_authority_digest:
-            ryeos_app::operator_authority::admitted_operator_authority_digest(
-                &state,
-                &operator_fingerprint,
-            )?,
+        delegation_digest,
         remote: req.remote,
-        remote_url: remote.url,
+        remote_url: remote.outbound_url()?.to_owned(),
         target_site_id: remote.site_id,
         target_principal_id: remote.principal_id,
         target_signing_key: remote.signing_key,
@@ -651,11 +650,11 @@ async fn drive_operation(
         }
         append_drive_intent(&state, drive_root_id, &operation, &operation_digest)?;
         let remote = validate_current_route(&state, &operation)?;
-        let client = RemoteClient::from_remote_cfg_as_retained_configured_operator(
+        let client = RemoteClient::from_remote_cfg_as_retained_delegated(
             &state,
             &remote,
             &operation.operator_fingerprint,
-            &operation.operator_authority_digest,
+            &operation.delegation_digest,
         )?;
 
         let snapshot_hash = operation.source_snapshot_hash.as_str();
@@ -1080,6 +1079,7 @@ fn compile_workflow(
         target_product_selections,
     )?;
     let effective = engine.effective_resolution_output(EffectiveItemRequest {
+        logical_project_root: None,
         item_ref: driver,
         expected_kind: Some("graph".to_owned()),
         project_root: Some(context.effective_path.clone()),
@@ -1365,6 +1365,43 @@ async fn adopt_contacted_launch(
     Ok(Some(thread_id))
 }
 
+/// Whether an admitted overlay environment equals the expected one in every
+/// field except the sealed vault recipient. The recipient is the target
+/// launch's own admitted caller and its scopes, judged by vault delivery, so
+/// it is not part of the retained workflow's source-owned expectation.
+fn environment_matches_ignoring_recipient(
+    admitted: &ryeos_state::objects::EnvironmentAuthority,
+    expected: &ryeos_state::objects::EnvironmentAuthority,
+) -> bool {
+    use ryeos_state::objects::EnvironmentAuthority::ProjectOverlay;
+    match (admitted, expected) {
+        (
+            ProjectOverlay {
+                project_authority_id: admitted_id,
+                source_identity: admitted_source,
+                include_operator_vault: admitted_vault,
+                recipient_principal: _,
+                recipient_scopes: _,
+                name_authority: admitted_names,
+            },
+            ProjectOverlay {
+                project_authority_id: expected_id,
+                source_identity: expected_source,
+                include_operator_vault: expected_vault,
+                recipient_principal: _,
+                recipient_scopes: _,
+                name_authority: expected_names,
+            },
+        ) => {
+            admitted_id == expected_id
+                && admitted_source == expected_source
+                && admitted_vault == expected_vault
+                && admitted_names == expected_names
+        }
+        _ => false,
+    }
+}
+
 async fn verify_target_launch(
     client: &RemoteClient,
     operation: &Operation,
@@ -1411,7 +1448,14 @@ async fn verify_target_launch(
         bail!("bound target launch capsule identity is invalid");
     }
     let fetched = client
-        .objects_get_with_total_timeout(&[capsule_hash.to_owned()], &[], STATUS_TIMEOUT)
+        .objects_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::ThreadResult {
+                thread_id: thread_id.to_owned(),
+            },
+            &[capsule_hash.to_owned()],
+            &[],
+            STATUS_TIMEOUT,
+        )
         .await?;
     let capsule_value = fetched
         .entries
@@ -1445,6 +1489,8 @@ async fn verify_target_launch(
                 .display()
         ),
         include_operator_vault: true,
+        recipient_principal: String::new(),
+        recipient_scopes: Vec::new(),
         name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
     };
     let project_semantics_match = matches!(
@@ -1465,7 +1511,7 @@ async fn verify_target_launch(
             && display_path == Path::new(&operation.target_project_path)
             && base_snapshot_hash == &operation.source_snapshot_hash
             && snapshot_hash == &operation.source_snapshot_hash
-            && environment == &expected_environment
+            && environment_matches_ignoring_recipient(environment, &expected_environment)
     );
     let item_matches = sealed.item_ref() == compiled.driver;
     // Target admission finalizes receiver-local derived execution state (most
@@ -1574,6 +1620,9 @@ async fn observe_target_completion(
     }
     let fetched = client
         .objects_get_with_total_timeout(
+            &crate::objects_read_scope::ReadRoot::Placement {
+                placement_id: evidence.placement_thread_id.clone(),
+            },
             std::slice::from_ref(&evidence.admitted_launch_capsule_hash),
             &[],
             STATUS_TIMEOUT,
@@ -1715,7 +1764,7 @@ fn resolve_route(
 ) -> Result<(String, RemoteConfig, String)> {
     let canonical = config::canonical_local_project_path(project)?;
     let local = config::local_project_identity(&canonical)?.to_owned();
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&canonical))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded = config::get_loaded_remote(&report.remotes, remote_name)?;
     let binding = config::resolve_loaded_project_binding(&loaded, &canonical)?;
     if binding.sync_scope != ProjectSyncScope::FullProject {
@@ -1762,19 +1811,18 @@ fn validate_current_route(state: &AppState, operation: &Operation) -> Result<Rem
     if state.threads.site_id() != operation.source_site_id {
         bail!("remote-worker workflow belongs to another source site");
     }
-    if ryeos_app::operator_authority::admitted_operator_authority_digest(
+    crate::remote::client::require_retained_delegation(
         state,
+        &operation.remote,
         &operation.operator_fingerprint,
-    )? != operation.operator_authority_digest
-    {
-        bail!("remote-worker workflow operator grant changed");
-    }
+        &operation.delegation_digest,
+    )?;
     let (_, remote, target) = resolve_route(
         state,
         &operation.remote,
         Path::new(&operation.local_project_path),
     )?;
-    if remote.url != operation.remote_url
+    if remote.url.as_deref() != Some(operation.remote_url.as_str())
         || remote.site_id != operation.target_site_id
         || remote.principal_id != operation.target_principal_id
         || remote.signing_key != operation.target_signing_key
@@ -1839,7 +1887,7 @@ fn validate_operation(operation: &Operation) -> Result<()> {
         bail!("remote-worker workflow target product selections differ from retained authority");
     }
     if !lillux::valid_hash(&operation.operator_fingerprint)
-        || !lillux::valid_hash(&operation.operator_authority_digest)
+        || !lillux::valid_hash(&operation.delegation_digest)
         || !lillux::valid_hash(&operation.admitted_start_request_digest)
         || !lillux::valid_hash(&operation.admitted_source_snapshot_hash)
         || !lillux::valid_hash(&operation.source_snapshot_hash)
@@ -4178,7 +4226,7 @@ mod tests {
                 .unwrap(),
             admitted_start_request: request,
             operator_fingerprint: "a".repeat(64),
-            operator_authority_digest: "b".repeat(64),
+            delegation_digest: "b".repeat(64),
             remote: "default".into(),
             remote_url: "https://example.invalid".into(),
             target_site_id: "site:target".into(),

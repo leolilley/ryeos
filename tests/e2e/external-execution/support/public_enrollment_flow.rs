@@ -450,12 +450,18 @@ mod tests {
             "../../../../bundles/.ai/node/init/profiles/full.yaml"
         ))
         .unwrap();
-        let original = profile["policies"]["isolation"].clone();
-        fn flag(document: &mut Value) -> &mut Value {
-            &mut document["policy"]["host_classes"]["local"]["trusted_process_group_sessions"]
+        let mut original = profile["policies"]["isolation"].clone();
+        // A node's selected policy declares exactly one host class: keep the
+        // class the fixture runs under, as initialization would.
+        let class = fast_fixture::fixture_host_class_of_policy(&original).unwrap();
+        original["policy"]["host_classes"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|name, _| name == class);
+        fn flag<'a>(document: &'a mut Value, class: &str) -> &'a mut Value {
+            &mut document["policy"]["host_classes"][class]["trusted_process_group_sessions"]
         }
-        let mut original = original;
-        assert_eq!(*flag(&mut original), false);
+        assert_eq!(*flag(&mut original, class), false);
         let node = fast_fixture::node_signing_key();
         let raw = lillux::signature::sign_content_at(
             &serde_yaml::to_string(&original).unwrap(),
@@ -467,8 +473,8 @@ mod tests {
         let signed = trusted_enrollment_policy(&raw, &node).unwrap();
         let body = lillux::signature::strip_signature_lines(&signed);
         let mut observed: Value = serde_yaml::from_str(&body).unwrap();
-        assert_eq!(*flag(&mut observed), true);
-        *flag(&mut observed) = json!(false);
+        assert_eq!(*flag(&mut observed, class), true);
+        *flag(&mut observed, class) = json!(false);
         assert_eq!(observed, original, "fixture widened another policy field");
         let header =
             lillux::signature::parse_signature_line(signed.lines().next().unwrap(), "#", None)

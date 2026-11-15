@@ -38,4 +38,4 @@ pub use apply::{
     read_node_fingerprint,
 };
 pub use envelope::{WildcardGrant, authorized_keys_dir, local_operator};
-pub use host::{BareHost, ImageSeed, OfflineHost, TypedReport};
+pub use host::{BareHost, BundleReplace, ImageSeed, OfflineHost, RemotePin, TypedReport};

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-13T13:05:39Z:776bda74ff42d667927bad95b0143147dab80cf4a3df814081b50c21542f1dda:qG/nPMGEgXqeORmY140egdTTvEOXk3vhmu/ELCI/mFuNX6s7uMrpFL836L+QPYOUm5W3hDyaT1ZpnC0GPyx6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:55:34Z:776bda74ff42d667927bad95b0143147dab80cf4a3df814081b50c21542f1dda:qG/nPMGEgXqeORmY140egdTTvEOXk3vhmu/ELCI/mFuNX6s7uMrpFL836L+QPYOUm5W3hDyaT1ZpnC0GPyx6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Externally invoked host helper in the development bundle; lib/ is excluded
 # from Tool resolution, so this is signed source, not an admitted Tool. It
 # grants no RyeOS authority. Run it from a checkout of this repository.

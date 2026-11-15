@@ -96,7 +96,7 @@ impl Journal {
         let mut diagnostics = Vec::new();
         let operator_path = app_root
             .join(ryeos_engine::AI_DIR)
-            .join("config/keys/signing/private_key.pem");
+            .join("node/operator/signing/private_key.pem");
         match read_signing_fingerprint(&operator_path) {
             Ok(Some(fingerprint)) => {
                 self.operator_fingerprint = Some(fingerprint);

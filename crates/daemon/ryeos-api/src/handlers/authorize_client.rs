@@ -26,7 +26,23 @@ pub async fn handle(
         .context("grant reconciliation requires the configured local operator")?;
     // The caller was just proved to be the configured local operator, the one
     // identity that may put an offline-operation scope into a grant.
+    let lifetime_secs = request.lifetime_secs;
     let params = request.into_params_as_local_operator(state.config.app_root.clone())?;
+    let operator =
+        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+            .context("load configured operator identity")?;
+    if lillux::crypto::fingerprint(&params.public_key) == operator.fingerprint() {
+        return Err(anyhow::Error::from(
+            super::grant_terms::operator_grant_refusal(),
+        ));
+    }
+    let terms = ryeos_core_tools::actions::authorize::authorize_client_terms(
+        &params,
+        lifetime_secs,
+        &super::grant_terms::authorization_policy(&state)?,
+        super::grant_terms::caller_authorized_by(&context),
+    )
+    .map_err(|error| anyhow::Error::from(super::grant_terms::lifetime_refusal(error)))?;
     tokio::task::spawn_blocking(move || {
         // Standalone dispatch already owns this exact lock. Borrow that
         // authority, not a boolean mode flag or a second flock acquisition.
@@ -36,6 +52,7 @@ pub async fn handle(
             .get::<ryeos_node_runtime::state_lock::StateLock>();
         let result = ryeos_core_tools::actions::authorize::run_authorize_client_with_authority(
             params,
+            &terms,
             &state.identity,
             &state.config.authorized_keys_dir,
             stopped_node.as_deref(),

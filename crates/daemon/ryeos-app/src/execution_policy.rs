@@ -11,6 +11,7 @@ pub trait ExecutionPolicyResolution {
         project_path: &std::path::Path,
         confinement: ryeos_state::objects::LiveFilesystemConfinement,
         capability_ceiling: Vec<String>,
+        recipient_principal: Option<&str>,
     ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority>;
 }
 
@@ -19,13 +20,30 @@ impl ExecutionPolicyResolution for ExecutionPolicy {
     /// authority consumed by provenance. This is the sole constructor used by
     /// daemon entry points; they may not manufacture a read/write or environment
     /// profile inside `ExecutionProvenance`.
+    ///
+    /// A project-overlay or vault environment seals `recipient_principal`
+    /// and the canonical form of `capability_ceiling` as the recipient of
+    /// every operator-vault name delivered under the authority; those
+    /// environments refuse to resolve without a principal. An environment
+    /// that reads no vault ignores it.
     fn resolve_live_project_authority(
         &self,
         project_path: &std::path::Path,
         confinement: ryeos_state::objects::LiveFilesystemConfinement,
         capability_ceiling: Vec<String>,
+        recipient_principal: Option<&str>,
     ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
         self.validate()?;
+        let mut recipient_scopes = capability_ceiling.clone();
+        recipient_scopes.sort_unstable();
+        recipient_scopes.dedup();
+        let recipient = || {
+            recipient_principal.map(str::to_owned).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "an environment that can read the operator vault must seal the recipient principal"
+                )
+            })
+        };
         let ProjectExecutionPolicy::LiveDirect {
             access,
             child_policy,
@@ -58,6 +76,8 @@ impl ExecutionPolicyResolution for ExecutionPolicy {
                 project_authority_id: "pending".to_string(),
                 source_identity: format!("dotenv:{}", root.join(".env").display()),
                 include_operator_vault: *include_operator_vault,
+                recipient_principal: recipient()?,
+                recipient_scopes: recipient_scopes.clone(),
                 name_authority: name_authority(name_policy),
             },
             ExecutionEnvironmentPolicy::Vault {
@@ -65,6 +85,8 @@ impl ExecutionPolicyResolution for ExecutionPolicy {
                 name_policy,
             } => ryeos_state::objects::EnvironmentAuthority::Vault {
                 namespace: namespace.clone(),
+                recipient_principal: recipient()?,
+                recipient_scopes: recipient_scopes.clone(),
                 name_authority: name_authority(name_policy),
             },
             ExecutionEnvironmentPolicy::Delegated {
@@ -136,11 +158,13 @@ pub struct ResolvedStandardLocalLiveAuthority {
 pub fn resolve_standard_local_live_authority(
     project_path: &std::path::Path,
     capability_ceiling: Vec<String>,
+    recipient_principal: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> anyhow::Result<ResolvedStandardLocalLiveAuthority> {
     resolve_local_live_authority(
         project_path,
         capability_ceiling,
+        recipient_principal,
         isolation,
         LocalLiveEnvironment::OverlayWithOperatorVault,
     )
@@ -187,9 +211,15 @@ pub fn authorize_local_live_execution(
 pub fn resolve_local_live_authority(
     project_path: &std::path::Path,
     capability_ceiling: Vec<String>,
+    recipient_principal: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
     environment: LocalLiveEnvironment,
 ) -> anyhow::Result<ResolvedStandardLocalLiveAuthority> {
+    // The sealed ceiling is a sorted set; callers hand over the caller's scopes
+    // in whatever order the grant listed them.
+    let mut capability_ceiling = capability_ceiling;
+    capability_ceiling.sort_unstable();
+    capability_ceiling.dedup();
     authorize_local_live_execution(&capability_ceiling, environment)?;
     let policy = environment.policy();
     policy.validate()?;
@@ -198,6 +228,7 @@ pub fn resolve_local_live_authority(
             project_path,
             live_filesystem_confinement_for_isolation(isolation.inspection()),
             capability_ceiling,
+            Some(recipient_principal),
         )?,
         lifecycle: policy.lifecycle_authority(),
     })
@@ -230,6 +261,7 @@ pub fn resolve_offline_local_live_project_authority(
         project_path,
         live_filesystem_confinement_for_isolation(isolation.inspection()),
         vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+        None,
     )
 }
 
@@ -359,6 +391,8 @@ pub(crate) fn synthetic_test_live_project_authority(
             project_authority_id: authority_id,
             source_identity: format!("dotenv:{}", project_path.join(".env").display()),
             include_operator_vault: true,
+            recipient_principal: "fp:test".to_string(),
+            recipient_scopes: Vec::new(),
             name_authority: EnvironmentNameAuthority::DeclaredRequired,
         },
         capability_ceiling: Vec::new(),
@@ -612,6 +646,7 @@ mod policy_tests {
                 project.path(),
                 live_filesystem_confinement_for_isolation(disabled.inspection()),
                 vec![LIVE_PROJECT_READ_CAPABILITY.to_owned()],
+                None,
             )
             .unwrap_err();
         assert!(
@@ -653,6 +688,7 @@ mod policy_tests {
                         project.path(),
                         live_filesystem_confinement_for_isolation(runtime.inspection()),
                         vec![capability.to_owned()],
+                        None,
                     )
                     .unwrap();
                 assert!(matches!(
@@ -678,6 +714,7 @@ mod policy_tests {
             let error = resolve_standard_local_live_authority(
                 project.path(),
                 vec![insufficient.to_string()],
+                "fp:test",
                 &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             )
             .unwrap_err();
@@ -687,6 +724,7 @@ mod policy_tests {
         let error = resolve_standard_local_live_authority(
             project.path(),
             vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            "fp:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap_err();
@@ -699,6 +737,7 @@ mod policy_tests {
         let without_vault = resolve_local_live_authority(
             project.path(),
             vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            "fp:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
             LocalLiveEnvironment::OverlayWithoutOperatorVault,
         )
@@ -711,6 +750,7 @@ mod policy_tests {
                 LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
                 OPERATOR_VAULT_CAPABILITY.to_string(),
             ],
+            "fp:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .unwrap();
@@ -729,6 +769,7 @@ mod policy_tests {
         resolve_standard_local_live_authority(
             project.path(),
             vec!["*".to_string()],
+            "fp:test",
             &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
         )
         .expect("node-local wildcard authority remains valid");

@@ -25,11 +25,11 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))?;
+    let report = config::load_remotes_report(&state.config.app_root)?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)?;
     let remote_cfg = loaded_remote.config.clone();
     let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)?;
-    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    let client = RemoteClient::from_remote_cfg(&state, &remote_cfg)?;
     let status = client.project_status(&binding.remote_project_path).await?;
 
     Ok(serde_json::json!({

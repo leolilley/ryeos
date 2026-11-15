@@ -60,7 +60,7 @@ async fn dispatch_with_state(
     }
     match request.method.as_str() {
         // Local lifecycle control has no public HTTP surface.
-        "lifecycle.status" => lifecycle_status(request.request_id, lifecycle),
+        "lifecycle.status" => lifecycle_status(request.request_id, lifecycle, state),
 
         // The UDS-only health read remains available to ready clients, but it
         // is not a bootstrap alias for lifecycle.status. Before Ready,
@@ -142,8 +142,48 @@ fn system_health(
     )
 }
 
-fn lifecycle_status(request_id: u64, lifecycle: &ryeos_node::LifecycleResponse) -> RpcResponse {
+fn lifecycle_status(
+    request_id: u64,
+    lifecycle: &ryeos_node::LifecycleResponse,
+    state: Option<&AppState>,
+) -> RpcResponse {
+    let window = (lifecycle.status == ryeos_node::LifecycleWireState::Running)
+        .then(|| state.and_then(live_service_window))
+        .flatten();
+    if window.is_none() {
+        return RpcResponse::ok(request_id, json!(lifecycle));
+    }
+    let mut lifecycle = lifecycle.clone();
+    lifecycle.service_window = window;
     RpcResponse::ok(request_id, json!(lifecycle))
+}
+
+/// The running incarnation's headroom before its planned rollover, read live
+/// from the same reader admission uses. A node without a native service has
+/// none; a factory that already refuses service is past its window, so it
+/// reports none either.
+fn live_service_window(state: &AppState) -> Option<ryeos_node::ServiceWindow> {
+    let reader = state
+        .extensions
+        .get::<ryeos_app::native_headroom::NativeServiceHeadroomReader>()?;
+    let headroom = reader.current().ok()?;
+    Some(service_window_at(
+        headroom,
+        u64::try_from(lillux::time::timestamp_millis()).unwrap_or(0) / 1_000,
+    ))
+}
+
+fn service_window_at(
+    headroom: ryeos_app::native_headroom::NativeServiceHeadroom,
+    now_unix_secs: u64,
+) -> ryeos_node::ServiceWindow {
+    ryeos_node::ServiceWindow {
+        seconds_until_rollover: headroom.service_seconds,
+        work_steps_until_rollover: headroom.work_steps,
+        rolls_at: lillux::time::iso8601_from_unix_secs(
+            now_unix_secs.saturating_add(headroom.service_seconds),
+        ),
+    }
 }
 
 fn unknown_method(request_id: u64, method: &str) -> RpcResponse {
@@ -213,6 +253,19 @@ fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse
                     json!({ "code": refusal.code() }),
                 );
             }
+            if let Some(refusal) =
+                ryeos_app::native_headroom::NativeHeadroomInsufficient::find(&err)
+            {
+                let mut details = refusal.details();
+                details["code"] = json!(refusal.code());
+                return RpcResponse::classified_err(
+                    request_id,
+                    refusal.code(),
+                    refusal.to_string(),
+                    false,
+                    details,
+                );
+            }
             RpcResponse::err(request_id, "request_failed", format!("{err:#}"))
         }
     }
@@ -239,6 +292,39 @@ mod tests {
         let error = response.error.expect("request failure");
         assert_eq!(error.code, "request_failed");
         assert_eq!(error.message, "handler context: root cause");
+    }
+
+    #[test]
+    fn service_window_reports_the_headroom_and_its_wall_clock_point() {
+        let window = service_window_at(
+            ryeos_app::native_headroom::NativeServiceHeadroom {
+                work_steps: 61_000_000,
+                service_seconds: 3_600,
+            },
+            0,
+        );
+        assert_eq!(window.seconds_until_rollover, 3_600);
+        assert_eq!(window.work_steps_until_rollover, 61_000_000);
+        assert_eq!(window.rolls_at, "1970-01-01T01:00:00Z");
+    }
+
+    #[test]
+    fn native_headroom_refusal_keeps_its_typed_code_and_fields() {
+        let error = anyhow::Error::new(ryeos_app::native_headroom::NativeHeadroomInsufficient {
+            what: "external qualification start".to_owned(),
+            dimension: ryeos_app::native_headroom::NativeHeadroomDimension::WorkSteps,
+            declared: 9,
+            remaining: 4,
+        })
+        .context("start the qualification");
+        let response = rpc_result(44, Err(error));
+        let error = response.error.expect("headroom refusal");
+        assert_eq!(error.code, "native_headroom_insufficient");
+        assert!(
+            error.message.contains("before its planned rollover"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

@@ -217,14 +217,31 @@ impl EnvironmentNameAuthority {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EnvironmentAuthority {
     None,
+    /// A project's `.env` overlay, optionally joined with the operator vault.
+    /// `recipient_principal` and `recipient_scopes` are the admitted
+    /// caller and its own canonical (sorted, unique) capability scopes at
+    /// admission, sealed whether or not the operator vault is included.
+    /// When `include_operator_vault` is set, every operator-vault name
+    /// delivered under this authority, to the admitted launch or to a child
+    /// or continuation that inherits it, is judged against exactly this
+    /// principal and scope set, and any other principal receives none.
     ProjectOverlay {
         project_authority_id: String,
         source_identity: String,
         include_operator_vault: bool,
+        recipient_principal: String,
+        recipient_scopes: Vec<String>,
         name_authority: EnvironmentNameAuthority,
     },
+    /// A vault namespace. `recipient_principal` and `recipient_scopes` are
+    /// the admitted caller and its own canonical (sorted, unique) capability
+    /// scopes at admission; every delivery under this authority judges the
+    /// node's name ceilings against exactly this set, and refuses any other
+    /// principal, including a child acting for someone else.
     Vault {
         namespace: String,
+        recipient_principal: String,
+        recipient_scopes: Vec<String>,
         name_authority: EnvironmentNameAuthority,
     },
     Delegated {
@@ -272,6 +289,8 @@ impl EnvironmentAuthority {
                 project_authority_id,
                 source_identity,
                 include_operator_vault: _,
+                recipient_principal,
+                recipient_scopes,
                 name_authority,
             } => {
                 if !project_backed {
@@ -287,13 +306,33 @@ impl EnvironmentAuthority {
                     source_identity,
                     false,
                 )?;
+                validate_trimmed_control_free(
+                    "project environment recipient principal",
+                    recipient_principal,
+                    false,
+                )?;
+                validate_sorted_capabilities(
+                    "project environment recipient scope",
+                    recipient_scopes,
+                )?;
                 name_authority.validate()
             }
             Self::Vault {
                 namespace,
+                recipient_principal,
+                recipient_scopes,
                 name_authority,
             } => {
                 validate_trimmed_control_free("vault namespace", namespace, false)?;
+                validate_trimmed_control_free(
+                    "vault environment recipient principal",
+                    recipient_principal,
+                    false,
+                )?;
+                validate_sorted_capabilities(
+                    "vault environment recipient scope",
+                    recipient_scopes,
+                )?;
                 name_authority.validate()
             }
             Self::Delegated {
@@ -366,6 +405,30 @@ pub enum ExecutionProjectAuthority {
 }
 
 impl ExecutionProjectAuthority {
+    /// The project this authority belongs to, as the node knows it: the
+    /// absolute project path that signer project scopes name.
+    ///
+    /// A live project is its own logical root. A pinned generation is
+    /// materialized at a per-generation checkout, so its logical root is the
+    /// original project path, but only when the stable project identity says
+    /// the project is local to this node (`local:<path>`). A pinned
+    /// generation whose identity names another site has no logical root here,
+    /// so a signer scoped to specific projects never admits its content.
+    pub fn logical_project_root(&self) -> Option<PathBuf> {
+        match self {
+            Self::Projectless { .. } => None,
+            Self::LiveProject { canonical_root, .. } => Some(canonical_root.clone()),
+            Self::PinnedGeneration {
+                stable_project_identity,
+                display_path: Some(path),
+                ..
+            } if stable_project_identity == &format!("local:{}", path.display()) => {
+                Some(path.clone())
+            }
+            Self::PinnedGeneration { .. } => None,
+        }
+    }
+
     pub const PROJECTLESS: Self = Self::Projectless {
         environment: EnvironmentAuthority::None,
     };
@@ -1306,7 +1369,68 @@ fn validate_sorted_capabilities(label: &str, capabilities: &[String]) -> anyhow:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vault_environment_recipient_is_validated_and_canonical() {
+        let vault = |principal: &str, scopes: &[&str]| EnvironmentAuthority::Vault {
+            namespace: "operator".to_owned(),
+            recipient_principal: principal.to_owned(),
+            recipient_scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            name_authority: EnvironmentNameAuthority::DeclaredRequired,
+        };
+        vault("fp:a", &["a", "b"]).validate(false).unwrap();
+        assert!(vault("", &[]).validate(false).is_err());
+        assert!(vault("fp:a", &["b", "a"]).validate(false).is_err());
+        assert!(vault("fp:a", &["a", "a"]).validate(false).is_err());
+        let overlay = EnvironmentAuthority::ProjectOverlay {
+            project_authority_id: "id".to_owned(),
+            source_identity: "dotenv:/p/.env".to_owned(),
+            include_operator_vault: true,
+            recipient_principal: "fp:a".to_owned(),
+            recipient_scopes: vec!["b".to_owned(), "a".to_owned()],
+            name_authority: EnvironmentNameAuthority::DeclaredRequired,
+        };
+        assert!(overlay.validate(true).is_err());
+    }
+
     use super::*;
+
+    fn pinned_for(identity: &str, display: Option<&str>) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::pinned(
+            identity.to_owned(),
+            display.map(PathBuf::from),
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn logical_project_root_is_the_local_project_path() {
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", Some("/srv/projects/alpha"))
+                .logical_project_root(),
+            Some(PathBuf::from("/srv/projects/alpha"))
+        );
+        // A project another site names is not a project of this node.
+        assert_eq!(
+            pinned_for(
+                "site:other:/srv/projects/alpha",
+                Some("/srv/projects/alpha")
+            )
+            .logical_project_root(),
+            None
+        );
+        assert_eq!(
+            pinned_for("local:/srv/projects/alpha", None).logical_project_root(),
+            None
+        );
+        assert_eq!(
+            ExecutionProjectAuthority::PROJECTLESS.logical_project_root(),
+            None
+        );
+    }
 
     fn output_partition() -> super::super::WorkspaceOutputPartition {
         let bounds = crate::external_content::products::ProductBounds {

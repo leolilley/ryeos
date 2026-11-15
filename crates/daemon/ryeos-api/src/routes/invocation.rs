@@ -39,7 +39,7 @@ pub struct RoutePrincipal {
     /// verifiers; policies must not infer this class from origin presence.
     pub authorized_key_class: Option<ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass>,
     /// Site identity cryptographically established by a remote-node request,
-    /// or by a remote-operator request plus its source-node co-signature.
+    /// or by a remote-principal request plus its source-node co-signature.
     /// `None` for local clients and non-RyeOS verifiers. Execute routes must
     /// never populate this from request data.
     pub authenticated_origin_site_id: Option<String>,
@@ -50,6 +50,14 @@ pub struct RoutePrincipal {
     /// `BTreeMap` for deterministic JSON serialization order.
     pub metadata: BTreeMap<String, String>,
 }
+
+/// Metadata key under which the `ryeos_signed` verifier records the content
+/// hash of the request it verified.
+pub(crate) const SIGNED_REQUEST_DIGEST_METADATA_KEY: &str = "signed_request_digest";
+
+/// Metadata key under which the `ryeos_signed` verifier records the site of the
+/// node that forwarded a delegated request.
+pub(crate) const DELEGATED_VIA_METADATA_KEY: &str = "delegated_via";
 
 impl RoutePrincipal {
     /// Convenience constructor with empty scopes + metadata.
@@ -70,7 +78,11 @@ impl RoutePrincipal {
     /// This conversion is mechanical: no class or origin is inferred from the
     /// principal string.
     pub fn handler_context(&self) -> ryeos_app::handler_context::HandlerContext {
-        match (
+        let signed_request_digest = self
+            .metadata
+            .get(SIGNED_REQUEST_DIGEST_METADATA_KEY)
+            .cloned();
+        let context = match (
             self.authorized_key_class,
             self.authenticated_grant_authority.clone(),
         ) {
@@ -90,7 +102,10 @@ impl RoutePrincipal {
                 self.authorized_key_class,
                 self.authenticated_origin_site_id.clone(),
             ),
-        }
+        };
+        context
+            .with_signed_request_digest(signed_request_digest)
+            .with_delegated_via(self.metadata.get(DELEGATED_VIA_METADATA_KEY).cloned())
     }
 }
 

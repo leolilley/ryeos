@@ -311,7 +311,7 @@ fn load_registered_generation_under_lock(
     TrustStore,
     Arc<VerifiedBundleGeneration>,
 )> {
-    let trust_store = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))
+    let trust_store = TrustStore::load_node_registry(app_root)
         .context("load node trust for isolation backend resolution")?;
     let loader = crate::bundle_bootstrap::BundleBootstrapLoader {
         app_root,
@@ -820,7 +820,6 @@ pub fn build_engine(
             &generation.roots(),
             Some(generation.registered_roots()),
             None, // no project root at startup — resolved per-request
-            None, // no overlay — daemon's persistent trust store wins
             isolation,
             Some(node_trust_store),
             execution_policy,
@@ -840,14 +839,8 @@ pub fn build_engine(
 /// * `bundle_roots` — system-tier bundle roots installed on this node.
 ///   The remote node's own bundles — same for every request.
 /// * `project_root` — optional materialised project root for the
-///   request. Currently used for project trust loading; the engine itself
-///   resolves project items via `ResolutionRoots` at request time, not from
-///   this argument.
-/// * `trust_overlay` — optional caller-pinned trust store to UNION
-///   with the persistent trust store. Used by per-request
-///   overlay so caller-trusted-only publishers can verify for the
-///   thread without leaking into the remote's persistent trust.
-///   `None` means use only the persistent trust store.
+///   request. The engine resolves project items via `ResolutionRoots` at
+///   request time, not from this argument.
 ///
 /// # Why a single constructor matters
 ///
@@ -862,7 +855,6 @@ pub fn build_engine_for_roots(
     config: &Config,
     bundle_roots: &[PathBuf],
     project_root: Option<&std::path::Path>,
-    trust_overlay: Option<&TrustStore>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     execution_policy: &crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<Engine> {
@@ -871,7 +863,6 @@ pub fn build_engine_for_roots(
         bundle_roots,
         None,
         project_root,
-        trust_overlay,
         isolation,
         None,
         execution_policy,
@@ -883,7 +874,6 @@ pub fn build_registered_engine_for_roots(
     config: &Config,
     bundle_roots: &[PathBuf],
     project_root: Option<&std::path::Path>,
-    trust_overlay: Option<&TrustStore>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     execution_policy: &crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
 ) -> Result<Engine> {
@@ -912,7 +902,6 @@ pub fn build_registered_engine_for_roots(
         bundle_roots,
         Some(captured_roots.to_vec()),
         project_root,
-        trust_overlay,
         isolation,
         None,
         execution_policy,
@@ -946,8 +935,7 @@ fn build_engine_for_roots_with_isolation(
     config: &Config,
     bundle_roots: &[PathBuf],
     registered_bundle_roots: Option<Vec<ryeos_engine::item_resolution::RegisteredBundleRoot>>,
-    project_root: Option<&std::path::Path>,
-    trust_overlay: Option<&TrustStore>,
+    _project_root: Option<&std::path::Path>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     pinned_node_trust_store: Option<&TrustStore>,
     execution_policy: &crate::node_policy::sections::execution::NodeExecutionAdmissionPolicy,
@@ -973,52 +961,20 @@ fn build_engine_for_roots_with_isolation(
     let bundle_roots: Vec<PathBuf> = bundle_roots.to_vec();
 
     // 3. Consume one immutable node-trust snapshot for installed executable
-    // and registry authority. Project keys and a caller-scoped overlay derive
-    // a separate item-resolution view but can never expand node authority.
-    //    Bundle-internal trust dirs are warning-only and never loaded.
-    //    Trust store loads BEFORE kind schemas because kind
-    //    schema verification requires the trust store. Both use raw
+    //    and registry authority. The trust registry loads BEFORE kind
+    //    schemas because kind schema verification requires it. Both use raw
     //    filesystem scanning (no item resolution dependency), so there
     //    is no bootstrap cycle.
-    let node_config_root = config.runtime_root().config();
-    TrustStore::warn_ignored_bundle_trust_dirs(&bundle_roots);
     let pinned_node_trust_store =
         pinned_node_trust_store.or_else(|| isolation.registered_generation_node_trust());
     let node_trust_store = match pinned_node_trust_store {
         Some(store) => store.clone(),
-        None => TrustStore::load(None, &node_config_root).map_err(|err| {
-            tracing::error!(error = %err, "failed to load node trust store");
-            anyhow::anyhow!("failed to load node trust store: {err:#}")
+        None => TrustStore::load_node_registry(&config.app_root).map_err(|err| {
+            tracing::error!(error = %err, "failed to load node trust registry");
+            anyhow::anyhow!("failed to load node trust registry: {err:#}")
         })?,
     };
-    tracing::info!(count = node_trust_store.len(), "loaded node trust store");
-    let trust_store = match project_root {
-        Some(project_root) => node_trust_store
-            .with_project_keys(project_root)
-            .map(std::borrow::Cow::into_owned),
-        None => Ok(node_trust_store.clone()),
-    };
-    let trust_store = match trust_store {
-        Ok(mut store) => {
-            if let Some(overlay) = trust_overlay {
-                // Caller-scoped overlay: pins the caller trusts but the
-                // remote does not — never written to the remote's
-                // persistent trust dir. The overlay lives for this
-                // engine's lifetime only.
-                let added = store.extend_from(overlay);
-                tracing::info!(
-                    overlay_added = added,
-                    total = store.len(),
-                    "applied per-request trust overlay"
-                );
-            }
-            store
-        }
-        Err(err) => {
-            tracing::error!(error = %err, "failed to load project item trust store");
-            anyhow::bail!("failed to load project item trust store: {err}");
-        }
-    };
+    tracing::info!(count = node_trust_store.len(), "loaded node trust registry");
 
     // 4. Admit the exact installed root set through the same registry and
     // executable checks used by prospective install/replace admission. Keeping
@@ -1039,7 +995,7 @@ fn build_engine_for_roots_with_isolation(
         .with_registered_bundle_roots(registered_bundle_roots.unwrap_or_default())
         .with_node_config_root(config.app_root.clone())
         .with_isolation_generation(Arc::clone(&isolation))
-        .with_trust_store(trust_store)
+        .with_trust_store(node_trust_store.clone())
         .with_node_trust_store(node_trust_store)
         .with_composers(composers)
         .with_effective_validators(effective_validators)

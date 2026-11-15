@@ -1,10 +1,13 @@
-# ryeos:signed:2026-11-11T02:56:41Z:e3bd8c66a4b26ffeed18590abdef060cc88490eb6429c28940cdbf32dd3ec820:qWGAXtkY30i3wxJWh8VNZ+K//BAPsnXxYb3asXScL2DQpSHkymMpy2Mh6f7iBdho0xU7Vyoz0/KVdNSLkrKsDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T19:53:53Z:8df8496919ac1278be22c244262ffd193b5b708ca634bafe44e649241e1f6ece:yYR6T5URQGamdDjmqvhZrEbMCRr2sJ7ZayWVNYQq9v5+OxkNbUc+UYoU5xF58Clvn0cM7ziNWmfBgmZBzDzqAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.claim
 required_caps: []
 schema:
   protocol_version: number
-  origin_site_id: string
+  principal_class: string
+  origin_site_id: string?
+  forwarding_key_id: string?
+  forwarding_signature: string?
   token: string
   public_key: string
   label: string?

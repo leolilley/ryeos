@@ -99,6 +99,7 @@ pub fn import_dry_run(
     // when this probe cannot supply the required captured launch authority.
     let plan = match engine.with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
         let effective = generation.effective_item(crate::engine::EffectiveItemRequest {
+            logical_project_root: None,
             item_ref: verified.resolved.canonical_ref.clone(),
             expected_kind: Some(verified.resolved.kind.clone()),
             project_root: match &plan_ctx.project_context {
@@ -389,12 +390,12 @@ mod tests {
                     crate::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                 live_access: None,
                 state_root: None,
+                bundle_state_home: None,
                 checkpoint_dir: None,
                 checkpoint_authority: None,
                 daemon_socket_path: None,
                 captured_callback_socket: false,
                 bundle_roots: &[],
-                node_trusted_keys_dir: None,
                 verified_code: &[],
                 verified_command: None,
                 external_read_only_mounts: &[],

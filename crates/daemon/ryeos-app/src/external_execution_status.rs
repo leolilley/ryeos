@@ -9,6 +9,13 @@
 //!
 //! The view is read only. It grants no release: every settlement keeps its
 //! own proof.
+//!
+//! `retained_generations` lists each runtime snapshot binding generation a
+//! recompose has superseded while open work (a qualification occurrence or a
+//! bootstrap source) still references it. The node retains such a generation
+//! with the work and releases it when the work settles.
+
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -18,6 +25,9 @@ use crate::runtime_db::external_execution::{
     ExternalAllocationOwner, ExternalAllocationPhase, HeldCredentialProfileOwner,
     HeldCredentialProfileRow, QualificationLocalStartPhase, QualificationLocalStartRecord,
     UnsettledAllocationRow,
+};
+use crate::runtime_db::runtime_snapshot_qualification::{
+    OpenSnapshotGenerationReference, SnapshotWorkKind,
 };
 use crate::state_store::StateStore;
 
@@ -103,12 +113,38 @@ pub struct CredentialProfileStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RetainedGenerationReference {
+    pub kind: SnapshotWorkKind,
+    pub operation_id: String,
+    pub occurrence_bound: bool,
+}
+
+/// A superseded runtime snapshot binding generation that open work still
+/// references, so the node keeps it to settle that work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedGenerationStatus {
+    /// `runtime_snapshot_production` or `runtime_snapshot_qualification`.
+    pub section: String,
+    pub binding_id: String,
+    pub retained_digest: String,
+    /// What node config pins for this binding now; `None` once the binding
+    /// is no longer installed at all.
+    pub current_digest: Option<String>,
+    pub referenced_by: Vec<RetainedGenerationReference>,
+    pub attention: Attention,
+    pub fix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExternalExecutionStatus {
     pub schema: String,
     pub observed_at_ms: i64,
     pub allocations: Vec<AllocationStatus>,
     pub qualification_local_starts: Vec<QualificationStartStatus>,
     pub credential_profiles: Vec<CredentialProfileStatus>,
+    pub retained_generations: Vec<RetainedGenerationStatus>,
 }
 
 impl ExternalExecutionStatus {
@@ -123,6 +159,7 @@ impl ExternalExecutionStatus {
                     .iter()
                     .map(|row| row.attention),
             )
+            .chain(self.retained_generations.iter().map(|row| row.attention))
             .max()
     }
 
@@ -135,14 +172,20 @@ impl ExternalExecutionStatus {
     }
 }
 
-/// Read the node's live view. The three journals are read under one store
-/// lock, so the rows agree with each other.
-pub fn read(store: &StateStore) -> Result<ExternalExecutionStatus> {
-    let rows = store.external_execution_status_rows()?;
+/// Read the node's live view. The journals are read under one store lock,
+/// so the rows agree with each other; `node_config` says which snapshot
+/// binding generations are current.
+pub fn read(
+    store: &StateStore,
+    node_config: &crate::node_config::NodeConfigSnapshot,
+) -> Result<ExternalExecutionStatus> {
+    let now = lillux::time::timestamp_millis();
+    let rows = store.external_execution_status_rows(now)?;
     Ok(classify(
         rows,
+        &current_snapshot_bindings(node_config),
         crate::runtime_db::daemon_generation_id(),
-        lillux::time::timestamp_millis() as i64,
+        now,
     ))
 }
 
@@ -151,6 +194,113 @@ pub struct StatusRows {
     pub allocations: Vec<UnsettledAllocationRow>,
     pub local_starts: Vec<QualificationLocalStartRecord>,
     pub profiles: Vec<HeldCredentialProfileRow>,
+    pub snapshot_references: Vec<OpenSnapshotGenerationReference>,
+}
+
+/// Current digest of every installed snapshot binding, by section and id.
+pub type CurrentSnapshotBindings = BTreeMap<(String, String), String>;
+
+pub fn current_snapshot_bindings(
+    node_config: &crate::node_config::NodeConfigSnapshot,
+) -> CurrentSnapshotBindings {
+    let production = node_config
+        .runtime_snapshot_production
+        .iter()
+        .map(|binding| {
+            (
+                (
+                    crate::node_config::sections::runtime_snapshot_production::SECTION_NAME
+                        .to_owned(),
+                    binding.id().to_owned(),
+                ),
+                binding.digest().to_owned(),
+            )
+        });
+    let qualification = node_config
+        .runtime_snapshot_qualification
+        .iter()
+        .map(|binding| {
+            (
+                (
+                    crate::node_config::sections::runtime_snapshot_qualification::SECTION_NAME
+                        .to_owned(),
+                    binding.id().to_owned(),
+                ),
+                binding.digest().to_owned(),
+            )
+        });
+    production.chain(qualification).collect()
+}
+
+/// Group open references by superseded generation. A generation that is
+/// still current is ordinary live work and is not listed.
+fn retained_generations(
+    references: &[OpenSnapshotGenerationReference],
+    current: &CurrentSnapshotBindings,
+) -> Vec<RetainedGenerationStatus> {
+    let mut grouped: BTreeMap<(String, String, String), Vec<RetainedGenerationReference>> =
+        BTreeMap::new();
+    for reference in references {
+        let key = (reference.section.to_owned(), reference.binding_id.clone());
+        if current.get(&key) == Some(&reference.binding_digest) {
+            continue;
+        }
+        grouped
+            .entry((key.0, key.1, reference.binding_digest.clone()))
+            .or_default()
+            .push(RetainedGenerationReference {
+                kind: reference.kind,
+                operation_id: reference.operation_id.clone(),
+                occurrence_bound: reference.occurrence_bound,
+            });
+    }
+    grouped
+        .into_iter()
+        .map(|((section, binding_id, retained_digest), referenced_by)| {
+            let waits_on_operator = referenced_by.iter().any(|reference| {
+                reference.kind == SnapshotWorkKind::QualificationOccurrence
+                    && reference.occurrence_bound
+            });
+            let (attention, fix) = if waits_on_operator {
+                let commands = referenced_by
+                    .iter()
+                    .filter(|reference| {
+                        reference.kind == SnapshotWorkKind::QualificationOccurrence
+                            && reference.occurrence_bound
+                    })
+                    .map(|reference| {
+                        format!(
+                            "`ryeos external-content terminate-runtime-snapshot-qualification {}`",
+                            reference.operation_id
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (
+                    Attention::Operator,
+                    format!(
+                        "a recompose superseded this generation while a qualification occurrence                          made under it is still running; the node keeps the generation so it can                          terminate the occurrence. {commands} ends it and releases the generation"
+                    ),
+                )
+            } else {
+                (
+                    Attention::Settling,
+                    "a recompose superseded this generation while open work made under it has                      not settled; the node keeps the generation for that work and releases it                      when the work settles (bootstrap sources are terminated by the daemon's                      recovery pass)"
+                        .to_owned(),
+                )
+            };
+            let current_digest = current.get(&(section.clone(), binding_id.clone())).cloned();
+            RetainedGenerationStatus {
+                section,
+                binding_id,
+                retained_digest,
+                current_digest,
+                referenced_by,
+                attention,
+                fix,
+            }
+        })
+        .collect()
 }
 
 fn start_generation(record: &QualificationLocalStartRecord, current: &str) -> DaemonGeneration {
@@ -375,7 +525,12 @@ fn profile_status(
     }
 }
 
-pub fn classify(rows: StatusRows, current_generation: &str, now: i64) -> ExternalExecutionStatus {
+pub fn classify(
+    rows: StatusRows,
+    current_bindings: &CurrentSnapshotBindings,
+    current_generation: &str,
+    now: i64,
+) -> ExternalExecutionStatus {
     let starts: Vec<_> = rows
         .local_starts
         .iter()
@@ -397,5 +552,152 @@ pub fn classify(rows: StatusRows, current_generation: &str, now: i64) -> Externa
         allocations,
         qualification_local_starts: starts,
         credential_profiles,
+        retained_generations: retained_generations(&rows.snapshot_references, current_bindings),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node_config::sections::{
+        runtime_snapshot_production, runtime_snapshot_qualification,
+    };
+
+    fn reference(
+        section: &'static str,
+        id: &str,
+        digest: char,
+        kind: SnapshotWorkKind,
+        operation: char,
+        occurrence_bound: bool,
+    ) -> OpenSnapshotGenerationReference {
+        OpenSnapshotGenerationReference {
+            section,
+            binding_id: id.to_owned(),
+            binding_digest: digest.to_string().repeat(64),
+            kind,
+            operation_id: operation.to_string().repeat(64),
+            occurrence_bound,
+        }
+    }
+
+    fn rows(snapshot_references: Vec<OpenSnapshotGenerationReference>) -> StatusRows {
+        StatusRows {
+            allocations: Vec::new(),
+            local_starts: Vec::new(),
+            profiles: Vec::new(),
+            snapshot_references,
+        }
+    }
+
+    #[test]
+    fn superseded_generations_are_listed_with_what_references_them() {
+        let production = runtime_snapshot_production::SECTION_NAME;
+        let qualification = runtime_snapshot_qualification::SECTION_NAME;
+        let current: CurrentSnapshotBindings = [
+            (
+                (production.to_owned(), "producer".to_owned()),
+                "b".repeat(64),
+            ),
+            (
+                (qualification.to_owned(), "qualify".to_owned()),
+                "d".repeat(64),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let status = classify(
+            rows(vec![
+                // A running occurrence made before the recompose.
+                reference(
+                    qualification,
+                    "qualify",
+                    'c',
+                    SnapshotWorkKind::QualificationOccurrence,
+                    '1',
+                    true,
+                ),
+                reference(
+                    production,
+                    "producer",
+                    'a',
+                    SnapshotWorkKind::QualificationOccurrence,
+                    '1',
+                    true,
+                ),
+                // A bootstrap source made before the recompose.
+                reference(
+                    production,
+                    "producer",
+                    'a',
+                    SnapshotWorkKind::BootstrapSource,
+                    '2',
+                    true,
+                ),
+                // Live work under the current generation is not retention.
+                reference(
+                    production,
+                    "producer",
+                    'b',
+                    SnapshotWorkKind::BootstrapSource,
+                    '3',
+                    true,
+                ),
+            ]),
+            &current,
+            "generation",
+            10,
+        );
+        assert_eq!(status.retained_generations.len(), 2);
+        let producer = status
+            .retained_generations
+            .iter()
+            .find(|row| row.section == production)
+            .unwrap();
+        assert_eq!(producer.retained_digest, "a".repeat(64));
+        assert_eq!(producer.current_digest, Some("b".repeat(64)));
+        assert_eq!(producer.referenced_by.len(), 2);
+        assert_eq!(producer.attention, Attention::Operator);
+        assert!(producer.fix.contains(&"1".repeat(64)));
+        let qualifier = status
+            .retained_generations
+            .iter()
+            .find(|row| row.section == qualification)
+            .unwrap();
+        assert_eq!(qualifier.retained_digest, "c".repeat(64));
+        assert_eq!(status.capacity_attention(), Some(Attention::Operator));
+    }
+
+    #[test]
+    fn a_retained_generation_only_recovery_settles_warns() {
+        let production = runtime_snapshot_production::SECTION_NAME;
+        let status = classify(
+            rows(vec![reference(
+                production,
+                "removed",
+                'a',
+                SnapshotWorkKind::BootstrapSource,
+                '2',
+                true,
+            )]),
+            &CurrentSnapshotBindings::new(),
+            "generation",
+            10,
+        );
+        assert_eq!(status.retained_generations.len(), 1);
+        assert_eq!(status.retained_generations[0].current_digest, None);
+        assert_eq!(
+            status.retained_generations[0].attention,
+            Attention::Settling
+        );
+        assert_eq!(status.capacity_attention(), Some(Attention::Settling));
+        let empty = classify(
+            rows(Vec::new()),
+            &CurrentSnapshotBindings::new(),
+            "generation",
+            10,
+        );
+        assert!(empty.retained_generations.is_empty());
+        assert_eq!(empty.capacity_attention(), None);
     }
 }

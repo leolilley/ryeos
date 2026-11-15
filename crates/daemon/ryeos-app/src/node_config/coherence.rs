@@ -194,7 +194,7 @@ pub fn inspect_installed_binding_coherence(
     })
 }
 
-fn read_installed_artifact_hashes(
+pub(crate) fn read_installed_artifact_hashes(
     app_root: &Path,
     node_trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<InstalledArtifactHashes> {

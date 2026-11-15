@@ -69,7 +69,7 @@ pub async fn handle(
             let report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
                 &source,
                 &dependencies,
-                &state.config.runtime_root().config(),
+                &state.config.app_root,
                 Arc::clone(&state.isolation),
             )
             .context("bundle verify failed")?;

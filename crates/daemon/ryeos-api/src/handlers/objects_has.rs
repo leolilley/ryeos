@@ -3,6 +3,17 @@
 //! Object and blob namespaces are intentionally independent. The same digest
 //! may validly exist in both namespaces, so a flattened presence answer cannot
 //! prove that a transfer closure is complete.
+//!
+//! Presence is answered only for hashes reachable from the caller's named
+//! root. Anything else is reported absent whether or not this node holds it,
+//! so the call never reveals the existence of an object outside the caller's
+//! scope. A sender that is told a hash is absent uploads it and the write
+//! deduplicates, which is the cost of not leaking.
+//!
+//! A project push asks under the `project_head` root of the project it is
+//! pushing. Objects it uploads for a head that does not exist yet are, by
+//! construction, not reachable from the current head, so they are answered
+//! absent and sent; `objects/put` stays a write that never answers presence.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -10,20 +21,29 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::objects_read_scope::{ReadRoot, resolve_scope, root_required};
 use crate::registry::ServiceDescriptor;
+use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    #[serde(default)]
+    pub root: Option<ReadRoot>,
     pub object_hashes: Vec<String>,
     pub blob_hashes: Vec<String>,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let root = req
+        .root
+        .clone()
+        .ok_or_else(|| root_required("objects/has"))?;
     validate_hashes("object", &req.object_hashes)?;
     validate_hashes("blob", &req.blob_hashes)?;
+    let scope = resolve_scope(&root, &ctx, &state)?;
     let cas_read = state.acquire_cas_read()?;
     let cas = cas_read.cas();
 
@@ -33,14 +53,14 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut missing_blob_hashes = Vec::new();
 
     for hash in &req.object_hashes {
-        if cas.has_object(hash)? {
+        if scope.objects.contains(hash) && cas.has_object(hash)? {
             found_object_hashes.push(hash.clone());
         } else {
             missing_object_hashes.push(hash.clone());
         }
     }
     for hash in &req.blob_hashes {
-        if cas.has_blob(hash)? {
+        if scope.blobs.contains(hash) && cas.has_blob(hash)? {
             found_blob_hashes.push(hash.clone());
         } else {
             missing_blob_hashes.push(hash.clone());
@@ -73,10 +93,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "objects.has",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/has"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

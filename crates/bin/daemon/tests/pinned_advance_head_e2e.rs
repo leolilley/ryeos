@@ -101,6 +101,10 @@ fn plant_writing_graph(project_dir: &Path, signer: &SigningKey) -> Result<()> {
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: test
 version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.advance/write
 config:
   start: write
   config_schema:
@@ -111,6 +115,7 @@ config:
     write:
       action:
         item_id: "tool:advance/write"
+        ref_bindings: {}
         params:
           gate: "${inputs.gate}"
       next:
@@ -359,9 +364,10 @@ async fn head_moved_case(item_ref: &str) -> Result<()> {
 
     let (status, body) = h
         .post_json(
-            "/execute",
+            "/execute/launch",
             json!({
                 "item_ref": item_ref,
+                "launch_id": "L-0123456789abcdef0123456789abcdef",
                 "ref_bindings": {},
                 "project_path": project.path(),
                 "parameters": {"gate": gate},
@@ -375,7 +381,7 @@ async fn head_moved_case(item_ref: &str) -> Result<()> {
         "advance-head run refused: {status}: {body:#}"
     );
     let thread_id = body
-        .pointer("/thread/thread_id")
+        .get("thread_id")
         .and_then(Value::as_str)
         .with_context(|| format!("accepted response has no thread id: {body:#}"))?
         .to_owned();

@@ -1,0 +1,45 @@
+# ryeos:signed:2026-11-15T00:04:42Z:463f1b66ae3bd09080cad04504541cf603eb936b4a2696205e198d2da4ca9b21:Ldq6Hp3N6f+GKPiMmz2QiMdoFKLa+2pq69PTZVomngyH2Ch2Q4myj6yS4deM0C1DvTM6LS6E4AwIH9J3orInAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+version: "0.1.0"
+category: "central-auth"
+name: "list-principals"
+executor_id: "@subprocess"
+execution_protocol: "protocol:ryeos/core/tool_callback"
+required_caps: ["ryeos.execute.tool.central-auth.list-principals"]
+description: "Read-only roster of the realm's accounts: id, display_name, roles, disabled. Never returns passphrases or secrets. For operator tooling that needs the full user list (e.g. per-user assistant assignment)."
+
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        state_home:
+          namespace:
+            from_param: realm_id
+          access: read_write
+
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
+config:
+  command: "${interpreter}"
+  args:
+    - "${tool_dir}/lib/central_auth.py"
+    - "list-principals"
+  input_data: "${params_json}"
+  timeout_secs: 15
+
+config_schema:
+  type: object
+  properties:
+    realm_id:
+      type: string
+      description: "Realm/app namespace, e.g. example-app."
+  required: [realm_id]

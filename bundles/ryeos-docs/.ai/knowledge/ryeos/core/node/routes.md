@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T12:24:06Z:96e1e4d39745fcf630735e79852d8cc2fcaf994d0f7a8da44098fd1c8359cd6c:1AzUTxw8wu0R/Vn/KQdXtJMsSvyLxDVI5l1Ioly89HuVZICTxTft2IWOynRtMAcpoK4FGZ/YXypEP8tTi4DAAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T07:17:08Z:b7d8accfb6e10bfa9a9480a95e7829f3238bd1c5868b182dc7021fbb187ce817:H1p72lDxMFUsCqlHBCuM+i63CCWzH3d2167yZW3u/HLS/MAKpnn4RG1yR4L9ChFawLG4nR4K35F+BXCfKJlEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -197,6 +197,14 @@ verified), or when it is undeclared and its handler declares
 reserved manifest runtime authority. See
 [Secrets & credentials](../../standard/secrets.md#who-may-read-the-operator-vault).
 
+Holding the capability is not enough on its own: each vault name the handler
+declares is also judged against the node's signed `sealed_vault_names`
+ceilings. The route's `route-handler:<bundle>:<route-id>` principal is not the
+configured operator, so every name must list that exact principal (or an exact
+capability it holds) as a recipient; otherwise the dispatch is refused with
+`vault_name_has_no_ceiling` or `vault_name_not_delivered`. See
+[Per-name vault ceilings](../../standard/secrets.md#per-name-vault-ceilings).
+
 The request envelope passed as tool parameters has this shape:
 
 ```json
@@ -354,6 +362,63 @@ Tracking pixel response example:
 }
 ```
 
+## Route authority
+
+A request authenticated as `auth: none` or `auth: hmac` has no human caller,
+yet a `launch` or `dispatch_launch` route can birth a thread. A thread never
+holds authority its caller did not lend, so the route is the caller and states
+the authority it lends in its signed data:
+
+```yaml
+id: arc/ingest
+path: /arc/ingest
+methods: [POST]
+auth: hmac
+request:
+  body: json
+response:
+  mode: launch
+  source_config:
+    item_ref: directive:arc/ingest
+    ref_bindings: {}
+    project_path: /srv/arc
+authority:
+  capabilities:
+    - ryeos.read.project.live
+    - ryeos.write.project.live
+    - ryeos.use.vault.operator
+    - ryeos.execute.tool.arc/*
+```
+
+The route bundle's signed manifest is the upper bound:
+
+```yaml
+runtime_authority:
+  operator_vault: true            # bounds ryeos.use.vault.operator
+  route_capabilities:             # bounds every other capability
+    - ryeos.read.project.live
+    - ryeos.write.project.live
+    - ryeos.execute.tool.arc/*
+```
+
+Per request, after the verifier runs, the route's principal receives exactly
+its declared capabilities if the verified manifest backs every one; otherwise
+the request is refused with 403 `route_authority_not_backed`, naming the
+unbacked capabilities and the cure. Root admission then requires those
+capabilities to cover every capability the launched item declares; a route
+that declares nothing lends nothing and is refused with
+`caller_capability_not_covered`. The launched thread records the route
+principal as its covering authority.
+
+Compile-time rules: `authority` is valid only on `auth: none` or `auth: hmac`
+(a `ryeos_signed` route runs with its caller's authority), is refused on
+handler routes (a tool declares no caps; handler operator-vault access stays
+under `response.source_config.authority`), must list at least one canonical
+capability once, and may not list capabilities in the manifest runtime-authority
+namespace other than the operator-vault capability. `route_capabilities`
+patterns obey the same grammar and are refused when they overlap that
+namespace.
+
 ## Invokers
 
 The `CompiledRouteInvocation` trait unifies auth, services, streaming,
@@ -400,6 +465,8 @@ significant:
 - **Undeclared path captures** — `${path.unknown}` in `source_config`
   when `unknown` is not in the route path
 - **Auth-mode coupling** — `execute` mode requires `auth: ryeos_signed`
+- **Route authority** — `authority` only on `auth: none`/`hmac` routes, never
+  on handler routes, with canonical, non-reserved, unique capabilities
 - **HMAC config validation** — secret env var must exist, replay
   protection must be configured, header validation, signature encoding
 

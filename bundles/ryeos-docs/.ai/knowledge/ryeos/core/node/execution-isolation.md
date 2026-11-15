@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-11-13T12:11:14Z:982226bb0c27fe5bff40163e3a9cae182ac6a7115ae4af99045f611eef508e16:pVSL1JUtC0AL/MvHAOSV4dNdnoKQem0A+CzOkk788gJkXOD2YbGweUbfweLZHYIKbjKzLzzf15QowDFhhW15Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T06:02:00Z:6cbda97ee985248091c06361d17dff49ab8d3a79b0530af7acf0bcb491cc3880:cJPKcoYB0RDbqkBz0EqJRbRaLGwSk+XAoXtJ0HUn34DkLaXvcOtS6iiF8ZIExNkYC1WFxHugyxTnyJTHO/7oBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
-version: "1.23.0"
+version: "1.24.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -24,8 +24,12 @@ compilation. Core ships the self-contained `linux-lillux` implementation as
 available signed data. The explicit development profile selects enforced
 execution, whole-process scope ownership, and the qualified nested-sandbox
 ceiling required by hosted development workers whose pinned client launches
-its own sandbox. The general installation profiles retain their explicit
-disabled choice.
+its own sandbox. The general installation profiles select enforced
+execution for their `local` host class too, using the direct shape (no
+process-scope requirement, `pid_namespace` proc) where the profile needs no
+scopes; the hosted classes retain their explicit disabled choice. Each such
+profile also declares `local_unconfined`, a disabled lane the operator must
+name with `--host-class local_unconfined`.
 
 Durable execution workspaces use the isolation-adapter v10 contract. RyeOS owns
 one canonical private `project/` generation. Disabled/native execution creates
@@ -198,8 +202,8 @@ installed runtime node-trusted.
 The policy has two modes:
 
 - `mode: disabled` does not wrap the subprocess in an isolation adapter. Profiles
-  select it per host class (the `standard` profile's `local` and `hosted` lanes
-  do). It does not require the selected bundle. Node-owned stdout/stderr retention
+  select it per host class (the `hosted` lanes and every `local_unconfined`
+  lane do). It does not require the selected bundle. Node-owned stdout/stderr retention
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement. Verification-to-exec is still pinned: an
   admitted command runs only from a retained descriptor carrying its exact
@@ -257,7 +261,6 @@ policy:
       - "{node_public_identity}"
       - "{daemon_socket}"
       - "{bundle_roots}"
-      - "{node_trusted_keys}"
       - "{verified_code}"
     writable:
       - "{project}"
@@ -354,7 +357,7 @@ refusal is not an executed workload's nonzero exit result.
   intersection of the signed declaration and live inspection.
 - `filesystem.readable` accepts absolute paths plus `{project}`, `{cwd}`,
   `{node_public_identity}`, `{daemon_socket}`, `{bundle_roots}`,
-  `{node_trusted_keys}`, and `{verified_code}`.
+  and `{verified_code}`.
 - `filesystem.writable` accepts absolute paths plus `{project}`, `{cwd}`, and
   `{checkpoint_dir}`.
 - A retained immutable-input or live-project authority intersects an explicit
@@ -505,8 +508,6 @@ The narrow readable placeholders mean:
   socket (for example its parent directory) is refused at launch by name, so
   no entry can hand a sandbox the control socket.
 - `{bundle_roots}` expands to bundle roots verified for this execution.
-- `{node_trusted_keys}` conditionally exposes the node owner's trusted-key
-  directory. The placeholder name matches the existing launch-envelope root.
 - `{verified_code}` is mandatory for executable-item launches. RyeOS rechecks
   the verified whole-file SHA-256, writes those exact bytes to node-owned
   content-addressed storage, mirrors the code's project or bundle authority at
@@ -541,11 +542,23 @@ and be contained by `{project}` or an absolute writable root chosen in this
 policy. This prevents a request from turning a path parameter into new host
 write authority.
 
+A launch that opened a bundle state home gets one more exact mount: the
+namespace directory `<app_root>/.ai/state/bundle-state/<bundle_id>/<namespace>`
+appears at the fixed destination `/run/ryeos/bundle-state`, writable or
+read-only by the declared access, pinned by descriptor. Isolation refuses any
+other path: the state-home root, a bundle's whole home, a deeper descendant, a
+path outside, or one that reaches there through a link. The mount is separate
+from the runtime state root, so a launch may carry both. Sibling namespaces and
+other bundles' homes are not mounted, and a broader policy mount that would
+contain them is dropped for the launch. Under disabled isolation no mount
+exists. See `ryeos/standard/bundle-state-home`.
+
 Writable roots may not overlap `/`, protected system roots, the app root, the
 selected backend artifacts, or the daemon socket. The resolved host home itself and
 its ancestors are also rejected. The only app-root exceptions are a
 daemon-provenance execution workspace directly beneath
-`.ai/state/cache/executions` and the exact daemon-owned checkpoint directory.
+`.ai/state/cache/executions`, the exact daemon-owned checkpoint directory, and
+the one bundle state namespace a launch opened.
 Absolute paths in this file are node-owner authority and should be kept narrow.
 
 ## Process boundary
@@ -900,13 +913,16 @@ execution workspaces; their lifelines are retained for the whole subprocess.
 
 ## Diagnostics and limits
 
-`ryeos node doctor` uses the production policy loader. Disabled mode reports a
-healthy inactive opt-out without resolving the selected backend. Enforce mode verifies
+`ryeos node doctor` uses the production policy loader. Disabled mode reports
+a warning without resolving the selected backend: runs execute as the daemon
+user, can read the operator key on the volume and write any `.ai/` path, and
+the live-run floors hold only under an enforced lane. The fix is to re-init on
+an enforced host class or cut a policy generation with an enforce lane. Enforce mode verifies
 backend availability and capture digest, and reports filesystem, network,
 environment, open-file, captured-output, and verified-artifact-limit posture.
 
-Images that initialize from a profile whose selected lane is disabled (for
-example `standard`) run without extra capabilities. The `contained-workflow`
+Images that initialize from a profile whose selected lane is disabled (a
+`hosted` class, or `local_unconfined`) run without extra capabilities. The `contained-workflow`
 image requires enforce. Enforce mode requires a separately installed selected signed
 backend bundle and every host facility needed by its declared capabilities.
 Setuid, setgid, and file-capability adapter or external artifact executables are
@@ -933,11 +949,15 @@ authorization, and capability checks remain active.
 
 ## Local use, hosted nodes, and Docker
 
-For a trusted, single-user local node, choosing a profile lane with disabled mode is a
-reasonable choice. It avoids namespace requirements while retaining RyeOS's
-normal signed-item and capability model. Enforcement becomes important when a
-node executes bundles for another person, accepts remotely supplied projects,
-or shares one worker among workloads with different trust.
+A local node enforces by default: the `local` host class runs jobs in the
+namespace sandbox, which needs unprivileged user, mount and pid namespaces and
+the new mount API from the kernel. When the host's sandbox probe cannot prove
+that lane, init refuses and names `--host-class local_unconfined`, the explicit
+disabled opt-out for a trusted single-user host. It avoids namespace
+requirements while retaining RyeOS's normal signed-item and capability model,
+but jobs then run as the daemon user and `ryeos node doctor` warns. Enforcement
+matters most when a node executes bundles for another person, accepts remotely
+supplied projects, or shares one worker among workloads with different trust.
 
 Docker and the RyeOS isolation protect different boundaries. A container isolates
 the whole RyeOS node from its host, but the daemon and every tool inside that

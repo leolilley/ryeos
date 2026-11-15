@@ -267,11 +267,9 @@ fn main() -> anyhow::Result<()> {
 fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<ResolvedLaunch> {
     let envelope: ryeos_runtime::envelope::LaunchEnvelope =
         serde_json::from_slice(stdin_data).map_err(|e| anyhow::anyhow!("invalid envelope: {e}"))?;
-    if envelope.schema_version()
-        != ryeos_engine::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
-    {
-        anyhow::bail!("unsupported managed launch envelope schema");
-    }
+    envelope
+        .validate_wire()
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
     if !envelope.runtime_data.is_empty() {
         anyhow::bail!(
             "graph launch runtime_data must be empty; received keys: {:?}",

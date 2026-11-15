@@ -1,11 +1,9 @@
-# ryeos:signed:2026-10-10T04:34:12Z:cd1065606b663e3bf224b2bf9f0735ec91175cafd523f05844b513710623d3fc:SsxfAJtTwv1ZlQ1IHL7qwcSIB+nsUDel3dvrZs4EA6WZMY2rIeYQpVOoFAJySPNy+Lu5mvgfHaj5EcYjeq3eDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T09:59:46Z:272891bd04ec2a4b85df821e1da45c8c22353b5effa757888f7aba371c7df1f7:JQTlWX4be4KxgZGz/zxAQkeIMTlGG4oRLEseOW8VvnhVISknNgu6MXRG2Kz6eDvecOhsrWgs7/qEmDXhEBdlDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: external-content.bootstrap-runtime-source
 required_caps: ["ryeos.execute.service.external-content/bootstrap-runtime-source"]
 schema:
   binding_id: string
-  materialization_binding_id: string
-  coordinate_digest: string
-  attestation_hash: string
+  source: object
   maximum_lifetime_seconds: integer
-description: Create one bounded source sandbox from the current admitted runtime materialization; this does not grant upload, snapshot, or worker authority
+description: "Create one bounded source sandbox for the current retained snapshot source: source {kind: captured_product, witness_hash, witness_source} or {kind: bundle_materialization, materialization_binding_id, coordinate_digest, attestation_hash}; this does not grant upload, snapshot, or worker authority"

@@ -111,6 +111,7 @@ fn session_context(
         .with_checked_bundle_generation(|generation| -> anyhow::Result<_> {
             let root = generation.effective_item_under_project_authority(
                 ryeos_engine::engine::EffectiveItemRequest {
+                    logical_project_root: None,
                     item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(
                         "config:test/presentation",
                     )?,

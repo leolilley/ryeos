@@ -75,9 +75,32 @@ struct RuntimeSourceAuthorityDecls {
     item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
     #[serde(default, rename = "project_snapshots")]
     _project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
+    /// Node-owned bundle state home; judged by the launch that opens it.
+    #[serde(default, rename = "state_home")]
+    _state_home: Option<RuntimeSourceStateHomeDecl>,
     /// Handler-route operator-vault bound; judged by route dispatch, not here.
     #[serde(default, rename = "operator_vault")]
     _operator_vault: bool,
+    /// Route-principal authority bound; judged by route dispatch, not here.
+    #[serde(default, rename = "route_capabilities")]
+    _route_capabilities: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceStateHomeDecl {
+    #[serde(rename = "namespaces")]
+    _namespaces: RuntimeSourceStateHomeNamespaces,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeSourceStateHomeNamespaces {
+    Fixed {
+        #[serde(rename = "names")]
+        _names: Vec<String>,
+    },
+    LaunchParam,
 }
 
 #[derive(serde::Deserialize)]
@@ -288,15 +311,19 @@ pub fn capture_signed_bundle_source_manifest(
                 manifest_path.display()
             ))
         })?;
-    let (trust_class, _) =
-        crate::trust::verify_item_signature(raw, &signature, &envelope, node_trust_store).map_err(
-            |error| {
-                EngineError::Internal(format!(
-                    "verify runtime source-bundle manifest {}: {error}",
-                    manifest_path.display()
-                ))
-            },
-        )?;
+    let (trust_class, _) = crate::trust::verify_item_signature(
+        raw,
+        &signature,
+        &envelope,
+        node_trust_store,
+        &crate::trust::SignerContext::bundle("runtime_source_bundle_manifest"),
+    )
+    .map_err(|error| {
+        EngineError::Internal(format!(
+            "verify runtime source-bundle manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
     if trust_class != ContractTrustClass::Trusted {
         return Err(EngineError::Internal(format!(
             "runtime source-bundle manifest signer {} is not node-trusted",
@@ -679,6 +706,15 @@ fn resolve_executor_chain(
                     header,
                     &source_format.signature,
                     trust_store,
+                    &crate::trust::SignerContext::new(
+                        source_space,
+                        &ref_.kind,
+                        roots
+                            .logical_project_root
+                            .as_deref()
+                            .or_else(|| project_authority.map(|(root, _)| root))
+                            .or_else(|| roots.project_root()),
+                    ),
                 )
                 .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
                 (trust_class, signer.map(|signer| signer.0))
@@ -1960,6 +1996,7 @@ metadata:
         let content_hash = crate::item_resolution::content_hash(&content);
 
         let resolved = ResolvedItem {
+            logical_project_root: None,
             canonical_ref: CanonicalRef::parse(canonical_ref).unwrap(),
             kind: kind.to_string(),
             source_path,
@@ -2000,6 +2037,7 @@ metadata:
             crate::contracts::SubjectResolutionAuthority::Projectless
         };
         PlanContext {
+            logical_project_root: None,
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
                 scopes: vec!["execute".into()],

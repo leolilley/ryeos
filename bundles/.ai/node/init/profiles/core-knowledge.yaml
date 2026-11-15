@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:e8a3224dff636499af044ae4fee8040a868c2bb892b183c9a8e6330ed256f322:VTGXNz0bnQXV7ZbLx+N306QnVF7o5YevbgZ+IWUv/NnhnTQzaThN/if8VWWNudztjPV1NlVxVAOqcLTe33WiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:11bdd136ad5575455ab2fc6461401001cd145bb371938895d6858d0a53c64d59:fUxIM/VJu5v8uQ6HXp0qkF1oaCe5y0D9y56VKeyzXX5s0zz3xq0OGr6yQc3uuqwjOCPl2/8H51uL3bx/nY9wBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the knowledge bundle.
 schema: 1
 exact_bundles:
@@ -281,7 +281,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -317,6 +316,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
@@ -343,7 +354,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -391,6 +402,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

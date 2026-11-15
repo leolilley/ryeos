@@ -60,7 +60,7 @@ async fn status_requires_operator() {
         (
             local.fingerprint.clone(),
             true,
-            AuthorizedKeyPrincipalClass::RemoteOperator,
+            AuthorizedKeyPrincipalClass::RemotePrincipal,
             site.clone(),
         ),
         (

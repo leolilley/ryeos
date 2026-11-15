@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-13T09:57:23Z:8a3133592a7b1b379d3af857384fa1b9c3eb6249cb60a3eb6cb3c69f0819c99d:G2ggZ1kFU4w2/D/1b/we5rSaz5TEe+aro3BWrzeKD5JZvkqyA6DiteVZXJ41EG5Zr5FtE6EKjNErcLGwqR5iCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- remote
+- pin
+description: Pin a remote node from its descriptor without contacting it
+forms:
+- slots:
+  - field: remote
+help:
+  usage: ryeos remote pin <name> --descriptor <file>
+dispatch:
+  kind: execute_ref
+  execute: service:remote/pin

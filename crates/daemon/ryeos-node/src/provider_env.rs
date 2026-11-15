@@ -17,8 +17,10 @@ use ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmission
 use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentPolicy;
 #[cfg(test)]
 use ryeos_node_runtime::node_policy::sections::provider_environment::{
-    PROVIDER_ENVIRONMENT_POLICY_SCHEMA, ProviderEnvironmentName, ProviderEnvironmentRecipients,
+    PROVIDER_ENVIRONMENT_POLICY_SCHEMA, ProviderEnvironmentName,
 };
+#[cfg(test)]
+use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
 
 /// Provider environment taken at startup, bound to the app root and the
 /// policy generation that declared its names. Its debug form carries names
@@ -63,7 +65,7 @@ impl StartupProviderEnvironment {
 /// Call only during single-threaded daemon startup, before any async
 /// runtime, application or foreign library thread exists.
 pub unsafe fn take_at_startup(app_root: &Path) -> Result<StartupProviderEnvironment> {
-    let trust = TrustStore::load(None, &app_root.join(ryeos_engine::AI_DIR).join("config"))
+    let trust = TrustStore::load_node_registry(app_root)
         .context("load node trust for the provider environment")?;
     let snapshot = ryeos_node_runtime::node_policy::load_snapshot(
         app_root,
@@ -121,7 +123,7 @@ mod tests {
                 .iter()
                 .map(|name| ProviderEnvironmentName {
                     name: (*name).to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: vec!["fp:operator".to_owned()],
                         capabilities: Vec::new(),
                     },

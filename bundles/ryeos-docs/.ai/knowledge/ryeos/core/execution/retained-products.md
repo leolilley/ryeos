@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T09:56:02Z:5c1d3681c87cc10a6132a13bda5ccefd6f7336d02f0cf737544cdfe59f59578e:BFlxhRSgXQZZ+TP3XyvO5BQnEwqQrlVzBkRkF9ykiSr+G5CacWNwpZtDr0epDqyPZvvjBYUUV9+yRmL4ksNOAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:de5f6dd4263a69d236a19664d8fcacf52f604a7a5ba766a69cc48c4067eb2f82:KyLouVjQtfxVt0r3gQQt5+U1BNliD2w4bBzEPpbPJDKbsQzbNcb+jr68OHAgDEUf+woY1eDvYpoIVrJLPdYUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -106,7 +106,7 @@ route, and prints `testimony_hash`, `acceptance_hash`, `coordinate_id` and
 `reused_existing`. Keep `acceptance_hash`; selections name it.
 
 The receiver accepts only when the testimony's signer is the authenticated
-caller and holds a current `remote_operator` grant, the named acceptance
+caller and holds a current `remote_principal` grant, the named acceptance
 policy resolves and allows the lane, the origin's qualification policy is the
 same signed bytes the receiver resolves for that ref, and the qualified
 product was received from that origin by that operator.
@@ -178,8 +178,9 @@ always present. The two acceptance hashes are different records.
 The receiver admits the selection only for the attesting operator, who also
 owns the received product. From the origin that is `ryeos remote run
 <receiver> service:external-execution/admit-product-program
---outbound-principal configured_operator ...`, and the origin operator's
-grant on the receiver needs
+--outbound-principal delegated ...` (the default), and the origin operator, who
+signs a delegation for the receiver with `ryeos remote delegate`, needs a grant
+on the receiver for
 `ryeos.execute.service.external-execution/admit-product-program`.
 
 `admit-product-program` derives the admitted program for a captured-product
@@ -229,6 +230,34 @@ its fix: `remote_content_no_local_activation`,
 `remote_content_verifier_differs` and `remote_content_acceptance_superseded`.
 A different release on the receiver needs either the origin's release or a
 re-qualification at the origin against the receiver's release.
+
+## Producing and publishing a product
+
+A product declaration is signed data: a producer (a graph or tool) declares
+named products with their bounds, and capture enforces them. One composite
+runs the whole operator flow over the separate verified commands:
+
+```bash
+ryeos --project <project> external-content product publish <producer-ref> <product-name> \
+  [--activation <config-ref>] [--push-to <remote>] [--json]
+```
+
+In order it activates the named external-content recipe online and waits for
+it, executes the producer with `--async --pin-project` (or `--current-head`,
+`--project-snapshot <hash>`), follows the thread to a terminal state, captures
+the product (`external-content capture-product`), admits the witness under the
+node's local admission policy (`ryeos admission submit <witness>`), and, with
+`--push-to`, pushes it (`external-content push-product`) under the
+declaration's byte bound. It keeps no state file. Capture is keyed by the
+chain, thread and product, admission by subject and policy, and a push resumes
+its staging on the remote, so a run that stopped after production resumes with
+`--from-thread <thread-id>`, which every failure after production names. A
+producer thread that ended other than `completed` has no product.
+
+The steps remain separate commands. `ryeos admission submit <subject-hash>
+[--policy <id>] [--claim accepted]` admits any local CAS root; its defaults are
+the local policy and the accepted claim. There is no export-to-directory verb:
+`push-product` is the product transport.
 
 ## Generation-scoped bindings and renewal
 

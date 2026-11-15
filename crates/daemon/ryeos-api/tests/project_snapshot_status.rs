@@ -131,7 +131,7 @@ async fn unauthorized_callers_are_refused_before_project_path_observation() {
             local.fingerprint.clone(),
             vec![CAP.to_owned()],
             true,
-            Some(AuthorizedKeyPrincipalClass::RemoteOperator),
+            Some(AuthorizedKeyPrincipalClass::RemotePrincipal),
             Some("site:remote".into()),
         ),
         HandlerContext::new_with_authority(

@@ -553,7 +553,11 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             if let Some(timings) = ctx.launch_timings.as_ref() {
                 timings.emit("gateway_preflight_failed");
             }
-            RouteDispatchError::BadRequest(format!("stream root launch admission failed: {error}"))
+            crate::routes::launch::typed_launch_policy_refusal(&error).unwrap_or_else(|| {
+                RouteDispatchError::BadRequest(format!(
+                    "stream root launch admission failed: {error}"
+                ))
+            })
         })?;
         if !preflight.class.persists_pre_minted_root() {
             return Err(RouteDispatchError::BadRequest(

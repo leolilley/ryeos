@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-05T00:45:27Z:12539c35871f1e2d105be3da7dc659a96e95006a1d90121fa22bd241b5ccf592:K1OSXj919Y2cRw8eJRkxtpbZaqdUs9TNIrpfeGWyZtJAWaTvhkkz0DEDjKWLxjADTjY7eQfhNHiNaKgDnarKCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T05:04:32Z:529d3fd3107f56b17d1bcbd8e295a04d83d945f341864ff4a116e60ad3e40e91:Jjto/OeEifscyRD1FE+Y/N2u0GCtmroERDKZsPBJ8n3AmxnmguuQnXTd1eaOKTkU5a/DxOMaOc1gTr4ntCt6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -84,7 +84,7 @@ capped at TrustedProject.
 ### 7. Per-Request Engine Overlays
 
 Remote execution materializes the caller's project source, parsers,
-kind schemas, trust pins, and tool definitions into a per-request engine
+kind schemas, and tool definitions into a per-request engine
 overlay. The remote adapts to the caller's context — the entire
 execution context travels with the push.
 

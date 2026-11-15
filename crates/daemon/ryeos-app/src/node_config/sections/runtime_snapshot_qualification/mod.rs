@@ -12,6 +12,7 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub mod compose;
 
@@ -108,7 +109,126 @@ impl QualificationDocument {
 pub struct InstalledRuntimeSnapshotQualificationBinding {
     id: String,
     document: QualificationDocument,
+    signer: String,
+    signer_verifying_key: [u8; 32],
+    signed_source: Arc<str>,
     digest: String,
+}
+
+fn binding_digest(id: &str, signer: &str, signed_source: &str) -> Result<String> {
+    ryeos_state::objects::canonical_value_digest(&serde_json::json!({
+        "domain": "ryeos.runtime-snapshot-qualification-binding.v1",
+        "id": id,
+        "signer": signer,
+        "signed_source": lillux::sha256_hex(signed_source.as_bytes()),
+    }))
+}
+
+/// The signed qualification generation an open qualification occurrence was
+/// created under, retained with the occurrence so its termination does not
+/// depend on what node config pins now. It carries no credential and cannot
+/// create a new occurrence: only the occurrence's own termination reads it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedRuntimeSnapshotQualificationBinding {
+    schema: u32,
+    id: String,
+    document: QualificationDocument,
+    signed_source: String,
+    signer: String,
+    signer_verifying_key: [u8; 32],
+    digest: String,
+}
+
+impl RetainedRuntimeSnapshotQualificationBinding {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema == 1 && !self.id.is_empty() && self.id.len() <= 128,
+            "retained snapshot qualification identity is invalid"
+        );
+        self.document.validate()?;
+        let key = lillux::crypto::VerifyingKey::from_bytes(&self.signer_verifying_key)
+            .context("retained snapshot qualification key is invalid")?;
+        ensure!(
+            lillux::signature::compute_fingerprint(&key) == self.signer,
+            "retained snapshot qualification signer changed"
+        );
+        ensure!(
+            !self.signed_source.is_empty()
+                && self.signed_source.len()
+                    <= ryeos_node_runtime::node_document::MAX_ITEM_BYTES as usize,
+            "retained snapshot qualification signed source exceeds bound"
+        );
+        let (body, _) = lillux::signature::strip_canonical_signature_with_envelope(
+            &self.signed_source,
+            "#",
+            None,
+            false,
+        )?;
+        let envelope = ryeos_engine::contracts::SignatureEnvelope {
+            prefix: "#".into(),
+            suffix: None,
+            after_shebang: false,
+        };
+        let header =
+            ryeos_engine::item_resolution::parse_signature_header(&self.signed_source, &envelope)
+                .context("retained snapshot qualification has no canonical signature")?;
+        ensure!(
+            header.signer_fingerprint == self.signer,
+            "retained snapshot qualification header changed signer"
+        );
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: self.signer.clone(),
+                verifying_key: key,
+                label: None,
+            },
+        ]);
+        let (class, _) = ryeos_engine::trust::verify_item_signature(
+            &self.signed_source,
+            &header,
+            &envelope,
+            &trust,
+            &ryeos_engine::trust::SignerContext::node("node_config"),
+        )?;
+        ensure!(
+            class == ryeos_engine::contracts::TrustClass::Trusted,
+            "retained snapshot qualification signature is invalid"
+        );
+        let decoded: QualificationDocument = serde_yaml::from_str(&body)?;
+        ensure!(
+            decoded == self.document,
+            "retained snapshot qualification document differs from signed source"
+        );
+        ensure!(
+            binding_digest(&self.id, &self.signer, &self.signed_source)? == self.digest,
+            "retained snapshot qualification digest changed"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Reconstructs the signed binding the occurrence was created under.
+    /// Historical identity for that occurrence's termination only; a new
+    /// occurrence still selects current node config.
+    pub(crate) fn recovered_binding(&self) -> Result<InstalledRuntimeSnapshotQualificationBinding> {
+        self.validate()?;
+        Ok(InstalledRuntimeSnapshotQualificationBinding {
+            id: self.id.clone(),
+            document: self.document.clone(),
+            signer: self.signer.clone(),
+            signer_verifying_key: self.signer_verifying_key,
+            signed_source: self.signed_source.clone().into(),
+            digest: self.digest.clone(),
+        })
+    }
 }
 
 impl InstalledRuntimeSnapshotQualificationBinding {
@@ -146,8 +266,58 @@ impl InstalledRuntimeSnapshotQualificationBinding {
         Self {
             id: "snapshot-qualification".into(),
             document,
+            signer: "0".repeat(64),
+            signer_verifying_key: [0; 32],
+            signed_source: Arc::from(""),
             digest: "9".repeat(64),
         }
+    }
+
+    /// A node-signed qualification binding whose digest is computed from its
+    /// signed source, so it can be retained and recovered.
+    #[cfg(test)]
+    pub(crate) fn signed_test_fixture(
+        production_binding_id: &str,
+        production_binding_digest: &str,
+        provider_spec_digest: &str,
+        verifier_artifact_hash: &str,
+    ) -> Self {
+        let mut fixture = Self::test_fixture(
+            production_binding_id,
+            production_binding_digest,
+            provider_spec_digest,
+            verifier_artifact_hash,
+            BTreeMap::new(),
+        );
+        let key = lillux::crypto::SigningKey::from_bytes(&[37; 32]);
+        fixture.signer = lillux::signature::compute_fingerprint(&key.verifying_key());
+        fixture.signer_verifying_key = key.verifying_key().to_bytes();
+        let signed = lillux::signature::sign_content_at(
+            &serde_yaml::to_string(&fixture.document).unwrap(),
+            &key,
+            "#",
+            None,
+            "2026-11-14T00:00:00Z",
+        );
+        fixture.digest = binding_digest(&fixture.id, &fixture.signer, &signed).unwrap();
+        fixture.signed_source = signed.into();
+        fixture
+    }
+
+    pub(crate) fn retained_generation(
+        &self,
+    ) -> Result<RetainedRuntimeSnapshotQualificationBinding> {
+        let retained = RetainedRuntimeSnapshotQualificationBinding {
+            schema: 1,
+            id: self.id.clone(),
+            document: self.document.clone(),
+            signed_source: self.signed_source.to_string(),
+            signer: self.signer.clone(),
+            signer_verifying_key: self.signer_verifying_key,
+            digest: self.digest.clone(),
+        };
+        retained.validate()?;
+        Ok(retained)
     }
 
     pub(crate) fn consumer_verifier(
@@ -233,15 +403,17 @@ impl CompiledNodeConfigItem for ParsedBinding {
         target: &mut crate::node_config::loader::NodeConfigSnapshotBuilder,
         admission: &crate::node_config::loader::NodeConfigAdmission,
     ) -> Result<()> {
-        let digest = ryeos_state::objects::canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.runtime-snapshot-qualification-binding.v1",
-            "id": self.id,
-            "signer": admission.signer_fingerprint,
-            "signed_source": lillux::sha256_hex(admission.signed_source.as_bytes()),
-        }))?;
+        let digest = binding_digest(
+            &self.id,
+            &admission.signer_fingerprint,
+            &admission.signed_source,
+        )?;
         target.push_runtime_snapshot_qualification(InstalledRuntimeSnapshotQualificationBinding {
             id: self.id,
             document: self.document,
+            signer: admission.signer_fingerprint.clone(),
+            signer_verifying_key: admission.signer_verifying_key,
+            signed_source: admission.signed_source.clone(),
             digest,
         })
     }

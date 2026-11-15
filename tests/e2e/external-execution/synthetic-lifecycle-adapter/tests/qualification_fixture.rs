@@ -483,6 +483,7 @@ fn run_receiver(
                 "portable content testimony origin operator",
                 state.identity.fingerprint(),
                 &now,
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 &state.identity,
                 ryeos_node_runtime::identity::WildcardPolicy::Reject,
                 false,
@@ -504,6 +505,7 @@ fn run_receiver(
                 "portable content testimony origin node",
                 state.identity.fingerprint(),
                 &now,
+                &ryeos_node_runtime::identity::GrantTerms::for_tests(),
                 &origin.site_id,
                 state.identity.signing_key(),
             )

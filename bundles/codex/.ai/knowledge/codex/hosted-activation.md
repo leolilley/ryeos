@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T02:52:55Z:36ee6d97308e9c1a76a355da1ec450f42ac4a0d5880868957df7039762155172:t6yRDia4O6SmBjQiTvyhRaj6vdp+jiqxonK0PMTtOx9CJF6gaRfLkIpVZk+wNOc8rcQ9o59eIcJdQsQJG+7YAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T18:26:28Z:2f86329c177d0480e75d98160be6a88ff8bc36e004f308ac6d92e195a4679a6c:FmKGde3Hj8rno45PvXmrAdi8QAuhVRsNI+FOKwp1m3q1JlQ5J6DjrbG50LDzLDoH1RS0hqE98FQ5TDZEos9wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -262,7 +262,7 @@ configured-operator forwarding route to inspect profiles on a remote node.
    semantic-conversion flag; an intentional reclassification or origin change
    of an incumbent grant does.
    Use the complete exact scope set printed in the Codex bundle README. The
-   target-signed `remote_operator` grant constrains which source site may
+   target-signed `remote_principal` grant constrains which source site may
    forward the operator; it is not transit proof without the separate
    source-node co-signature. A plain `local_client` grant is not acceptable,
    and ordinary remote-node grants remain node principals that cannot own this
@@ -345,14 +345,15 @@ configured-operator forwarding route to inspect profiles on a remote node.
    generation, and is never automatic.
 6. Establish the configured operator's principal-scoped project HEAD through
    the standard local `commit` or an explicit full-project
-   `service:remote/push` with `outbound_principal: configured_operator`. A
+   `service:remote/push` with `outbound_principal: delegated` (the operator signs a delegation for the
+   hosted remote with `ryeos remote delegate`). A
    local launch uses `--current-head`; a client with a different absolute path
    uses `service:remote/run`, whose configured project binding supplies the
    destination path, preserves that configured-operator principal, and
    co-signs the request with the admitted source-node key. It returns the
    durable accepted thread ID. Drive projectless credential and session
    services through wait-mode `service:remote/run` with
-   `outbound_principal: configured_operator`; do not connect an operator-key
+   `outbound_principal: delegated`; do not connect an operator-key
    client directly to the hosted daemon. Start the worker with the signed
    `config:codex/environments/default` environment (the local CLI spelling is
    `codex session start <profile> --environment
@@ -395,7 +396,7 @@ executions and invoke only the required local maintenance scopes
 is actually required). Same-class scope replacement is an atomic node-signed
 grant update and is hot-reloaded; an actual class or origin transition requires
 explicit stopped-node semantic-conversion authority. The source
-`remote_operator` grant and source private key are untouched. Never use
+`remote_principal` grant and source private key are untouched. Never use
 `--merge-scopes` across an actual class or origin transition.
 
 On daemon restart, the generic worker-execution runtime reclaims the same root
@@ -449,6 +450,28 @@ survive restart and also bound queued worker writes. A pending command or an
 already-reserved contact allowance cannot extend either deadline. Exact settled
 replay remains readable after expiry; a possible-contact boundary without a
 proven result remains unknown and is never resent.
+
+## Producing the guest products
+
+The guest runtime products are declared by `config:codex/guest-runtime-products`
+and `config:codex/guest-owner-runtime-products`,
+and produced by `graph:codex/guest-runtime-production` (the Codex runtime) and
+`graph:codex/guest-owner-runtime-production` (the occurrence owner). After a
+Codex pin bump, publish both on the origin and push them to the controller:
+
+```sh
+ryeos --project <project> external-content product publish \
+  graph:codex/guest-runtime-production runtime \
+  --activation config:codex/guest-runtime-activation --push-to <controller-remote>
+ryeos --project <project> external-content product publish \
+  graph:codex/guest-owner-runtime-production runtime --push-to <controller-remote>
+```
+
+Each run prints the witness, admission and acceptance hashes. A run that
+stopped after production resumes with `--from-thread <thread-id>`. The push
+needs the controller's grants for the origin's node and operator; a controller
+wired without a shell gets them through the signed offline operations its
+profile delegates (see the remote-operations knowledge).
 
 ## Mechanical policy boundary
 

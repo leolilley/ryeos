@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-04T09:32:59Z:db2b1e518949450286f85023de6066eca2637c473d61d8f5771cf2e15ea5760f:LOk/Je7XrYs8BLCA/t4b19gY6KkOauHPpw3BGJpU8Pyqh4Z9ZbwUpaCQVqvakTV1u26bA10ZHXqutOr+VZBRDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T20:02:48Z:dce345b6413a3e96e868195b5590f68d27f29067174f1c3c85160b5891cdc067:l0YHhkSrRfcurZ0PhRAQbB6MCFq8fb2wsIQQAeNl/48JcWSXIY859j2DwctWdVW5G8nZ0x1SrMKBKYhqQYP5Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -18,9 +18,20 @@ working directories.
 
 Operator artifacts owned by `ryeos init`:
 
-- `<system>/.ai/config/keys/signing/private_key.pem` — operator/CLI key.
-- `<system>/.ai/config/keys/trusted/<fp>.toml` — publisher, operator, and
-  node trust docs.
+- `<system>/.ai/node/operator/signing/private_key.pem` — operator/CLI key.
+- `<system>/.ai/node/trust/signers/<fp>.yaml` — node-signed signer
+  records (publisher, operator, project author).
+- `<system>/.ai/node/trust/events/` — node-signed hash-chained key events.
+- `<system>/.ai/node/authoring/signing/private_key.pem` — authoring key, the
+  key `runtime.author_item` signs with. Under the live-execution floor.
+- `<system>/.ai/node/operator/genesis.json` — operator-signed genesis record.
+
+Operator artifacts owned by `ryeos remote configure`:
+
+- `<system>/.ai/node/remotes/<name>.yaml` — one node-signed pin record per
+  remote (schema `ryeos/remote-pin/v1`): the remote's pinned node key, URL,
+  site and vault identity, ingest-ignore rules, project bindings, how the key
+  was pinned and when. Only the configured local operator can write one.
 
 System-space artifacts installed or registered by `ryeos init`:
 
@@ -39,7 +50,7 @@ Daemon-local artifacts `ryeosd` may repair after init verification:
 - `<system>/.ai/node/auth/authorized_keys/<user-fp>.toml`
 - daemon-local layout directories
 
-The daemon must not write user trust docs or regenerate the node key.
+The daemon must not write signer records or regenerate the node key.
 
 ## Major directories
 

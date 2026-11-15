@@ -65,7 +65,10 @@ fn grant_host_direct_on_the_lane(state_path: &Path, node: &SigningKey) {
     let raw = std::fs::read_to_string(&path).expect("read isolation policy");
     let mut body: Value =
         serde_yaml::from_str(&lillux::signature::strip_signature_lines(&raw)).expect("parse");
-    body["policy"]["host_classes"]["local"]["host_direct"] = "operator_granted".into();
+    let document = serde_json::to_value(&body).expect("isolation policy as json");
+    let class = common::fast_fixture::fixture_host_class_of_policy(&document)
+        .expect("the fixture's host class");
+    body["policy"]["host_classes"][class]["host_direct"] = "operator_granted".into();
     write_policy(
         state_path,
         node,
@@ -244,7 +247,7 @@ async fn an_exact_operator_grant_runs_the_tool_and_records_what_ran() {
         .expect("thread exists");
     assert_eq!(
         thread
-            .pointer("/project_authority/live_access/confinement/kind")
+            .pointer("/thread/project_authority/live_access/confinement/kind")
             .and_then(Value::as_str),
         Some("unconfined_host"),
         "the live project authority records what ran: {thread:#}"
@@ -329,7 +332,7 @@ fn daemon_pid_namespace() -> String {
 
 fn confinement_kind(thread: &Value) -> Option<&str> {
     thread
-        .pointer("/project_authority/live_access/confinement/kind")
+        .pointer("/thread/project_authority/live_access/confinement/kind")
         .and_then(Value::as_str)
 }
 
@@ -436,13 +439,33 @@ async fn on_an_enforcing_lane_only_granted_host_tools_leave_the_sandbox() {
         .as_str()
         .expect("graph thread id")
         .to_owned();
-    let threads = h.list_threads(100).await.expect("list threads");
-    let child = threads
-        .iter()
-        .find(|thread| thread.item_ref == PROBE_REF && thread.chain_root_id == graph_thread)
-        .unwrap_or_else(|| panic!("graph child thread not listed: {threads:#?}"));
+    // An inline in-process child is a thread in the graph's chain, listed
+    // through `threads.children` of the graph thread.
+    let (children_status, children_body) = h
+        .post_execute(
+            "service:threads/children",
+            ".",
+            serde_json::json!({ "thread_id": graph_thread }),
+        )
+        .await
+        .expect("post service:threads/children");
+    assert!(
+        children_status.is_success(),
+        "threads.children failed: {children_status}; {children_body:#}"
+    );
+    let child_id = children_body
+        .pointer("/result/children")
+        .and_then(Value::as_array)
+        .and_then(|children| {
+            children
+                .iter()
+                .find(|child| child.get("item_ref").and_then(Value::as_str) == Some(PROBE_REF))
+        })
+        .and_then(|child| child.get("thread_id").and_then(Value::as_str))
+        .unwrap_or_else(|| panic!("graph child thread not listed: {children_body:#}"))
+        .to_owned();
     let child = h
-        .get_thread(&child.thread_id)
+        .get_thread(&child_id)
         .await
         .expect("get child thread")
         .expect("child thread exists");

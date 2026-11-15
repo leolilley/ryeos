@@ -7,7 +7,9 @@ use serde_json::json;
 
 use crate::LocalLifecycleEnv;
 use crate::init_check::{InitDiagnostics, InitState, init_state};
-use crate::lifecycle_wire::{LifecycleResponse, LifecycleWireState, StartupSnapshot};
+use crate::lifecycle_wire::{
+    LifecycleResponse, LifecycleWireState, ServiceWindow, StartupSnapshot,
+};
 use crate::metadata::DaemonMetadata;
 use crate::native_capacity::CapacityAccountSummary;
 
@@ -37,6 +39,10 @@ pub enum LifecycleStatus {
         startup: StartupSnapshot,
         capacity: Option<CapacityAccountSummary>,
         capacity_error: Option<String>,
+        /// What remains of this incarnation before its planned rollover, as
+        /// the daemon read it for this status. `None` on a node without a
+        /// native service window.
+        service_window: Option<ServiceWindow>,
     },
     Failed {
         metadata: DaemonMetadata,
@@ -255,6 +261,7 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                     startup: response.startup,
                     capacity,
                     capacity_error,
+                    service_window: response.service_window,
                 }
             }
             LifecycleWireState::Failed => LifecycleStatus::Failed {
@@ -418,6 +425,23 @@ pub fn capacity_status_rows(
         rows.push(("capacity", format!("unreadable: {error}")));
     }
     rows
+}
+
+/// Key/value rows describing the live service window for a text status
+/// report: the time and work left before the planned rollover begins.
+pub fn service_window_status_rows(window: Option<&ServiceWindow>) -> Vec<(&'static str, String)> {
+    let Some(window) = window else {
+        return Vec::new();
+    };
+    vec![(
+        "service window",
+        format!(
+            "{} min / {} work steps until rollover (about {})",
+            window.seconds_until_rollover / 60,
+            window.work_steps_until_rollover,
+            window.rolls_at
+        ),
+    )]
 }
 
 /// A connect refused with `InvalidInput` on a pathname longer than the
@@ -913,6 +937,53 @@ mod tests {
         assert!(
             matches!(status, LifecycleStatus::Unresponsive { .. }),
             "a connected peer with an unusable RPC exchange must block replacement: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_status_rows_show_the_service_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
+        let uds_path = config.uds_path.clone();
+        let app_root = config.app_root.clone();
+        let window = ServiceWindow {
+            seconds_until_rollover: 4_380,
+            work_steps_until_rollover: 61_000_000,
+            rolls_at: "2026-07-14T01:13:00Z".into(),
+        };
+        let served = window.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _request = read_frame(&mut stream).await;
+            let mut response = ready_wire_result(1234, app_root, uds_path, "now", "test");
+            response["result"]["service_window"] = serde_json::to_value(&served).unwrap();
+            let encoded = rmp_serde::to_vec_named(&response).unwrap();
+            write_frame(&mut stream, &encoded).await;
+        });
+
+        let status = status(&env).await.unwrap();
+        server.await.unwrap();
+        let LifecycleStatus::Running { service_window, .. } = &status else {
+            panic!("expected running")
+        };
+        assert_eq!(service_window.as_ref(), Some(&window));
+        assert_eq!(
+            service_window_status_rows(service_window.as_ref()),
+            vec![(
+                "service window",
+                "73 min / 61000000 work steps until rollover (about 2026-07-14T01:13:00Z)"
+                    .to_owned()
+            )]
+        );
+        assert!(service_window_status_rows(None).is_empty());
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json["Running"]["service_window"]["seconds_until_rollover"],
+            4_380
         );
     }
 

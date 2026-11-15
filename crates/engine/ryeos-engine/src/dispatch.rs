@@ -1217,6 +1217,7 @@ fn isolation_plan_request(
             // policy mount. Isolation pins and bounds it independently even
             // under captured_execution (e.g. a session-private home).
             state_root: ctx.isolation_state_root.as_deref(),
+            bundle_state_home: ctx.isolation_bundle_state_home.as_ref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
             checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
@@ -1226,10 +1227,6 @@ fn isolation_plan_request(
             } else {
                 &[]
             },
-            node_trusted_keys_dir: ctx
-                .isolation_node_trusted_keys_dir
-                .as_deref()
-                .filter(|_| node_filesystem),
             verified_code: &verified_code,
             verified_command: ctx
                 .isolation_verified_command
@@ -1289,6 +1286,7 @@ fn isolation_plan_request_awaiting_attachment(
             // Keep the exact launch-owned state authority on the held path
             // too; only ambient node-policy mounts are removed by this ceiling.
             state_root: ctx.isolation_state_root.as_deref(),
+            bundle_state_home: ctx.isolation_bundle_state_home.as_ref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
             checkpoint_authority: ctx.isolation_checkpoint_authority.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
@@ -1298,10 +1296,6 @@ fn isolation_plan_request_awaiting_attachment(
             } else {
                 &[]
             },
-            node_trusted_keys_dir: ctx
-                .isolation_node_trusted_keys_dir
-                .as_deref()
-                .filter(|_| node_filesystem),
             verified_code: &verified_code,
             verified_command: ctx
                 .isolation_verified_command
@@ -1557,12 +1551,12 @@ mod tests {
                 },
             ),
             isolation_state_root: None,
+            isolation_bundle_state_home: None,
             isolation_checkpoint_dir: None,
             isolation_checkpoint_authority: None,
             isolation_daemon_socket_path: None,
             isolation_captured_callback_socket: false,
             isolation_bundle_roots: Vec::new(),
-            isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
             isolation_verified_command: None,
             isolation_external_read_only_mounts: Vec::new(),

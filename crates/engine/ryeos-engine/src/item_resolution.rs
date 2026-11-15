@@ -213,12 +213,41 @@ pub struct ResolutionRoot {
 pub struct ResolutionRoots {
     /// Search roots in resolution priority order (first match wins)
     pub ordered: Vec<ResolutionRoot>,
-    /// Namespaces installed bundles own. A project candidate inside one is
-    /// refused; only bundle space can supply it.
+    /// Namespaces installed bundles own, including each installed bundle's
+    /// own name. A project candidate inside one is refused; only bundle space
+    /// can supply it.
     pub owned_namespaces: Vec<OwnedNamespace>,
+    /// The logical project of the project root, when it differs from the
+    /// root's own path (a pinned or COW checkout). Signer project scopes
+    /// are judged against [`ResolutionRoots::signer_project_root`].
+    pub logical_project_root: Option<PathBuf>,
 }
 
 impl ResolutionRoots {
+    /// Attach the logical project of this resolution.
+    pub fn with_logical_project_root(mut self, logical_project_root: Option<PathBuf>) -> Self {
+        self.logical_project_root = logical_project_root;
+        self
+    }
+
+    /// The project root a signer's project scope is matched against: the
+    /// logical project when one was stated, otherwise the project root
+    /// itself (a live project is its own logical root).
+    pub fn signer_project_root(&self) -> Option<&Path> {
+        self.logical_project_root
+            .as_deref()
+            .or_else(|| self.project_root())
+    }
+
+    /// Root directory of the project (the parent of its `.ai` root), when a
+    /// project root participates in this resolution.
+    pub fn project_root(&self) -> Option<&Path> {
+        self.ordered
+            .iter()
+            .find(|root| root.space == ItemSpace::Project)
+            .and_then(|root| root.ai_root.parent())
+    }
+
     /// Build from already-normalized `.ai` roots.
     /// The project `.ai` root is ordered first, then bundle `.ai` roots.
     pub fn from_flat(project_ai_root: Option<PathBuf>, bundle_ai_roots: Vec<PathBuf>) -> Self {
@@ -251,6 +280,7 @@ impl ResolutionRoots {
         Self {
             ordered,
             owned_namespaces: Vec::new(),
+            logical_project_root: None,
         }
     }
 
@@ -287,21 +317,29 @@ impl ResolutionRoots {
             ai_root: bundle.canonical_root.join(crate::AI_DIR),
             content_root: Some(bundle.canonical_root.clone()),
         }));
+        // A bundle's name is reserved alongside its declared namespaces: the
+        // first segment of an item ref names the bundle that owns its runtime
+        // authority, so a project item under an installed bundle's name would
+        // read as that bundle.
         let owned_namespaces = bundles
             .iter()
             .flat_map(|bundle| {
-                bundle
-                    .owned_namespaces
-                    .iter()
-                    .map(|namespace| OwnedNamespace {
+                std::iter::once(OwnedNamespace {
+                    bundle: bundle.name.clone(),
+                    namespace: bundle.name.clone(),
+                })
+                .chain(bundle.owned_namespaces.iter().map(|namespace| {
+                    OwnedNamespace {
                         bundle: bundle.name.clone(),
                         namespace: namespace.clone(),
-                    })
+                    }
+                }))
             })
             .collect();
         Self {
             ordered,
             owned_namespaces,
+            logical_project_root: None,
         }
     }
 
@@ -979,6 +1017,24 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn signer_project_root_prefers_the_logical_project_over_the_checkout() {
+        let checkout = ResolutionRoots::from_flat(
+            Some(PathBuf::from("/cache/pinned/ab12/project/.ai")),
+            Vec::new(),
+        );
+        assert_eq!(
+            checkout.signer_project_root(),
+            Some(Path::new("/cache/pinned/ab12/project"))
+        );
+        let logical =
+            checkout.with_logical_project_root(Some(PathBuf::from("/srv/projects/alpha")));
+        assert_eq!(
+            logical.signer_project_root(),
+            Some(Path::new("/srv/projects/alpha"))
+        );
+    }
+
+    #[test]
     fn authoritative_roots_select_typed_identity_not_nested_path_prefix() {
         let roots = ResolutionRoots::from_registered(
             Some(PathBuf::from("/projects/demo")),
@@ -1027,6 +1083,7 @@ mod tests {
         assert!(loose.authoritative_bundle_roots().is_err());
 
         let duplicate = ResolutionRoots {
+            logical_project_root: None,
             owned_namespaces: Vec::new(),
             ordered: vec![
                 ResolutionRoot {
@@ -1261,6 +1318,36 @@ mod tests {
             namespace: "ryeos/core".to_owned(),
         }];
         roots
+    }
+
+    #[test]
+    fn project_candidate_under_an_installed_bundle_name_is_refused() {
+        let project = tempdir();
+        let bundle = tempdir();
+        let schema = make_kind_schema("tools", vec![(".yaml", "yaml")]);
+        let project_ai = project.join(crate::AI_DIR);
+        write_item(&project_ai, "tools", "core/x", ".yaml", "executor_id: run");
+        write_item(&project_ai, "tools", "mine/x", ".yaml", "executor_id: run");
+        let installed = vec![RegisteredBundleRoot {
+            name: "core".to_owned(),
+            canonical_root: bundle.clone(),
+            owned_namespaces: vec!["ryeos/core".to_owned()],
+        }];
+        let roots = ResolutionRoots::from_registered(Some(project.clone()), &installed);
+        let item = CanonicalRef::parse("tool:core/x").unwrap();
+        match resolve_item_full(&roots, &schema, &item) {
+            Err(EngineError::ReservedNamespaceShadow {
+                namespace, bundle, ..
+            }) => {
+                assert_eq!(namespace, "core");
+                assert_eq!(bundle, "core");
+            }
+            other => panic!("expected reserved_namespace_shadow, got {other:?}"),
+        }
+        let unique = CanonicalRef::parse("tool:mine/x").unwrap();
+        assert!(resolve_item_full(&roots, &schema, &unique).is_ok());
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(bundle).unwrap();
     }
 
     #[test]

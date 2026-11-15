@@ -670,6 +670,7 @@ fn build_app_state(
         node_policy: Arc::new(
             ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
                 ryeos_node_runtime::node_policy::default_launch_trust_record(),
+                ryeos_node_runtime::node_policy::default_authorization_record(),
                 ryeos_node_runtime::node_policy::shipped_event_storage_record(),
                 Arc::new(
                     ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy(),
@@ -713,6 +714,9 @@ fn build_app_state(
         ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         provider_env: std::sync::Arc::new(ryeos_app::vault::ProviderEnvironment::none()),
+        vault_ceilings: std::sync::Arc::new(ryeos_app::vault::VaultCeilings::operator_only(
+            "fp:test-operator",
+        )),
         command_registry: test_command_registry,
         authorizer: test_auth,
         ignore_matcher: Arc::new(
@@ -762,6 +766,7 @@ fn test_ui_routes() -> Vec<ryeos_app::route_raw::RawRouteSpec> {
             body: RawRequestBody::Json,
         },
         source_file: "/test/route.yaml".into(),
+        authority: None,
     };
     vec![
         route(

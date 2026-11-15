@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:8174edb436670de351e1faa9f1d9298a42cfcaa5442432ef8997fc3be4a459d0:Rnwu3YMVruww/5XKbPNT8SAaKFgKw984AUTYoMjFSSvHL7yzReGqHf6XaNFpvL8XFdVx2EwBZi5GRqdY1yV1AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:c60f26d149dc020587988972811ffea82d3c7d3ff7b7f9ec3a9591e9a03874fe:hKHDUg2dzddyUZ16OL10Zf8Biw8EjleMO3nigyvyMe0J3flAMJycmHQBLLDHQ4es8fAkNw1ESV25Wg52IYB1DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - codex
@@ -308,7 +308,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -332,6 +331,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
@@ -358,7 +369,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -423,6 +434,9 @@ policies:
           # a recipient capability.
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
+  sealed_vault_names:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 5
     session_ttl_secs: 28800

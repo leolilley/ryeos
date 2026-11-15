@@ -51,7 +51,7 @@ fn sealed_core_root() -> (
 fn operator_key(app_root: &Path) -> SigningKey {
     let pem = String::from_utf8(
         lillux::read_regular_file_bounded_no_follow(
-            &app_root.join(".ai/config/keys/signing/private_key.pem"),
+            &app_root.join(".ai/node/operator/signing/private_key.pem"),
             32 * 1024,
         )
         .expect("read operator key"),

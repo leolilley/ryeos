@@ -1,0 +1,8 @@
+# ryeos:signed:2026-11-13T16:49:28Z:7603e3e4d4839f10213640db5d3d7fed0224cfc28a15a39a96fadc6a09a80539:/EK8rCcTcbd0hRtPVd61oo1tICpNP8cMnyahx3HnCa0QNCbqlJAXKfw2alpApJRN461UtKuG1QO2JZXw0+jyAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: remote.pin
+required_caps: ["ryeos.execute.service.remote/pin"]
+schema:
+  remote: string?
+  descriptor: string
+description: "Pin a remote node from its exported signed v2 descriptor without contacting it, as a node-signed pin record. A descriptor without a URL pins an inbound-only remote. A descriptor without ingest rules pins a remote this node never pushes to (push refuses with remote_pinned_without_ingest_rules)."

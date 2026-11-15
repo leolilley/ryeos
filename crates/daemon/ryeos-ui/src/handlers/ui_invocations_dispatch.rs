@@ -1518,6 +1518,7 @@ pub(crate) fn prepare_item_ref(
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
 
     let plan_ctx = ryeos_engine::contracts::PlanContext {
+        logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
             ryeos_engine::contracts::Principal {
                 fingerprint: ctx.fingerprint.clone(),
@@ -1686,6 +1687,7 @@ async fn execute_prepared_item_ref(
     let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
         &project_root,
         authority_scopes.to_vec(),
+        &exec_ctx.principal_fingerprint,
         &state.isolation,
     )
     .map_err(|error| HandlerError::Forbidden(format!("{error:#}")))?;

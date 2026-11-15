@@ -315,6 +315,23 @@ impl OccupancyServiceEdge {
             .max(self.start_tick_ns);
         sleep_until_tick(tick)
     }
+    /// Time left until `before` ahead of the edge, read on `CLOCK_BOOTTIME`:
+    /// zero once that point has passed. A planned point that falls before the
+    /// window start is the window start, as in `sleep_until_before_edge`.
+    pub fn remaining_before(&self, before: Duration) -> Result<Duration, &'static str> {
+        self.remaining_before_at(before, occupancy_tick()?)
+    }
+    fn remaining_before_at(&self, before: Duration, tick: u64) -> Result<Duration, &'static str> {
+        if tick < self.start_tick_ns {
+            return Err("retained occupancy clock moved backwards");
+        }
+        let before = u64::try_from(before.as_nanos()).map_err(|_| "edge offset overflow")?;
+        let point = self
+            .end_tick_ns
+            .saturating_sub(before)
+            .max(self.start_tick_ns);
+        Ok(Duration::from_nanos(point.saturating_sub(tick)))
+    }
     fn require_service_at(&self, tick: u64) -> Result<(), &'static str> {
         if tick < self.start_tick_ns {
             return Err("retained occupancy clock moved backwards");
@@ -425,6 +442,42 @@ mod controls {
         assert!(edge.require_service_at(start - 1).is_err());
         assert!(clock.window_at_tick(&limit, cleanup, start - 1).is_err());
         edge.require_service_fixed().unwrap();
+    }
+    #[test]
+    fn remaining_before_saturates_past_the_point() {
+        let edge = OccupancyServiceEdge {
+            start_tick_ns: 1_000,
+            end_tick_ns: 11_000,
+        };
+        let margin = Duration::from_nanos(3_000);
+        // The planned point is 8_000: the edge less the margin.
+        assert_eq!(
+            edge.remaining_before_at(margin, 1_000).unwrap(),
+            Duration::from_nanos(7_000)
+        );
+        assert_eq!(
+            edge.remaining_before_at(margin, 7_999).unwrap(),
+            Duration::from_nanos(1)
+        );
+        assert_eq!(
+            edge.remaining_before_at(margin, 8_000).unwrap(),
+            Duration::ZERO
+        );
+        assert_eq!(
+            edge.remaining_before_at(margin, 12_000).unwrap(),
+            Duration::ZERO
+        );
+        assert_eq!(
+            edge.remaining_before_at(Duration::ZERO, 1_000).unwrap(),
+            Duration::from_nanos(10_000)
+        );
+        // A margin wider than the window leaves no time at the start.
+        assert_eq!(
+            edge.remaining_before_at(Duration::from_nanos(20_000), 1_000)
+                .unwrap(),
+            Duration::ZERO
+        );
+        assert!(edge.remaining_before_at(margin, 999).is_err());
     }
     #[test]
     fn live_original_observer_preserves_start_and_exact_phase_boundaries() {

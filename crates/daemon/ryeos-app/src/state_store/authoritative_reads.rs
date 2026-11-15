@@ -353,6 +353,10 @@ impl StateStore {
         roots.extend(g.runtime_db.external_execution_cas_roots()?);
         roots.extend(g.runtime_db.scoped_child_observation_cas_roots()?);
         roots.extend(g.runtime_db.snapshot_bootstrap_lifecycle_roots()?);
+        roots.extend(
+            g.runtime_db
+                .snapshot_qualification_lifecycle_roots(lillux::time::timestamp_millis())?,
+        );
         Ok(roots.into_iter().collect())
     }
 

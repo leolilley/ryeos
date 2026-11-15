@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:d8d9f9fb72e637f2133967006376110e1e162a6e0e082c26760787516fdfaa8b:kHXlXT+zFKkE65B7jIKND285Ms04MhYMU8bOGUjcS7xvSIP7qt2lT6byl584ljsExPmknpKYZRlzGDgb1BZtCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:5c8a5ab33ce9e4c46822b422da3afcca1a2d4db6ec2aa0f2ed255ed72c84862a:Yh/UscdecP7Eyj6pdxYe8iCmyH9qjUiRV6542fdrt83bFiASIzd92otezSKIk95ur8ko/QnmoXp+247OiGHVBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Controller of remote Codex authoring leases: runs the Codex app server
 # and the render-sandbox lease adapter, and runs no schedules.
 schema: 1
@@ -234,11 +234,23 @@ policies:
       max_cleanup_steps: 1024
       max_recovery_record_bytes: 2097152
     schedules: []
-    # The origin operator that drives this controller may request external
-    # placement composition through a signed offline operation; no other
-    # authority-bearing offline operation is open to a remote signer.
+    # The origin operator that drives this controller may request, through
+    # signed offline operations applied at the next start, external placement
+    # composition, the recompose that re-pins installed bindings to the
+    # installed bundles after a payload change, and the controller's wiring: a
+    # remote-node or remote-principal grant, a remote pinned from its
+    # descriptor, and a site bundle installed or replaced from an archive.
+    # Delegating one authority-bearing operation is close to delegating them
+    # all (a grant or a bundle changes who the node trusts and what it runs),
+    # so the operator granted these scopes is trusted with the whole
+    # controller. No other authority-bearing offline operation is open to a
+    # remote signer.
     remote_offline_operations:
       - node.external-execution.compose
+      - node.external-execution.recompose
+      - node.authorize-client
+      - node.remote.pin
+      - node.bundle.replace
   hosted:
     schema: 1
     admission_enabled: false
@@ -343,7 +355,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -367,6 +378,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
@@ -393,7 +416,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -470,6 +493,9 @@ policies:
           # a recipient capability.
           capabilities:
             - ryeos.receive.provider_env.openai_api_key
+  sealed_vault_names:
+    schema: 1
+    names: []
   ui_browser_sessions:
     schema: 5
     session_ttl_secs: 28800

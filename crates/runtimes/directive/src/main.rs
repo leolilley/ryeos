@@ -246,11 +246,9 @@ fn run_directive() -> Result<RuntimeResult> {
 }
 
 async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult> {
-    if envelope.schema_version()
-        != ryeos_engine::launch_envelope_types::MANAGED_LAUNCH_ENVELOPE_SCHEMA_VERSION
-    {
-        anyhow::bail!("unsupported managed launch envelope schema");
-    }
+    envelope
+        .validate_wire()
+        .map_err(|reason| anyhow::anyhow!("{reason}"))?;
     let observed_effective_digest = envelope.resolution().effective_definition_digest()?;
     if &observed_effective_digest != envelope.effective_definition_digest() {
         anyhow::bail!(
@@ -268,7 +266,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let verified_loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
         envelope.roots.project_root.clone(),
         envelope.roots.bundle_roots.clone(),
-        &envelope.roots.node_trusted_keys_dir,
+        &envelope.roots.trusted_signers,
     )?;
 
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")

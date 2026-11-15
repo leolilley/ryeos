@@ -81,13 +81,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
     walk_and_ingest(
         &bundle_path,
         &bundle_path,
-        &cas,
+        Some(&cas),
         &mut entries,
         &mut total_bytes,
         &mut tree_entries,
         0,
     )
     .map_err(|e| HandlerError::Internal(format!("{e:#}")))?;
+
+    remember_exported_blobs(&state, &req.bundle_name, &entries);
 
     Ok(serde_json::json!({
         "bundle_name": req.bundle_name,
@@ -98,11 +100,81 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value, Handler
     }))
 }
 
+/// Blob hashes of each bundle's most recent export, keyed by store and bundle.
+/// Root-scoped reads of a `bundle_export` root are served from this set: the
+/// export is what names the files a caller may then fetch.
+fn exported_blob_cache()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, std::collections::BTreeSet<String>>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::BTreeSet<String>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn exported_blob_key(state: &AppState, bundle_name: &str) -> String {
+    format!("{}|{bundle_name}", state.config.app_root.display())
+}
+
+fn remember_exported_blobs(state: &AppState, bundle_name: &str, entries: &[Value]) {
+    let hashes = entries
+        .iter()
+        .filter_map(|entry| entry.get("hash").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    if let Ok(mut cache) = exported_blob_cache().lock() {
+        cache.insert(exported_blob_key(state, bundle_name), hashes);
+    }
+}
+
+/// The file blobs an installed bundle exports. Served from the last export
+/// when there is one; otherwise the installed tree is hashed without being
+/// ingested.
+pub(crate) fn exported_blob_hashes(
+    state: &AppState,
+    bundle_name: &str,
+) -> Result<std::collections::BTreeSet<String>> {
+    let key = exported_blob_key(state, bundle_name);
+    if let Some(hashes) = exported_blob_cache()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("bundle export cache poisoned"))?
+        .get(&key)
+    {
+        return Ok(hashes.clone());
+    }
+    super::bundle_install::validate_name(bundle_name)?;
+    let bundle_path = state
+        .node_config
+        .bundles
+        .iter()
+        .find(|b| b.name == bundle_name)
+        .map(|b| b.path.clone())
+        .context("bundle is not installed")?;
+    let mut entries = Vec::new();
+    let mut total_bytes = 0;
+    let mut tree_entries = 0;
+    walk_and_ingest(
+        &bundle_path,
+        &bundle_path,
+        None,
+        &mut entries,
+        &mut total_bytes,
+        &mut tree_entries,
+        0,
+    )?;
+    remember_exported_blobs(state, bundle_name, &entries);
+    Ok(entries
+        .iter()
+        .filter_map(|entry| entry.get("hash").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect())
+}
+
 /// Recursively walk a directory, store each regular file as a blob in CAS.
 fn walk_and_ingest(
     base: &std::path::Path,
     current: &std::path::Path,
-    cas: &lillux::cas::CasStore,
+    cas: Option<&lillux::cas::CasStore>,
     entries: &mut Vec<Value>,
     total_bytes: &mut u64,
     tree_entries: &mut usize,
@@ -204,7 +276,10 @@ fn walk_and_ingest(
                     MAX_EXPORTED_BUNDLE_TOTAL_BYTES
                 );
             }
-            let hash = cas.store_blob(&bytes)?;
+            let hash = match cas {
+                Some(cas) => cas.store_blob(&bytes)?,
+                None => lillux::sha256_hex(&bytes),
+            };
             entries.push(serde_json::json!({
                 "kind": EXPORTED_BUNDLE_ENTRY_KIND_FILE,
                 "path": rel,

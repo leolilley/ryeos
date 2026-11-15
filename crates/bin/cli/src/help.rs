@@ -345,6 +345,10 @@ fn build_top_level_help(
             "Reset authorized keys for a schema cutover",
         ),
         crate::tty::Row::key_value(
+            "node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
+        ),
+        crate::tty::Row::key_value(
             "node reset policy-generation",
             "Replace an obsolete node-policy generation",
         ),
@@ -961,6 +965,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Retire all grants and restore only the local operator",
             "ryeos node reset authorization --confirm [--json] [--app-root <DIR>]",
         ),
+        "node authorization revoke" => (
+            "ryeos node authorization revoke",
+            "Revoke a grant on a stopped node, leaving a tombstone",
+            "ryeos node authorization revoke --fingerprint <FINGERPRINT> --reason <TEXT> [--keep-delegates] [--json] [--app-root <DIR>]",
+        ),
         "node reset replay-indexes" => (
             "ryeos node reset replay-indexes",
             "Retire predecessor replay indexes",
@@ -1016,6 +1025,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Sign RyeOS items by canonical ref, glob, or .ai path",
             "ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]",
         ),
+        "external-content product publish" => (
+            "ryeos external-content product publish",
+            "Produce a named product and ship it: activate, execute the producer, wait, capture, admit the witness, and push it when asked",
+            "ryeos external-content product publish <producer-ref> <product-name> [--activation <config-ref>] [--from-thread <thread-id>] [--push-to <remote>] [--json]",
+        ),
         "codex login device" => (
             "ryeos codex login device",
             "Log a Codex credential profile in with a device code: open the login session, show the code, wait for the account, end the session, and confirm",
@@ -1064,12 +1078,39 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             ),
             (
                 "--host-class <NAME>",
-                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile",
+                "Kind of host the node runs on (for example local or hosted), one the profile declares; required with --node-profile. `local` enforces the sandbox and init refuses if the host cannot prove it; `local_unconfined` is the explicit opt-out that runs jobs as the daemon user",
             ),
             ("--app-root <DIR>", "Application root"),
         ],
         #[cfg(feature = "model-provider-setup")]
         "setup" => &[("--app-root <DIR>", "Application root")],
+        "external-content product publish" => &[
+            (
+                "--activation <config-ref>",
+                "Activate this external-content recipe online first and wait for it",
+            ),
+            (
+                "--from-thread <thread-id>",
+                "Resume from a completed producer thread instead of executing again",
+            ),
+            (
+                "--push-to <remote>",
+                "Push the admitted product to this remote under the declared byte bound",
+            ),
+            (
+                "--project-snapshot <hash>",
+                "Execute the producer from this published project snapshot",
+            ),
+            (
+                "--current-head",
+                "Execute the producer from the current principal project HEAD",
+            ),
+            (
+                "--timeout-secs <n>",
+                "Give up waiting after this many seconds",
+            ),
+            ("--json", "Emit the final result as JSON"),
+        ],
         "codex login device" => &[
             (
                 "--create",

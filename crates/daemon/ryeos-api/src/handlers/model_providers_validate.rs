@@ -46,6 +46,7 @@ pub async fn handle(
     let effective = state
         .engine
         .effective_item(EffectiveItemRequest {
+            logical_project_root: None,
             item_ref,
             expected_kind: None,
             project_root: None,
@@ -91,7 +92,13 @@ pub async fn handle(
         .validate(&format!(" for '{}' validation", req.provider_id))
         .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     let credential = match setup.credential {
-        Some(credential) => Some(
+        Some(credential) => Some({
+            // The credential leaves the vault for the validation request, so
+            // the caller must be a recipient of the name.
+            state
+                .vault_ceilings
+                .judge_receive(&credential.secret_name, &ctx.fingerprint, &ctx.scopes)
+                .map_err(|refusal| crate::handler_error::vault_name_handler_error(&refusal))?;
             ryeos_app::vault::read_named_secret(state.vault.as_ref(), &credential.secret_name)
                 .map_err(|error| HandlerError::Internal(format!("{error:#}")))?
                 .ok_or_else(|| {
@@ -99,8 +106,8 @@ pub async fn handle(
                         "provider '{}' credential '{}' is not configured",
                         req.provider_id, credential.secret_name
                     ))
-                })?,
-        ),
+                })?
+        }),
         None => None,
     };
     let model = req.model.as_deref().unwrap_or_default();

@@ -475,6 +475,7 @@ fn relationship_resolution_request(
         }
     };
     Ok(ryeos_engine::engine::EffectiveItemRequest {
+        logical_project_root: None,
         item_ref: ryeos_engine::canonical_ref::CanonicalRef::parse(relationship_ref)?,
         expected_kind: Some("config".to_owned()),
         project_root,

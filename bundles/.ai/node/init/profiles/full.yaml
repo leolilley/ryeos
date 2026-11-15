@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:6fdd0d02e51f36bccd50d1bf23b2ba2bcc62314cd42bcbf876c18bd296a02426:yCnYZJT/IiPiMmKZHzeWkMSRKNZ38x9TtTvQeg5kodXFRhbyAll+aWxRS3M8Ijr1dornCYroH6hDIwyod2BIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:abfd09361206b6b970f8344247eb82c25525f20d98b097847ba94705652ee372:QdMuxvLWj9TCzNjQgjTy7oyIdAM9oWnjAqrb35dEImXICN21WWUljtUEUIvDnufxLbxJuY/3RJ9/yh2ebl9DAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -296,6 +296,32 @@ policies:
       # different floor and lane in another profile.
       host_classes:
         local:
+          # A host whose supervisor delegates qualified per-job process scopes:
+          # jobs run in the enforced namespace sandbox and in their own scope.
+          # Hosts that cannot provide the sandbox refuse initialization; the
+          # explicit opt-out is the `local_unconfined` class.
+          # Capabilities this node must prove on its host before it starts.
+          # `ryeos node doctor` shows what the host proves and what is missing.
+          requires_capabilities: [accounting, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
+          process_scopes:
+            # Resource-bearing launches require a Lillux-owned durable scope even
+            # when filesystem/network isolation is disabled.
+            mode: required
+            control_timeout_ms: 5000
+          trusted_process_group_sessions: false
+          mode: enforce
+          backend:
+            bundle: core
+            implementation: linux-lillux
+          proc_filesystem: pid_namespace
+          host_direct: unavailable
+        local_unconfined:
+          # The explicit opt-out from the sandbox: a host the operator runs
+          # where jobs execute as the daemon user with no isolation backend.
+          # Nothing selects this class implicitly; initialization names it
+          # with `--host-class local_unconfined`. Jobs can read the node's
+          # operator key on the volume and write any `.ai/` path, and the
+          # live-run floors hold only under an enforced lane.
           # Capabilities this node must prove on its host before it starts.
           # `ryeos node doctor` shows what the host proves and what is missing.
           requires_capabilities: [accounting, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
@@ -324,14 +350,25 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
           - "{checkpoint_dir}"
       network:
         mode: host
-        runtime_files: []
+        runtime_files:
+          - source: /etc/resolv.conf
+            destination: /etc/resolv.conf
+            max_bytes: 65536
+          - source: /etc/hosts
+            destination: /etc/hosts
+            max_bytes: 65536
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/certs/ca-certificates.crt
+            max_bytes: 4194304
+          - source: /etc/ssl/certs/ca-certificates.crt
+            destination: /etc/ssl/cert.pem
+            max_bytes: 4194304
       environment:
         allow:
           - "*"
@@ -348,6 +385,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
@@ -374,7 +423,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -424,6 +473,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

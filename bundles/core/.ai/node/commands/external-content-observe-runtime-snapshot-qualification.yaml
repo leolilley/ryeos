@@ -1,0 +1,11 @@
+# ryeos:signed:2026-11-13T09:59:46Z:985b53cdcf07697fcaeaa8365a10904a0b35cc713f9a28295f7b911b8702f4d2:J62zOmwEqqQWpZs7rFjbE4v/WG8jtsyW+95iZVOOgshJLMwOY3CGiNVNY4xL/sqhUDd5j8lyILcKfZCTen13Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens: [external-content, observe-runtime-snapshot-qualification]
+description: Observe whether an exact restored qualification Sandbox is running before its verifier runs
+forms:
+  - slots:
+      - field: qualification_operation_id
+help:
+  usage: ryeos external-content observe-runtime-snapshot-qualification <qualification-operation-id>
+dispatch:
+  kind: execute_ref
+  execute: service:external-content/observe-runtime-snapshot-qualification

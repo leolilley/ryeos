@@ -103,6 +103,7 @@ pub async fn handle(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let site_id = state.threads.site_id().to_string();
     let plan_ctx = PlanContext {
+        logical_project_root: None,
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
             scopes: ctx.scopes.clone(),
@@ -188,6 +189,7 @@ pub async fn handle(
                     state.isolation.inspection(),
                 ),
                 ctx.scopes.clone(),
+                Some(&ctx.fingerprint),
             )
             .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
     };
@@ -199,7 +201,12 @@ pub async fn handle(
         &names,
         &project_authority,
     )
-    .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    .map_err(|e| match e {
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            crate::handler_error::vault_name_handler_error(&refusal)
+        }
+        other => HandlerError::Internal(other.to_string()),
+    })?;
 
     let secrets: Vec<Value> = report
         .iter()
@@ -243,12 +250,12 @@ pub async fn handle(
                         ryeos_engine::isolation::IsolationNetworkAuthorityCeiling::NodePolicy,
                     live_access: None,
                     state_root: None,
+                    bundle_state_home: None,
                     checkpoint_dir: None,
                     checkpoint_authority: None,
                     daemon_socket_path: None,
                     captured_callback_socket: false,
                     bundle_roots: &[],
-                    node_trusted_keys_dir: None,
                     verified_code: &isolation_verified_code,
                     verified_command: None,
                     external_read_only_mounts: &[],

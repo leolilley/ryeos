@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:26cb7d7cc2709b781d3278f011d11f337a1230f7abd940bd293fb4c1bcca6468:KQNuHluUILb1pE/SVbX4qcjoqiNAQCpx0wvPglQblIu7rNwhBwgr8XpNi+IHQi7grSlMnHOMwzmbXa6PXY4LDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:5eff93849fc170d102d8de4bc0f5b5bda6fc7254a191de4031002d80c2cb0b0a:NmhA7a8+Ym2s9xsZt23dBN2A19TFBpmdRJU57VmcGSqTu1WF2B+1W66UMI9nW2e9Lxo41veeiJC3va6hPNUmBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -338,7 +338,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -374,6 +373,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
@@ -400,7 +411,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       # Exclude this project's build output, not package source directories
       # such as a vendored crate's src/target/ required by its checksums.
@@ -456,6 +467,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

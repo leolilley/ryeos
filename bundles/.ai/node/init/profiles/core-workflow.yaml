@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T12:24:05Z:1d7b90d46b8550fe7cbb277d7fc7cc423eafd01ead1d9b7cb35f9154fd1f4417:mYKJ7r2OWczFIrPp7Hs7IVpsINKcqPK3/b2pRHlPfAJNnypjOM+r384ffBu93lg5lond2ANy5UuRBNTC1YLKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T07:17:08Z:ca65c4e139967879140bddb4bb34b8a64843d55f79f860fc4926de6018d8bdbf:aaBeiMc0ogLwPbt1tFDiuAxtg6WpX5NbLKpf6D35h8IDaIY6tjClpoqYRiKjRAnHVGmJ+qOi9zC4hMdBF3xfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -282,7 +282,6 @@ policies:
           - "{node_public_identity}"
           - "{daemon_socket}"
           - "{bundle_roots}"
-          - "{node_trusted_keys}"
           - "{verified_code}"
         writable:
           - "{project}"
@@ -318,6 +317,18 @@ policies:
   host_access:
     schema: 1
     grants: []
+  # Longest lifetime of an authorized-key grant per principal class, in
+  # seconds (365, 90 and 30 days). A grant request that names no lifetime
+  # receives its class maximum; the configured operator's own grant is the
+  # only one issued without an expiry. warn_before_secs (14 days) is how
+  # early `ryeos node doctor` reports a grant as expiring.
+  authorization:
+    schema: 1
+    max_lifetime_secs:
+      local_client: 31536000
+      remote_node: 7776000
+      remote_principal: 2592000
+    warn_before_secs: 1209600
   # Trust classes the operator admits for launch roots beyond each kind's
   # default, per kind (only what the kind schema lets an operator admit).
   launch_trust:
@@ -344,7 +355,7 @@ policies:
       - ".svn/"
       - ".tmp/"
       - ".venv/"
-      - "/.ai/config/remotes/"
+      - "/.ai/node/remotes/"
       - "/.ai/state/"
       - "__pycache__/"
       - "node_modules/"
@@ -392,6 +403,9 @@ policies:
       max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
+    names: []
+  sealed_vault_names:
+    schema: 1
     names: []
   ui_browser_sessions:
     schema: 5

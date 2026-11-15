@@ -351,6 +351,10 @@ pub fn resolve_execution_project_authority(
             }
         };
 
+    // The vault-reading environments seal the admitted caller and its own
+    // canonical scopes the same way, so delivery judges the recipient and
+    // never the project's access ceiling (empty for a projectless launch).
+    //
     // A project-overlay environment is part of the exact project authority,
     // not an independently authored path setting. Resolve it only after the
     // live or pinned project identity is known so remote pinned generations
@@ -377,6 +381,8 @@ pub fn resolve_execution_project_authority(
                         ),
                         source_identity: format!("dotenv:{}", root.join(".env").display()),
                         include_operator_vault: *include_operator_vault,
+                        recipient_principal: provider_environment.principal.to_owned(),
+                        recipient_scopes: capability_ceiling.clone(),
                         name_authority: resolve_name_authority(name_policy),
                     }
                 }
@@ -385,6 +391,8 @@ pub fn resolve_execution_project_authority(
                     name_policy,
                 } => EnvironmentAuthority::Vault {
                     namespace: namespace.clone(),
+                    recipient_principal: provider_environment.principal.to_owned(),
+                    recipient_scopes: capability_ceiling.clone(),
                     name_authority: resolve_name_authority(name_policy),
                 },
                 ExecutionEnvironmentPolicy::Delegated {
@@ -767,6 +775,7 @@ pub(crate) fn admit_host_direct_execution(
     // refused by the launch-time gate or the disabled-shape compile.
     let Ok((_, output)) =
         engine.effective_item_with_resolution(ryeos_engine::engine::EffectiveItemRequest {
+            logical_project_root: provenance.logical_project_root(),
             item_ref: root.clone(),
             expected_kind: Some(root.kind.clone()),
             project_root: (!no_project_requested).then(|| project_ctx.effective_path.clone()),
@@ -1005,19 +1014,29 @@ pub fn preauthorize_execution_policy(
     caller_scopes: &[String],
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<()> {
+    preauthorize_execution_policy_with(policy, caller_scopes, state.authorizer.as_ref())
+}
+
+/// [`preauthorize_execution_policy`] over the authorizer alone, for callers
+/// that hold no [`ryeos_app::state::AppState`].
+pub fn preauthorize_execution_policy_with(
+    policy: &ExecutionPolicy,
+    caller_scopes: &[String],
+    authorizer: &ryeos_runtime::authorizer::Authorizer,
+) -> anyhow::Result<()> {
     policy.validate()?;
     // An environment that reads the operator's vault is operator authority,
     // not a consequence of holding execute rights on the item. Refuse it here,
     // before any capture, launch reservation, or secret read.
     ryeos_app::execution_policy::authorize_operator_vault_exposure(
-        state.authorizer.as_ref(),
+        authorizer,
         caller_scopes,
         &policy.environment,
     )?;
     if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
         let required_capability = access.required_capability();
         ryeos_app::execution_policy::authorize_live_project_access(
-            state.authorizer.as_ref(),
+            authorizer,
             caller_scopes,
             *access,
         )
@@ -1036,8 +1055,7 @@ pub fn preauthorize_execution_policy(
             ..
         }
     ) {
-        state
-            .authorizer
+        authorizer
             .authorize(
                 caller_scopes,
                 &AuthorizationPolicy::require(
@@ -1822,6 +1840,7 @@ async fn admit_execution_with_publication(
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
     let plan_ctx = PlanContext {
+        logical_project_root: provenance.logical_project_root(),
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),
@@ -1957,7 +1976,9 @@ async fn admit_execution_with_publication(
             let _preflight_work_timer = preflight_timings
                 .as_ref()
                 .map(|timings| timings.nested("preflight_admission", "preflight_blocking_work"));
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            // The caller must cover what the item declares; an accepted launch
+            // refuses that here, before a thread id exists.
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -1969,7 +1990,12 @@ async fn admit_execution_with_publication(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -2019,6 +2045,18 @@ async fn admit_execution_with_publication(
                 .required_secrets,
             provenance.project_authority(),
         ) {
+            if let ryeos_app::vault::VaultReadError::NameRefused(refusal) = &err {
+                return Ok((
+                    StatusCode::FORBIDDEN,
+                    json!({
+                        "error": refusal.message(),
+                        "error_code": refusal.code(),
+                        "name": refusal.name,
+                        "principal": refusal.principal,
+                    }),
+                )
+                    .into());
+            }
             return Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({
@@ -2140,35 +2178,27 @@ async fn admit_execution_with_publication(
         && request.method().is_none()
         && request.args().is_none();
     let remotes = if remote_target_requested && request_can_need_remote_config {
-        let project_for_layering: Option<&std::path::Path> = if no_project_requested {
-            None
-        } else {
-            Some(project_ctx.original_path.as_ref())
-        };
         Some(
-            crate::remote::config::load_remotes_layered_report(
-                &state.config.app_root,
-                project_for_layering,
-            )
-            .map(|report| report.remotes)
-            .map_err(|e| {
-                match crate::remote::config::typed_load_error_or(e, |e| {
-                    crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
-                }) {
-                    crate::handler_error::HandlerError::Structured { code, status, body } => {
-                        RouteDispatchError::Structured {
-                            code,
-                            status,
-                            body,
-                            thread_id: None,
+            crate::remote::config::load_remotes_report(&state.config.app_root)
+                .map(|report| report.remotes)
+                .map_err(|e| {
+                    match crate::remote::config::typed_load_error_or(e, |e| {
+                        crate::handler_error::HandlerError::Internal(format!("load remotes: {e:#}"))
+                    }) {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
                         }
+                        crate::handler_error::HandlerError::Internal(message) => {
+                            RouteDispatchError::Internal(message)
+                        }
+                        other => RouteDispatchError::Internal(other.to_string()),
                     }
-                    crate::handler_error::HandlerError::Internal(message) => {
-                        RouteDispatchError::Internal(message)
-                    }
-                    other => RouteDispatchError::Internal(other.to_string()),
-                }
-            })?,
+                })?,
         )
     } else {
         None
@@ -2234,11 +2264,37 @@ async fn admit_execution_with_publication(
                 return Ok(dispatch_error_response(error));
             }
             let client =
-                crate::remote::client::RemoteClient::from_remote_cfg(&state, &plan.remote.remote);
-            let remote_ignore = IgnoreMatcher::from_config(&plan.remote.remote.ingest_ignore)
-                .map_err(|e| {
-                    RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+                crate::handlers::remote_push::OutboundPrincipal::resolve(None, &state, &principal)
+                    .client(&state, &plan.remote.remote, &principal)
+                    .map_err(|error| match error {
+                        crate::handler_error::HandlerError::Structured { code, status, body } => {
+                            RouteDispatchError::Structured {
+                                code,
+                                status,
+                                body,
+                                thread_id: None,
+                            }
+                        }
+                        other => RouteDispatchError::Forbidden(other.to_string()),
+                    })?;
+            let rules = plan
+                .remote
+                .remote
+                .ingest_rules()
+                .map_err(|refusal| match refusal {
+                    crate::handler_error::HandlerError::Structured { code, status, body } => {
+                        RouteDispatchError::Structured {
+                            code,
+                            status,
+                            body,
+                            thread_id: None,
+                        }
+                    }
+                    other => RouteDispatchError::Internal(other.to_string()),
                 })?;
+            let remote_ignore = IgnoreMatcher::from_config(rules).map_err(|e| {
+                RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
+            })?;
             let state_arc = Arc::new(state.clone());
             let mut destination_policy = request.execution_policy.clone();
             destination_policy.target = ExecutionTarget::Here;
@@ -2304,7 +2360,7 @@ async fn admit_execution_with_publication(
         let preflight_state = state.clone();
         let preflight_timings = launch_timings.clone();
         let preflight = tokio::task::spawn_blocking(move || {
-            ryeos_executor::dispatch::preflight_root_dispatch(
+            let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
                 &preflight_item_ref,
                 &preflight_kind,
                 &preflight_parameters,
@@ -2316,7 +2372,12 @@ async fn admit_execution_with_publication(
                 &preflight_exec_ctx,
                 &preflight_state,
                 preflight_timings.as_ref(),
-            )
+            )?;
+            ryeos_executor::dispatch::require_preflight_caller_coverage(
+                &preflight,
+                &preflight_exec_ctx,
+            )?;
+            Ok(preflight)
         })
         .await
         .map_err(|error| {
@@ -2712,9 +2773,8 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
-    use ryeos_node_runtime::node_policy::sections::provider_environment::{
-        ProviderEnvironmentName, ProviderEnvironmentRecipients,
-    };
+    use ryeos_node_runtime::node_policy::sections::provider_environment::ProviderEnvironmentName;
+    use ryeos_node_runtime::node_policy::sections::recipients::NameRecipients;
 
     static NO_PROVIDER_ENVIRONMENT: ryeos_app::vault::ProviderEnvironment =
         ryeos_app::vault::ProviderEnvironment::none();
@@ -2827,6 +2887,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn vault_namespace_admission_seals_the_callers_principal_and_canonical_scopes() {
+        // A projectless launch has an empty project ceiling; the recipient
+        // sealed here is the caller and its own scopes, in canonical form.
+        let authority = resolve_execution_project_authority(
+            &operator_vault_namespace_policy(),
+            None,
+            None,
+            None,
+            "site:test",
+            &ryeos_engine::isolation::IsolationRuntime::disabled_for_authoring(),
+            &scopes(&[
+                "ryeos.receive.vault.b",
+                "ryeos.receive.vault.a",
+                "ryeos.receive.vault.b",
+            ]),
+            ProviderEnvironmentRecipient {
+                environment: &NO_PROVIDER_ENVIRONMENT,
+                principal: "fp:caller",
+            },
+        )
+        .unwrap();
+        let ryeos_state::objects::EnvironmentAuthority::Vault {
+            recipient_principal,
+            recipient_scopes,
+            ..
+        } = authority.environment()
+        else {
+            panic!("expected a vault authority");
+        };
+        assert_eq!(recipient_principal, "fp:caller");
+        assert_eq!(
+            recipient_scopes,
+            &scopes(&["ryeos.receive.vault.a", "ryeos.receive.vault.b"])
+        );
+        assert!(authority.capability_ceiling().is_empty());
+        authority.validate().unwrap();
+    }
+
     const OPENAI_VALUE: &str = "sk-node-provider-value";
     const ANTHROPIC_VALUE: &str = "sk-node-anthropic-value";
     const RECEIVE_ANTHROPIC: &str = "ryeos.receive.provider_env.anthropic_api_key";
@@ -2844,14 +2943,14 @@ mod tests {
             vec![
                 ProviderEnvironmentName {
                     name: "ANTHROPIC_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: Vec::new(),
                         capabilities: strings(&[RECEIVE_ANTHROPIC]),
                     },
                 },
                 ProviderEnvironmentName {
                     name: "OPENAI_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(&["fp:alice", "route:fixed-handler"]),
                         capabilities: Vec::new(),
                     },
@@ -3075,6 +3174,7 @@ mod tests {
         let sources = ryeos_app::vault::SecretSources {
             vault: &vault,
             provider_env: &environment,
+            ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
         };
         let names = vec!["OPENAI_API_KEY".to_owned()];
         // A child acting for another principal under the inherited authority.
@@ -3121,14 +3221,14 @@ mod tests {
             vec![
                 ProviderEnvironmentName {
                     name: "ANTHROPIC_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(&["fp:placeholder"]),
                         capabilities: strings(anthropic_capabilities),
                     },
                 },
                 ProviderEnvironmentName {
                     name: "OPENAI_API_KEY".to_owned(),
-                    recipients: ProviderEnvironmentRecipients {
+                    recipients: NameRecipients {
                         principals: strings(openai_principals),
                         capabilities: Vec::new(),
                     },
@@ -3159,6 +3259,7 @@ mod tests {
             &ryeos_app::vault::SecretSources {
                 vault: &vault,
                 provider_env: environment,
+                ceilings: &ryeos_app::vault::VaultCeilings::operator_only("fp:alice"),
             },
             ryeos_app::vault::SecretRecipient { principal },
             &[name.to_owned()],
@@ -3662,6 +3763,7 @@ mod tests {
             execute: None,
             request: RawRequest { body },
             source_file: std::path::PathBuf::from("/test/execute.yaml"),
+            authority: None,
         }
     }
 
@@ -3848,7 +3950,8 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         crate::remote::config::RemoteConfig {
             name: name.to_string(),
-            url: format!("https://{name}.example.com"),
+            url: Some(format!("https://{name}.example.com")),
+            reachability: Default::default(),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
             signing_key: format!(
                 "ed25519:{}",
@@ -3856,7 +3959,7 @@ mod tests {
             ),
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".into(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            ingest_ignore: Some(ryeos_app::ignore::IgnoreConfig { patterns: vec![] }),
             project_bindings: HashMap::new(),
         }
     }
@@ -3864,8 +3967,9 @@ mod tests {
     fn loaded(remote: crate::remote::config::RemoteConfig) -> LoadedRemote {
         LoadedRemote {
             config: remote,
-            scope: crate::remote::config::RemoteConfigScope::Operator,
             config_path: PathBuf::new(),
+            pin_source: crate::remote::config::PinSource::ExpectedFingerprint,
+            pinned_at: String::new(),
         }
     }
 

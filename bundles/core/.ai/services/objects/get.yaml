@@ -1,10 +1,11 @@
-# ryeos:signed:2026-10-22T05:18:13Z:d4217c44d254eec73bbee743706fe5af6779ff842ce14356659a5dbc882024d7:FeS9wgxKoTpwWw8+ZNdD9A/V+UFiIGOTpNgGmSLkUaRmogzJTuiga/dFfS7qwxdslkCZSJG/+9Bh8jNHQsKACg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T20:05:09Z:4aadaf730a8884cb78778c8c541cdb8081bc574ee3fde30a308afd5a5836f974:W/ftIKOv2Wxm1xRPW2bFoRb58xKaBHP6/4uu4sY1VWSUjrTltXDOSnu+4WfoSg6QgTv+MXbNPt2JJAwFRUXXAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.get
 required_caps: ["ryeos.execute.service.objects/get"]
 schema:
+  root: object
   object_hashes: string[]?
   blob_hashes: string[]?
   blob_chunk: object?
   large_object_chunk: object?
-description: "Retrieve typed CAS object/blob batches, one bounded blob chunk, or one bounded large-object chunk served from the large-object tier"
+description: "Retrieve typed CAS object/blob batches, one bounded blob chunk, or one bounded large-object chunk served from the large-object tier, only for hashes reachable from the named root (project_head, thread_result, bundle_export, placement, admitted_subject or catalog_publication); refuses anything else with object_not_in_scope"

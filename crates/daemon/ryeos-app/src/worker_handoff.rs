@@ -2711,10 +2711,10 @@ impl WorkerPlacementPreflightEvidence {
             {
                 bail!("local-operator preflight has no target chain owner anchor");
             }
-            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal
                 if self.target_chain_owner_anchor_hash.is_some() =>
             {
-                bail!("remote-operator preflight carries a local chain owner anchor");
+                bail!("remote-principal preflight carries a local chain owner anchor");
             }
             _ => {}
         }
@@ -4148,15 +4148,24 @@ fn equivalent_remote_environment(
         (
             EnvironmentAuthority::ProjectOverlay {
                 include_operator_vault: source_vault,
+                recipient_principal: source_principal,
+                recipient_scopes: source_scopes,
                 name_authority: source_names,
                 ..
             },
             EnvironmentAuthority::ProjectOverlay {
                 include_operator_vault: target_vault,
+                recipient_principal: target_principal,
+                recipient_scopes: target_scopes,
                 name_authority: target_names,
                 ..
             },
-        ) => source_vault == target_vault && source_names == target_names,
+        ) => {
+            source_vault == target_vault
+                && source_principal == target_principal
+                && source_scopes == target_scopes
+                && source_names == target_names
+        }
         _ => source == target,
     }
 }
@@ -4211,6 +4220,8 @@ pub fn build_remote_project_rebind(
     let (target_environment, target_overlay_root) = match environment {
         EnvironmentAuthority::ProjectOverlay {
             include_operator_vault,
+            recipient_principal,
+            recipient_scopes,
             name_authority,
             ..
         } => (
@@ -4225,6 +4236,8 @@ pub fn build_remote_project_rebind(
                 ),
                 source_identity: format!("dotenv:{}", target_project_path.join(".env").display()),
                 include_operator_vault: *include_operator_vault,
+                recipient_principal: recipient_principal.clone(),
+                recipient_scopes: recipient_scopes.clone(),
                 name_authority: name_authority.clone(),
             },
             Some(target_project_path.to_path_buf()),
@@ -5050,7 +5063,7 @@ mod tests {
                 owner_principal: request.owner_principal.clone(),
                 origin_site_id: request.origin_site_id.clone(),
                 principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "e".repeat(64),
                 scopes: vec!["*".to_owned()],
             },
@@ -5231,7 +5244,7 @@ mod tests {
                 owner_principal: format!("fp:{}", "e".repeat(64)),
                 origin_site_id: "site:a".into(),
                 principal_class:
-                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemoteOperator,
+                    ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::RemotePrincipal,
                 grant_digest: "5".repeat(64),
                 scopes: vec!["*".into()],
             },

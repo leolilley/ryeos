@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:09:46Z:59dd1e8f3f5565f38bcc452d8776fd03546e3f8cf5b0f6bff433a00dc775cc34:XY7i/Gy8gk25/YYGZyBzasEzhOdJ133JYfuVoJQuVJw/wt0q9L1EfefuHtKKE+xri1TpUB7Mcit36s0hZQ23Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T16:31:52Z:a1e6a46b21ac74bae9a8090e4ee8387d0140304047c82097fec8eba43fab40b1:YC9P7BV0pz3gwXuDgwopGgr//d3yrG2ElLrinQymnGYMFAMsR7aqe9BM0InWMTjsTHh3ul3ZHfN2Wt37hrAQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -157,7 +157,7 @@ with the node's retained identity and configured authorization directory.
 There is no worker Tool for this operation and no key mount into a subprocess.
 The external core-tools entry remains only for explicit host bootstrap; it
 shares request validation and the same writer, not a second grant protocol.
-Remote-operator grants require an exact origin site and reject wildcards.
+Remote-principal grants require an exact origin site and reject wildcards.
 Existing remote-node grants are maintained with
 `--remote-node-origin-site-id`; this preserves the admitted node's principal
 class while reconciling its exact scopes through the same locked writer.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-14T10:12:37Z:419300acda8215f63fc5cc0d97a8690c4061fde3d62fa003a528f533b03746f1:XhijM+SELODxJD8SxXDmzivfsM7EPaUVFWR6CNPioqLiwh5OhV63rHSdhlck/oLHyimpHoFPniVFDjawdOq6DQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-11-13T21:47:42Z:32a57a491d296d2535311abb6da626bfd935fcbc2c0f2f327695ccc3565a07d4:7JhX8hcnJk48mId8Crn92fiWzkCt9QKkYrwX7EFglMoi87UgpfHhBCOFPmXRUOkqPT9rb4dL+4QFnKv/HUUeCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: future
 tags: [ryeos, security, env, secrets, architecture]

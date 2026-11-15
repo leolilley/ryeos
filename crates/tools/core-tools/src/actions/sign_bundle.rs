@@ -27,7 +27,7 @@ use std::sync::Arc;
 use ryeos_engine::AI_DIR;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-use ryeos_engine::trust::{TrustStore, TrustedSigner};
+use ryeos_engine::trust::{SignerScope, TrustStore, TrustedSignerEntry};
 
 /// Report returned by [`sign_bundle_items`].
 #[derive(Debug, Serialize, Deserialize)]
@@ -201,14 +201,28 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
 
     // 1. Build a TrustStore seeded with the author's key plus any
     //    caller-provided registry/dependency trust.
-    let mut trust_store = TrustStore::from_signers(vec![TrustedSigner {
-        fingerprint: fingerprint.clone(),
-        verifying_key,
-        label: Some("author".to_string()),
-    }]);
-    if let Some(base) = base_trust_store {
-        trust_store.extend_from(base);
+    let mut signer_entries = base_trust_store
+        .map(TrustStore::signer_entries)
+        .unwrap_or_default();
+    if !signer_entries
+        .iter()
+        .any(|entry| entry.fingerprint == fingerprint)
+    {
+        signer_entries.push(TrustedSignerEntry {
+            fingerprint: fingerprint.clone(),
+            public_key: format!(
+                "ed25519:{}",
+                base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    verifying_key.as_bytes()
+                )
+            ),
+            label: "author".to_string(),
+            scope: SignerScope::everywhere(),
+        });
     }
+    let trust_store =
+        TrustStore::from_signer_entries(&signer_entries).context("build signing trust store")?;
 
     // 2. Load KindRegistry from registry_roots AND source bundle's own kind
     //    schemas. Registry roots provide base/dependency kinds (core, standard,

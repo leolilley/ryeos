@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:27:41Z:5364aa5f77c1626bcb68aba827d41eb2c88cd37bfb39731b33fb1689791c2bd7:Q6ejR8aRJlz+lfBo95IX6nq1i6kCw+cWIZDoNlMMsQB+QVEspJSSZwazg4DVQUiLYH8iAVVdA8nLkjrqG+r+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-13T09:40:08Z:a3475b6e8be5479ab63c44e9e7ce15ee0c8bc833d60a2f2e6391a65b2f154f15:tQcp9hzoNMACeCQSkghoqGrmPmONzsRZHE6lql00UnjaeMkoeI3UgXENfBDY6KH7Gcs0zJrqyKBCZgRRGVzbAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -19,8 +19,13 @@ escalation, secret leakage, and environment-dependent behavior.
 ## Node-owned OS isolation
 
 Tool and runtime item launches can additionally pass through the immutable strict
-node isolation snapshot. The mode comes from the node's init profile; most
-packaged profiles' lanes select disabled. In enforce mode, the node—not the
+node isolation snapshot. The mode comes from the node's init profile and host
+class: the `local` class of every packaged profile that declares one selects
+enforce, `hosted` classes select disabled, and each profile with a local lane
+also declares an explicit `local_unconfined` class (disabled) that an operator
+must name with `--host-class local_unconfined`. Init never falls back to it:
+when the host cannot prove the enforced lane, init refuses and names that
+opt-out. In enforce mode, the node—not the
 item—owns filesystem/network policy, environment filtering, and
 the Lillux open-file cap. Policy is resolved once at startup and shared across
 launch paths; edits require restart. Parser/composer handlers are trusted engine
