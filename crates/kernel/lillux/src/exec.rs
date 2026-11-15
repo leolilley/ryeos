@@ -13328,6 +13328,8 @@ fn install_no_process_creation_filter() -> std::io::Result<()> {
     const JEQ_K: u16 = 0x15;
     const JSET_K: u16 = 0x45;
     const RET_K: u16 = 0x06;
+    // Offset of the first syscall argument (low word, little endian) in `struct seccomp_data`.
+    const ARG0_LOW: u32 = 16;
     const KILL_PROCESS: u32 = 0x8000_0000;
     const ERRNO: u32 = 0x0005_0000;
     const ALLOW: u32 = 0x7fff_0000;
@@ -13341,16 +13343,23 @@ fn install_no_process_creation_filter() -> std::io::Result<()> {
     }
     // The architecture check also rejects foreign syscall-number tables.
     // x86_64 explicitly refuses the x32 ABI before comparing syscall IDs.
+    // A new PROCESS is refused; a new THREAD of the calling process is not. `clone` is allowed only when its
+    // first argument (the flags) carries CLONE_THREAD: such a task shares the caller's process, so it cannot
+    // outlive it or leave a descendant behind. Every other clone (a fork-like one) is refused. `clone3` keeps
+    // returning ENOSYS because its flags sit behind a pointer the filter cannot read; libc falls back to `clone`.
     #[cfg(target_arch = "x86_64")]
-    const FILTER: [libc::sock_filter; 14] = [
+    const FILTER: [libc::sock_filter; 17] = [
         filter(LD_W_ABS, 0, 0, 4),
         filter(JEQ_K, 1, 0, AUDIT_ARCH),
         filter(RET_K, 0, 0, KILL_PROCESS),
         filter(LD_W_ABS, 0, 0, 0),
         filter(JSET_K, 0, 1, 0x4000_0000),
         filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
-        filter(JEQ_K, 0, 1, libc::SYS_clone as u32),
+        filter(JEQ_K, 0, 4, libc::SYS_clone as u32),
+        filter(LD_W_ABS, 0, 0, ARG0_LOW),
+        filter(JSET_K, 1, 0, libc::CLONE_THREAD as u32),
         filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(RET_K, 0, 0, ALLOW),
         filter(JEQ_K, 0, 1, libc::SYS_clone3 as u32),
         filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
         filter(JEQ_K, 0, 1, libc::SYS_fork as u32),
@@ -13359,13 +13368,16 @@ fn install_no_process_creation_filter() -> std::io::Result<()> {
         filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
     ];
     #[cfg(target_arch = "aarch64")]
-    const FILTER: [libc::sock_filter; 8] = [
+    const FILTER: [libc::sock_filter; 11] = [
         filter(LD_W_ABS, 0, 0, 4),
         filter(JEQ_K, 1, 0, AUDIT_ARCH),
         filter(RET_K, 0, 0, KILL_PROCESS),
         filter(LD_W_ABS, 0, 0, 0),
-        filter(JEQ_K, 0, 1, libc::SYS_clone as u32),
+        filter(JEQ_K, 0, 4, libc::SYS_clone as u32),
+        filter(LD_W_ABS, 0, 0, ARG0_LOW),
+        filter(JSET_K, 1, 0, libc::CLONE_THREAD as u32),
         filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(RET_K, 0, 0, ALLOW),
         filter(JEQ_K, 0, 1, libc::SYS_clone3 as u32),
         filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
     ];
@@ -13432,6 +13444,22 @@ mod no_process_creation_tests {
         assert_ne!(denied.exit_code, 41, "{}", denied.stderr);
         let replaced = lib_run(request("exec /bin/true", true));
         assert!(replaced.success, "{}", replaced.stderr);
+    }
+
+    #[test]
+    fn no_process_creation_filter_allows_threads_of_the_process_but_not_new_processes() {
+        // A thread shares its creator's process, so it is not process creation: a filtered interpreter can start
+        // one. The same interpreter cannot fork.
+        let threaded = lib_run(request(
+            "exec /usr/bin/env python3 -c 'import threading; t = threading.Thread(target=lambda: None); t.start(); t.join()'",
+            true,
+        ));
+        assert!(threaded.success, "{}", threaded.stderr);
+        let forked = lib_run(request(
+            "exec /usr/bin/env python3 -c 'import os; os.fork()'",
+            true,
+        ));
+        assert!(!forked.success, "{}", forked.stderr);
     }
 
     #[test]
