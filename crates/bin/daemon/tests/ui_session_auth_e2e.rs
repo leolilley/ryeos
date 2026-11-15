@@ -188,17 +188,15 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
 
     let producer = claim_producer(&harness, &session_id, &root).await?;
 
-    // In-binding dispatch: the signed binding names this source.
+    // In-binding dispatch: the root binding's closure is the presentation's
+    // dialog Views (initial Surfaces bind separately), and the Node details
+    // dialog names this source.
     let (status, admitted) = cookie_request(
         &harness,
         reqwest::Method::POST,
         "/ui/api/invocations/dispatch",
         &session_id,
-        Some(dispatch_body(
-            &root,
-            &producer,
-            "view:ryeos/threads/history",
-        )),
+        Some(dispatch_body(&root, &producer, "view:ryeos/node/status")),
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "in-binding dispatch: {admitted}");
@@ -236,11 +234,7 @@ async fn browser_session_authority_lifecycle_over_http() -> anyhow::Result<()> {
         (
             reqwest::Method::POST,
             "/ui/api/invocations/dispatch",
-            Some(dispatch_body(
-                &root,
-                &producer,
-                "view:ryeos/threads/history",
-            )),
+            Some(dispatch_body(&root, &producer, "view:ryeos/node/status")),
         ),
     ] {
         let (status, answer) = cookie_request(&harness, method, path, &session_id, body).await?;
