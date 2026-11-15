@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-15T02:27:41Z:df7b0157f2434eb098ab7e099cd5c576e408e2eb6d8fb0be634102cbb6238fe9:9BvRbfP+j05dTMd/oWGpvvps6IdccMxoJ0aTd5eViPdMssbK4xWw7acU6ZtDZDW/SD9y+bm+ELCsEZneSx0oBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T07:11:12Z:07b33090cbf21073cee1036ac05954fc9c0cc847f94055621c5abcd647f1cb00:p70+LswAcDtUlVzH7P4i1pk6u3DCFjuEaBmvTVPUVruEOZ67HLD7iUnXoa723yXZrWpz5UZhkYXBwshb+iDTDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -294,7 +294,7 @@ for profile_name in "${node_init_profiles[@]}"; do
   case "$profile_name" in
     core|core-scheduling|core-workflow|core-knowledge)
       [[ "$declared_host_classes" == "hosted local " ]] ;;
-    standard)
+    standard|bundle-source)
       [[ "$declared_host_classes" == "hosted local local_unconfined " ]] ;;
     hosted-controller)
       [[ "$declared_host_classes" == "hosted local hosted_enforced " ]] ;;
