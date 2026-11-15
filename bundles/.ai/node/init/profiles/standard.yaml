@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-15T02:27:40Z:9781c11a1f2cbb97bbf26e4582b3661d4cdcd1490fbb7df14ff4112ca696d85b:OAl2yziaPvr+goOzqg/j6shP/2sD5kdeZfl62OwCnam290uRmvFxbtclLHLJ2+zAgDDaeNUw90bLZv22o5TCCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T06:50:32Z:44e3ba9ee7ee4228962c97589769bbaec6a683b72c4267879e5ea13d8d299fd6:+kbOm33KIDivNwjSGF0+JggQLdzhuz9pi+6zsb5p1ETqLg9vOp/SVtsDF4qUV86lfQ+f28kFqqm2VjEOLYGKCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - browser
@@ -328,7 +328,10 @@ policies:
             bundle: core
             implementation: linux-lillux
           proc_filesystem: pid_namespace
-          host_direct: unavailable
+          # Offers the host-direct posture: a tool that declares
+          # `host_authority: required` may run on the host, unconfined,
+          # under an exact operator grant in the `host_access` section.
+          host_direct: operator_granted
         local_unconfined:
           # The explicit opt-out from the sandbox: a host the operator runs
           # where jobs execute as the daemon user with no isolation backend.
@@ -348,7 +351,10 @@ policies:
           mode: disabled
           backend: null
           proc_filesystem: empty
-          host_direct: unavailable
+          # Offers the host-direct posture: a tool that declares
+          # `host_authority: required` may run on the host, unconfined,
+          # under an exact operator grant in the `host_access` section.
+          host_direct: operator_granted
       # Inits trusted to exit when their only child exits. When the node's
       # parent is pid 1 and pid 1 is one of these, the node's exit is trusted
       # to end its container, so a new container on the same boot proves

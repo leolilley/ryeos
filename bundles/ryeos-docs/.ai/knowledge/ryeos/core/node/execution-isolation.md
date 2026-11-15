@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T06:02:00Z:6cbda97ee985248091c06361d17dff49ab8d3a79b0530af7acf0bcb491cc3880:cJPKcoYB0RDbqkBz0EqJRbRaLGwSk+XAoXtJ0HUn34DkLaXvcOtS6iiF8ZIExNkYC1WFxHugyxTnyJTHO/7oBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T06:50:32Z:08dc3fa59fbdd61c1bef5dda373e62471010419781859cdea27bdf5fd220c51e:qrKs7WTJ6eyEROzAvFHOWIH1ON0Ss9Lfy27h2YyoerUKSMTiKB19/+t9txWC2Udr5BI3/CwbN2Qh/t+uOBQUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -344,7 +344,9 @@ refusal is not an executed workload's nonzero exit result.
 - Every host class declares `host_direct: unavailable | operator_granted`,
   with no default. It says whether that class offers the host-direct posture
   at all (see below). Only the `development` profile's `local` and
-  `local_direct` classes say `operator_granted`.
+  `local_direct` classes and the `standard` profile's `local` and
+  `local_unconfined` classes say `operator_granted`; every hosted class says
+  `unavailable`.
 - `backend` is null when no backend is selected and must be present in enforce
   mode.
 - `backend.bundle` names one registered signed bundle.
