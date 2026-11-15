@@ -621,43 +621,60 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
 }
 
 fn operate() -> Result<()> {
+    use fail_class::{Classify as _, FailClass};
     // Start the one operation deadline before reading any request/configuration
     // descriptor. The signed parent budget is never renewed by local work.
-    let mut deadline = operation_deadline()?;
+    let mut deadline = operation_deadline().classed(FailClass::Deadline)?;
     let cancellation = NetworkCancellation::default();
-    let _signal_cancellation = SignalCancellation::install(cancellation.clone())?;
-    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_REQUEST_BYTES)?;
+    let _signal_cancellation = SignalCancellation::install(cancellation.clone())
+        .classed(FailClass::CancellationInstall)?;
+    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_REQUEST_BYTES)
+        .classed(FailClass::RequestParse)?;
     let request: LifecycleAdapterRequest =
-        from_json_slice_strict(&request_bytes, MAX_LIFECYCLE_REQUEST_BYTES)?;
-    request.validate()?;
+        from_json_slice_strict(&request_bytes, MAX_LIFECYCLE_REQUEST_BYTES)
+            .classed(FailClass::RequestParse)?;
+    request.validate().classed(FailClass::RequestParse)?;
     ensure!(
-        request.canonical_bytes()? == request_bytes,
+        request
+            .canonical_bytes()
+            .classed(FailClass::RequestParse)?
+            == request_bytes,
         "operation request is noncanonical"
     );
     let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;
     let provider_spec_bytes =
-        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)?;
+        read_sealed_env(LIFECYCLE_PROVIDER_SPEC_FD_ENV, maximum_provider_spec_bytes)
+            .classed(FailClass::SpecDigest)?;
     let provider_spec_sha256 = std::env::var(LIFECYCLE_PROVIDER_SPEC_SHA256_ENV)
-        .context("missing captured provider spec digest")?;
+        .context("missing captured provider spec digest")
+        .classed(FailClass::SpecDigest)?;
     let schema_digest = lillux::sha256_hex(include_bytes!("../fixtures/settings.schema.json"));
     let (provider_spec, _provider_spec_sha256) =
-        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)?;
+        parse_provider_spec_bytes(&provider_spec_bytes, &provider_spec_sha256, &schema_digest)
+            .classed(FailClass::SpecDigest)?;
     // A remote Codex lease's admitted request names its guest egress. It
     // selects the exact policy the create requests and every read of the
     // Sandbox must echo. A policy the signed spec cannot create fails closed
     // here, before any credential or network input is read.
-    let lease_egress = match ryeos_remote_lease_core::read_lease_admission()? {
+    let lease_egress = match ryeos_remote_lease_core::read_lease_admission()
+        .classed(FailClass::LeaseAdmissionInput)?
+    {
         Some(admission) => {
-            ensure!(
-                admission.adapter_id == ADAPTER_ID
-                    && admission.provider_spec_sha256 == provider_spec_sha256,
-                "lease admission names a different adapter or provider spec"
-            );
+            if admission.adapter_id != ADAPTER_ID
+                || admission.provider_spec_sha256 != provider_spec_sha256
+            {
+                return Err(anyhow::anyhow!(
+                    "lease admission names a different adapter or provider spec"
+                )
+                .context(FailClass::LeaseAdmissionInput));
+            }
             admission.guest_network_allow
         }
         None => BTreeSet::new(),
     };
-    let egress_policy = provider_spec.egress_policy(&lease_egress)?;
+    let egress_policy = provider_spec
+        .egress_policy(&lease_egress)
+        .classed(FailClass::EgressPolicy)?;
     // A disabled signed profile cannot turn an already claimed activation
     // into a silent pending observation. Reject before reading guest inputs,
     // network inputs, or credentials. Reconciliation remains observation-only

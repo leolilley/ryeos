@@ -32,6 +32,9 @@ pub(crate) enum FailClass {
     RelayResponse,
     RelayInput,
     RelayBody,
+    CancellationInstall,
+    LeaseAdmissionInput,
+    EgressPolicy,
     Other,
 }
 
@@ -62,6 +65,9 @@ impl FailClass {
             Self::RelayResponse => 23,
             Self::RelayInput => 24,
             Self::RelayBody => 25,
+            Self::CancellationInstall => 26,
+            Self::LeaseAdmissionInput => 27,
+            Self::EgressPolicy => 28,
         }
     }
 
@@ -91,6 +97,9 @@ impl FailClass {
             Self::RelayResponse => "relay_response",
             Self::RelayInput => "relay_input",
             Self::RelayBody => "relay_body",
+            Self::CancellationInstall => "cancellation_install",
+            Self::LeaseAdmissionInput => "lease_admission_input",
+            Self::EgressPolicy => "egress_policy",
         }
     }
 
@@ -166,6 +175,9 @@ mod tests {
             FailClass::RelayResponse,
             FailClass::RelayInput,
             FailClass::RelayBody,
+            FailClass::CancellationInstall,
+            FailClass::LeaseAdmissionInput,
+            FailClass::EgressPolicy,
             FailClass::Other,
         ];
         let mut codes: Vec<i32> = all.iter().map(|class| class.exit_code()).collect();
