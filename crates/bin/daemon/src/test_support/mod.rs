@@ -10,8 +10,8 @@
 //! ## Running the daemon suite
 //!
 //! The harness initializes nodes from the authored `core`,
-//! `core-scheduling`, `standard` and `full` init profiles. Every profile
-//! except `core` installs the scheduling bundle (`service:scheduler/*`) and
+//! `core-scheduling`, `standard` and `standard-central-auth` init profiles.
+//! Every profile except `core` installs the scheduling bundle (`service:scheduler/*`) and
 //! all but `core-scheduling` also install the directive bundle
 //! (`service:model-providers/*`). A daemon refuses to start when an installed
 //! operational service has no compiled handler, so the suite runs with the
@@ -803,7 +803,7 @@ enum FastBundleSelection {
     CoreOnly,
     CoreScheduling,
     Standard,
-    Full,
+    StandardCentralAuth,
 }
 
 impl DaemonHarness {
@@ -950,9 +950,7 @@ impl DaemonHarness {
             None,
             None,
             FastBundleSelection::Standard,
-            |state_path, _user_space, fixture| {
-                fast_fixture::register_standard_composition(state_path, fixture)
-            },
+            |_state_path, _user_space, _fixture| Ok(()),
             |_| {},
         )
         .await
@@ -1008,7 +1006,27 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             None,
             None,
-            FastBundleSelection::Full,
+            FastBundleSelection::Standard,
+            plant,
+            tweak,
+        )
+        .await
+    }
+
+    /// Like [`start_fast_with`], but under the authored Standard-central-auth
+    /// composition: Core, Scheduling, the workflow bundles and central-auth.
+    pub async fn start_fast_standard_central_auth_with<S, F>(
+        plant: S,
+        tweak: F,
+    ) -> anyhow::Result<(Self, fast_fixture::FastFixture)>
+    where
+        S: FnOnce(&Path, &Path, &fast_fixture::FastFixture) -> anyhow::Result<()>,
+        F: FnOnce(&mut Command),
+    {
+        Self::start_fast_with_optional_identities(
+            None,
+            None,
+            FastBundleSelection::StandardCentralAuth,
             plant,
             tweak,
         )
@@ -1030,7 +1048,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             None,
-            FastBundleSelection::Full,
+            FastBundleSelection::Standard,
             plant,
             tweak,
         )
@@ -1053,7 +1071,7 @@ impl DaemonHarness {
         Self::start_fast_with_optional_identities(
             Some(node_key),
             Some(user_key),
-            FastBundleSelection::Full,
+            FastBundleSelection::Standard,
             plant,
             tweak,
         )
@@ -1085,10 +1103,10 @@ impl DaemonHarness {
                     .exact_bundles()
                     .expect("Standard profile has an exact bundle inventory"),
             )?,
-            FastBundleSelection::Full => copy_core_to_temp_prepared(
-                fast_fixture::FastFixtureProfile::Full
+            FastBundleSelection::StandardCentralAuth => copy_core_to_temp_prepared(
+                fast_fixture::FastFixtureProfile::StandardCentralAuth
                     .exact_bundles()
-                    .expect("Full profile has an exact bundle inventory"),
+                    .expect("Standard-central-auth profile has an exact bundle inventory"),
             )?,
         };
 
@@ -1096,7 +1114,9 @@ impl DaemonHarness {
             FastBundleSelection::CoreOnly => fast_fixture::FastFixtureProfile::Core,
             FastBundleSelection::CoreScheduling => fast_fixture::FastFixtureProfile::CoreScheduling,
             FastBundleSelection::Standard => fast_fixture::FastFixtureProfile::Standard,
-            FastBundleSelection::Full => fast_fixture::FastFixtureProfile::Full,
+            FastBundleSelection::StandardCentralAuth => {
+                fast_fixture::FastFixtureProfile::StandardCentralAuth
+            }
         };
         let fixture = match (node_key, user_key) {
             (Some(node_key), Some(user_key)) => {
@@ -1129,8 +1149,14 @@ impl DaemonHarness {
         // The harness copies `bundles/core` to `state_path`. Register it
         // so `bootstrap::verify_initialized` sees at least one bundle.
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
-        if matches!(bundle_selection, FastBundleSelection::Full) {
-            fast_fixture::register_full_composition(&state_path, &fixture)?;
+        match bundle_selection {
+            FastBundleSelection::Standard => {
+                fast_fixture::register_standard_composition(&state_path, &fixture)?
+            }
+            FastBundleSelection::StandardCentralAuth => {
+                fast_fixture::register_standard_central_auth_composition(&state_path, &fixture)?
+            }
+            FastBundleSelection::CoreOnly | FastBundleSelection::CoreScheduling => {}
         }
         plant(&state_path, user_space.path(), &fixture)?;
         fast_fixture::validate_profile_bundle_records(&state_path, &fixture, selected_profile)?;

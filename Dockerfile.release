@@ -566,6 +566,11 @@ COPY --from=composition-publication /build/bundles/knowledge /opt/ryeos/knowledg
 COPY --from=composition-publication /build/bundles/directive /opt/ryeos/directive
 COPY --from=composition-publication /build/bundles/graph /opt/ryeos/graph
 COPY --from=composition-publication /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
+COPY --from=composition-publication /build/bundles/ryeos-ui /opt/ryeos/ryeos-ui
+COPY --from=composition-publication /build/bundles/codex /opt/ryeos/codex
+COPY --from=composition-publication /build/bundles/opencode /opt/ryeos/opencode
+COPY --from=composition-publication /build/bundles/web /opt/ryeos/web
+COPY --from=composition-publication /build/bundles/browser /opt/ryeos/browser
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV RYEOS_APP_ROOT=/data/app

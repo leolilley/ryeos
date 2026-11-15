@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T16:49:28Z:b4542bea916344e49051489719c7d252598764b564b74d9b954886ea890b83eb:gUcWqEHikYocwNNUhLzBbPKPOhtMZ8I/EWk1+7taYHUXX/XM/AlGksu5YDpvt7TqlB4cXbUqEiCDgCbFbh7RCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:908b4e07c67d6e9ef311e43d6a9fce379d337978ab522e41afb715721cd7fd2d:dKsgmY2roEB9Q7PwsxRXqqHrYx+8oHhzerMiRmWJqSDqixYy9h4TxHnuBWdk5kRwZUFB3D7Tpb6PV3GXMWnZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
@@ -24,8 +24,8 @@ Defaults are `/usr/share/ryeos` for source and the XDG data dir
 (`~/.local/share/ryeos`) for the app root, overridable via `--app-root`
 or `RYEOS_APP_ROOT`. Every fresh initialization requires
 `--node-profile <name>` to select a complete publisher-signed init profile from
-`<source>/.ai/node/init/profiles/<name>.yaml`. Packaged full installs use
-`--node-profile full --host-class local`; each lean distribution uses its exact
+`<source>/.ai/node/init/profiles/<name>.yaml`. Packaged installs use
+`--node-profile standard --host-class local`; each lean distribution uses its exact
 same-named profile. `--host-class <class>` names which of the profile's
 declared host classes the node runs under (`local` on a host the operator
 runs, with enforced isolation; `local_unconfined` on that host with no

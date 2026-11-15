@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:30:21Z:0aff0604592874adefd6cfa54aaf0ef205f5eb01a7b8906f1dfa8156b7347eca:1wUY2E3lDLzH1F2/BT6ncLviW0oz3a6JwhtuwLNXYO8sopLwXPj/go/mGlfua0eHU2RAzNY5Rei1G53uqJh5AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:75407dab9adbaea2cf018c6130f4f1ca53485ccf843e5917e2c69ffcd69859ac:ScJ3xq/7KUGM3WeZimsDKXoSQwFFf9X9wQaUJiPBYCRGwhSQ/r/BjtnV96iHMqsFxW63nXnHjmFXqExbiR1lDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -207,7 +207,7 @@ principal's grant ends all of them, and `not_after` bounds the rest.
    --host-class <class>` so
    the remote has node identity, vault key material, local operator
    authorization, the exact distribution bundles, and a complete signed node
-   policy generation. Packaged full nodes use `full` with class `local`;
+   policy generation. Packaged nodes use `standard` with class `local`;
    images use the profile mapped by their bundle-set packaging, with the class
    the deployment sets in `RYEOS_INIT_HOST_CLASS` (`hosted` in a hosting
    provider's container, `local` on a host the operator runs).

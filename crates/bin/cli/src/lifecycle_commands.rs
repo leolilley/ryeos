@@ -738,7 +738,7 @@ struct NodePolicyGenerationResetArgs {
     #[arg(long, default_value = "/usr/share/ryeos")]
     source: PathBuf,
 
-    /// Exact publisher-signed profile to install (for example `full`).
+    /// Exact publisher-signed profile to install (for example `standard`).
     #[arg(long)]
     node_profile: String,
 
@@ -6274,7 +6274,7 @@ mod tests {
     fn policy_generation_reset_args(confirm: bool) -> NodePolicyGenerationResetArgs {
         NodePolicyGenerationResetArgs {
             source: PathBuf::from("/usr/share/ryeos"),
-            node_profile: "full".to_string(),
+            node_profile: "standard".to_string(),
             host_class: "local".to_string(),
             trust_files: Vec::new(),
             substrate_image_digest: None,
@@ -6292,7 +6292,7 @@ mod tests {
         assert!(policy_generation_reset_args(true).validate().is_ok());
 
         let mut invalid = policy_generation_reset_args(true);
-        invalid.node_profile = "../full".to_string();
+        invalid.node_profile = "../standard".to_string();
         assert!(invalid.validate().is_err());
 
         let mut noncanonical = policy_generation_reset_args(true);

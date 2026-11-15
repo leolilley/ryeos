@@ -42,7 +42,7 @@ fn scopes(use_caps: &[&str]) -> Vec<String> {
 }
 
 async fn start(callers: Vec<(SigningKey, Vec<String>)>) -> (DaemonHarness, FastFixture) {
-    DaemonHarness::start_fast_with(
+    DaemonHarness::start_fast_standard_central_auth_with(
         move |state: &Path, _user: &Path, fixture: &FastFixture| {
             register_workflow_bundles(state, fixture)?;
             register_central_auth_bundle(state, fixture)?;

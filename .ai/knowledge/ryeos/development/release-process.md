@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-12T12:14:08Z:c92f192f83b9bbacce20a926ad02929c8150a7836343ca3d9e450e2d1f9a1f31:drf8UJco2+hJFCkiWjMmrvHflvjKnfyVPhCRE5KeTa09wXNNqF6o5cGEBgaPiwH68ZI9htg05Tr9r3fTRqcjAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:3abccaf92af7155fdf4ffb9b86b409edb5f4ac58ae11cb763f3d0d3aad266673:DQT0v8NGY5eKNnyNvDlOXa5M3ii7L+v2BpZgnlHWW4RblVV1Dx0sopCdQRFfAL/2KBd5uWnCjO2mKC1EWFlkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -528,7 +528,8 @@ package has two immutable inputs, both listed in its `source=` with a pinned
   binaries; and
 - `ryeos-bundles-<version>-x86_64.tar.gz`, the release asset produced by the
   release workflow (`scripts/release/package-bundle-artifact.sh`) after
-  populating and signing the full bundle set with the official publisher key.
+  populating and signing the release bundle sets with the official publisher
+  key; the archive carries the standard and hosted-controller sets.
 
 The tag archive alone is not enough: it omits the ignored, generated bundle
 artifacts produced by `scripts/populate-bundles.sh` (bundle-owned binaries,
@@ -549,8 +550,8 @@ intentionally bypasses the package manager/AUR flow while installing the same
 runtime layout:
 
 - binaries to `/usr/bin`;
-- selected bundle sources to `/usr/share/ryeos/<bundle>` (default: the full set
-  defined by `scripts/pkg/bundle-sets.sh`);
+- selected bundle sources to `/usr/share/ryeos/<bundle>` (default: the standard
+  set defined by `scripts/pkg/bundle-sets.sh`);
 - initialized bundles under `~/.local/share/ryeos/.ai/bundles/...` after
   `ryeos init`.
 
