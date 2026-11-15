@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:943d38525103715b1082a6bf52f033e2cbfcc4c83f82aecad0b785ce42d663e9:35AoDp3GPAVEoWfOI+uODutKcNxQY41pnbwoW9PEgLhSKU3C7/lDBdFrsVpL3PxVF2PF5zwvA2gVDsOiHkZPBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:04:42Z:fd9457a424b504527e618cd3e73e3d97da6af3e52e4819f69a71577b1db11f81:CRQZNTBJ00jToEl50ARKCKQfTPiWiztOAVVHt027tYnKo4wRi0Dy+246MiAYT+oVI+gtwuwsjUZFWto4jzYsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "central-auth"
 name: "create-invite"
@@ -16,8 +16,20 @@ requires:
             from_param: realm_id
           access: read_write
 
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
 config:
-  command: "python3"
+  command: "${interpreter}"
   args:
     - "${tool_dir}/lib/central_auth.py"
     - "create-invite"

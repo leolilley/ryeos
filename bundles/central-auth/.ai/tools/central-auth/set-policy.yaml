@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:e51b331ed27b81d1f83a98abdc1ccded5e2633f9264760314bd45b7c0f207cdc:NzIN6oitQ6VZuA/azgD/Z6aB3BncN9yrZJrPRqyAPsc5BMpyiiOdxNrFvj6Evv8ljdkcs1qk758Hk2r7cW65Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:04:42Z:abcfb92e22faffecc1ce58571f000947ebaa48eafdfde5fe2c075120f56aa8a6:sE2Tou2s71mSXLHLRxVYKECyobCgxRcQA/rn3G6ztt1h8X7tYKWFNAeaF5PzObOdE4zYQJ6/S0E8M+2E1I02Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "central-auth"
 name: "set-policy"
@@ -16,8 +16,20 @@ requires:
             from_param: realm_id
           access: read_write
 
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
 config:
-  command: "python3"
+  command: "${interpreter}"
   args:
     - "${tool_dir}/lib/central_auth.py"
     - "set-policy"

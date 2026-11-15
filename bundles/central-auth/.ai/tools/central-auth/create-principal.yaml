@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:7601a533eb3deba234519c68b4a84a2972971d8b50709608eaea1467588c9096:cEJKT0P7xG0INmYVeCVnR0gkUvFzuVbSHlw0eYSiBbdXGsz+iznl3ydRREDoQKdwoXMLfbV523wt5vdBgH2YBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:04:42Z:2ef840016461b8eb5d2228becc47aca1dd130db5a46667aa7a212fca6b8273b2:mAoNR9P6W8yx6AL8veFfWXYafU/an9vuAG7vSr+q9hoAfnXQyQXDzGgB1wPvrBbpeMeH3PvItO1tdny8ewCbAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "central-auth"
 name: "create-principal"
@@ -16,8 +16,20 @@ requires:
             from_param: realm_id
           access: read_write
 
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
 config:
-  command: "python3"
+  command: "${interpreter}"
   args:
     - "${tool_dir}/lib/central_auth.py"
     - "create-principal"

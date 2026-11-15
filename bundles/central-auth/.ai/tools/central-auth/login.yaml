@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:6a342f018cd5868ed2b9daa94aed76da669577d7ed5f272addee5a8f420e10ac:16tQf2250GXK+IBzSNlAywubg9ArOcaREoLr27kPuaffXRWLfjsM2deynz5YLF/xZn3ePRIJx2lINEyJp1p9AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:04:42Z:ca861a8612f86fc89ec9f1788a8d41337f43cead36cabd3bdc0ae3cd12ebd00b:xya8EiSyo7D8/I6tgnuJEwJ0hlXHUwB3urBLPykN73RE1nT18sZuTswvjh0j5HdkNVBqO04pRcpvQ2rhP17mBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "central-auth"
 name: "login"
@@ -16,8 +16,20 @@ requires:
             from_param: realm_id
           access: read_write
 
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
 config:
-  command: "python3"
+  command: "${interpreter}"
   args:
     - "${tool_dir}/lib/central_auth.py"
     - "login"
