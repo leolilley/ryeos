@@ -111,6 +111,8 @@ ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-scheduler = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
+ryeos-client-base = { workspace = true }
+uuid = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "server", "http1"] }
