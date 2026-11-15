@@ -155,7 +155,18 @@ fn resolve_interpreter_with_env(
     }
 }
 
+/// Search path used when the engine process has no `PATH`. A node supervised
+/// by its host service starts with an empty environment by design (it never
+/// inherits an administrator's or login session's `PATH`), so bare
+/// `path_candidates` would otherwise never resolve there. This is a fixed
+/// system location list, not inherited configuration.
+const DEFAULT_SEARCH_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
 fn resolve_path_candidate(name: &str) -> Option<PathBuf> {
+    resolve_path_candidate_in(name, std::env::var_os("PATH"))
+}
+
+fn resolve_path_candidate_in(name: &str, path: Option<std::ffi::OsString>) -> Option<PathBuf> {
     let candidate = Path::new(name);
     if candidate.components().count() > 1 {
         return if candidate.is_file() {
@@ -164,7 +175,7 @@ fn resolve_path_candidate(name: &str) -> Option<PathBuf> {
             None
         };
     }
-    let search_path = std::env::var_os("PATH")?;
+    let search_path = path.unwrap_or_else(|| DEFAULT_SEARCH_PATH.into());
     std::env::split_paths(&search_path)
         .map(|directory| directory.join(candidate))
         .find(|path| path.is_file())
@@ -604,6 +615,21 @@ mod interpreter_resolution_tests {
         let root = tempfile::tempdir().unwrap();
         let got = resolve_interpreter(&python_like(None), Some(root.path())).unwrap();
         assert_eq!(Path::new(&got), resolve_path_candidate("python3").unwrap());
+    }
+
+    #[test]
+    fn an_absent_path_searches_the_fixed_system_locations() {
+        // A host-service supervised node runs with an empty environment.
+        let expected = resolve_path_candidate_in("sh", Some("/bin:/usr/bin".into()));
+        assert!(
+            expected.is_some(),
+            "test host has no /bin/sh or /usr/bin/sh"
+        );
+        assert_eq!(resolve_path_candidate_in("sh", None), expected);
+        assert_eq!(
+            resolve_path_candidate_in("ryeos-no-such-interpreter", None),
+            None
+        );
     }
 
     #[test]
