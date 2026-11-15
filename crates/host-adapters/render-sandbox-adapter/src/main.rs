@@ -399,15 +399,24 @@ fn main() {
             "render lifecycle adapter failed closed: {}",
             class.word()
         );
-        std::process::exit(class.exit_code());
+        std::process::exit(match class {
+            // An error no step classified still names the invocation that
+            // failed, by a stable exit code and no text.
+            fail_class::FailClass::Other => {
+                fail_class::unclassified_exit_code(std::env::args().nth(1).as_deref())
+            }
+            _ => class.exit_code(),
+        });
     }
 }
 
 fn run() -> Result<()> {
+    use fail_class::{Classify as _, FailClass};
     let adapter = unsafe {
         lillux::take_inherited_descriptor_authority_from_env(LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV)
     }
-    .map_err(anyhow::Error::msg)?;
+    .map_err(anyhow::Error::msg)
+    .classed(FailClass::ExecutableAuthority)?;
     match std::env::args().nth(1).as_deref() {
         Some("inspect") => inspect(&adapter),
         Some("verify-runtime-probe") => verify_runtime_probe(&adapter),
@@ -621,7 +630,7 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
 }
 
 fn operate() -> Result<()> {
-    use fail_class::{Classify as _, FailClass};
+    use fail_class::{Classify as _, FailClass, ensure_class};
     // Start the one operation deadline before reading any request/configuration
     // descriptor. The signed parent budget is never renewed by local work.
     let mut deadline = operation_deadline().classed(FailClass::Deadline)?;
@@ -726,24 +735,36 @@ fn operate() -> Result<()> {
         None
     };
     if let LifecycleAdapterRequest::Allocate { reservation, .. } = &request {
-        deadline = request_deadline(reservation.contact_deadline_ms, deadline)?;
+        deadline = request_deadline(reservation.contact_deadline_ms, deadline)
+            .classed(FailClass::Deadline)?;
     }
     if let LifecycleAdapterRequest::ActivateSupervisor { activation, .. } = &request {
-        deadline = request_deadline(activation.attachment_deadline_ms, deadline)?;
+        deadline = request_deadline(activation.attachment_deadline_ms, deadline)
+            .classed(FailClass::Deadline)?;
     }
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
+    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)
+        .classed(FailClass::SettingsDigest)?;
+    ensure_class!(
+        FailClass::SettingsDigest,
         lillux::sha256_hex(&settings_bytes) == request.common().settings_digest,
         "settings digest changed"
     );
     let settings_value: serde_json::Value =
-        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)?;
-    ensure!(
-        lillux::canonical_json(&settings_value)?.as_bytes() == settings_bytes,
+        from_json_slice_strict(&settings_bytes, MAX_SETTINGS_BYTES)
+            .classed(FailClass::SettingsShape)?;
+    ensure_class!(
+        FailClass::SettingsShape,
+        lillux::canonical_json(&settings_value)
+            .map_err(anyhow::Error::from)
+            .classed(FailClass::SettingsShape)?
+            .as_bytes()
+            == settings_bytes,
         "settings are noncanonical"
     );
-    let settings: Settings = serde_json::from_value(settings_value)?;
-    validate_settings(&settings)?;
+    let settings: Settings = serde_json::from_value(settings_value)
+        .map_err(anyhow::Error::from)
+        .classed(FailClass::SettingsShape)?;
+    validate_settings(&settings).classed(FailClass::SettingsShape)?;
     let network = network_context_from_captured_inputs()?;
 
     let response = match &request {
