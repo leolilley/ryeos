@@ -580,8 +580,10 @@ async fn grant_expiry_pauses_schedule_with_typed_outcome() {
         .await
         .expect("start Core+Scheduling daemon");
     let owner = SecondPrincipal::new();
-    // The grant lapses before the schedule's first five-second boundary.
-    owner.grant_for(&h, OWNER_SCOPES, 3).await;
+    // The grant outlives registration, which refuses an already-lapsed
+    // authority, and lapses a few five-second boundaries later; the first fire
+    // after it lapses pauses the schedule.
+    owner.grant_for(&h, OWNER_SCOPES, 15).await;
     let project = doctor_project(&h);
     let (status, body) = owner
         .exec(
