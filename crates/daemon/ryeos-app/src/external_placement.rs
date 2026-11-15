@@ -2409,19 +2409,7 @@ fn admit_current_runtime_qualification(
     };
     retained.validate()?;
     let source = verify_retained_runtime_proof(state, &retained)?;
-    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
-        state,
-        &retained.proof,
-        &source,
-        &contract.backend,
-        &retained.owner_principal,
-    )?;
-    state.external_placement_backends.verify_runtime_probe(
-        contract,
-        &RuntimeProbeInput::from_product(&retained.proof),
-        &source,
-        binding_hash,
-    )?;
+    verify_retained_runtime_probe(state, contract, &retained, &source, binding_hash)?;
     Ok(Some(retained))
 }
 
@@ -2468,18 +2456,44 @@ fn require_retained_session_runtime_qualification(
         return Ok(());
     };
     let source = verify_retained_runtime_proof(state, retained)?;
-    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
+    verify_retained_runtime_probe(state, &contract, retained, &source, binding.digest())
+}
+
+/// Judge the retained qualification's probe evidence against the exact placement.
+///
+/// A probe that names a snapshot locator was produced on this node's own
+/// provider: its locator is rejoined to this node's journal and the backend's
+/// adapter then interprets it against the exact adapter, settings and binding.
+/// A remote qualification testimony cannot carry a locator, because the
+/// attesting node's journal is not this node's; its evidence was already
+/// authenticated against the accepted testimony, so no adapter interprets it.
+/// Locator-less evidence with no testimony is refused rather than skipped.
+fn verify_retained_runtime_probe(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+    retained: &ryeos_state::objects::RetainedExternalRuntimeQualification,
+    source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
+    binding_hash: &str,
+) -> Result<()> {
+    let locator = crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
         state,
         &retained.proof,
-        &source,
+        source,
         &contract.backend,
         &retained.owner_principal,
     )?;
+    if locator.is_none() {
+        ensure!(
+            retained.remote_testimony.is_some(),
+            "runtime qualification probe names no snapshot locator and carries no remote testimony"
+        );
+        return Ok(());
+    }
     state.external_placement_backends.verify_runtime_probe(
-        &contract,
+        contract,
         &RuntimeProbeInput::from_product(&retained.proof),
-        &source,
-        binding.digest(),
+        source,
+        binding_hash,
     )
 }
 
