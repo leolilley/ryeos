@@ -924,6 +924,28 @@ fn create_qualification_occurrence_checked(
     state
         .external_placement_backends
         .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
+    // The publish below hashes the payload closure several times, so it runs before the contact deadline is
+    // taken: the deadline then bounds the provider contact, not the node's own escrow work.
+    // Retain the exact generation this occurrence is made under: both signed
+    // bindings and the producer's lifecycle closure. Its termination resolves
+    // through them, so a later recompose or bundle replacement cannot strand
+    // the occurrence. The shared guard keeps the published closure from a
+    // CAS sweep until the journal roots it.
+    let retention_authority = state.state_store.pinned_state_authority()?;
+    let retention_guard = retention_authority.acquire_shared_guard()?;
+    let lifecycle_capture = state
+        .external_placement_backends
+        .lifecycle_escrow_capture(producer)?;
+    let published_lifecycle = crate::external_artifacts::publish_retained_lifecycle_artifacts(
+        &state.state_store,
+        &context.fingerprint,
+        &lifecycle_capture,
+    )?;
+    let generation = RetainedQualificationGeneration {
+        production: producer.retained_generation()?,
+        qualification: qualification.retained_generation()?,
+        lifecycle_root_hash: published_lifecycle.root_hash().to_owned(),
+    };
     let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotQualificationIntent {
         schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
@@ -956,26 +978,6 @@ fn create_qualification_occurrence_checked(
         );
     }
     intent.validate_for(&source.intent, &locator)?;
-    // Retain the exact generation this occurrence is made under: both signed
-    // bindings and the producer's lifecycle closure. Its termination resolves
-    // through them, so a later recompose or bundle replacement cannot strand
-    // the occurrence. The shared guard keeps the published closure from a
-    // CAS sweep until the journal roots it.
-    let retention_authority = state.state_store.pinned_state_authority()?;
-    let retention_guard = retention_authority.acquire_shared_guard()?;
-    let lifecycle_capture = state
-        .external_placement_backends
-        .lifecycle_escrow_capture(producer)?;
-    let published_lifecycle = crate::external_artifacts::publish_retained_lifecycle_artifacts(
-        &state.state_store,
-        &context.fingerprint,
-        &lifecycle_capture,
-    )?;
-    let generation = RetainedQualificationGeneration {
-        production: producer.retained_generation()?,
-        qualification: qualification.retained_generation()?,
-        lifecycle_root_hash: published_lifecycle.root_hash().to_owned(),
-    };
     let reserved = state
         .state_store
         .reserve_snapshot_qualification(&intent, &generation)?;
