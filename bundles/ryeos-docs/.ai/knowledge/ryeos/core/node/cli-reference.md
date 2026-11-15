@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:66db52be7d0e686ca7f08a4bc665c16709f0c1b10fd72aef099b1d8350a526ae:QJNUiuf8CPwrHCrT2a9yfuqxyNJWh308VQCvcgxTuXkjt4nhBYR9Cnfrld5W/DhB17UF7cdbw/lwyR/uaXoMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T07:30:20Z:03c55612bc2312a7203ab3e06776de87526105e661307590a0682df4e6516909:2aFR3B4342L9CtQs89yZpGhSnfBhx4CSrGPA4AaGIq2k79+V2Eox7qZ03zn/i2wdJUdDdCNBEdg0cfGuvABDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -286,11 +286,9 @@ The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
 cure, for a record that is unsigned (`remote_pin_unsigned`), signed by a key
 other than the node key (`remote_pin_wrong_signer`), edited after signing
-(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`), and for
-an unsigned remotes config file this node no longer reads
-(`remote_config_file_unsupported`): re-pin each remote with
-`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`,
-then delete the file.
+(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`): re-pin
+the remote with
+`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and

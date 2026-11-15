@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:75407dab9adbaea2cf018c6130f4f1ca53485ccf843e5917e2c69ffcd69859ac:ScJ3xq/7KUGM3WeZimsDKXoSQwFFf9X9wQaUJiPBYCRGwhSQ/r/BjtnV96iHMqsFxW63nXnHjmFXqExbiR1lDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T07:30:20Z:b66b02fb2c8f88e6bebb0151ee7b25dcc75fe3bcff3c5b5a5872ffa2c325cfe1:dIkbtr0ERSom6D1VGxETis8aeIlpk23b8KVMFA+RcQvRLnUjTL7S8orDUgB0BhF9v30hT1ki4Brey07OFx/1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -1007,7 +1007,4 @@ remote:
 
 The loader verifies the node signature on every read, so editing the pinned
 key, URL or a binding in place makes the record unusable until it is pinned
-again. A leftover unsigned remotes config file is refused with
-`remote_config_file_unsupported`; `ryeos node doctor` reports it in its
-`remote_pins` row. Re-pin each remote with `ryeos remote configure`, then
-delete the file.
+again.

@@ -331,14 +331,6 @@ pub enum RemotePinError {
     Invalid { path: PathBuf, reason: String },
 
     #[error(
-        "remote_config_file_unsupported: {path} is an unsigned remote config file this node no \
-         longer reads. Remote pins are node-signed records under {records}. For each remote in \
-         the file run `ryeos remote configure <name> --url <url> --expect-fingerprint \
-         <fingerprint>`, then delete {path}"
-    )]
-    UnsupportedConfigFile { path: PathBuf, records: PathBuf },
-
-    #[error(
         "remote_inbound_only: remote '{name}' is pinned inbound-only, a node that only calls in, \
          so this node never dials it. Run this operation on the remote, or pin it with a URL: \
          `ryeos remote configure {name} --url <url> --expect-fingerprint <fingerprint>`"
@@ -357,7 +349,6 @@ impl RemotePinError {
             RemotePinError::WrongSigner { .. } => "remote_pin_wrong_signer",
             RemotePinError::Tampered { .. } => "remote_pin_tampered",
             RemotePinError::Invalid { .. } => "remote_pin_invalid",
-            RemotePinError::UnsupportedConfigFile { .. } => "remote_config_file_unsupported",
             RemotePinError::InboundOnly { .. } => REMOTE_INBOUND_ONLY,
             RemotePinError::Unreadable { .. } => "remote_pins_unreadable",
         }
@@ -440,32 +431,6 @@ pub fn remote_pins_dir(app_root: &Path) -> PathBuf {
 /// Path of one remote's pin record.
 pub fn remote_pin_path(app_root: &Path, name: &str) -> PathBuf {
     remote_pins_dir(app_root).join(format!("{name}.yaml"))
-}
-
-/// The unsigned config file layout this node no longer reads. Its presence is
-/// refused, because the entries it holds were never node-signed.
-pub fn unsupported_config_file_path(app_root: &Path) -> PathBuf {
-    app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("remotes")
-        .join("remotes.yaml")
-}
-
-/// Refuse the unsupported config file when it exists.
-pub fn refuse_unsupported_config_file(app_root: &Path) -> Result<(), RemotePinError> {
-    let path = unsupported_config_file_path(app_root);
-    match std::fs::symlink_metadata(&path) {
-        Ok(_) => Err(RemotePinError::UnsupportedConfigFile {
-            path,
-            records: remote_pins_dir(app_root),
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(RemotePinError::Unreadable {
-            path,
-            reason: error.to_string(),
-        }),
-    }
 }
 
 fn map_trust_error(error: ryeos_engine::trust::TrustError) -> RemotePinError {
@@ -567,13 +532,12 @@ fn repair_hint(name: &str, url: Option<&str>) -> String {
 }
 
 /// Load every remote pin with diagnostics for the ones that fail
-/// verification. Refuses outright when the unsupported config file exists.
+/// verification.
 ///
 /// A malformed or unsigned record is reported in `invalid` rather than
 /// failing the whole load, so one stale record cannot block listing or using
 /// the other remotes.
 pub fn load_remotes_report(app_root: &Path) -> Result<RemotesLoadReport> {
-    refuse_unsupported_config_file(app_root)?;
     let dir = remote_pins_dir(app_root);
     let mut report = RemotesLoadReport::default();
     let files = read_pin_files(&dir)?;
@@ -667,7 +631,6 @@ pub fn write_remote_pin(
     let directory = lillux::PinnedDirectory::open_or_create(&dir)
         .with_context(|| format!("open remote pin directory {}", dir.display()))?;
     let _lock = directory.lock_exclusive()?;
-    refuse_unsupported_config_file(app_root)?;
     let path = remote_pin_path(app_root, &config.name);
     let pinned_at = match read_pin_files(&dir)?
         .into_iter()
@@ -1358,34 +1321,6 @@ mod tests {
         let report = load_remotes_report(tmp.path()).unwrap();
         assert!(report.remotes.is_empty());
         assert_eq!(report.invalid[0].code, "remote_pin_invalid");
-    }
-
-    #[test]
-    fn unsupported_config_file_is_refused_with_cure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let key = node_fixture(tmp.path());
-        let stale = unsupported_config_file_path(tmp.path());
-        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
-        std::fs::write(&stale, "remotes: {}\n").unwrap();
-        for error in [
-            load_remotes_report(tmp.path()).unwrap_err(),
-            write_remote_pin(
-                tmp.path(),
-                &key,
-                &pinned_remote("default", 1),
-                PinSource::Descriptor,
-                None,
-            )
-            .unwrap_err(),
-        ] {
-            let typed = error
-                .downcast_ref::<RemotePinError>()
-                .expect("typed remote pin error");
-            assert_eq!(typed.code(), "remote_config_file_unsupported");
-            let message = typed.to_string();
-            assert!(message.contains("ryeos remote configure"), "{message}");
-            assert!(message.contains("then delete"), "{message}");
-        }
     }
 
     #[test]
