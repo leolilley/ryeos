@@ -297,7 +297,6 @@ pub(crate) fn publish_retained_lifecycle_artifacts(
     let mut executables = Vec::with_capacity(capture.executables.len());
     for item in &capture.executables {
         let observation = item.handle.regular_file_observation()?;
-        let mode = observation.permission_mode()?;
         ensure!(
             observation.size() == item.bytes,
             "captured lifecycle executable size changed"
@@ -311,6 +310,15 @@ pub(crate) fn publish_retained_lifecycle_artifacts(
             signer_fingerprint: capture.signer_fingerprint.to_owned(),
             target_triple: target.to_owned(),
         };
+        // The capture descriptor is a sealed executable memfd whose mode the
+        // kernel layer fixes at 0o500, so its observed mode says nothing about
+        // the bundle payload. The signed ItemSource declares the payload mode;
+        // it is source data, not a new grant.
+        let (_, mode) = ryeos_engine::executor_resolution::verify_executor_item_source(
+            &item.proof.item_source_object,
+            &identity.item_source_hash,
+            &item.proof.selected_item_ref,
+        )?;
         verify_retained_bundle_payload_proof(item.proof, &identity, mode, &verifier)?;
         executables.push(RetainedLifecycleExecutable {
             role: item.role,
