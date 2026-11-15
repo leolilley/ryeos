@@ -199,7 +199,7 @@ mod tests {
         profiles.sort();
         assert_eq!(
             profiles.len(),
-            16,
+            15,
             "update provider-environment profile expectations"
         );
         let table = ryeos_node_runtime::node_policy::NodePolicyTable::new();
