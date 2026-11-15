@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T07:17:08Z:5eff93849fc170d102d8de4bc0f5b5bda6fc7254a191de4031002d80c2cb0b0a:NmhA7a8+Ym2s9xsZt23dBN2A19TFBpmdRJU57VmcGSqTu1WF2B+1W66UMI9nW2e9Lxo41veeiJC3va6hPNUmBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T02:27:40Z:79ad9bb5b66fffa60fea164aabeb29a0c9e5cba0e3d37f3e280ee3b609bbbc00:A+sogC1E1DbO9rVirCFu6aIz63KDCED8uAxKBsINV9EvQoYZe10svqdddXX7jRF/FDHjksLCpbRRsDmnzgiIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -188,7 +188,7 @@ policies:
     workload_client: null
     # Release-authority runs signed, purpose-scoped bundle-release producers.
     # This is the explicit initial node-wide ceiling already used by
-    # full/development; producer admission remains disabled in catalog-only
+    # standard/development; producer admission remains disabled in catalog-only
     # nodes. It is bounded below structural maxima and is not recipe-calibrated.
     producer_resource_ceiling:
       maximum_wall_time_ms: 600000

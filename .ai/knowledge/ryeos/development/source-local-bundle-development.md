@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T11:09:13Z:92998b892328cca234c6860e513457dd42fc84688a4aff644ffd11c2473d7dd5:0TtYp1W6mA7/ZBhfn14Nt8hoo45m0lrRR88dZMYkIUbCNJZP5B82SpS2HNi1V7F08RjpG1KAFYj32E/nPEBcCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:53543af6b36c8f6e7a856a806ef26ccf8bf5fe8212039b6d9f466a43e852f053:4cKNKap3qWFYc5dwmzA99xqC7zB+cGAn0fHC05LtJsVg/n4DYY72T76OQPpLL5z+vnNf4Kw7NIACHjAfaPEkAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: source-local-bundle-development
@@ -201,7 +201,7 @@ branch integration: the prior Rust test covered eight profiles and omitted
 both role-specific profiles.
 
 The release-authority ceiling matches the explicit bounded values already used
-by `full` and `development`. It is an operator-authored initial node-wide
+by `standard` and `development`. It is an operator-authored initial node-wide
 ceiling, below structural producer maxima but not derived from per-recipe
 measurements. Keep that distinction visible through qualification; do not
 describe the current limits as measured recipe budgets.
@@ -1631,10 +1631,10 @@ Core carries one self-contained `linux-lillux` isolation adapter under the
 clean-cut isolation-adapter v10 protocol. The backend is available signed data,
 not ambient host setup: bundle membership does not activate it and every
 ordinary init profile remains explicitly disabled. The separately selectable
-`development` init profile maps to the existing `full` bundle set and enables
+`development` init profile maps to the `development` bundle set and enables
 the backend plus a finite workload-client node ceiling. It is a policy choice,
 not a duplicate bundle distribution. A fresh local development node selects it
-with `--bundle-set full --node-profile development`; replacing an existing
+with `--bundle-set development --node-profile development`; replacing an existing
 policy generation additionally requires the explicit
 `--reset-node-policy-generation` decision. Hosted-worker profiles retain their
 independently selected network policy.

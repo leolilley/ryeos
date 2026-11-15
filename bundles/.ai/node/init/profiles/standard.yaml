@@ -1,12 +1,17 @@
-# ryeos:signed:2026-11-14T07:17:08Z:eea5706ebbc41fd6987841724ad6050be78edcbf66a16430202a8ef293ac823b:kXCHd+THdP5RM757m+3bhCoQH2X37QkEi4hIz94CwDN7Ke3QfjqFkgPpzWQ5wyt7Yi+3+S5uS9Yb2Oq8yqYzBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T02:27:40Z:9781c11a1f2cbb97bbf26e4582b3661d4cdcd1490fbb7df14ff4112ca696d85b:OAl2yziaPvr+goOzqg/j6shP/2sD5kdeZfl62OwCnam290uRmvFxbtclLHLJ2+zAgDDaeNUw90bLZv22o5TCCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
+  - browser
+  - codex
   - core
   - directive
   - graph
   - knowledge
+  - opencode
   - ryeos-docs
+  - ryeos-ui
   - scheduling
+  - web
 policies:
   bundle_publication:
     schema: 2
@@ -101,6 +106,11 @@ policies:
         required_caps:
           - ryeos.register.command.root.execute
       - claim:
+          kind: command.root
+          value: codex
+        required_caps:
+          - ryeos.register.command.root.codex
+      - claim:
           kind: command.dispatch.kind
           value: direct_execute_item_ref
         required_caps:
@@ -122,6 +132,10 @@ policies:
       - ryeos.register.command.root.stop
       - ryeos.register.command.root.system
     bundle_source_caps:
+      browser: []
+      codex:
+        - ryeos.register.command.root.codex
+      opencode: []
       core:
         - ryeos.register.command.dispatch.direct_execute_item_ref
         - ryeos.register.command.dispatch.local_handler
@@ -133,6 +147,7 @@ policies:
         - ryeos.register.command.root.start
         - ryeos.register.command.root.stop
         - ryeos.register.command.root.system
+      ryeos-ui: []
       scheduling:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       directive: []
@@ -140,14 +155,32 @@ policies:
         - ryeos.register.command.dispatch.direct_execute_item_ref
       knowledge: []
       ryeos-docs: []
+      web: []
   execution:
     schema: 4
     max_live_fanout: 8
     max_private_materialization_copy_bytes: 17179869184
     host_env_passthrough: []
     workload_client: null
-    producer_resource_ceiling: null
-    resource_authority: null
+    producer_resource_ceiling:
+      maximum_wall_time_ms: 600000
+      maximum_stdout_bytes: 6291456
+      maximum_stderr_bytes: 2097152
+      maximum_memory_bytes: 2147483648
+      maximum_processes: 64
+    resource_authority:
+      cleanup_allowance_ms: 30000
+      admission:
+        limits:
+          max_requirements: 1
+          max_resource_count: 1
+          max_facts_per_requirement: 16
+        max_total_resource_count: 1
+        max_concurrent_exclusive_allocations: 1
+        allowed_classes: [accelerator]
+        allowed_allocations: [exclusive]
+        allowed_access: [deployment_visible]
+      resources: []
   object_closure:
     schema: 1
     max_roots: 256
@@ -243,8 +276,8 @@ policies:
           - ryeos.execute.service.maintenance/gc
   hosted:
     schema: 1
-    admission_enabled: false
-    admission_token_ttl_secs: null
+    admission_enabled: true
+    admission_token_ttl_secs: 600
     allow_loopback_http: true
   isolation:
     schema: 1
@@ -277,17 +310,18 @@ policies:
           proc_filesystem: empty
           host_direct: unavailable
         local:
-          # A host the operator runs where the daemon is spawned directly,
-          # without an administrator-owned host association. Jobs run in the
-          # enforced namespace sandbox; no per-scope capability is required
-          # because no delegated cgroup subtree exists. Hosts whose kernel
-          # cannot provide the sandbox refuse initialization; the explicit
-          # opt-out is the `local_unconfined` class.
+          # A host whose supervisor delegates qualified per-job process scopes:
+          # jobs run in the enforced namespace sandbox and in their own scope.
+          # Hosts that cannot provide the sandbox refuse initialization; the
+          # explicit opt-out is the `local_unconfined` class.
           # Capabilities this node must prove on its host before it starts.
           # `ryeos node doctor` shows what the host proves and what is missing.
-          requires_capabilities: [accounting, storage:durable_root, time]
+          requires_capabilities: [accounting, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
           process_scopes:
-            mode: unconfigured
+            # Resource-bearing launches require a Lillux-owned durable scope even
+            # when filesystem/network isolation is disabled.
+            mode: required
+            control_timeout_ms: 5000
           trusted_process_group_sessions: false
           mode: enforce
           backend:
@@ -304,9 +338,12 @@ policies:
           # live-run floors hold only under an enforced lane.
           # Capabilities this node must prove on its host before it starts.
           # `ryeos node doctor` shows what the host proves and what is missing.
-          requires_capabilities: [accounting, storage:durable_root, time]
+          requires_capabilities: [accounting, limits:scope, quiescence:scope, recovery:scope, storage:durable_root, termination:scope, time]
           process_scopes:
-            mode: unconfigured
+            # Resource-bearing launches require a Lillux-owned durable scope even
+            # when filesystem/network isolation is disabled.
+            mode: required
+            control_timeout_ms: 5000
           trusted_process_group_sessions: false
           mode: disabled
           backend: null
@@ -409,33 +446,45 @@ policies:
     schema: 1
     roots: {}
     limits:
-      max_depth: 8
-      max_entries: 64
-      max_file_bytes: 268435456
-      max_total_bytes: 536870912
-      store_budget_bytes: 1073741824
-      minimum_free_bytes: 1073741824
+      max_depth: 11
+      max_entries: 4480
+      max_file_bytes: 1503300328
+      max_total_bytes: 1514745854
+      store_budget_bytes: 4294967296
+      minimum_free_bytes: 2147483648
     managed_activation:
       enabled: true
       limits:
         allow_online: true
         allowed_https_hosts:
+          - github.com
+          - release-assets.githubusercontent.com
           - releases.openai.com
-        max_redirects: 0
-        max_archives: 1
-        max_compressed_bytes: 134217728
-        max_expanded_bytes: 335544320
-        max_members: 64
-        max_member_bytes: 268435456
+        max_redirects: 2
+        max_archives: 4
+        max_compressed_bytes: 1329438282
+        max_expanded_bytes: 1893273600
+        max_members: 4836
+        max_member_bytes: 1503300328
         max_concurrent_activations: 1
-        cache_budget_bytes: 536870912
-        store_budget_bytes: 1073741824
-        minimum_free_bytes: 1073741824
+        cache_budget_bytes: 2147483648
+        store_budget_bytes: 4294967296
+        minimum_free_bytes: 2147483648
         max_attempts: 3
   persistent_sessions:
     schema: 1
-    enabled: false
-    limits: null
+    enabled: true
+    limits:
+      max_pool_groups: 4
+      max_total_processes: 4
+      max_total_address_space_bytes: 68719476736
+      max_total_cpu_seconds: 14400
+      max_real_uid_process_limit: 4096
+      max_open_streams: 32
+      max_active_streams: 4
+      max_active_streams_per_subject: 1
+      max_stream_backlog_bytes: 16777216
+      max_total_backlog_bytes: 67108864
   provider_environment:
     schema: 2
     names: []

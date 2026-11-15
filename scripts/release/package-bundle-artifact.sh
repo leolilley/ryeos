@@ -222,7 +222,7 @@ while IFS= read -r -d '' staged_path; do
 done < <(find "$stage" -print0)
 
 # Do not pass --trust-file here. First prove that a fresh node refuses absence
-# of an explicit init profile; then prove the full distribution's exact
+# of an explicit init profile; then prove the standard distribution's exact
 # same-named profile solely under the official public key embedded in the
 # qualified RyeOS binary.
 verify_app_root="$tmp/verify-app"
@@ -241,7 +241,7 @@ if "$ryeos_bin" init \
     exit 2
 fi
 
-node_init_profile="$(ryeos_bundle_set_node_init_profile full)"
+node_init_profile="$(ryeos_bundle_set_node_init_profile standard)"
 policy_verify_app_root="$tmp/verify-profile-$node_init_profile"
 ryeos_term_update "verifying staged node init profile" "$node_init_profile"
 "$ryeos_bin" init \

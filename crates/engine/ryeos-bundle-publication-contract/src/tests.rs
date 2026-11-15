@@ -150,12 +150,12 @@ fn payload_ownership_value() -> Value {
         },
         "data_only_bundles": ["central-auth"],
         "host_only_bundles": [
-            {"bundle_name": "scheduling", "bundle_sets": ["full"], "host_features": ["scheduling"]}
+            {"bundle_name": "scheduling", "bundle_sets": ["standard"], "host_features": ["scheduling"]}
         ],
         "bundles": [
             {
                 "bundle_name": "browser",
-                "bundle_sets": ["full", "release-artifacts"],
+                "bundle_sets": ["release-artifacts", "standard"],
                 "host_features": [],
                 "payloads": [
                     {"binary":"ryeos-browser-tools","cargo_package":"ryeos-browser-tools","build_class":"release","cargo_features":[]}
@@ -163,7 +163,7 @@ fn payload_ownership_value() -> Value {
             },
             {
                 "bundle_name": "web",
-                "bundle_sets": ["central-host", "full", "release-artifacts"],
+                "bundle_sets": ["central-host", "release-artifacts", "standard"],
                 "host_features": ["web-host"],
                 "payloads": [
                     {"binary":"ryeos-web-tools","cargo_package":"ryeos-web-tools","build_class":"release","cargo_features":[]}

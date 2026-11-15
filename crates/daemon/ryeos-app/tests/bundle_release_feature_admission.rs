@@ -44,7 +44,7 @@ fn ownership(bundle: &str, payloads: &[(&str, &[&str])]) -> BundlePayloadOwnersh
         "host_only_bundles": [],
         "bundles": [{
             "bundle_name": bundle,
-            "bundle_sets": ["full"],
+            "bundle_sets": ["standard"],
             "host_features": [],
             "payloads": payloads,
         }],
@@ -58,7 +58,7 @@ fn payload(bundle: &str, binary: &str, features: &[&str]) -> Value {
         "binary": binary,
         "cargo_package": package_for(binary),
         "build_class": "release",
-        "bundle_sets": ["full"],
+        "bundle_sets": ["standard"],
         "required_features": features,
     })
 }

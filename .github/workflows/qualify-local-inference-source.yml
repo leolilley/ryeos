@@ -109,7 +109,7 @@ jobs:
           scripts/populate-bundles.sh \
             --key .dev-keys/PUBLISHER_DEV.pem \
             --owner "RyeOS Development" \
-            --bundle-set full \
+            --bundle-set standard \
             --all \
             --jobs 2
           QUALIFICATION_BIN="$RUNNER_TEMP/local-inference-qualification-bin"

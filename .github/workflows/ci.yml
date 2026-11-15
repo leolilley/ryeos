@@ -39,10 +39,10 @@ on:
       bundle_set:
         description: "Bundle set for refresh_bundles"
         required: true
-        default: full
+        default: development
         type: choice
         options:
-          - full
+          - development
           - standard
           - hosted-workflow
 
@@ -885,10 +885,10 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Build and install full distribution
+      - name: Build and install standard distribution
         run: |
           CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
-            --populate --all --bundle-set full --no-init --no-daemon-restart
+            --populate --all --bundle-set standard --no-init --no-daemon-restart
 
       - name: Install headless Chromium for the smoke driver
         run: |

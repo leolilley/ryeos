@@ -1407,7 +1407,7 @@ mod tests {
 
         fn write_node_policy_generation(&self) {
             let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../bundles/.ai/node/init/profiles/full.yaml");
+                .join("../../../bundles/.ai/node/init/profiles/standard.yaml");
             let raw = std::fs::read_to_string(&source).unwrap();
             let body = lillux::signature::strip_signature_lines(&raw);
             let profile: ryeos_node_runtime::node_policy::generation::NodeInitProfile =

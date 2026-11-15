@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn enrollment_preboot_opt_in_changes_only_trusted_session_flag_and_remains_node_signed() {
         let profile: Value = serde_yaml::from_str(include_str!(
-            "../../../../bundles/.ai/node/init/profiles/full.yaml"
+            "../../../../bundles/.ai/node/init/profiles/standard.yaml"
         ))
         .unwrap();
         let mut original = profile["policies"]["isolation"].clone();

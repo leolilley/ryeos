@@ -226,7 +226,7 @@ mod tests {
                 | "standard-central-auth"
                 | "bundle-source" => &[],
                 "contained-workflow" | "core" | "core-knowledge" | "core-scheduling"
-                | "core-workflow" | "development" | "full" | "hosted-node" | "local-inference"
+                | "core-workflow" | "development" | "hosted-node" | "local-inference"
                 | "standard" => &[],
                 _ => panic!("add an explicit provider-environment expectation for {profile_name}"),
             };

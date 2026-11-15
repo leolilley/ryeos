@@ -203,8 +203,8 @@ PY
 
 ryeos_term_info "initializing isolated node"
 # The profile and host class an installed package's post-install message
-# names: the full profile on a host the operator runs.
-init_args=(init --non-interactive --source "$BUNDLE_SOURCE" --node-profile full --host-class local)
+# names: the standard profile on a host the operator runs.
+init_args=(init --non-interactive --source "$BUNDLE_SOURCE" --node-profile standard --host-class local)
 if [[ -n "$TRUST_FILE" ]]; then
   [[ -f "$TRUST_FILE" ]] || {
     ryeos_term_fail "RYEOS_SMOKE_TRUST_FILE does not exist: $TRUST_FILE"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-13T02:46:08Z:fafe9f7cc4e2cb4d720f021984b084102f8e6e956a1e1e59ee0e92db9a53d97a:1+6CYFkNTikQmFfynfI20eK+zUISu+7icDRTE8p01b5B6S9MCg7uncIy+nwRQUADmb906tw5qCyaMK4+aZMKDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T02:27:41Z:122eb5b87ecfcb08ac39dd7ab654746d5f2817c558b2b78d38a68556be472e16:j/kpYZedwRHlAzPLC0ba07WyeTDYTnRAFVis8PdULdvWhsqmSniHZsZyxvYCv4tsjABK/44iy/NYVC9P55gdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Fast local packaged-layout install from this checkout.
 #
 # This intentionally skips yay/makepkg but installs the same runtime layout
@@ -7,9 +7,10 @@
 #   - binaries -> /usr/bin
 #   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
 #     The set membership is the single source of truth in
-#     scripts/pkg/bundle-sets.sh (full = core, central-auth, scheduling,
-#     knowledge, directive, graph, ryeos-docs, environment-qualification, web,
-#     browser, ryeos-ui, codex, opencode; the lean sets are subsets).
+#     scripts/pkg/bundle-sets.sh (standard = core, scheduling, knowledge,
+#     directive, graph, ryeos-docs, ryeos-ui, codex, opencode, web, browser;
+#     development adds central-auth, environment-qualification and
+#     render-sandbox; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -34,9 +35,9 @@ Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
   /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
-Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
-central-auth, scheduling, knowledge, directive, graph, ryeos-docs,
-environment-qualification, web, browser, ryeos-ui, codex, opencode). The release-authority set additionally installs the
+Set membership is defined in scripts/pkg/bundle-sets.sh (standard = core,
+scheduling, knowledge, directive, graph, ryeos-docs, ryeos-ui, codex, opencode,
+web, browser). The release-authority set additionally installs the
 standalone publisher measurement executable; it does not start the separately
 operated key-bearing publisher service.
 
@@ -78,18 +79,18 @@ Options:
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: RyeOS Development)
-  --bundle-set SET      Bundle set to populate/install: full, development, central-host,
-                        standard, standard-central-auth, local-inference,
+  --bundle-set SET      Bundle set to populate/install: standard, development, central-host,
+                        standard-central-auth, local-inference,
                         hosted-workflow,
                         bundle-source, core, core-scheduling, core-workflow, core-knowledge, or release-authority.
                         Each set
                         has an explicit default publisher-authored node init
                         profile; an existing signed generation is preserved.
-                        (default: full)
+                        (default: standard)
   --node-profile NAME   Select another publisher-authored policy profile whose
-                        exact_bundles match --bundle-set. For example,
-                        development selects enforced hosted-development policy
-                        over the full bundle set without creating another set.
+                        exact_bundles match --bundle-set. A profile selects
+                        policy over its set's exact bundles without creating
+                        another set.
   --host-class NAME     Host class this host is declared as at first init; the
                         selected profile must declare it. A direct install
                         runs the node on this host itself.
@@ -680,7 +681,7 @@ reset_node_policy_generation=0
 policy_carry_args=()
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="RyeOS Development"
-bundle_set="full"
+bundle_set="standard"
 node_profile_override=""
 init_host_class="local"
 jobs=""            # forwarded to populate as cargo -j N
@@ -849,7 +850,7 @@ bundle_names_csv=$(IFS=,; printf '%s\n' "${bundle_names[*]}")
 # integrity merely because they stage no Rust binary.
 closed_payload_bundle_names=("${bundle_names[@]}")
 
-if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
+if [[ "$bundle_set" != "standard" && $run_init -eq 0 ]]; then
     ryeos_term_warn "--no-init installs lean sources only; existing local initialized state is not rewritten"
 fi
 
@@ -1340,7 +1341,7 @@ if [[ $run_init -eq 1 ]]; then
             die "existing node-policy generation is empty: $node_policy_dir"
     fi
     if [[ "$bundle_set" == "standard" ]]; then
-        for name in ryeos-ui web browser; do
+        for name in central-auth environment-qualification; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized standard state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -1357,7 +1358,7 @@ if [[ $run_init -eq 1 ]]; then
                 die "initialized central-host state unexpectedly contains $name registration"
         done
     fi
-    if [[ "$bundle_set" == "full" ]]; then
+    if [[ "$bundle_set" == "standard" ]]; then
         grep -q '^  execute: client:ryeos/tui$' \
             "$state_root/.ai/bundles/ryeos-ui/.ai/node/commands/tui.yaml" || \
             die "initialized tui command is stale or not client-backed"

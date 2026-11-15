@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T02:51:43Z:11285275bca6bc360b5f3987de557f9f538d40c6c552944e86244e0db17be31d:5nawGibl6zaOQuRCfYr9+l1KxTEvzn+RMyCbFiKpNV/sl12VbGsKrmrvgAXz0UVtqwLFupV5KXvkxbzZztvNBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:1ebc415a4b5ece3471f3901fa82bace966201f819f07cbe64ad83c80a6a61537:w8lEqikhK1+O2TY/BrxClF61FEyr1juOfZ6OF1tMiNlcrdfxDLW8GzoZIsIsdBa21IJWisuD6WC2ZdT2V5HLAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
@@ -16,7 +16,7 @@ is the ordinary four-verb surface below, plus one explicit administrator
 transition for nodes that require host supervision:
 
 ```bash
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ryeos start
 ryeos stop
 ryeos node status
@@ -31,7 +31,7 @@ that variable only steers normal daemon-backed dispatch. Native service-manager
 and process-scope mechanics belong wholly to Lillux. RyeOS retains only the
 generic protected association and lifecycle/upgrade testimony.
 
-`full` above is the native-package distribution selector. Every fresh node
+`standard` above is the native-package distribution selector. Every fresh node
 requires one explicit publisher-signed init profile whose exact bundle inventory
 matches its distribution; image and package entrypoints select their mapped
 profile rather than asking Rust to infer policy from bundle presence. An already

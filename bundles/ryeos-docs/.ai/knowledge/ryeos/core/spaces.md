@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:55:49Z:512eafeeddbf98f64598720afac2661d8dd8830ff39bd29566cc9d0357444970:PFYXXIaiTk7rBt2fBfrlbLVWG2svgO1iu+ePPGTcEDQK8l3zgVnUWCEOFEXHrgsDTSM8YTyOWnwvJV4PvYwsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:fa20c5dff18a4304f2a571727efe8909e4ba2329247be73b6330670a93bef5b3:GOj0yQnR4EtCQx7LtJQCNrNGN0ymN9Ct5TZwYsQv9SvIt32NrRryYpfLIkfJYI64zKs1/jHFzGyK8XflQVH7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
@@ -100,10 +100,10 @@ Bundles are installed by `ryeos init` (not the daemon). The CLI:
 
 ```bash
 # Packaged install (default source):
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 
 # Development:
-ryeos init --source bundles --node-profile full --host-class local \
+ryeos init --source bundles --node-profile standard --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 
 # Distribution image entrypoint:

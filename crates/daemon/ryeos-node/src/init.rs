@@ -3055,13 +3055,13 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),
@@ -3198,7 +3198,7 @@ mod tests {
             .expect_err("an ephemeral root must refuse a durable-storage profile");
         let text = format!("{error:#}");
         assert!(
-            text.contains("profile full requires storage:durable_root"),
+            text.contains("profile standard requires storage:durable_root"),
             "{text}"
         );
         assert!(
@@ -3347,10 +3347,10 @@ mod tests {
             "{undeclared}"
         );
         // A profile without a hosted variant does not run hosted.
-        let full = authored_profile("full");
+        let development = authored_profile("development");
         let refused = format!(
             "{:#}",
-            select_profile_host_class("full", &full, Some("hosted")).unwrap_err()
+            select_profile_host_class("development", &development, Some("hosted")).unwrap_err()
         );
         assert!(refused.contains("it declares local"), "{refused}");
         let noncanonical = format!(
@@ -3437,22 +3437,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let mut opts = make_opts(&state, tmp.path());
-        opts.host_class = Some("hosted".to_owned());
+        opts.host_class = Some("local_direct".to_owned());
         opts.substrate_identity = Some(
             SubstrateIdentity::new(
                 format!("sha256:{}", "1".repeat(64)),
                 1,
-                Some("full".to_owned()),
-                Some("hosted".to_owned()),
+                Some("standard".to_owned()),
+                Some("local_direct".to_owned()),
             )
             .unwrap(),
         );
         let error = format!(
             "{:#}",
-            run_init(&opts).expect_err("full declares no hosted class")
+            run_init(&opts).expect_err("standard declares no local_direct class")
         );
         assert!(
-            error.contains("does not declare host class `hosted`"),
+            error.contains("does not declare host class `local_direct`"),
             "{error}"
         );
         assert!(
@@ -3892,7 +3892,7 @@ mod tests {
         let first = load_verified_substrate_identity(&state).expect("offline verified load");
         assert_eq!(first.image_digest, format!("sha256:{}", "1".repeat(64)));
         assert_eq!(first.protocol, 1);
-        assert_eq!(first.node_profile.as_deref(), Some("full"));
+        assert_eq!(first.node_profile.as_deref(), Some("standard"));
         assert!(
             verify_init_completion(&state)
                 .unwrap()
@@ -4125,12 +4125,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        run_init(&make_opts(&state, &user)).expect("initial standard generation");
         let source = workspace_root().join("bundles");
         let pinned = prospective_replacement_policy_digest(
             &state,
             &source,
-            "standard",
+            "standard-central-auth",
             "local",
             &[dev_trust_file()],
             &Default::default(),
@@ -4142,7 +4142,7 @@ mod tests {
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("standard".to_owned()),
+            node_profile: Some("standard-central-auth".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
@@ -4269,7 +4269,7 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
@@ -4432,7 +4432,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        run_init(&make_opts(&state, &user)).expect("initial standard generation");
         let node_key = fs::read(state.join(".ai/node/identity/private_key.pem")).unwrap();
         let operator_key =
             fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap();
@@ -4444,7 +4444,7 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("standard".to_owned()),
+            node_profile: Some("standard-central-auth".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
@@ -4456,9 +4456,12 @@ mod tests {
         run_init(&replacement).expect("replace policy and exact bundle inventory");
 
         let trust = TrustStore::load_node_registry(&state).unwrap();
-        let profile =
-            load_trusted_init_node_profile(&workspace_root().join("bundles"), "standard", &trust)
-                .unwrap();
+        let profile = load_trusted_init_node_profile(
+            &workspace_root().join("bundles"),
+            "standard-central-auth",
+            &trust,
+        )
+        .unwrap();
         assert_eq!(
             installed_bundle_names(&state).unwrap(),
             profile.exact_bundles().iter().cloned().collect()
@@ -4528,7 +4531,7 @@ mod tests {
         SubstrateIdentity::new(
             format!("sha256:{}", digest_nibble.repeat(64)),
             protocol,
-            Some("full".to_owned()),
+            Some("standard".to_owned()),
             Some(host_class.to_owned()),
         )
         .unwrap()
@@ -4704,7 +4707,7 @@ mod tests {
         copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
             .expect("copy core bundle");
         copy_source_seed(&source);
-        fs::remove_file(source.join(".ai/node/init/profiles/full.yaml"))
+        fs::remove_file(source.join(".ai/node/init/profiles/standard.yaml"))
             .expect("remove selected node profile");
 
         let state = tmp.path().join("state");
@@ -4714,13 +4717,13 @@ mod tests {
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),
@@ -4735,7 +4738,7 @@ mod tests {
         let err = run_init(&opts).expect_err("missing seed must fail closed");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("full.yaml") || msg.contains("node init profile"),
+            msg.contains("standard.yaml") || msg.contains("node init profile"),
             "got: {msg}"
         );
     }
@@ -4750,13 +4753,13 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),
@@ -5178,13 +5181,13 @@ typo_field: oops
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),

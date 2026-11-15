@@ -139,7 +139,7 @@ source and exact reproduction command live in `runtime-program.c` and
 The product and verifier use `mount_root: execution_runtime`, and the verifier
 uses the admitted `realization_member` command owner. They therefore require
 enforced isolation. Of the existing publisher-authored profiles, `development`
-is the enforced profile and its exact bundle set is `full`. Do not use the
+is the enforced profile and its exact bundle set is `development`. Do not use the
 disabled `hosted-workflow` profile for this run and do not patch a live policy.
 
 First copy and validate the unsigned overlay using the exact observed manifest:
@@ -166,7 +166,7 @@ installed node or production Bundle ownership.
 ```text
 (cd <disposable-repository-source> && \
   ./scripts/populate-bundles.sh --key <publisher-key> --owner <test-owner> \
-    --bundle-set full --all)
+    --bundle-set development --all)
 tests/e2e/environment-products/prepare-disposable-node-source.sh \
   <absolute-disposable-repository-source> <new-absolute-node-source>
 <matching-ryeos> init --non-interactive \
@@ -176,7 +176,7 @@ tests/e2e/environment-products/prepare-disposable-node-source.sh \
 ```
 
 `prepare-disposable-node-source.sh` verifies that all six overlay definitions
-are publisher-signed, copies only the existing closed `full` set and shared
+are publisher-signed, copies only the existing closed `development` set and shared
 init authority, and performs no signing or node lifecycle operation. Sign the
 five project definitions through the new node's ordinary project signing flow;
 do not copy signatures from another generation.

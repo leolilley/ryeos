@@ -249,8 +249,8 @@ assert_runtime_bundle_inventory() {
     fi
 }
 
-assert_runtime_bundle_inventory Dockerfile full
-assert_runtime_bundle_inventory Dockerfile.dev full
+assert_runtime_bundle_inventory Dockerfile standard
+assert_runtime_bundle_inventory Dockerfile.dev standard
 assert_runtime_bundle_inventory Dockerfile.standard standard
 assert_runtime_bundle_inventory Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_bundle_inventory Dockerfile.central-host central-host
@@ -288,8 +288,8 @@ assert_runtime_init_profile() {
     fi
 }
 
-assert_runtime_init_profile Dockerfile full
-assert_runtime_init_profile Dockerfile.dev full
+assert_runtime_init_profile Dockerfile standard
+assert_runtime_init_profile Dockerfile.dev standard
 assert_runtime_init_profile Dockerfile.standard standard
 assert_runtime_init_profile Dockerfile.hosted-workflow hosted-workflow
 assert_runtime_init_profile Dockerfile.central-host central-host
@@ -786,7 +786,6 @@ image_bundle_sets=(
     hosted-controller
 )
 no_image_bundle_sets=(
-    full
     standard-central-auth
     release-authority
     development

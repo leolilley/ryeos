@@ -1089,7 +1089,7 @@ mod tests {
                 serde_json::from_value(worker["external_content"].clone()).unwrap();
 
             {
-                let node_profile = "full";
+                let node_profile = "standard";
                 let profile_path = repository
                     .join("bundles/.ai/node/init/profiles")
                     .join(format!("{node_profile}.yaml"));
