@@ -1971,9 +1971,15 @@ impl ExternalPlacementBackendRegistry {
         let effective = backend.lifecycle_capabilities();
         if require_activation {
             match runtime_basis {
+                // Current guest mechanism testimony is mandatory for every
+                // ordinary start (admit_current_runtime_qualification), so a
+                // binding always carries a runtime qualification. An adapter
+                // that itself requires independent guest runtime admission
+                // can never run without one; an adapter that does not require
+                // it still starts only on the binding's qualification.
                 RuntimeAdmissionBasis::OrdinarySignedRelationship => ensure!(
                     contract.runtime_qualification.is_some()
-                        == effective
+                        || !effective
                             .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
                     "external runtime qualification relationship differs from installed adapter admission"
                 ),
@@ -12859,15 +12865,15 @@ mod tests {
                 remote_testimony: None,
             },
         );
-        assert!(
-            registry
-                .qualify(
-                    &unverified,
-                    &credential,
-                    &AdmittedExternalExecutionProgram::StructuredSession(program()),
-                )
-                .is_err()
-        );
+        // An adapter that does not itself require independent guest runtime
+        // admission still starts on the binding's mandatory qualification.
+        registry
+            .qualify(
+                &unverified,
+                &credential,
+                &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            )
+            .unwrap();
         let qualified_backend = Arc::new(FaultBackend {
             capabilities: BTreeSet::from([
                 LifecycleCapability::SupervisorActivation,
