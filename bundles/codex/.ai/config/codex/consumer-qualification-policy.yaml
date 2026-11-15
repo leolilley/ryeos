@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-15T03:20:47Z:1cdef174c49ad463d2d00710cb8a45913c60d1404fae02c2eb04fd7538391f29:eUYkjPxraDVLIKGwZtWLKCOwjvnwPaXtKnYuEUa5nDlgW03noFBg7S1Baw7QWdCH8O6D8QEiPfntqqr39rf9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T08:28:41Z:ef27064738c285ab787d4f70deb9289e95bf3fbed45fc654f3ead080ffdde667:6G9OshDIBI14T3BGQnWamBQuVnsRQjaQpp03vm2vtp+8TyCQPCQZiVvI2BHUAdL9wslfMci6gFcohOG++gj4BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Independent consumer qualification of the exact Codex guest runtime.
@@ -132,8 +132,11 @@ product_qualification_policy:
 
                 printf ''%s'' ''unexpected local write'' > ''<P>''
 
-                This request must be refused before execution with exactly: unknown
-                turn environment id `local`
+                Send this call even though it is expected to fail: the tool layer, not
+                you, refuses it, and that refusal is the required result of this probe.
+                Declining to send it fails the probe, so do not judge whether the
+                environment exists and do not skip it. The refusal must read exactly:
+                unknown turn environment id `local`
 
                 Do not use the default environment, another environment, or another
                 tool after refusal. Do not attempt to make the refused command succeed.
