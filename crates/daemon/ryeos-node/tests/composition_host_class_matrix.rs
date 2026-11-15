@@ -419,7 +419,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         ("hosted-controller", &controller),
         ("standard-central-auth", &local_only),
         ("central-host", &local_only),
-        ("bundle-source", &local_only),
+        ("bundle-source", &standard),
         ("local-inference", &local_only),
         ("contained-workflow", &["local"]),
         ("release-authority", &["local"]),
@@ -562,6 +562,23 @@ fn the_central_and_bundle_source_compositions_follow_the_host_class_matrix() {
         for (class, host, expect) in plain_local_cases() {
             check(profile, class, &host, &expect);
         }
+    }
+}
+
+/// The bundle-source composition also runs in a hosting provider's
+/// container: its `hosted` floor admits a volume-backed container that
+/// proves neither accounting nor process scopes, and still needs a disk.
+#[test]
+fn bundle_source_runs_in_a_hosted_container() {
+    let cases: Vec<(&str, Host, Expect)> = vec![
+        ("hosted", local_docker(), Expect::Admit),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
+    ];
+    for (class, host, expect) in &cases {
+        check("bundle-source", class, host, expect);
     }
 }
 
