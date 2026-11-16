@@ -4430,6 +4430,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-chat-stub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "bytes",
+ "clap",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+]
+
+[[package]]
 name = "ryeos-cli"
 version = "0.5.102"
 dependencies = [
