@@ -248,6 +248,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         &app_root,
         snapshot,
         &command_registration_policy,
+        cli.project.as_deref(),
     )
     .await?
     {
@@ -526,6 +527,7 @@ async fn try_dispatch_client_handler(
     app_root: &Path,
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     command_registration_policy: &ryeos_runtime::CommandRegistrationPolicy,
+    default_project: Option<&Path>,
 ) -> Result<Option<Value>, CliError> {
     let registry = CommandRegistry::from_records(&snapshot.commands, command_registration_policy)
         .map_err(|error| CliError::Local {
@@ -537,7 +539,7 @@ async fn try_dispatch_client_handler(
     let CommandDispatch::LocalHandler { handler, .. } = &matched.command.dispatch else {
         return Ok(None);
     };
-    let parameters =
+    let mut parameters =
         bind_command_parameters_for_daemon(&rest[matched.consumed..], &matched.command)?;
     match handler.as_str() {
         "artifact_export" => {
@@ -573,6 +575,30 @@ async fn try_dispatch_client_handler(
                 "remote-delegate.yaml",
             )?;
             crate::client_handlers::remote_delegate(app_root, &parameters)
+                .await
+                .map(Some)
+        }
+        "sign_items" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "sign.yaml")?;
+            apply_project_policy(&matched.command, &mut parameters, default_project)?;
+            crate::client_handlers::sign_items(app_root, &parameters)
+                .await
+                .map(Some)
+        }
+        "content_pin" => {
+            authorize_exact_core_client_handler(&matched.command, snapshot, "content-pin.yaml")?;
+            apply_project_policy(&matched.command, &mut parameters, default_project)?;
+            crate::client_handlers::content_pin(app_root, &parameters)
+                .await
+                .map(Some)
+        }
+        "external_content_export_qualification_testimony" => {
+            authorize_exact_core_client_handler(
+                &matched.command,
+                snapshot,
+                "external-content-export-qualification-testimony.yaml",
+            )?;
+            crate::client_handlers::export_qualification_testimony(app_root, &parameters)
                 .await
                 .map(Some)
         }

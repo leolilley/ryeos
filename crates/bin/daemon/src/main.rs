@@ -4941,7 +4941,7 @@ async fn run(
 
             let vault_ceilings = Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
                 &node_policy_snapshot,
-                &config.operator_signing_key_path,
+                &config.app_root,
             )?);
             let app_state = AppState {
                 config: Arc::new(config.clone()),
@@ -8222,10 +8222,10 @@ fn ensure_runtime_paths(config: &Config) -> Result<()> {
 /// stopped-node bootstrap. A principal string alone is not authentication;
 /// keep this proof here, never infer it in the generic service executor.
 fn standalone_operator_handler_context(
-    operator: &NodeIdentity,
+    operator_principal: String,
 ) -> ryeos_app::handler_context::HandlerContext {
     ryeos_app::handler_context::HandlerContext::new_with_authority(
-        operator.principal_id(),
+        operator_principal,
         vec![], // Existing standalone filesystem authority does not mint live scopes.
         true,
         Some(ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient),
@@ -8345,10 +8345,12 @@ async fn run_service_standalone(
     // node identity still signs node-owned state below, but it is the server's
     // attesting identity, not the caller principal. Keeping those authorities
     // distinct lets the same local-operator handler run live or standalone.
-    let standalone_operator = NodeIdentity::load(&config.operator_signing_key_path)
-        .context("load configured local operator identity for standalone service")?;
+    let standalone_operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&config.app_root)
+            .context("load configured local operator identity for standalone service")?;
     let standalone_principal = standalone_operator.principal_id();
-    let standalone_handler_context = standalone_operator_handler_context(&standalone_operator);
+    let standalone_handler_context =
+        standalone_operator_handler_context(standalone_principal.clone());
     let standalone_plan_ctx = ryeos_engine::contracts::PlanContext {
         logical_project_root: None,
         requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
@@ -8696,7 +8698,7 @@ async fn run_service_standalone(
         provider_env: Arc::clone(provider_environment.environment()),
         vault_ceilings: Arc::new(ryeos_app::vault::VaultCeilings::from_node_policy(
             &node_policy_snapshot,
-            &config.operator_signing_key_path,
+            &config.app_root,
         )?),
         command_registry: standalone_command_registry,
         authorizer: standalone_auth,
@@ -9391,7 +9393,7 @@ mod shutdown_mapping_tests {
         let operator =
             ryeos_node_runtime::identity::NodeIdentity::create(&root.path().join("operator.pem"))
                 .unwrap();
-        let context = super::standalone_operator_handler_context(&operator);
+        let context = super::standalone_operator_handler_context(operator.principal_id());
         assert!(context.verified);
         assert_eq!(context.fingerprint, operator.principal_id());
         assert!(context.scopes.is_empty());

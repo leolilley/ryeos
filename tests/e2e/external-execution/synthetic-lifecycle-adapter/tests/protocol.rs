@@ -568,7 +568,7 @@ fn store_project_file(
 
 fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let scopes = vec!["*".to_owned()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
@@ -595,7 +595,7 @@ fn install_test_operator_grant(state: &ryeos_app::state::AppState) {
 
 fn install_active_test_credential_profile(state: &ryeos_app::state::AppState) {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let profile_id = "credential:fixture";
     let home_id = "external-candidate-fixture-home";
@@ -810,7 +810,7 @@ fn publish_external_runtime_product_witness(
         admitted_parameters_digest: relationship.producer.admitted_parameters_digest().unwrap(),
     };
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let manifest_hash = declaration.expected_manifest_hash.clone().unwrap();
     let evidence = ProductCaptureEvidence {
@@ -904,7 +904,7 @@ fn bind_external_runtimes_to_qualification_verifier(
     )
     .unwrap();
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let operator_grant = ryeos_node_runtime::identity::load_verified_authorized_key(
         operator.fingerprint(),
@@ -1124,7 +1124,7 @@ async fn prepare_external_worker_program_and_binding(
     let pre_selection_digest =
         ryeos_engine::external_content::pre_product_selection_consumer_digest(&resolution).unwrap();
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let context = ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),
@@ -1890,9 +1890,7 @@ fn dispatch_pinned_public_worker(
                         project_authority,
                     )
                     .unwrap();
-                let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-                    &state.config.operator_signing_key_path,
-                )
+                let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
                 .unwrap();
                 let principal = operator.principal_id();
                 let scopes = vec!["*".to_owned()];
@@ -4006,7 +4004,7 @@ async fn run_production_tls_candidate(
         &[&runtime_manifest_hash, &qualification_runtime_manifest_hash],
     );
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let handler_context = ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),

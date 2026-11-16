@@ -77,22 +77,65 @@ impl SignSource {
 ///
 /// `project_path` is required when `source = Project`; ignored
 /// otherwise. The operator signing key is loaded from
-/// `<app_root>/.ai/node/operator/signing/private_key.pem`.
+/// `<app_root>/.ai/node/operator/signing/private_key.pem`; this runs in the
+/// operator's own process, never in the daemon.
 ///
 /// Returns a `BatchReport` always — single-item refs produce a one-
 /// element vec. Per-item failures are collected; a failed validator
 /// or sign on one item does NOT stop the batch.
 pub fn run_sign(
+    app_root: &Path,
     item_ref: &str,
     project_path: Option<&Path>,
     source: SignSource,
 ) -> Result<BatchReport> {
-    run_sign_batch(&[item_ref.to_owned()], project_path, source)
+    run_sign_batch(app_root, &[item_ref.to_owned()], project_path, source)
+}
+
+/// Everything an offline authoring run needs from the node at `app_root`: the
+/// retained registered generation's kinds, parsers and trust, and the
+/// operator signing key. The key is read here, in the operator's own process.
+pub(crate) struct OfflineAuthoring {
+    pub(crate) isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
+    pub(crate) kinds: KindRegistry,
+    pub(crate) parsers: ParserDispatcher,
+    pub(crate) node_trust_store: TrustStore,
+    pub(crate) signing_key: SigningKey,
+}
+
+pub(crate) fn load_offline_authoring(app_root: &Path) -> Result<OfflineAuthoring> {
+    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(app_root)
+        .context("load retained node isolation generation")?;
+    let bundle_roots = isolation
+        .registered_generation_bundle_roots()
+        .context("retained isolation generation omitted bundle roots")?
+        .to_vec();
+    let node_trust_store = isolation
+        .registered_generation_node_trust()
+        .context("retained isolation generation omitted node trust")?
+        .clone();
+    let kinds = build_kind_registry(&bundle_roots, &node_trust_store)?;
+    let parsers = build_parser_dispatcher(
+        &bundle_roots,
+        &kinds,
+        &node_trust_store,
+        Arc::clone(&isolation),
+    )?;
+    let signing_key = load_operator_signing_key(app_root)?;
+    ensure_operator_key_is_trusted(&node_trust_store, &signing_key)?;
+    Ok(OfflineAuthoring {
+        isolation,
+        kinds,
+        parsers,
+        node_trust_store,
+        signing_key,
+    })
 }
 
 /// Offline batch form of [`run_sign`], retaining one admitted engine
 /// generation and one project mutation lock for both signing phases.
 pub fn run_sign_batch(
+    app_root: &Path,
     item_refs: &[String],
     project_path: Option<&Path>,
     source: SignSource,
@@ -106,30 +149,11 @@ pub fn run_sign_batch(
             return parsed_target.map(|_| unreachable!());
         }
     }
-    let app_root = match std::env::var("RYEOS_APP_ROOT") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => dirs::data_dir()
-            .map(|d| d.join("ryeos"))
-            .expect("could not determine XDG data directory"),
-    };
-    let isolation = ryeos_node_runtime::engine_init::load_locked_registered_isolation(&app_root)
-        .context("load retained node isolation generation")?;
-    let bundle_roots = isolation
-        .registered_generation_bundle_roots()
-        .context("retained isolation generation omitted bundle roots")?
-        .to_vec();
-    let node_trust_store = isolation
-        .registered_generation_node_trust()
-        .context("retained isolation generation omitted node trust")?
-        .clone();
-    let trust_store = node_trust_store.clone();
-
-    let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
-    let parsers =
-        build_parser_dispatcher(&bundle_roots, &kinds, &trust_store, Arc::clone(&isolation))?;
+    let authoring = load_offline_authoring(app_root)?;
     let resolution_roots = ryeos_engine::item_resolution::ResolutionRoots::from_registered(
         project_path.map(Path::to_path_buf),
-        isolation
+        authoring
+            .isolation
             .registered_generation_roots()
             .context("retained isolation generation omitted typed bundle roots")?,
     );
@@ -140,27 +164,24 @@ pub fn run_sign_batch(
             // superset of every node-specific ignored view.
             patterns: Vec::new(),
         })?;
-    let signing_key = load_operator_signing_key(&app_root)?;
-    ensure_operator_key_is_trusted(&trust_store, &signing_key)?;
     run_sign_prepared_batch(
         item_refs,
         project_path,
         source,
-        &kinds,
-        &parsers,
+        &authoring.kinds,
+        &authoring.parsers,
         &resolution_roots,
-        &trust_store,
-        &node_trust_store,
+        &authoring.node_trust_store,
+        &authoring.node_trust_store,
         &configured_ignore,
-        &signing_key,
+        &authoring.signing_key,
     )
 }
 
-/// Sign project items through an already-admitted daemon engine generation.
-///
-/// The daemon handler owns caller authentication and supplies the exact local
-/// operator key. This function publishes only the selected project item bytes;
-/// it never takes the node-wide state lock or writes runtime/CAS state.
+/// Sign project items through an already-admitted engine generation and the
+/// operator key the caller holds. This function publishes only the selected
+/// project item bytes; it never takes the node-wide state lock or writes
+/// runtime/CAS state.
 pub fn run_sign_online(
     item_ref: &str,
     project_path: &Path,
@@ -1404,8 +1425,7 @@ pub fn load_user_signing_key() -> Result<SigningKey> {
 }
 
 /// Load the exact operator signing key beneath one already-selected node root.
-/// Daemon-owned authoring passes its configured root explicitly rather than
-/// relying on process environment discovery.
+/// Only operator-side processes call this; the daemon never holds the key.
 pub fn load_operator_signing_key(runtime_root: &Path) -> Result<SigningKey> {
     let root = lillux::PinnedDirectory::open(runtime_root)?
         .ok_or_else(|| anyhow!("operator runtime root is unavailable"))?;
@@ -1533,7 +1553,13 @@ mod tests {
     fn run_sign_rejects_malformed_canonical_ref() {
         // `not-a-ref` has no `:` — CanonicalRef::parse fails. We
         // never reach trust-store / kind-registry loading.
-        let err = run_sign("not-a-ref", None, SignSource::Project).unwrap_err();
+        let err = run_sign(
+            Path::new("/nonexistent"),
+            "not-a-ref",
+            None,
+            SignSource::Project,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("malformed canonical ref"),
             "expected malformed-ref error, got: {err}"

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T05:04:32Z:ae86d974276de986f49b9174c643e67d4eeccfc2c56b16300a1d2a1c85865848:4jBU7ayQZDq19eG/y8w4F1/9LE/WHA3qaT+xdx902Qqd00ziN+HN2QzjTQe1asn9WNjrnnPj/DvPyT+lkAElDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:51:10Z:dc5ad2dd198fc85a6c0ac6c733bdc2e8bbe5306fd5e8a04fdfdfccb55c31fa7d:rK/Q0glqXq5pHcepZUaO4skSuUpWfE2ab9PTObf61ilG54Qf0npy3cR5LtjsfP8fhx55wirUg47RZ9kU1kFHCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, bootstrap, bundles, section-table, repair, init]
@@ -24,9 +24,15 @@ and publishes that profile's complete policy set under `.ai/node/policies/`,
 re-signed by the node. Runtime startup never fills omitted policy with defaults.
 
 `bootstrap::repair_daemon_local` owns only daemon-local repair after
-init-state verification. It first checks that operator signing key, node
-signing key, node signing key, and the signer registry exist. Missing
-artifacts fail with `Run: ryeos init` guidance. The daemon never writes
+init-state verification. It first checks that the node signing key and the
+signer registry exist. Missing artifacts fail with `Run: ryeos init` guidance.
+The daemon never holds the operator private key: wherever it needs the
+operator's fingerprint or public key (grant classification, local-operator
+checks, the sealed-vault operator) it reads the operator-signed genesis under
+`.ai/node/operator/` and the node-signed operator record in the signer
+registry, and verifies the genesis signature under that key. Operator
+signatures (qualification testimony, `ryeos sign`, `ryeos content pin`) are
+made by the CLI, which holds the key. The daemon never writes
 to the signer registry and never regenerates the node key, because the
 node key is the root that signs every signer record.
 

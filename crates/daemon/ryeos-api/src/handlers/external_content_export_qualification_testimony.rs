@@ -1,5 +1,10 @@
 //! Export one local qualification as a signed testimony and submit it to a
 //! hosted node.
+//!
+//! Two steps, because the operator key is not the daemon's. Without
+//! `signed_testimony` the service returns the exact unsigned testimony. With
+//! it, the operator's signature over that statement is verified against the
+//! operator identity the node pins, and the testimony is submitted.
 
 use std::sync::Arc;
 
@@ -8,12 +13,14 @@ use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::operator_external_content::qualification_testimony::ContentExportSelection;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::objects::Attestation;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
 use crate::remote::qualification_testimony_push::{
     QualificationTestimonyExportRequest, export_qualification_testimony,
+    prepare_qualification_testimony,
 };
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +33,10 @@ pub struct Request {
     /// speaks to, named the way a launch names it. Absent for the product lane.
     #[serde(default)]
     pub content: Option<ContentSelection>,
+    /// The testimony returned by the first step, signed by the operator. Absent
+    /// on the first step.
+    #[serde(default)]
+    pub signed_testimony: Option<Attestation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,22 +100,24 @@ impl Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ryeos_app::operator_authority::require_local_configured_operator(&state, &ctx)?;
     req.validate()?;
-    let outcome = export_qualification_testimony(
-        &state,
-        &ctx,
-        &QualificationTestimonyExportRequest {
-            remote: req.remote,
-            qualification_hash: req.qualification_hash,
-            acceptance_policy_ref: req.acceptance_policy_ref,
-            content: req.content.map(|content| ContentExportSelection {
-                activation_ref: content.activation_ref,
-                coordinate_id: content.coordinate_id,
-                manifest_hash: content.manifest_hash,
-            }),
-        },
-    )
-    .await?;
-    Ok(serde_json::to_value(outcome)?)
+    let request = QualificationTestimonyExportRequest {
+        remote: req.remote,
+        qualification_hash: req.qualification_hash,
+        acceptance_policy_ref: req.acceptance_policy_ref,
+        content: req.content.map(|content| ContentExportSelection {
+            activation_ref: content.activation_ref,
+            coordinate_id: content.coordinate_id,
+            manifest_hash: content.manifest_hash,
+        }),
+    };
+    match req.signed_testimony {
+        None => Ok(serde_json::to_value(
+            prepare_qualification_testimony(&state, &ctx, &request).await?,
+        )?),
+        Some(signed) => Ok(serde_json::to_value(
+            export_qualification_testimony(&state, &ctx, &request, &signed).await?,
+        )?),
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -142,6 +155,7 @@ mod tests {
                 "qualification_hash": "string",
                 "acceptance_policy_ref": "string",
                 "content": "object?",
+                "signed_testimony": "object?",
             })
         );
         let mut coordinates = serde_json::Map::new();

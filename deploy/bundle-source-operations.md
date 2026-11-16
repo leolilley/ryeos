@@ -121,7 +121,7 @@ initializes from that profile; the image never sets it. A node keeps the host
 class it was initialized under. A restart preserves the installed generation rather
 than reconciling it against image contents.
 
-This release accepts only `ryeos/init-completion/v3`, including its signed
+This release accepts only `ryeos/init-completion/v5`, including its signed
 substrate-identity binding. Existing volumes with a different completion schema
 are not an in-place image-swap deployment target. Keep them stopped and backed
 up; do not delete the bundle directory, edit completion JSON, or use policy

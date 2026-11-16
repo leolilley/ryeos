@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T22:15:51Z:eeeae93b63458b7e7b641497e1f3dd5df3da898df05809fbdfd09f48696250d8:Pv9sLFi6eWM/7VdxgW/pnfxvysW0MKCNSIu6TDDbcw6L+8Xp2cXEyy0cUJbK6j6f2GSEpQTi3i2IUF0gEYylBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T01:11:15Z:25e9895f0b5787d1853f7ee69ed6f4317793c32f58c5cd83636e5b38363352fd:OXJps8az9Sc8nYJWtNkoBEbJcXvKMIYcQ8uuPMGhjiBbe0X+SoB/FO3YEKLhyBTD+vX/Y0BDgiiTn/1d7RJ9Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -90,16 +90,22 @@ operation records the succession in the registry (the new key becomes active
 with the old key's role and scope, the old key is retired and **keeps verifying
 what it signed**) and installs the new key last. Installing replaces the old
 private key, so no retired private key stays on disk. A rotation that stopped
-part way is finished by running the same request again.
+part way is finished by running the same request again. The daemon never holds
+the operator's private key: for an operator rotation the command signs the
+succession statement with the old key and the new genesis with the new key,
+the node applies them, and the command installs the new private key afterwards,
+in its own process (a rerun after an interruption finishes that install).
 
 An operator rotation also:
 
-- replaces `operator/genesis.json` with a genesis signed by the new key that
-  records `predecessor_fingerprint` and `predecessor_created_at`;
+- installs `operator/genesis.json` as the genesis the command signed with the
+  new key, which records `predecessor_fingerprint` and `predecessor_created_at`
+  (the node checks it against the new public key before installing it);
 - issues the new operator's grant (schema 3, `expires_at = "never"`) with
   `authorized_by` naming the old operator and the rotation request's digest, and
   removes the retired key's grant;
-- reseals the init completion under the new key.
+- reseals the init completion, signed by the node key and carrying the
+  operator's signed rotation request (see below).
 
 Refusals name their cure: `key_rotation_no_current_key`, `key_rotation_not_pinned`
 and `key_rotation_not_active` (run `ryeos init`, or inspect the record with
@@ -157,8 +163,32 @@ state:
 | Bundle registrations | `<system>/.ai/node/bundles/` | node key |
 | Any other node config under the app root (routes, commands, external execution, runtime snapshots) | `<system>/.ai/node/<section>/` | node key |
 | Authorized-key grants | `<system>/.ai/node/auth/authorized_keys/` | node key |
-| Init completion record | `<system>/.ai/config/onboarding/init-completion.json` | the local operator key (`.ai/node/operator/signing/`) |
+| Init completion record | `<system>/.ai/config/onboarding/init-completion.json` | the operator key when `ryeos init` runs in the operator's process; the node key when the node reseals it, carrying the operator-signed offline request that authorized the change (or no request, after a live bundle install or removal) |
 | Offline operation requests | request envelope | the local operator key, or an operator granted by the node |
+
+**Node-signed documents that record the operator's consent.** The daemon holds
+no operator private key. A document the node writes while applying a queued
+offline operation (capacity re-issuance, re-anchor and policy-amendment
+documents, and the init completion reseal) is signed by the node key and carries
+the operator-signed request that authorized it, together with that request's
+digest in the signed body (`authority.signed_by = node_under_request`). A
+verifier accepts it as the operator's authority only through that request: the
+node signature, the request's digest, the request's node and operation, and the
+request's operator signature, checked against the operator lineage (the
+operator that issued the capacity account and its registered successors). A
+request signed under a delegated grant, or by an operator outside the lineage,
+is refused with `apply_authority_request_not_operator`; a missing, swapped or
+wrong-operation request is refused with the other `apply_authority_*` codes.
+Documents the operator's own process writes (`ryeos init`, the command-line
+tool) are operator-signed as before.
+
+Capacity documents are issued data. Their schemas are `ryeos/native-capacity-reissuance/v2`
+and `ryeos/native-capacity-reanchor/v3`, and the init completion is
+`ryeos/init-completion/v5`. An earlier document is refused by name:
+`init_completion_old_shape` (cure: stop the node and run `ryeos init` on the
+same app root with its original arguments, which reseals the completion) and
+`capacity_document_old_shape` (cure: stop the node and initialize a fresh app
+root with `ryeos init`).
 
 Routes and commands shipped inside a bundle root keep their publisher
 signatures. A node document signed by any other key is refused with

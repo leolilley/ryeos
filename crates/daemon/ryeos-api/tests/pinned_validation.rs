@@ -7,7 +7,7 @@ use ryeos_api::routes::compile::{CompiledLimits, CompiledRoute, RouteDispatchCon
 use ryeos_api::routes::invocation::RoutePrincipal;
 use ryeos_api::routes::response_modes::execute_mode::CompiledExecuteMode;
 use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectTree};
 use ryeos_state::project_sync::{PROJECT_SNAPSHOT_CONFIG_RELATIVE, ProjectSyncScope};
 use serde_json::{Value, json};
@@ -19,7 +19,9 @@ use serde_json::{Value, json};
 async fn current_head_validation_uses_pinned_authority_without_invoking_or_publishing() {
     let (_node, _state_owner, state) = test_state::build_test_state_with_bundles();
     let project = tempfile::tempdir().unwrap();
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let mut principal = RoutePrincipal::anonymous(operator.principal_id(), "ryeos_signed");
     principal.verified = true;
     principal.authorized_key_class = Some(AuthorizedKeyPrincipalClass::LocalClient);

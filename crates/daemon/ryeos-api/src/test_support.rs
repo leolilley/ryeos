@@ -73,7 +73,6 @@ fn build_test_state_at(
         uds_path: root.join("test.sock"),
         app_root: root.to_path_buf(),
         node_signing_key_path: key_path.clone(),
-        operator_signing_key_path: root.join("user-key.pem"),
         authorized_keys_dir: root.join("auth"),
     };
     let identity = if create_identity {
@@ -85,16 +84,13 @@ fn build_test_state_at(
     // node claimants. Keep that authority real in the shared fixture so tests
     // exercise the production identity check instead of failing before the
     // claim contract is reached.
-    if create_identity {
-        ryeos_node_runtime::identity::NodeIdentity::create(&config.operator_signing_key_path)
-            .unwrap();
-    }
     // Node-signed records (remote pins, registry records) verify against the
     // node public identity document.
     if create_identity {
         identity
             .write_public_identity(&ryeos_engine::trust::node_public_identity_path(root))
             .unwrap();
+        ryeos_node_runtime::operator_identity::test_support::install_operator(root, &identity);
     }
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,

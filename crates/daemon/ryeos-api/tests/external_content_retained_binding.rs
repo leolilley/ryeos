@@ -75,7 +75,9 @@ fn fixture_on(
             }),
         ]),
     );
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/import".to_owned()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
@@ -446,7 +448,9 @@ async fn bind_through_managed_activation_owner(
             }),
         ]),
     );
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let scopes = vec!["ryeos.execute.service.external-content/activate".to_owned()];
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
@@ -1036,7 +1040,9 @@ async fn binding_reuse_refuses_nonowner_remote_stale_grant_and_byte_overclaims()
         .await
         .is_err()
     );
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     ryeos_node_runtime::identity::write_authorized_key_toml(
         &state.config.authorized_keys_dir,
         operator.fingerprint(),

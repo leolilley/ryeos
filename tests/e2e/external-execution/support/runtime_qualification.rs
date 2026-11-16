@@ -301,7 +301,7 @@ pub fn publish_guest_runtime_witness(
         admitted_parameters_digest: relationship.producer.admitted_parameters_digest().unwrap(),
     };
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .unwrap();
     let evidence = ProductCaptureEvidence {
         schema: PRODUCT_CAPTURE_EVIDENCE_SCHEMA,

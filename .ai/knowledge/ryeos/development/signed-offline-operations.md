@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T23:11:47Z:4ae555b1073d912e7974ed7eb8fcc68aa9d5812615acf40f909bf46aa268ca3e:Rxa8OtCJeAO5OvfwsXdqwxyKgoq3VQWFVV1T2cOqOjspKAmx1MyITBkhY9WmtGiCE0nZfXaKbSSQ6BMUNumyDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T14:32:55Z:42e2f5cff5f42f8c9c276b91f6072bc27911fc0ed63c90592bd1fe59ee69eade:pPgdnwdwRoL/ULgnY+k2HBDQCOO5AtuhC3RnmFcMIRShfQXWjI/uFgoc0T2cXBUy72nN1XJXp+htzmoN8T+CCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "signed-offline-operations"
@@ -52,9 +52,16 @@ ledger's chain tip makes a later rewrite of history by class C detectable
 against an earlier tip. It does not prevent one. Keeping class C out needs a
 key the volume cannot reach, which is later work.
 
-A remote signer only authorizes. Artifacts the node trusts are still signed
-by the keys on the volume: the local operator key where an operator signs,
-the node key where the node signs. Receipts are signed with the node key.
+A remote signer only authorizes. The daemon holds no operator private key, so
+what the node writes while applying a request is signed by the node key. A
+document that records the operator's consent (capacity re-issuance, re-anchor
+and policy-amendment documents, and the init completion reseal) carries the
+operator-signed request that authorized it and that request's digest in its
+signed body; verifiers accept it as the operator's authority only through that
+request. The operator signs only in the command-line tool: the request itself,
+and for a rotation the succession statement and the new genesis; installing the
+operator's new private key is also the command's step. Receipts are signed with
+the node key.
 
 ## The request
 

@@ -185,9 +185,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
     use base64::Engine as _;
-    use ryeos_node_runtime::identity::{
-        AuthorizedBy, AuthorizedKeyPrincipalClass, GrantExpiry, NodeIdentity,
-    };
+    use ryeos_node_runtime::identity::{AuthorizedBy, AuthorizedKeyPrincipalClass, GrantExpiry};
 
     const SCOPE: &str = "ryeos.execute.service.vault/list";
 
@@ -314,7 +312,10 @@ mod tests {
     #[tokio::test]
     async fn the_configured_operator_renews_any_grant() {
         let (_guard, state, fingerprint) = lapsed_grant();
-        let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
         handle(
             request(&fingerprint),
             context(operator.principal_id(), &[]),

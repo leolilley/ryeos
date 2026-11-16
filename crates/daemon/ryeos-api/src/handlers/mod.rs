@@ -35,7 +35,6 @@ pub mod commands_get;
 pub mod commands_list;
 pub mod commands_submit;
 pub mod commands_wait;
-pub mod content_pin;
 pub mod credential_profiles;
 pub mod dedicated_sessions;
 pub mod events_chain_replay;
@@ -137,7 +136,6 @@ pub mod scheduler_register;
 pub mod scheduler_resume;
 #[cfg(feature = "scheduling")]
 pub mod scheduler_show_fires;
-pub mod sign;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
 pub mod system_routes;
@@ -206,7 +204,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_dispatch::DESCRIPTOR,
     commands_list::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
-    sign::DESCRIPTOR,
     threads_input::DESCRIPTOR,
     accounting_summary::DESCRIPTOR,
     usage_summary::DESCRIPTOR,
@@ -258,7 +255,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_submit::DESCRIPTOR,
     commands_get::DESCRIPTOR,
     commands_wait::DESCRIPTOR,
-    content_pin::DESCRIPTOR,
     credential_profiles::CREATE_DESCRIPTOR,
     credential_profiles::GET_DESCRIPTOR,
     credential_profiles::LIST_DESCRIPTOR,

@@ -522,6 +522,13 @@ pub fn populate_initialized_state_with_profile_and_identities(
     )
     .with_context(|| format!("write operator signing key under {}", state_path.display()))?;
 
+    // The operator's public genesis, which the daemon reads in place of the key.
+    ryeos_node_runtime::operator_identity::test_support::write_genesis(
+        state_path,
+        &ryeos_engine::trust::compute_fingerprint(&user.verifying_key()),
+        &user,
+    );
+
     // ── Authoring Ed25519 identity ──
     let authoring_key_path = ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf())
         .authoring_signing_key_path();
@@ -584,7 +591,14 @@ pub fn populate_initialized_state_with_profile_and_identities(
 /// lock; a parsed native-capacity policy alone cannot make this fixture live.
 /// Capacity files bind real inode identities and are not byte-stability inputs.
 pub fn seal_initialized_state(state_path: &Path) -> Result<()> {
-    ryeos_node::init::seal_test_fixture_init_completion(state_path)
+    // The fixture plays the operator's command-line tool, which is the one
+    // process that holds the operator key.
+    let operator = lillux::crypto::load_signing_key(
+        &ryeos_engine::roots::RuntimeRoot::new(state_path.to_path_buf())
+            .operator_signing_key_path(),
+    )
+    .context("load the fixture operator key")?;
+    ryeos_node::init::seal_test_fixture_init_completion(state_path, &operator)
         .context("seal fast-fixture initialization transaction")
 }
 
@@ -737,9 +751,6 @@ pub fn write_harness_bootstrap_config(
         node_signing_key_path: state_path
             .join(AI_DIR)
             .join("node/identity/private_key.pem"),
-        operator_signing_key_path: state_path
-            .join(AI_DIR)
-            .join("node/operator/signing/private_key.pem"),
         authorized_keys_dir: state_path.join(AI_DIR).join("node/auth/authorized_keys"),
     };
     fs::write(

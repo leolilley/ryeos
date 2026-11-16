@@ -70,7 +70,7 @@ fn reissue(
     reissue_capacity(ReissueRequest {
         app_root,
         state_lock: lock,
-        operator_key: operator,
+        signer: ryeos_node::apply_authority::DocumentSigner::Operator(operator),
         reason,
         command: COMMAND,
     })
@@ -469,7 +469,7 @@ fn reanchor(
     reanchor_capacity(ReanchorRequest {
         app_root,
         state_lock: lock,
-        operator_key: operator,
+        signer: ryeos_node::apply_authority::DocumentSigner::Operator(operator),
         reason: "e2e move to another filesystem",
         command: COMMAND,
     })
