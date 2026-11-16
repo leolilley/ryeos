@@ -17,9 +17,7 @@ mod session;
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
 #[cfg(test)]
-use execution::status_tone;
-pub(crate) use execution::timeline_summary_entry;
-use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
+use execution::{facet_backed_response, focused_timeline_entry};
 pub use session::{RyeOsSessionVm, RyeOsSurfaceChoiceVm};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1452,50 +1450,22 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            use std::borrow::Cow;
-
             let cached = source_key
                 .as_ref()
                 .and_then(|key| core.data.timeline_sources.get(key));
-            let (full, full_indents, full_sources, full_sections, collapsible) =
-                if let Some(cache) = cached {
-                    (
-                        Cow::Borrowed(cache.entries.as_slice()),
-                        Cow::Borrowed(cache.indents.as_slice()),
-                        Cow::Borrowed(cache.sources.as_slice()),
-                        Cow::Borrowed(cache.sections.as_slice()),
-                        Cow::Borrowed(&cache.collapsible),
-                    )
-                } else {
-                    let (mut entries, mut indents, mut sources) = timeline_entries_indented(
-                        super::content::project_records(binding, response),
-                    );
-                    if let Some(summary) = timeline_summary_entry(response) {
-                        entries.insert(0, summary);
-                        indents.insert(0, 0);
-                        sources.insert(0, None);
-                    }
-                    let (sections, collapsible_set) =
-                        super::timeline::timeline_section_index(&entries);
-                    (
-                        Cow::Owned(entries),
-                        Cow::Owned(indents),
-                        Cow::Owned(sources),
-                        Cow::Owned(sections),
-                        Cow::Owned(collapsible_set),
-                    )
-                };
+            let built;
+            let layout = match cached {
+                Some(cache) => &cache.layout,
+                None => {
+                    built = super::timeline::timeline_layout_for(binding, response);
+                    &built
+                }
+            };
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
             let windowed = super::timeline::fold_timeline_window(
-                super::timeline::TimelineWindowInput {
-                    entries: full.as_ref(),
-                    indents: full_indents.as_ref(),
-                    sources: full_sources.as_ref(),
-                    sections: full_sections.as_ref(),
-                    collapsible: collapsible.as_ref(),
-                },
+                layout,
                 super::timeline::live_delta_entry(core),
                 collapsed.unwrap_or(&empty),
                 cursor.unwrap_or(0),
@@ -1507,6 +1477,7 @@ fn bound_view_vm_keyed(
             let arrival_by_key: std::collections::HashMap<&str, Option<u64>> = cached
                 .map(|cache| {
                     cache
+                        .layout
                         .sources
                         .iter()
                         .zip(cache.arrivals.iter())
@@ -2178,15 +2149,6 @@ fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
-
-// Timeline entry building + the live cognition buffer render live in
-// `super::timeline`; re-exported crate-wide so the timeline arm above and the
-// tests below call them unqualified (via `use super::*`).
-#[cfg(test)]
-pub(crate) use super::timeline::append_live_delta;
-#[cfg(test)]
-pub(crate) use super::timeline::timeline_entries;
-pub(crate) use super::timeline::timeline_entries_indented;
 
 pub(crate) fn tone_from_name(name: Option<&str>) -> RyeOsTone {
     match name {
@@ -3045,32 +3007,12 @@ fn context_command_items(
     focused: Option<&RyeOsViewInstanceKey>,
 ) -> Vec<RyeOsCommandChoice> {
     let mut items = Vec::new();
-    // A recoverable failed terminal offers retry: re-submit its own stimulus as
-    // a continuation, retargeted at the selected failed thread, pre-filled for
-    // review (not one-click). Surfaced two ways so it works everywhere — as the
-    // Inspect item's Shift+Enter secondary, AND as a distinct plain-Enter item
-    // (clients that can't send Shift+Enter still reach it).
-    let retry = focused.and_then(|instance| retry_intent_for_focused_row(core, instance));
-
     if let Some(intent) = inspect_intent_for_focused_row(core, focused) {
-        let hint = if retry.is_some() {
-            "Enter inspect · Shift+Enter retry".to_string()
-        } else {
-            focused_selection_hint(core, focused).unwrap_or_else(|| "focused row".to_string())
-        };
+        let hint =
+            focused_selection_hint(core, focused).unwrap_or_else(|| "focused row".to_string());
         items.push(RyeOsCommandChoice {
             label: "Inspect selection".to_string(),
             hint,
-            intent,
-            secondary_intent: retry.clone(),
-            enabled: true,
-        });
-    }
-
-    if let Some(intent) = retry {
-        items.push(RyeOsCommandChoice {
-            label: "Retry failed turn".to_string(),
-            hint: "re-submit this failed turn (review, then Enter)".to_string(),
             intent,
             secondary_intent: None,
             enabled: true,
@@ -3801,7 +3743,6 @@ fn tile_id_text(id: TileId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::content::{ProjectedRecord, TimelineRole};
     use crate::ui::reducer::test_support::core as test_support_core;
     use crate::ui::reducer::test_support::*;
     use crate::ui::{RyeOsEvent, RyeOsUiEvent};
@@ -3843,23 +3784,6 @@ mod tests {
         .unwrap();
         assert_eq!(unavailable.state, "unavailable");
         assert_eq!(unavailable.reason, "kind_not_registered");
-    }
-
-    fn record(
-        primary: &str,
-        meta: Option<&str>,
-        tone: Option<&str>,
-        role: TimelineRole,
-        pair_key: Option<&str>,
-    ) -> ProjectedRecord {
-        ProjectedRecord {
-            primary: primary.to_string(),
-            meta: meta.map(str::to_string),
-            tone: tone.map(str::to_string),
-            role,
-            pair_key: pair_key.map(str::to_string),
-            raw: json!({ "primary": primary }),
-        }
     }
 
     fn tile_default_source_key(core: &RyeOsCore, tile_id: TileId) -> String {
@@ -4116,22 +4040,6 @@ mod tests {
             RyeOsUiIntent::SupplyRequiredSubject { instance_key, source_view_set_id }
                 if instance_key == &instance && *source_view_set_id == source_set
         )));
-    }
-
-    #[test]
-    fn timeline_entries_merge_consecutive_flow_records() {
-        let entries = timeline_entries(vec![
-            record("hello ", None, None, TimelineRole::Flow, None),
-            record("world", None, Some("accent"), TimelineRole::Flow, None),
-        ]);
-
-        assert_eq!(
-            entries,
-            vec![RyeOsTimelineEntryVm::Block {
-                text: "hello world".to_string(),
-                tone: RyeOsTone::Accent,
-            }]
-        );
     }
 
     #[test]
@@ -4563,183 +4471,6 @@ mod tests {
     }
 
     #[test]
-    fn timeline_entries_collapse_matching_pairs_in_open_position() {
-        let entries = timeline_entries(vec![
-            record(
-                "run tool",
-                None,
-                Some("accent"),
-                TimelineRole::PairOpen,
-                Some("call-1"),
-            ),
-            record("thinking", None, None, TimelineRole::Line, None),
-            record(
-                "ok",
-                Some("42ms"),
-                Some("good"),
-                TimelineRole::PairClose,
-                Some("call-1"),
-            ),
-        ]);
-
-        assert_eq!(
-            entries,
-            vec![
-                RyeOsTimelineEntryVm::Pair {
-                    summary: "run tool".to_string(),
-                    meta: Some("42ms".to_string()),
-                    tone: RyeOsTone::Good,
-                    pending: false,
-                },
-                RyeOsTimelineEntryVm::Line {
-                    primary: "thinking".to_string(),
-                    meta: None,
-                    tone: RyeOsTone::Neutral,
-                    intent: None,
-                    secondary_intent: None,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn timeline_entries_close_without_open_degrades_to_line() {
-        let entries = timeline_entries(vec![record(
-            "orphan close",
-            Some("done"),
-            Some("good"),
-            TimelineRole::PairClose,
-            Some("call-1"),
-        )]);
-
-        assert_eq!(
-            entries,
-            vec![RyeOsTimelineEntryVm::Line {
-                primary: "orphan close".to_string(),
-                meta: Some("done".to_string()),
-                tone: RyeOsTone::Good,
-                intent: None,
-                secondary_intent: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn timeline_entries_open_without_close_stays_pending() {
-        let entries = timeline_entries(vec![record(
-            "run tool",
-            None,
-            Some("accent"),
-            TimelineRole::PairOpen,
-            Some("call-1"),
-        )]);
-
-        assert_eq!(
-            entries,
-            vec![RyeOsTimelineEntryVm::Pair {
-                summary: "run tool".to_string(),
-                meta: None,
-                tone: RyeOsTone::Accent,
-                pending: true,
-            }]
-        );
-    }
-
-    #[test]
-    fn timeline_entries_boundary_becomes_separator() {
-        let entries = timeline_entries(vec![record(
-            "turn 2",
-            None,
-            None,
-            TimelineRole::Boundary,
-            None,
-        )]);
-
-        assert_eq!(
-            entries,
-            vec![RyeOsTimelineEntryVm::Separator {
-                label: "turn 2".to_string(),
-            }]
-        );
-    }
-
-    #[test]
-    fn timeline_entries_records_with_no_role_map_are_lines() {
-        let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": { "default": { "primary": "event_type" } }
-        }))
-        .unwrap();
-        let records = super::super::content::project_records(
-            &binding,
-            &json!({ "events": [ { "event_type": "message" } ] }),
-        );
-
-        assert_eq!(
-            timeline_entries(records),
-            vec![RyeOsTimelineEntryVm::Line {
-                primary: "message".to_string(),
-                meta: None,
-                tone: RyeOsTone::Neutral,
-                intent: None,
-                secondary_intent: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn timeline_entries_skip_flow_records_without_primary() {
-        let entries = timeline_entries(vec![
-            record("", None, None, TimelineRole::Flow, None),
-            record("durable", None, None, TimelineRole::Flow, None),
-        ]);
-
-        assert_eq!(
-            entries.as_slice(),
-            &[RyeOsTimelineEntryVm::Block {
-                text: "durable".into(),
-                tone: RyeOsTone::Neutral,
-            }]
-        );
-    }
-
-    #[test]
-    fn actual_chain_timeline_binding_projects_replay_shapes() {
-        let binding: super::super::content::ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml"
-        ))
-        .unwrap();
-        let records = super::super::content::project_records(
-            &binding,
-            &json!({ "events": [
-                { "event_type": "cognition_in", "payload": { "turn": 1 } },
-                { "event_type": "cognition_out", "payload": { "content": "answer", "turn": 1 } },
-                { "event_type": "cognition_out", "payload": { "delta": "live-only" } },
-                { "event_type": "tool_call_start", "payload": { "tool": "tool:demo", "call_id": "call-1" } },
-                { "event_type": "tool_call_result", "payload": { "tool": "tool:demo", "call_id": "call-1", "result_size_bytes": 42 } }
-            ] }),
-        );
-
-        let entries = timeline_entries(records);
-        assert!(entries.iter().any(
-            |entry| matches!(entry, RyeOsTimelineEntryVm::Block { text, .. } if text == "answer")
-        ));
-        assert!(entries.iter().any(|entry| matches!(
-            entry,
-            RyeOsTimelineEntryVm::Separator { label } if label == "1"
-        )));
-        assert!(entries.iter().any(|entry| matches!(
-            entry,
-            RyeOsTimelineEntryVm::Pair { summary, tone: RyeOsTone::Good, pending: false, .. } if summary == "tool:demo"
-        )));
-        assert!(!entries.iter().any(|entry| matches!(
-            entry,
-            RyeOsTimelineEntryVm::Line { primary, .. } if primary.contains("live-only")
-        )));
-    }
-
-    #[test]
     fn actual_threads_list_binding_projects_a_table() {
         use crate::ui::content::{ViewBinding, project_table, table_columns};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
@@ -4786,49 +4517,6 @@ mod tests {
         assert_eq!(rows[1].tone.as_deref(), Some("danger"));
         // The raw record is preserved for affordance interpolation.
         assert_eq!(rows[0].raw["thread_id"], "T-ab");
-    }
-
-    #[test]
-    fn timeline_summary_entry_builds_a_header_line_from_the_summary() {
-        let response = json!({
-            "events": [],
-            "summary": {
-                "status": "running",
-                "input_tokens": 1200,
-                "output_tokens": 340,
-                "spend_usd": 0.0421,
-                "turns": 3
-            }
-        });
-        match timeline_summary_entry(&response).expect("summary present") {
-            RyeOsTimelineEntryVm::Line { primary, tone, .. } => {
-                assert!(primary.contains("running"), "{primary}");
-                assert!(
-                    primary.contains("1200") && primary.contains("340"),
-                    "{primary}"
-                );
-                assert!(primary.contains("$0.0421"), "{primary}");
-                assert!(primary.contains("3 turns"), "{primary}");
-                assert_eq!(tone, RyeOsTone::Accent);
-            }
-            other => panic!("expected a header Line, got {other:?}"),
-        }
-        // A timeline whose source carries no `summary` gets no header.
-        assert!(timeline_summary_entry(&json!({ "events": [] })).is_none());
-    }
-
-    #[test]
-    fn status_tone_maps_by_typed_status_variant() {
-        assert_eq!(status_tone("running"), RyeOsTone::Accent);
-        assert_eq!(status_tone("created"), RyeOsTone::Accent);
-        assert_eq!(status_tone("completed"), RyeOsTone::Good);
-        assert_eq!(status_tone("continued"), RyeOsTone::Good);
-        assert_eq!(status_tone("failed"), RyeOsTone::Danger);
-        assert_eq!(status_tone("killed"), RyeOsTone::Danger);
-        assert_eq!(status_tone("timed_out"), RyeOsTone::Danger);
-        assert_eq!(status_tone("cancelled"), RyeOsTone::Warn);
-        // An unrecognized status folds to Unknown → neutral, not a panic.
-        assert_eq!(status_tone("some_future_status"), RyeOsTone::Neutral);
     }
 
     #[test]
@@ -5180,16 +4868,18 @@ mod tests {
         }
     }
 
-    /// Build a single focused timeline tile over a chain_replay response, with
-    /// the feed point (distance-from-bottom 0) on the newest entry.
-    fn feed_core(events: serde_json::Value) -> RyeOsCore {
+    /// A single focused timeline tile over a timeline-service response, with
+    /// the point on the newest entry.
+    fn feed_core(items: serde_json::Value) -> RyeOsCore {
         let session = session_with_surface(json!({
             "name": "t",
             "tiles": ["view:ryeos/chain/timeline"],
             "views": {
                 "view:ryeos/chain/timeline": {
                     "widget": "timeline",
-                    "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } }
+                    "sources": { "default": {
+                        "ref": "service:ui/ryeos-ui/timeline/thread", "collection": "items"
+                    } }
                 }
             }
         }));
@@ -5198,7 +4888,7 @@ mod tests {
         let key = tile_default_source_key(&core, core.active_view_set().unwrap().focused_tile);
         core.data
             .sources
-            .insert(key.clone(), json!({ "events": events }));
+            .insert(key.clone(), json!({ "items": items, "older": 0 }));
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::SetTileCursor {
                 tile_id: tile_key,
@@ -5208,164 +4898,36 @@ mod tests {
         core
     }
 
-    #[test]
-    fn command_overlay_offers_inspect_and_retry_on_a_focused_failed_feed_entry() {
-        let core = feed_core(json!([
-            { "event_type": "cognition_in", "thread_id": "T-1", "payload": { "content": "do it" } },
-            { "event_type": "thread_failed", "thread_id": "T-1", "chain_root_id": "R-1",
-              "payload": { "error": { "message": "boom" } } }
-        ]));
+    fn outcome(state: &str, reason: Option<&str>) -> serde_json::Value {
+        let slots = match reason {
+            Some(reason) => json!({ "reason": reason }),
+            None => json!({}),
+        };
+        json!({
+            "item": "entry", "id": "out-1", "type": "outcome", "state": state,
+            "tone": null, "thread": "T-1", "parent": null, "exchange": null,
+            "counts_as": null, "slots": slots, "seq": [2, 2], "ts": ["t", "t"]
+        })
+    }
 
+    #[test]
+    fn command_overlay_offers_inspect_on_an_outcome_that_carries_a_reason() {
+        let core = feed_core(json!([outcome("failed", Some("boom"))]));
         let items = available_command_items(&core);
-        // Enter=inspect, carrying the visible line as title and the raw event.
         let inspect = items
             .iter()
             .find(|i| i.label == "Inspect selection")
-            .expect("inspect item on a failed entry");
+            .expect("inspect item on an outcome with a reason");
         assert!(
             matches!(&inspect.intent, RyeOsUiIntent::InspectSummary { title, .. } if title == "failed — boom")
         );
-        // Retry is the inspect item's Shift+Enter secondary …
-        assert!(
-            matches!(&inspect.secondary_intent,
-                Some(RyeOsUiIntent::PrefillRetryTurn { thread_id, chain_root_id, input })
-                    if thread_id == "T-1" && chain_root_id == "R-1" && input == "do it"),
-            "retry is offered as the inspect item's secondary; got {:?}",
-            inspect.secondary_intent
-        );
-        // … AND a distinct plain-Enter item (for clients that can't send Shift+Enter).
-        let retry = items
-            .iter()
-            .find(|i| i.label == "Retry failed turn")
-            .expect("distinct retry item");
-        assert!(matches!(
-            &retry.intent,
-            RyeOsUiIntent::PrefillRetryTurn { thread_id, .. } if thread_id == "T-1"
-        ));
     }
 
     #[test]
-    fn command_overlay_offers_neither_inspect_nor_retry_on_a_cancelled_terminal() {
-        // Cancelled is operator-initiated, not an error — it is neither
-        // inspectable nor retryable.
-        let core = feed_core(json!([
-            { "event_type": "cognition_in", "thread_id": "T-1", "payload": { "content": "do it" } },
-            { "event_type": "thread_cancelled", "thread_id": "T-1", "chain_root_id": "R-1",
-              "payload": {} }
-        ]));
+    fn command_overlay_offers_nothing_on_an_outcome_without_a_reason() {
+        let core = feed_core(json!([outcome("completed", None)]));
         let items = available_command_items(&core);
-        assert!(!items.iter().any(|i| i.label == "Retry failed turn"));
         assert!(!items.iter().any(|i| i.label == "Inspect selection"));
-    }
-
-    #[test]
-    fn command_overlay_offers_inspect_but_not_retry_on_a_timed_out_terminal() {
-        // timed_out is inspectable but not retryable in v1 (the daemon refuses
-        // continuation for that status).
-        let core = feed_core(json!([
-            { "event_type": "cognition_in", "thread_id": "T-1", "payload": { "content": "do it" } },
-            { "event_type": "thread_timed_out", "thread_id": "T-1", "chain_root_id": "R-1",
-              "payload": {} }
-        ]));
-        let items = available_command_items(&core);
-        assert!(items.iter().any(|i| i.label == "Inspect selection"));
-        assert!(!items.iter().any(|i| i.label == "Retry failed turn"));
-    }
-
-    #[test]
-    fn append_live_delta_adds_trailing_cursor_block_for_head_thread() {
-        let mut core =
-            input_session(json!({"widget":"text","input":{"id":"line","submit":"route"}}));
-        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
-        core.data.live_delta = Some(crate::ui::model::RyeOsLiveDelta {
-            thread: "T-1".to_string(),
-            text: "Hel".to_string(),
-        });
-
-        let mut entries = Vec::new();
-        append_live_delta(&core, &mut entries);
-
-        // Accent-toned trailing block with a cursor — the in-progress turn.
-        assert!(matches!(
-            entries.as_slice(),
-            [RyeOsTimelineEntryVm::Block { text, tone: RyeOsTone::Accent }]
-                if text == "Hel\u{258d}"
-        ));
-    }
-
-    #[test]
-    fn append_live_delta_ignores_buffer_for_non_head_thread() {
-        let mut core =
-            input_session(json!({"widget":"text","input":{"id":"line","submit":"route"}}));
-        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
-        // A buffer left over from a different head must not render.
-        core.data.live_delta = Some(crate::ui::model::RyeOsLiveDelta {
-            thread: "T-OTHER".to_string(),
-            text: "stale".to_string(),
-        });
-
-        let mut entries = Vec::new();
-        append_live_delta(&core, &mut entries);
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn append_live_delta_shows_working_indicator_when_head_runs_silently() {
-        let mut core =
-            input_session(json!({"widget":"text","input":{"id":"line","submit":"route"}}));
-        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
-        // Head thread is running but has emitted no streaming text yet.
-        core.data.threads = Some(crate::ui::dto::RyeOsThreadsDto {
-            threads: vec![json!({ "thread_id": "T-1", "status": "running" })],
-        });
-
-        let mut entries = Vec::new();
-        append_live_delta(&core, &mut entries);
-        assert!(
-            matches!(
-                entries.as_slice(),
-                [RyeOsTimelineEntryVm::Line { primary, tone: RyeOsTone::Accent, .. }]
-                    if primary.contains("working")
-            ),
-            "running head with no tail → working indicator: {entries:?}"
-        );
-    }
-
-    #[test]
-    fn append_live_delta_no_indicator_when_head_thread_settled() {
-        let mut core =
-            input_session(json!({"widget":"text","input":{"id":"line","submit":"route"}}));
-        set_focused_route_value(&mut core, json!({ "thread": "T-1" }));
-        core.data.threads = Some(crate::ui::dto::RyeOsThreadsDto {
-            threads: vec![json!({ "thread_id": "T-1", "status": "completed" })],
-        });
-
-        let mut entries = Vec::new();
-        append_live_delta(&core, &mut entries);
-        assert!(entries.is_empty(), "settled head → no working indicator");
-    }
-
-    #[test]
-    fn timeline_entries_unknown_role_degrades_to_line() {
-        let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": { "message": { "primary": "event_type", "role": "unknown" } },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let records = super::super::content::project_records(
-            &binding,
-            &json!({ "events": [ { "event_type": "message" } ] }),
-        );
-
-        assert_eq!(records[0].role, TimelineRole::Line);
-        assert!(matches!(
-            timeline_entries(records).as_slice(),
-            [RyeOsTimelineEntryVm::Line { primary, .. }] if primary == "message"
-        ));
     }
 
     fn input_session(view: serde_json::Value) -> crate::ui::model::RyeOsCore {

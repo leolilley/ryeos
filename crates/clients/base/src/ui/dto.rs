@@ -83,18 +83,6 @@ impl ThreadStatus {
     }
 }
 
-/// The fields the braid lens reads from a `cognition_out` event payload. Typed
-/// so the projection branches on a field rather than a raw JSON key. Other
-/// payload fields (turn, tokens, content, tool_calls) reach the feed through the
-/// event projection, not this struct, so they are intentionally omitted.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct CognitionOutPayload {
-    /// The cognition was cut mid-flight by a live interrupt; the braid marks the
-    /// seam where it was cut and the next `cognition_in` folds.
-    #[serde(default)]
-    pub interrupted: bool,
-}
-
 /// Daemon-authored per-execution facts, surfaced both on thread projections
 /// (`thread.execution`) and on a continuation launch result — the substrate
 /// authority the client gates machine-continuation (`supports_continuation`) and

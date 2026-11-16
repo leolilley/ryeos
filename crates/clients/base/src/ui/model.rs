@@ -530,17 +530,10 @@ pub struct RyeOsDataState {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RyeOsTimelineSourceCache {
-    pub entries: Vec<super::timeline::RyeOsTimelineEntryVm>,
-    pub indents: Vec<u8>,
-    pub sources: Vec<Option<super::timeline::TimelineEntrySource>>,
+    /// The service items mapped onto entries and fold sections, derived once
+    /// when the source response lands rather than rescanned per render frame.
+    pub layout: super::timeline::TimelineLayout,
     pub arrivals: Vec<Option<u64>>,
-    /// Section (turn) index per entry, parallel to `entries`. Depends only on
-    /// `entries`, so it is derived once here rather than rescanned by every
-    /// windowed render frame (`timeline::fold_timeline_window`).
-    pub sections: Vec<usize>,
-    /// Sections headed by a real `Separator` — the ones a fold key can
-    /// collapse. Derived alongside `sections`.
-    pub collapsible: std::collections::BTreeSet<usize>,
 }
 
 // The live cognition buffer type + its accumulation logic live with the rest
@@ -2176,22 +2169,15 @@ impl RyeOsCore {
         let Some(response) = self.data.sources.get(source_key) else {
             return;
         };
-        let (mut entries, mut indents, mut sources) = super::timeline::timeline_entries_indented(
-            super::content::project_records(binding, response),
-        );
-        if let Some(summary) = super::view_model::timeline_summary_entry(response) {
-            entries.insert(0, summary);
-            indents.insert(0, 0);
-            sources.insert(0, None);
-        }
-        let (sections, collapsible) = super::timeline::timeline_section_index(&entries);
+        let layout = super::timeline::timeline_layout_for(binding, response);
         let previous_by_key: HashMap<String, (String, Option<u64>)> = previous
             .as_ref()
             .map(|cache| {
                 cache
+                    .layout
                     .sources
                     .iter()
-                    .zip(cache.entries.iter())
+                    .zip(cache.layout.entries.iter())
                     .zip(cache.arrivals.iter())
                     .filter_map(|((source, entry), arrived)| {
                         Some((
@@ -2203,9 +2189,10 @@ impl RyeOsCore {
             })
             .unwrap_or_default();
         let baseline = previous.is_none();
-        let arrivals = sources
+        let arrivals = layout
+            .sources
             .iter()
-            .zip(entries.iter())
+            .zip(layout.entries.iter())
             .map(|(source, entry)| {
                 let source = source.as_ref()?;
                 if baseline {
@@ -2222,14 +2209,7 @@ impl RyeOsCore {
             .collect();
         self.data.timeline_sources.insert(
             source_key.to_string(),
-            RyeOsTimelineSourceCache {
-                entries,
-                indents,
-                sources,
-                arrivals,
-                sections,
-                collapsible,
-            },
+            RyeOsTimelineSourceCache { layout, arrivals },
         );
     }
 
@@ -2977,45 +2957,32 @@ impl RyeOsCore {
                 }
             }
             "timeline" => {
-                let (mut entries, mut indents, mut sources) = self
-                    .data
-                    .timeline_sources
-                    .get(&source_key)
-                    .map(|cache| {
-                        (
-                            cache.entries.clone(),
-                            cache.indents.clone(),
-                            cache.sources.clone(),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        let (mut entries, mut indents, mut sources) =
-                            super::timeline::timeline_entries_indented(
-                                super::content::project_records(binding, response),
-                            );
-                        if let Some(summary) = super::view_model::timeline_summary_entry(response) {
-                            entries.insert(0, summary);
-                            indents.insert(0, 0);
-                            sources.insert(0, None);
-                        }
-                        (entries, indents, sources)
-                    });
-                // `append_live_delta` can add non-expandable transient entries.
-                super::timeline::append_live_delta(self, &mut entries);
-                indents.resize(entries.len(), 0);
-                sources.resize(entries.len(), None);
+                let built;
+                let layout = match self.data.timeline_sources.get(&source_key) {
+                    Some(cache) => &cache.layout,
+                    None => {
+                        built = super::timeline::timeline_layout_for(binding, response);
+                        &built
+                    }
+                };
                 let collapsed = match &tile.local {
                     ViewLocalState::GenericList { collapsed, .. } => collapsed,
                     ViewLocalState::None | ViewLocalState::Field(_) => return None,
                 };
-                let folded = super::timeline::fold_timeline(entries, indents, sources, collapsed);
-                let selected = folded.entries.len().checked_sub(1).map(|last| {
-                    let distance = cursor.min(last);
-                    last - distance
-                })?;
-                folded
+                // A one-entry window around the point: the selected entry's
+                // detail source, with the live tail entry counted like the
+                // rendered view counts it.
+                let windowed = super::timeline::fold_timeline_window(
+                    layout,
+                    super::timeline::live_delta_entry(self),
+                    collapsed,
+                    cursor,
+                    1,
+                );
+                windowed
+                    .folded
                     .sources
-                    .get(selected)
+                    .get(windowed.selected?)
                     .cloned()
                     .flatten()
                     .map(|source| (source.key, source.raw))

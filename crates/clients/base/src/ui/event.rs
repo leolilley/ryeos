@@ -581,9 +581,9 @@ pub enum RyeOsEvent {
     },
     /// One frame from the head thread's live SSE tail. The reducer applies
     /// ryeos event semantics so both clients reach them through `dispatch`:
-    /// cognition deltas accumulate into the live buffer; durable milestones
-    /// supersede it and refetch the braid snapshot. Clients only open the
-    /// stream and forward each frame's `(event_type, payload)`.
+    /// streamed text accumulates into the live buffer; any other frame
+    /// supersedes it and refetches the timeline source. Clients only open the
+    /// stream and forward each frame.
     ThreadTail {
         thread_id: String,
         event_type: String,

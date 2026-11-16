@@ -2131,48 +2131,6 @@ mod tests {
         assert_eq!(core.ui.notices.len(), 1);
     }
 
-    #[test]
-    fn thread_tail_deltas_accumulate_then_clear_on_durable() {
-        let mut core = RyeOsCore::default();
-
-        // Streaming cognition deltas accumulate; no refetch while live.
-        let effects = core.dispatch(RyeOsEvent::ThreadTail {
-            thread_id: "T-1".to_string(),
-            event_type: "cognition_out".to_string(),
-            payload: serde_json::json!({ "delta": "Hel" }),
-        });
-        assert!(effects.is_empty());
-        core.dispatch(RyeOsEvent::ThreadTail {
-            thread_id: "T-1".to_string(),
-            event_type: "cognition_out".to_string(),
-            payload: serde_json::json!({ "delta": "lo" }),
-        });
-        assert_eq!(
-            core.data.live_delta.as_ref().map(|d| d.text.as_str()),
-            Some("Hello")
-        );
-
-        // The settled turn (content, no delta) supersedes the live buffer.
-        core.dispatch(RyeOsEvent::ThreadTail {
-            thread_id: "T-1".to_string(),
-            event_type: "cognition_out".to_string(),
-            payload: serde_json::json!({ "content": "Hello", "turn": 1 }),
-        });
-        assert!(core.data.live_delta.is_none());
-    }
-
-    #[test]
-    fn thread_tail_ephemeral_nontext_is_noop() {
-        let mut core = RyeOsCore::default();
-        let effects = core.dispatch(RyeOsEvent::ThreadTail {
-            thread_id: "T-1".to_string(),
-            event_type: "stream_opened".to_string(),
-            payload: serde_json::json!({}),
-        });
-        assert!(effects.is_empty());
-        assert!(core.data.live_delta.is_none());
-    }
-
     // --- Dedicated coverage for the extracted ratchet path (`try_ratchet_route`
     // and the `apply_launch_outcome` delivery tower). ---
 

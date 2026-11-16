@@ -1,3 +1,4 @@
+# ryeos:signed:2026-11-16T07:56:53Z:76cff111747722f402b184cb0c670db2aedbb412853b01ea21ae6a1e7a43aec2:lGKxP0Zvs4EzwSzGi3WhqQIg+PolIw/2iT8pkUeOfYlPS3oApEklq1n3IEAqUqWWYm7M2bg8q4W7hmOSGCGDDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 vocabulary:
@@ -180,3 +181,110 @@ events:
           state: completed
           tone: [{default: good}]
           project: {detail: {join: [{path: payload.steps, prefix: "steps: "}]}}
+
+  # Provider and accounting notices.
+  provider_retry:
+    - emit:
+        - type: marker
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}, reason: payload.error}
+  cost_untracked:
+    - emit:
+        - type: marker
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.model, prefix: "cost untracked: "}]}, reason: payload.reason}
+  milestone:
+    - emit:
+        - type: marker
+          tone: [{default: accent}]
+          project: {headline: {join: [payload.kind, {path: payload.node, prefix: "node "}]}}
+  graph_follow_suspended:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: waiting
+          project: {detail: {join: [{path: payload.item_id, prefix: "waiting on "}]}}
+  seat.facet: [{drop: true}]
+
+  # Hosted sessions. An approval is one entity: its request asks, and each
+  # later event moves its state. A candidate likewise.
+  hosted_session.turn_started:
+    - emit:
+        - type: marker
+          tone: [{default: accent}]
+          project: {headline: {join: [{path: payload.turn_id, prefix: "hosted turn started "}]}}
+  hosted_session.turn_completed:
+    - emit:
+        - type: marker
+          tone: [{default: good}]
+          project: {headline: {join: [{path: payload.turn_id, prefix: "hosted turn completed "}]}}
+  hosted_session.approval_requested:
+    - emit:
+        - type: ask
+          key: [payload.approval_id]
+          state: pending
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.observation.operation_class, prefix: "approval requested: "}]}}
+  hosted_session.approval_expired:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: expired, tone: [{default: warn}]}
+  hosted_approval.decision_reserved:
+    - emit:
+        - type: ask
+          key: [payload.approval_id]
+          state: {from: payload.decision, map: {approve: approved, approved: approved, deny: denied, denied: denied}, default: decided}
+          tone: [{default: accent}]
+          project: {decision: payload.decision}
+  hosted_approval.delivery_contacting:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivering}
+  hosted_approval.delivery_unknown:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivery_unknown, tone: [{default: danger}]}
+  hosted_approval.delivery_settled:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivered, tone: [{default: good}]}
+  hosted_approval.delivery_expired:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivery_expired, tone: [{default: warn}]}
+  worker_session.restored:
+    - emit:
+        - type: marker
+          tone: [{default: accent}]
+          project: {headline: "session restored", target: payload.successor_placement_thread_id}
+  hosted_candidate.captured:
+    - emit:
+        - type: activity
+          key: [payload.candidate_snapshot_hash]
+          state: captured
+          tone: [{default: accent}]
+          project: {headline: {join: [{path: payload.candidate_snapshot_hash, format: short_hash, prefix: "candidate "}]}}
+  hosted_candidate.qualified:
+    - emit:
+        - {type: activity, key: [payload.candidate_evaluation.candidate_snapshot_hash], state: qualified, tone: [{default: good}]}
+  hosted_candidate.publication_reserved:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: publishing}
+  hosted_candidate.published:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: published, tone: [{default: good}]}
+  hosted_candidate.publication_not_applied:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: not_applied, tone: [{default: warn}]}
+  hosted_candidate.publication_superseded:
+    - emit:
+        - type: activity
+          key: [payload.candidate_snapshot_hash]
+          state: superseded
+          tone: [{default: warn}]
+          project: {detail: {join: [{path: payload.observed_head, format: short_hash, prefix: "head "}]}}
+  hosted_candidate.publication_unknown:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: unknown, tone: [{default: danger}]}
+  hosted_candidate.discarded:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: discarded}
+  hosted_bounded_execution.terminal_outcome:
+    - emit:
+        - type: marker
+          project: {headline: {join: [{path: payload.outcome.kind, prefix: "hosted execution: "}]}, reason: payload.terminal_reason}

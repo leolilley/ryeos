@@ -2419,14 +2419,7 @@ mod tests {
         }
         core.data.timeline_sources.insert(
             closing_keys[0].clone(),
-            crate::ui::model::RyeOsTimelineSourceCache {
-                entries: Vec::new(),
-                indents: Vec::new(),
-                sources: Vec::new(),
-                arrivals: Vec::new(),
-                sections: Vec::new(),
-                collapsible: std::collections::BTreeSet::new(),
-            },
+            crate::ui::model::RyeOsTimelineSourceCache::default(),
         );
         core.deferred_source_fetches.insert(
             closing_keys[2].clone(),
