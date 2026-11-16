@@ -357,6 +357,20 @@ fn admitted_session_capsule(
         .get(name)
         .cloned()
         .ok_or_else(|| anyhow!("admitted dependency has no retained session capsule"))?;
+    // The launch's stated lifetime is judged here, at session start, against
+    // the worker kind's signed ceiling frozen in the capsule just admitted.
+    let ceiling = state
+        .state_store
+        .admitted_persistent_session_capsule(&capsule_hash)?
+        .lifecycle
+        .max_lifetime_seconds_ceiling;
+    ryeos_app::dedicated_session_service::admitted_lifetime_seconds(
+        prepared
+            .runtime_data
+            .get("worker_execution")
+            .ok_or_else(|| anyhow!("worker execution has no admitted config"))?,
+        ceiling,
+    )?;
     Ok(AdmittedSession {
         capsule_hash,
         bounded_turn,

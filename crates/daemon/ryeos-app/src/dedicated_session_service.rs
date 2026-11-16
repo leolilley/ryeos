@@ -1561,7 +1561,30 @@ fn validate_bounded_command_admission(
     )
 }
 
-fn bounded_session_deadline(config: &Value, created_at_ms: i64) -> Result<Option<i64>> {
+/// The lifetime in seconds a worker execution states, refused when zero or
+/// above the signed kind ceiling frozen in the admitted session capsule.
+pub fn admitted_lifetime_seconds(config: &Value, ceiling_seconds: u64) -> Result<u64> {
+    config
+        .get("max_lifetime_seconds")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0 && *value <= ceiling_seconds)
+        .ok_or_else(|| anyhow!("worker execution has no signed lifetime within its kind ceiling"))
+}
+
+/// The signed lifetime ceiling frozen into the session's admitted capsule.
+fn session_lifetime_ceiling(state: &AppState, session: &DedicatedSessionRecord) -> Result<u64> {
+    Ok(
+        admitted_session_capsule(state, &session.admitted_capsule_hash)?
+            .lifecycle
+            .max_lifetime_seconds_ceiling,
+    )
+}
+
+fn bounded_session_deadline(
+    config: &Value,
+    created_at_ms: i64,
+    ceiling_seconds: u64,
+) -> Result<Option<i64>> {
     match config
         .get("mode")
         .and_then(|mode| mode.get("kind"))
@@ -1569,11 +1592,8 @@ fn bounded_session_deadline(config: &Value, created_at_ms: i64) -> Result<Option
     {
         Some("session") => Ok(None),
         Some("bounded_turn") => {
-            let lifetime_seconds = config
-                .get("max_lifetime_seconds")
-                .and_then(Value::as_u64)
-                .filter(|value| *value > 0 && *value <= 603_600)
-                .ok_or_else(|| anyhow!("bounded worker closure has no signed lifetime"))?;
+            let lifetime_seconds = admitted_lifetime_seconds(config, ceiling_seconds)
+                .context("bounded worker closure has no signed lifetime")?;
             let lifetime_ms = i64::try_from(lifetime_seconds)?
                 .checked_mul(1_000)
                 .ok_or_else(|| anyhow!("bounded worker lifetime exceeds timestamp range"))?;
@@ -1614,6 +1634,7 @@ pub(crate) fn ensure_hosted_contact_deadline(
     let session_deadline = bounded_session_deadline(
         admitted_worker_execution_config(&launch)?,
         session.created_at_ms,
+        session_lifetime_ceiling(state, session)?,
     )?;
     let aggregate_deadline = if let Some(scope) = launch.accounting_scope.as_ref() {
         state
@@ -4962,6 +4983,7 @@ fn bounded_duration_authority_reached(
     let session_deadline = bounded_session_deadline(
         admitted_worker_execution_config(&launch)?,
         session.created_at_ms,
+        session_lifetime_ceiling(state, session)?,
     )?
     .ok_or_else(|| anyhow!("retained worker session was not admitted as a bounded turn"))?;
     let now_ms = lillux::time::timestamp_millis();
@@ -7111,17 +7133,22 @@ mod tests {
     fn bounded_contact_deadline_is_creation_anchored_and_checked_for_overflow() {
         let config = bounded_admission_config();
         assert_eq!(
-            bounded_session_deadline(&config, 123).unwrap(),
+            bounded_session_deadline(&config, 123, 603_600).unwrap(),
             Some(60_123)
         );
-        assert!(bounded_session_deadline(&config, i64::MAX - 1).is_err());
+        assert!(bounded_session_deadline(&config, i64::MAX - 1, 603_600).is_err());
         let mut invalid = config;
         invalid["max_lifetime_seconds"] = json!(0);
-        assert!(bounded_session_deadline(&invalid, 123).is_err());
+        assert!(bounded_session_deadline(&invalid, 123, 603_600).is_err());
+        // The ceiling is read from the signed kind data it is given, not a
+        // fixed number: the same stated lifetime passes or fails with it.
         invalid["max_lifetime_seconds"] = json!(603_601);
-        assert!(bounded_session_deadline(&invalid, 123).is_err());
+        assert!(bounded_session_deadline(&invalid, 123, 603_600).is_err());
+        assert!(bounded_session_deadline(&invalid, 123, 604_800).is_ok());
+        invalid["max_lifetime_seconds"] = json!(100);
+        assert!(bounded_session_deadline(&invalid, 123, 99).is_err());
         assert_eq!(
-            bounded_session_deadline(&json!({"mode":{"kind":"session"}}), 123,).unwrap(),
+            bounded_session_deadline(&json!({"mode":{"kind":"session"}}), 123, 603_600,).unwrap(),
             None
         );
         assert!(validate_hosted_contact_deadlines(Some(60_123), Some(70_000), 60_122).is_ok());

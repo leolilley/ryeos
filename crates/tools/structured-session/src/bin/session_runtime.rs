@@ -254,8 +254,9 @@ async fn run_session(
 ) -> Result<RuntimeResult> {
     if config.worker_ref.len() > 256
         || !config.worker_ref.starts_with("worker:")
+        // The upper bound is the worker kind's signed ceiling, enforced by
+        // the daemon when it admits the session this config launches.
         || config.max_lifetime_seconds == 0
-        || config.max_lifetime_seconds > 603_600
     {
         bail!("admitted worker execution config is outside runtime bounds");
     }

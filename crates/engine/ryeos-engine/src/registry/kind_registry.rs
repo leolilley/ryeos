@@ -1242,18 +1242,42 @@ pub struct PersistentSessionDecl {
     #[serde(default)]
     pub resource_overrides_path: Option<Vec<String>>,
     /// Kind-owned upper bound for a signed per-worker real-UID ceiling.
-    #[serde(default = "default_max_real_uid_process_limit")]
     pub max_real_uid_process_limit: u64,
+    /// Signed upper bounds for the per-worker overrides of the matching
+    /// defaults above. A worker may state a value up to its ceiling, never
+    /// above it, and the ceiling is never below the default.
+    pub max_address_space_bytes_ceiling: u64,
+    pub max_cpu_seconds_ceiling: u64,
+    pub request_timeout_ms_ceiling: u64,
+    pub idle_timeout_ms_ceiling: u64,
+    /// Signed upper bound for the lifetime a worker execution may state for
+    /// one admitted session, in seconds.
+    pub max_lifetime_seconds_ceiling: u64,
     pub ready_timeout_ms: u64,
     pub request_timeout_ms: u64,
     pub idle_timeout_ms: u64,
 }
 
-fn default_max_real_uid_process_limit() -> u64 {
-    // Backward-reading default for the immediately preceding worker schema.
-    // It preserves that schema's exact effective limit during bundle cutover;
-    // a higher cap exists only when a new kind schema signs it explicitly.
-    512
+/// Daemon sanity bound on every signed time ceiling of a persistent-session
+/// kind (seven days). The signed ceilings govern; this only stops a signed
+/// value that no node could honour.
+pub const PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+/// Each signed ceiling is at least its default and within the daemon sanity
+/// bound. The ceilings are what a worker's overrides are judged against.
+fn persistent_session_ceilings_are_valid(declaration: &PersistentSessionDecl) -> bool {
+    let sanity_ms = PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS * 1000;
+    declaration.max_address_space_bytes_ceiling >= declaration.max_address_space_bytes
+        && declaration.max_address_space_bytes_ceiling <= 1024 * 1024 * 1024 * 1024
+        && declaration.max_cpu_seconds_ceiling >= declaration.max_cpu_seconds
+        && declaration.max_cpu_seconds_ceiling <= PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS
+        && declaration.request_timeout_ms_ceiling >= declaration.request_timeout_ms
+        && declaration.request_timeout_ms_ceiling <= sanity_ms
+        && declaration.idle_timeout_ms_ceiling >= declaration.idle_timeout_ms
+        && declaration.idle_timeout_ms_ceiling <= sanity_ms
+        && declaration.max_lifetime_seconds_ceiling > 0
+        && declaration.max_lifetime_seconds_ceiling
+            <= PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS
 }
 
 /// Execution configuration for a kind (resolution pipeline + aliases).
@@ -3430,9 +3454,8 @@ fn parse_execution_schema(
                 || declaration.ready_timeout_ms == 0
                 || declaration.ready_timeout_ms > 10 * 60 * 1000
                 || declaration.request_timeout_ms == 0
-                || declaration.request_timeout_ms > 60 * 60 * 1000
                 || declaration.idle_timeout_ms == 0
-                || declaration.idle_timeout_ms > 24 * 60 * 60 * 1000
+                || !persistent_session_ceilings_are_valid(&declaration)
             {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
@@ -4379,15 +4402,70 @@ mod tests {
     use lillux::crypto::SigningKey;
     use std::fs;
 
-    #[test]
-    fn persistent_session_decl_reads_pre_override_schema_at_exact_old_limit() {
-        let declaration: PersistentSessionDecl = serde_yaml::from_str(
-            "max_processes: 1\nmax_inflight_per_process: 1\nmax_address_space_bytes: 17179869184\nmax_cpu_seconds: 3600\nreal_uid_process_limit: 512\nready_timeout_ms: 600000\nrequest_timeout_ms: 3600000\nidle_timeout_ms: 1800000\n",
+    fn persistent_session_decl_fixture() -> PersistentSessionDecl {
+        serde_yaml::from_str(
+            "max_processes: 1\nmax_inflight_per_process: 1\nmax_address_space_bytes: 17179869184\nmax_cpu_seconds: 3600\nreal_uid_process_limit: 512\nmax_real_uid_process_limit: 4096\nmax_address_space_bytes_ceiling: 34359738368\nmax_cpu_seconds_ceiling: 86400\nrequest_timeout_ms_ceiling: 28800000\nidle_timeout_ms_ceiling: 28800000\nmax_lifetime_seconds_ceiling: 603600\nready_timeout_ms: 600000\nrequest_timeout_ms: 3600000\nidle_timeout_ms: 1800000\n",
         )
-        .unwrap();
-        assert_eq!(declaration.real_uid_process_limit, 512);
-        assert_eq!(declaration.max_real_uid_process_limit, 512);
-        assert!(declaration.resource_overrides_path.is_none());
+        .unwrap()
+    }
+
+    #[test]
+    fn persistent_session_decl_requires_every_signed_ceiling() {
+        let declaration = persistent_session_decl_fixture();
+        assert_eq!(declaration.max_lifetime_seconds_ceiling, 603_600);
+        assert!(persistent_session_ceilings_are_valid(&declaration));
+        for field in [
+            "max_real_uid_process_limit",
+            "max_address_space_bytes_ceiling",
+            "max_cpu_seconds_ceiling",
+            "request_timeout_ms_ceiling",
+            "idle_timeout_ms_ceiling",
+            "max_lifetime_seconds_ceiling",
+        ] {
+            let mut value = serde_yaml::to_value(&declaration).unwrap();
+            value.as_mapping_mut().unwrap().remove(field);
+            assert!(
+                serde_yaml::from_value::<PersistentSessionDecl>(value).is_err(),
+                "{field} must be required"
+            );
+        }
+    }
+
+    #[test]
+    fn persistent_session_ceilings_are_bounded_below_by_defaults_and_above_by_sanity() {
+        let valid = persistent_session_decl_fixture();
+        let mutations: [fn(&mut PersistentSessionDecl); 11] = [
+            |d| d.max_address_space_bytes_ceiling = d.max_address_space_bytes - 1,
+            |d| d.max_address_space_bytes_ceiling = 1024 * 1024 * 1024 * 1024 + 1,
+            |d| d.max_cpu_seconds_ceiling = d.max_cpu_seconds - 1,
+            |d| d.max_cpu_seconds_ceiling = PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS + 1,
+            |d| d.request_timeout_ms_ceiling = d.request_timeout_ms - 1,
+            |d| {
+                d.request_timeout_ms_ceiling =
+                    PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS * 1000 + 1
+            },
+            |d| d.idle_timeout_ms_ceiling = d.idle_timeout_ms - 1,
+            |d| {
+                d.idle_timeout_ms_ceiling =
+                    PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS * 1000 + 1
+            },
+            |d| d.max_lifetime_seconds_ceiling = 0,
+            |d| d.max_lifetime_seconds_ceiling = PERSISTENT_SESSION_TIME_CEILING_SANITY_SECONDS + 1,
+            |d| d.request_timeout_ms_ceiling = d.request_timeout_ms,
+        ];
+        for (index, mutate) in mutations.iter().enumerate() {
+            let mut declaration = valid.clone();
+            mutate(&mut declaration);
+            // The last mutation is the boundary case: a ceiling equal to its
+            // default is valid.
+            assert_eq!(
+                persistent_session_ceilings_are_valid(&declaration),
+                index == mutations.len() - 1,
+                "mutation {index}"
+            );
+        }
+        // A request ceiling above the former fixed one-hour cap is admitted.
+        assert!(valid.request_timeout_ms_ceiling > 60 * 60 * 1000);
     }
 
     #[test]

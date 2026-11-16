@@ -423,6 +423,9 @@ fn validate_execution_config(
     let required_terminal_publication = object
         .get("required_terminal_publication")
         .and_then(serde_json::Value::as_str);
+    // The preparer sees no kind data, so the upper bound on the stated
+    // lifetime is the worker kind's signed ceiling, enforced where the
+    // session capsule is admitted.
     if !matches!(
         object
             .get("required_credential_state")
@@ -436,7 +439,7 @@ fn validate_execution_config(
     ) || object
         .get("max_lifetime_seconds")
         .and_then(serde_json::Value::as_u64)
-        .is_none_or(|seconds| seconds == 0 || seconds > 603_600)
+        .is_none_or(|seconds| seconds == 0)
         || !object
             .get("require_pinned_cow")
             .is_some_and(serde_json::Value::is_boolean)
@@ -1604,7 +1607,7 @@ mod tests {
         );
 
         let mut lifetime = valid_config();
-        lifetime["max_lifetime_seconds"] = serde_json::Value::from(603_601_u64);
+        lifetime["max_lifetime_seconds"] = serde_json::Value::from(0_u64);
         assert_eq!(
             validate_execution_config(&lifetime).unwrap_err().code,
             "worker_execution_policy_invalid"
