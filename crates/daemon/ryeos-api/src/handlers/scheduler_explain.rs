@@ -1,6 +1,7 @@
 //! `scheduler.explain` — explain a schedule's current planning state.
 //!
-//! Ownership check: callers can only explain schedules they own.
+//! Ownership check: callers can only explain schedules they own; the
+//! configured local operator may also explain node-owned schedules.
 
 use std::sync::Arc;
 
@@ -40,7 +41,16 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(format!("{e:#}")))?
         .ok_or(HandlerError::NotFound)?;
 
-    ctx.require_owner(Some(spec.execution.principal_id()))?;
+    // The configured local operator may also read node-owned schedules;
+    // everyone else only their own. Mutation handlers keep their owner check.
+    let sees_node_owned = super::scheduler_list::operator_sees_node_owned(state.as_ref(), &ctx);
+    if sees_node_owned
+        && super::scheduler_list::visible_to(&spec.execution.authority, &ctx.fingerprint, true)
+    {
+        // visible
+    } else {
+        ctx.require_owner(Some(spec.execution.principal_id()))?;
+    }
 
     let last_fire = db
         .get_last_fire(&req.schedule_id)
