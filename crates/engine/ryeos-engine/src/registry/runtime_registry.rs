@@ -1665,7 +1665,9 @@ mod tests {
         let declared = |bundle: &str, name: &str| {
             let path = bundles.join(bundle).join(".ai/runtimes").join(name);
             let body = std::fs::read_to_string(&path).unwrap();
-            parse_runtime_yaml(&path, &body).unwrap().writes_child_lineage
+            parse_runtime_yaml(&path, &body)
+                .unwrap()
+                .writes_child_lineage
         };
         assert!(declared("graph", "graph-runtime.yaml"));
         assert!(!declared("directive", "directive-runtime.yaml"));

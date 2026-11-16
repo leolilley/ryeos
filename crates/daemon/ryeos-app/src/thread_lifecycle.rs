@@ -6681,7 +6681,9 @@ impl ThreadLifecycleService {
         let child = self
             .state_store
             .get_thread(child_thread_id)?
-            .ok_or_else(|| anyhow!("child thread not found while recording lineage: {child_thread_id}"))?;
+            .ok_or_else(|| {
+                anyhow!("child thread not found while recording lineage: {child_thread_id}")
+            })?;
         let relation = self
             .state_store
             .child_link_relation(child_thread_id)?
@@ -6707,9 +6709,9 @@ impl ThreadLifecycleService {
     /// event is an error, so the child never runs without its lineage.
     pub fn require_dispatch_child_lineage(&self, child_thread_id: &str) -> Result<()> {
         match self.record_dispatch_child_lineage(child_thread_id)? {
-            DispatchChildLineage::Recorded(ChildLineageAppendOutcome::ParentSettled) => bail!(
-                "parent settled before the lineage of child {child_thread_id} was recorded"
-            ),
+            DispatchChildLineage::Recorded(ChildLineageAppendOutcome::ParentSettled) => {
+                bail!("parent settled before the lineage of child {child_thread_id} was recorded")
+            }
             DispatchChildLineage::NotOwed | DispatchChildLineage::Recorded(_) => Ok(()),
         }
     }

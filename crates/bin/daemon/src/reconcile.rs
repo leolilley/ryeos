@@ -3330,7 +3330,11 @@ fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
             &intent.child_thread_id,
             "dispatch",
         )?;
-        recover_child_lineage(&state.threads, &intent.operation_id, &intent.child_thread_id);
+        recover_child_lineage(
+            &state.threads,
+            &intent.operation_id,
+            &intent.child_thread_id,
+        );
         if inherited_stop.is_some() {
             continue;
         }
@@ -4296,7 +4300,7 @@ mod tests {
             usage_subject_asserted_by: None,
             captured_history_policy: Some(ryeos_state::objects::CapturedThreadHistoryPolicy {
                 retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
-                canonical_item_ref: "directive:test".to_string(),
+                canonical_item_ref: format!("directive:test/{thread_id}"),
                 item_content_hash: hash.clone(),
                 item_signer_fingerprint: Some(hash.clone()),
                 item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
@@ -4312,11 +4316,12 @@ mod tests {
     #[test]
     fn lineage_recovery_continues_past_a_child_whose_parent_settled() {
         let root = tempfile::tempdir().expect("tempdir");
-        let (_owner, state) =
-            ryeos_app::state::test_support::build(root.path()).expect("compose");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
         let store = &state.state_store;
         for (index, (parent, child)) in [("T-p1", "T-c1"), ("T-p2", "T-c2")].iter().enumerate() {
-            store.create_thread_for_test(&lineage_thread(parent)).unwrap();
+            store
+                .create_thread_for_test(&lineage_thread(parent))
+                .unwrap();
             store.mark_thread_running(parent, None).unwrap();
             store
                 .reserve_runtime_action_intent(
@@ -4328,7 +4333,9 @@ mod tests {
                     None,
                 )
                 .unwrap();
-            store.create_thread_for_test(&lineage_thread(child)).unwrap();
+            store
+                .create_thread_for_test(&lineage_thread(child))
+                .unwrap();
             store.record_child_link(parent, child, "dispatch").unwrap();
         }
         store

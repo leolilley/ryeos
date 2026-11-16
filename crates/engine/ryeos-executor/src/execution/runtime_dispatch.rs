@@ -1559,7 +1559,10 @@ async fn handle_execute(
             // linking it and recording its lineage event. The append is
             // idempotent; a settled parent or a failed append must not fail
             // the recovery of the child's result.
-            match state.threads.record_dispatch_child_lineage(&child_thread_id) {
+            match state
+                .threads
+                .record_dispatch_child_lineage(&child_thread_id)
+            {
                 Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
                     ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
                 )) => tracing::warn!(

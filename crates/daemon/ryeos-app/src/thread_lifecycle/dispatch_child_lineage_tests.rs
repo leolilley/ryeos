@@ -24,14 +24,14 @@ fn thread_record(thread_id: &str) -> NewThreadRecord {
         usage_subject_asserted_by: None,
         captured_history_policy: Some(ryeos_state::objects::CapturedThreadHistoryPolicy {
             retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
-            canonical_item_ref: "directive:test".to_string(),
+            canonical_item_ref: format!("directive:test/{thread_id}"),
             item_content_hash: hash.clone(),
             item_signer_fingerprint: Some(hash.clone()),
             item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
             kind_schema_content_hash: hash,
             resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
-                node_policy:
-                    ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
+                node_policy: ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(
+                ),
             },
         }),
     }
@@ -56,7 +56,9 @@ fn dispatched_child(state: &crate::state::AppState, parent: &str, child: &str, o
     store
         .create_thread_for_test(&thread_record(parent))
         .expect("parent thread");
-    store.mark_thread_running(parent, None).expect("start parent");
+    store
+        .mark_thread_running(parent, None)
+        .expect("start parent");
     store
         .reserve_runtime_action_intent(
             operation,
@@ -106,7 +108,10 @@ fn dispatched_child_gets_exactly_one_generic_lineage_event() {
     dispatched_child(&state, "T-parent", "T-child", &operation);
 
     assert_eq!(
-        state.threads.record_dispatch_child_lineage("T-child").unwrap(),
+        state
+            .threads
+            .record_dispatch_child_lineage("T-child")
+            .unwrap(),
         DispatchChildLineage::Recorded(ChildLineageAppendOutcome::Appended)
     );
     assert_eq!(
@@ -121,7 +126,10 @@ fn dispatched_child_gets_exactly_one_generic_lineage_event() {
 
     // A repeated drive (a retry, or the reconcile pass) writes nothing more.
     assert_eq!(
-        state.threads.record_dispatch_child_lineage("T-child").unwrap(),
+        state
+            .threads
+            .record_dispatch_child_lineage("T-child")
+            .unwrap(),
         DispatchChildLineage::Recorded(ChildLineageAppendOutcome::AlreadyPresent)
     );
     assert_eq!(spawned_events(&state, "T-parent").len(), 1);
@@ -144,7 +152,10 @@ fn child_without_an_action_intent_is_owed_no_event() {
         .unwrap();
 
     assert_eq!(
-        state.threads.record_dispatch_child_lineage("T-child").unwrap(),
+        state
+            .threads
+            .record_dispatch_child_lineage("T-child")
+            .unwrap(),
         DispatchChildLineage::NotOwed
     );
     assert!(spawned_events(&state, "T-parent").is_empty());
@@ -161,7 +172,10 @@ fn parent_settling_before_the_append_writes_nothing_and_requires_fails_closed() 
     settle(&state, "T-parent");
 
     assert_eq!(
-        state.threads.record_dispatch_child_lineage("T-child").unwrap(),
+        state
+            .threads
+            .record_dispatch_child_lineage("T-child")
+            .unwrap(),
         DispatchChildLineage::Recorded(ChildLineageAppendOutcome::ParentSettled)
     );
     assert!(

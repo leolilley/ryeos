@@ -5479,7 +5479,9 @@ pub async fn run_and_wait(
                 // A parent stopped during admission cannot author the
                 // lineage event; the child is stopped below instead.
                 if inherited_stop.is_none() {
-                    state.threads.require_dispatch_child_lineage(&created.thread_id)?;
+                    state
+                        .threads
+                        .require_dispatch_child_lineage(&created.thread_id)?;
                 }
                 Ok(inherited_stop)
             });
@@ -6553,7 +6555,9 @@ pub async fn run_detached(
                 // A parent stopped during admission cannot author the
                 // lineage event; the child is stopped below instead.
                 if inherited_stop.is_none() {
-                    state.threads.require_dispatch_child_lineage(&created.thread_id)?;
+                    state
+                        .threads
+                        .require_dispatch_child_lineage(&created.thread_id)?;
                 }
                 Ok(inherited_stop)
             });
