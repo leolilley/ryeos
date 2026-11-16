@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T04:13:42Z:8c5756044560374a98776a37a4c6c96f06056ca54c92c4b61fe1b47c83ed1190:ozs3GS25ul7iNdbiMg0PGGsD/Na4NbyLBYjPxzCqeyqf1Qih1r8gS5fitRD6RP2N6Bvm22nxeZwBsBBAbGGNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T07:28:02Z:356c24f53e15deaac9bd58799a247ba3022ad1e512e6599b815e572506d2e9d1:TQ6VZhyBj+pwoZ7Esj9igUIfBtdBrBqBgBfLFxiu3wbYd4GjhpthAh0O4n7YxOkjbutEvEglJtREHdQl6DSNBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, retry, hooks, resilience]
@@ -38,6 +38,26 @@ Semantics:
   dispatch once and go straight to `on_error`. The step error then ends with
   `retry not attempted: failure not classified retryable (retry.attempts=N ...)`
   so the refusal is visible, and no `graph_node_retry` event is emitted.
+- **Opt in to retrying tool failures** with `on: [tool_failure]`. `on` is a
+  list; `tool_failure` is the only value today and unknown values are refused
+  at graph validation. With it, a tool that exits nonzero or raises consumes
+  the budget and is re-dispatched (emitting `graph_node_retry`) until
+  `attempts` is spent, then routes to `on_error`. Dispatch rejections,
+  unauthorized calls and integrity failures still never retry.
+
+  ```yaml
+  retry:
+    attempts: 3
+    backoff_ms: 1000
+    on: [tool_failure]
+    idempotent: true   # required for a live action, see below
+  ```
+
+  A node whose effects are `live` (the default) that opts into `tool_failure`
+  must also declare `retry.idempotent: true`; otherwise validation refuses it
+  ("retrying a live action on tool failure can repeat its side effects;
+  declare retry.idempotent: true if it is safe"). `recorded` and `sealed`
+  nodes need no flag.
 - `attempts` is the total count including the first dispatch, so `attempts: 3`
   is one initial call plus up to two retries. Exhaustion routes through the
   node's `on_error` (or the graph-level `on_error` policy) unchanged.
