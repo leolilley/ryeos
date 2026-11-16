@@ -31,6 +31,7 @@ ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-executor = { workspace = true, features = ["test-support"] }
 ryeos-isolation-protocol = { workspace = true }
+ryeos-node = { workspace = true }
 ryeosd = { path = "../../../../crates/bin/daemon" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tempfile = { workspace = true }
