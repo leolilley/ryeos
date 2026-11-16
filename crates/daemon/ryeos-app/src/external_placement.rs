@@ -2286,8 +2286,68 @@ fn admit_current_runtime_qualification(
         remote_testimony,
     };
     retained.validate()?;
+    require_qualified_launch_shape(contract, &retained.proof.evidence)?;
     verify_retained_runtime_proof(state, &retained)?;
     Ok(Some(retained))
+}
+
+/// The shape a binding launches under, as kinds: an HTTPS controller is
+/// dialed by the guest, so its sandbox is created with an egress allow-list
+/// (the lease's, or the controller host); a file-relay controller needs no
+/// guest network, so its sandbox denies all. Hosts are not compared: a
+/// qualification names a host that never resolves and a lease names the real
+/// controller.
+fn binding_launch_shape_kinds(
+    contract: &ExternalPlacementBackendContract,
+) -> (
+    ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
+    &'static str,
+) {
+    use ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport;
+    match &contract.controller_transport {
+        ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_) => {
+            (LaunchControllerTransport::Https, "allow_list")
+        }
+        ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => {
+            (LaunchControllerTransport::Relay, "deny_all")
+        }
+    }
+}
+
+/// Refuse a launch whose shape differs from the shape its qualification ran
+/// under, naming the differing field and both values.
+fn compare_launch_shape(
+    qualified: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    launch: (
+        ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
+        &'static str,
+    ),
+) -> Result<()> {
+    ensure!(
+        qualified.controller_transport == launch.0,
+        "launch shape differs from the qualified shape: launch_shape.controller_transport \
+         qualified {:?}, launch {:?}",
+        qualified.controller_transport,
+        launch.0
+    );
+    ensure!(
+        qualified.sandbox_network_policy.kind() == launch.1,
+        "launch shape differs from the qualified shape: launch_shape.sandbox_network_policy \
+         qualified {}, launch {}",
+        qualified.sandbox_network_policy.kind(),
+        launch.1
+    );
+    Ok(())
+}
+
+fn require_qualified_launch_shape(
+    contract: &ExternalPlacementBackendContract,
+    evidence: &ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
+) -> Result<()> {
+    match evidence.remote_consumer_launch_shape() {
+        Some(qualified) => compare_launch_shape(qualified, binding_launch_shape_kinds(contract)),
+        None => Ok(()),
+    }
 }
 
 /// Rejoin the session's CAS-owned guest-runtime proof to the exact signed
@@ -11089,6 +11149,43 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_launch_shape_that_differs_from_the_qualified_one_is_refused_with_both_values() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchControllerTransport, LaunchShape,
+        };
+        let https = LaunchShape::https_allow_list(["controller.invalid".to_owned()]);
+        // Hosts are not compared: the qualification's host never resolves.
+        compare_launch_shape(&https, (LaunchControllerTransport::Https, "allow_list")).unwrap();
+        compare_launch_shape(
+            &LaunchShape::relay_deny_all(),
+            (LaunchControllerTransport::Relay, "deny_all"),
+        )
+        .unwrap();
+        let transport = format!(
+            "{:#}",
+            compare_launch_shape(&https, (LaunchControllerTransport::Relay, "deny_all"))
+                .unwrap_err()
+        );
+        assert!(
+            transport.contains("launch_shape.controller_transport")
+                && transport.contains("Https")
+                && transport.contains("Relay"),
+            "{transport}"
+        );
+        let policy = format!(
+            "{:#}",
+            compare_launch_shape(&https, (LaunchControllerTransport::Https, "deny_all"))
+                .unwrap_err()
+        );
+        assert!(
+            policy.contains("launch_shape.sandbox_network_policy")
+                && policy.contains("allow_list")
+                && policy.contains("deny_all"),
+            "{policy}"
+        );
+    }
+
     fn fixture_guest_package(
         contract: &ExternalPlacementBackendContract,
         reservation: &ExternalAllocationReservation,

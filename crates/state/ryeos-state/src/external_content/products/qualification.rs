@@ -1574,6 +1574,28 @@ impl ProductQualificationOriginHoldings {
     }
 }
 
+impl ProductQualificationEvidence {
+    /// The launch shape the verifier's remote occurrence was created under,
+    /// as the daemon retained it in the verifier attempt intent. Absent when
+    /// the qualification ran no remote consumer attempt.
+    pub fn remote_consumer_launch_shape(
+        &self,
+    ) -> Option<&ryeos_external_execution_contract::runtime_snapshot::LaunchShape> {
+        use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
+        match self.execution_proof.subordinate_attempt.as_ref()? {
+            ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof } => {
+                match &proof.intent.purpose {
+                    RemoteVerificationPurpose::ConsumerRuntime { launch_shape, .. } => {
+                        Some(launch_shape)
+                    }
+                    RemoteVerificationPurpose::OwnerMeasurement { .. } => None,
+                }
+            }
+            ProductQualificationSubordinateAttemptProof::ScopedProducer { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationEvidence {
