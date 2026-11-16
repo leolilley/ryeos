@@ -135,6 +135,9 @@ jobs:
       - name: Check development host tools
         run: python3 tests/development/dev_host_tools.py
 
+      - name: Check supervised smoke tool
+        run: python3 -I -B tests/development/supervised_smoke_tests.py
+
       - name: Check bundle-set membership
         run: ./scripts/pkg/test-bundle-sets.sh
 
