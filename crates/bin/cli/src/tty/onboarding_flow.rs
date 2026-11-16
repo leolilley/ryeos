@@ -245,6 +245,7 @@ async fn run_core_initialization(
         policy_carry: Default::default(),
         replace_substrate_identity: options.replace_substrate_identity,
         confirm_substrate_identity_replacement: options.confirm_substrate_identity_replacement,
+        invalidate_bindings: options.invalidate_bindings.clone(),
         skip_preflight: options.skip_preflight,
     };
     let ceremony = InitOperatorCeremony {

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T01:11:15Z:c4de4749099d285dc89dff8272f55f97d400cae3112fdc27f633eef912ec53d4:xEcSWbkejbld9RVKzU3DBwUFclqfX6JlpB3TE6ErcnbGYNeZg/5VGZmSRsQj8eCzYZFQy6fw+dBjTEkFaYMHBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T02:06:03Z:1da82249fb547136273e590c42615efde0b6ca5cded13de1357ce3f9f977fab2:Ts9+Mvuaa6Jj7B2ygx5+8lz3FA7k197WD0RHr9BlufKz/2aPeJFm0YF7ypCYOZaZVEajIrEH1p10bQP78+2hCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -53,7 +53,7 @@ Signed command aliases still use their declared selector-to-service mappings.
 ### `ryeos init`
 
 ```bash
-ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
+ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]... [--invalidate-binding <section>/<id>]...
 ```
 
 Packaged installs use `/usr/share/ryeos` by default. The standard package selects
@@ -419,7 +419,7 @@ daemon to be stopped:
 ryeos node reset authorization --confirm
 ryeos node reset replay-indexes --confirm
 ryeos node reset external-content-bindings [--dry-run | --confirm]
-ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]... [--keep-section <section>]... [--reset-section <section>]...
+ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]... [--keep-section <section>]... [--reset-section <section>]... [--invalidate-binding <section>/<id>]...
 ```
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
@@ -484,6 +484,34 @@ incarnation debit is outstanding, or the account's image does not fit the new
 policy, the cut refuses with nothing changed; settle the account with
 `ryeos node capacity reissue --reason "..."` and rerun it. A rerun after a
 crash converges on the same amendment.
+
+#### Bundle replacements that strand a binding
+
+`ryeos init` over an existing node, `ryeos node reset policy-generation` and
+`ryeos bundle install --replace` compare the installed `external_execution`,
+`runtime_snapshot_production` and `runtime_snapshot_qualification` bindings
+with the artifacts the replacement would install, before anything changes. A
+replacement that would leave a binding pinning an adapter, supervisor,
+launcher, restoration verifier, consumer verifier, connector or spec it
+removes is refused with `replacement_strands_bindings` (HTTP 409 for
+`bundle install`). The refusal lists each binding (section, id, digest), the
+field, the pinned hash and the incoming one, and nothing is installed. Only
+pins the replacement itself breaks count; a pin that already failed is left
+to `ryeos node doctor`.
+
+To replace anyway, name every stranded binding with
+`--invalidate-binding <section>/<id>` (repeatable; `invalidate_bindings` in the
+`bundle/install` request). Overrides are exact: naming a binding the
+replacement does not strand is refused with
+`invalidated_binding_not_stranded`. The named bindings stay installed, the
+report lists them under `invalidated_bindings`, and `ryeos node doctor` fails
+them until they are recomposed against the installed bundles.
+
+```bash
+ryeos init --source <dir> --node-profile <name> --host-class <class> \
+  --invalidate-binding runtime_snapshot_production/render-snapshot \
+  --invalidate-binding runtime_snapshot_qualification/render-snapshot-qualification
+```
 
 The same cut moves a node to a renamed profile. A node records the profile it
 was initialized under in its substrate identity; a release that renames a
@@ -803,7 +831,10 @@ failure, and a streamed run, is reported at once.
 
 ## Bundle Management
 
-- `ryeos bundle install <name> <path>` — install bundle offline.
+- `ryeos bundle install <name> <path>` — install bundle offline. `--replace`
+  updates an installed bundle; a replacement that strands an installed binding
+  is refused unless each is named (see
+  [Bundle replacements that strand a binding](#bundle-replacements-that-strand-a-binding)).
 - `ryeos bundle list` — list installed bundles.
 - `ryeos bundle remove <name>` — remove installed bundle offline.
 
