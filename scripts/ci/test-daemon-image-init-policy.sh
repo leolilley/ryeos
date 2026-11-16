@@ -504,6 +504,49 @@ fi
     build_ryeos_init_args /opt/ryeos "$policy_test_root" '[::]:18081' >/dev/null
     [[ "${INIT_ARGS[*]}" == "init --non-interactive --app-root $policy_test_root --source /opt/ryeos --bind [::]:18081 $substrate_args" ]]
 
+    # Pre-start bundle-set update: unset changes nothing, success and an
+    # already-current report proceed, any failure refuses the start.
+    prestart_calls="$policy_test_root/prestart-calls"
+    prestart_request="$policy_test_root/request.yaml"
+    : > "$prestart_request"
+    prestart_mode=ok
+    ryeos() {
+        printf '%s\n' "$*" >> "$prestart_calls"
+        [[ "$prestart_mode" != fail ]]
+    }
+    unset RYEOS_PRESTART_BUNDLE_SET_REQUEST
+    prestart_bundle_set_update "$policy_test_root"
+    [[ ! -e "$prestart_calls" ]]
+    RYEOS_PRESTART_BUNDLE_SET_REQUEST=
+    prestart_bundle_set_update "$policy_test_root"
+    [[ ! -e "$prestart_calls" ]]
+    RYEOS_PRESTART_BUNDLE_SET_REQUEST="$prestart_request"
+    prestart_bundle_set_update "$policy_test_root" >/dev/null
+    [[ "$(cat "$prestart_calls")" == "node bundle-set update $prestart_request --app-root $policy_test_root --json" ]]
+    # Already current is a zero exit of the same command and proceeds.
+    prestart_bundle_set_update "$policy_test_root" >/dev/null
+    prestart_mode=fail
+    if prestart_failure="$(prestart_bundle_set_update "$policy_test_root" 2>&1)"; then
+        echo "entrypoint continued after a failed pre-start bundle-set update" >&2
+        exit 1
+    fi
+    grep -Fq 'refusing to start: the pre-start bundle-set update' <<<"$prestart_failure"
+    prestart_mode=ok
+    for bad_request in relative.yaml "$policy_test_root/missing.yaml" "$policy_test_root"; do
+        RYEOS_PRESTART_BUNDLE_SET_REQUEST="$bad_request"
+        if prestart_bundle_set_update "$policy_test_root" >/dev/null 2>&1; then
+            echo "entrypoint accepted a bad pre-start request path: $bad_request" >&2
+            exit 1
+        fi
+    done
+    unset RYEOS_PRESTART_BUNDLE_SET_REQUEST
+    unset -f ryeos
+    # main runs the step after init and before the daemon exec.
+    main_body="$(declare -f main)"
+    [[ "${main_body%%prestart_bundle_set_update*}" != "$main_body" ]]
+    [[ "${main_body%%prestart_bundle_set_update*}" != *'exec ryeosd "${DAEMON_ARGS[@]}"'*'exec ryeosd'* ]]
+    [[ "${main_body#*prestart_bundle_set_update}" == *'exec ryeosd "${DAEMON_ARGS[@]}"'* ]]
+
     # A mount nested under the app root is refused before anything changes.
     # No mount can be created unprivileged, so the app root's device number is
     # overridden: every entry then reads as another filesystem.
