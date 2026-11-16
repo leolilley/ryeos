@@ -1762,15 +1762,16 @@ fn compiled_user_principal_id(state: &AppState) -> Result<Option<String>> {
     let Some(attachment) = crate::seat_auth::compiled_ui_attachment() else {
         return Ok(None);
     };
-    let operator =
-        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)?;
+    let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
+        &state.config.app_root,
+    )?;
     let principal_id = &attachment.compiled_binding.binding.principal_id;
     Ok((principal_id.as_str() != operator.principal_id().as_str()).then(|| principal_id.clone()))
 }
 
 fn require_local_store_principal(ctx: &HandlerContext, state: &AppState) -> Result<()> {
     if let Some(attachment) = crate::seat_auth::compiled_ui_attachment() {
-        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+        let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(
             &state.config.app_root,
         )?;
         if attachment.compiled_binding.binding.principal_id != operator.principal_id() {
