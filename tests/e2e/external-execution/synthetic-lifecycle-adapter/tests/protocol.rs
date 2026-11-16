@@ -358,6 +358,7 @@ fn install_live_engine(
     large_runtime: bool,
     isolation_policy: ryeos_engine::isolation::IsolationPolicy,
     activation: Option<&qualification_node::ManagedActivationGrant>,
+    lease_budget: Option<ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget>,
 ) {
     use ryeos_node_runtime::node_policy::sections::external_content::{
         ExternalContentImportLimits, ExternalContentImportPolicyRecord, ExternalContentImportRoot,
@@ -468,10 +469,7 @@ fn install_live_engine(
     state.engine = engine;
     state.services = Arc::new(ryeos_api::registry::build_service_registry());
     state.service_descriptors = ryeos_api::handlers::ALL;
-    state.node_policy = Arc::new(qualification_node::node_policy_snapshot(
-        &state.config.app_root,
-        state.identity.fingerprint(),
-        vec![
+    let mut fixed: Vec<Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy>> = vec![
             Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
             Arc::new(import_policy),
             Arc::new(
@@ -499,7 +497,26 @@ fn install_live_engine(
                     local_verification: None,
                 },
             ),
-            ],
+    ];
+    if let Some(budget) = lease_budget {
+        // The node's execution policy with a lease budget: the rest of the
+        // policy is what the profile already gives it.
+        let current = qualification_node::node_policy_snapshot(
+            &state.config.app_root,
+            state.identity.fingerprint(),
+            fixed.clone(),
+        );
+        let mut execution = current
+            .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()
+            .unwrap()
+            .clone();
+        execution.external_lease_budget = Some(budget);
+        fixed.push(Arc::new(execution));
+    }
+    state.node_policy = Arc::new(qualification_node::node_policy_snapshot(
+        &state.config.app_root,
+        state.identity.fingerprint(),
+        fixed,
     ));
 }
 
@@ -1494,6 +1511,7 @@ fn run_signed_worker_admission_on(
         true,
         None,
         None,
+        None,
     );
     let qualification_inputs =
         prepare_runtime_qualification_inputs(root.path(), &state, runtime.path());
@@ -1509,6 +1527,7 @@ fn run_signed_worker_admission_on(
         true,
         composed_isolation_policy(),
         Some(&qualification_inputs.grant),
+        None,
     );
     let admitted = admit_external_worker_evidence(&state);
     assert_eq!(
@@ -1539,6 +1558,7 @@ fn run_signed_worker_admission_on(
         true,
         composed_isolation_policy(),
         Some(&qualification_inputs.grant),
+        None,
     );
     let after = admit_external_worker_evidence(&state);
     assert_eq!(admitted.source, after.source);
@@ -3246,6 +3266,7 @@ fn composed_controller_attachment_on(
         true,
         None,
         None,
+        None,
     );
     author_guest_runtime_sources(
         &qualification_inputs,
@@ -3551,6 +3572,16 @@ fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::PublicDispatch);
 }
 
+/// The no-spend lease lane: the real codex placement requirements, a lease the
+/// synthetic adapter admits through the shared lease core, and the held
+/// supervisor over https.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+#[ignore = "the fixture binding's 60 s lease cannot outlive the session deadline; see run.md W7"]
+fn production_tls_candidate_on_a_remote_lease() {
+    run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Lease);
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn production_tls_stale_base_refuses_candidate_publication() {
@@ -3579,9 +3610,43 @@ fn pinned_codex_turn_freezes_remote_candidate_and_evaluates_from_base() {
     );
 }
 
+/// The node's lease budget for the lease lane; every other scenario declares none.
+fn lease_lane_budget(
+    publication: PublicationScenario,
+) -> Option<ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget> {
+    (publication == PublicationScenario::Lease).then_some(
+        ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
+            max_concurrent_leases: 2,
+            max_lease_lifetime_seconds: 4 * 60 * 60,
+            daily_lease_seconds: 8 * 60 * 60,
+            turn_end_margin_seconds: 30,
+        },
+    )
+}
+
+/// The capability names the real codex profile's controller and credential
+/// requirements need, one per entry: the environment the lease-lane node states.
+fn lease_lane_environment_names() -> Vec<String> {
+    let requires = candidate_authoring::real_codex_placement_requires(fixture_repository_source_root());
+    let requirements = ryeos_engine::structured_session_profile::placement_requirements(
+        &serde_json::json!({"external_candidate": {}, "requires": requires}),
+    )
+    .unwrap()
+    .unwrap();
+    requirements
+        .controller
+        .iter()
+        .chain(requirements.credential_kinds.values().flatten())
+        .map(|entry| entry.names()[0].clone())
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PublicationScenario {
     Publish,
+    /// Publish, with the session placed on a remote lease: the worker profile
+    /// carries the real codex placement requirements.
+    Lease,
     StaleBase,
     PublicDispatch,
 }
@@ -3889,10 +3954,15 @@ async fn run_production_tls_candidate(
         .unwrap();
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
+    let environment_names: Vec<String> = if publication == PublicationScenario::Lease {
+        lease_lane_environment_names()
+    } else {
+        vec!["time".into(), "credential:private_home".into()]
+    };
     node_capability_report::install(
         &state,
         &node_capability_report::FixtureEnvironment {
-            provided: &["time", "credential:private_home"],
+            provided: &environment_names.iter().map(String::as_str).collect::<Vec<_>>(),
             missing: &[],
         },
     );
@@ -3956,6 +4026,8 @@ async fn run_production_tls_candidate(
         true,
         scripted_model_origin.as_deref(),
         command_tools_manifest_hash,
+        (publication == PublicationScenario::Lease)
+            .then(|| candidate_authoring::real_codex_placement_requires(fixture_repository_source_root())),
     );
     let qualification_inputs =
         prepare_runtime_qualification_inputs(root.path(), &state, runtime.path());
@@ -3975,6 +4047,7 @@ async fn run_production_tls_candidate(
         true,
         isolation_policy.clone(),
         Some(&qualification_inputs.grant),
+        lease_lane_budget(publication),
     );
     let admitted = admit_external_worker_evidence(&state);
     assert_eq!(admitted.profile, authored_profile);
@@ -4006,6 +4079,7 @@ async fn run_production_tls_candidate(
         true,
         isolation_policy.clone(),
         Some(&qualification_inputs.grant),
+        lease_lane_budget(publication),
     );
     let after = admit_external_worker_evidence(&state);
     assert_eq!(admitted.source, after.source);
@@ -4156,6 +4230,7 @@ async fn run_production_tls_candidate(
             true,
             hosted_policy.clone(),
             Some(&qualification_inputs.grant),
+            lease_lane_budget(publication),
         );
         state.isolation = ryeos_node_runtime::engine_init::load_test_daemon_execution_isolation(
             root.path(),

@@ -92,6 +92,7 @@ fn guest_and_activated_runtime_qualifications_publish_real_current_attestations(
             true,
             None,
             None,
+            None,
         );
         write_guest_runtime_sources(
             &bundle.root,
@@ -704,6 +705,7 @@ fn a_content_testimony_is_usable_exactly_where_the_same_release_is_activated() {
         &verifier_hash,
         false,
         true,
+        None,
         None,
         None,
     );

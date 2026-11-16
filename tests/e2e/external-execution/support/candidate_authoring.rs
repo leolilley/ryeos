@@ -258,6 +258,7 @@ pub fn write_candidate_authoring_bundle(
     large_runtime: bool,
     scripted_model_origin: Option<&str>,
     command_tools_manifest_hash: Option<&str>,
+    placement_requires: Option<serde_json::Value>,
 ) -> (
     CandidateAuthoringBundle,
     ryeos_state::objects::AdmittedStructuredSessionProfile,
@@ -538,6 +539,9 @@ config_schema:
             &mut profile_sources,
         );
     }
+    if let Some(requires) = placement_requires {
+        profile["requires"] = requires;
+    }
     let profile = lillux::canonical_json(&profile).unwrap();
     profile_sources.insert("profile.json".into(), profile.as_bytes().to_vec());
     let compiled_profile =
@@ -714,7 +718,7 @@ requires:
 
 /// What an admitted external-candidate profile declares about its placement:
 /// no lease and no guest fact, so the fixture session is placed without one.
-fn fixture_placement_requires() -> serde_json::Value {
+pub fn fixture_placement_requires() -> serde_json::Value {
     serde_json::json!({
         "workload_class": "fixture.workload",
         "controller": ["time"],
@@ -1015,4 +1019,18 @@ mod runtime_recipe_tests {
             }
         }
     }
+}
+
+/// The placement requirements of the shipped external-authoring codex profile:
+/// the real controller, credential, lease and guest floors a hosted session
+/// is judged with.
+pub fn real_codex_placement_requires(repository_source_root: &Path) -> serde_json::Value {
+    let profile: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(repository_source_root.join(
+            "bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    profile["requires"].clone()
 }
