@@ -129,6 +129,8 @@ pub use external_content_binding::{
 };
 pub use external_content_manifest::{
     EXECUTION_RUNTIME_REALIZATIONS_ROOT, EXTERNAL_CONTENT_MANIFEST_KIND,
+    EXTERNAL_REALIZATION_DESCRIPTORS_ENV, EXTERNAL_REALIZATION_DESCRIPTORS_SCHEMA,
+    ExternalRealizationDescriptors,
     EXTERNAL_CONTENT_TREE_SCHEMA, EXTERNAL_REALIZATIONS_DERIVED_KEY, ExternalContentKind,
     ExternalContentManifestEntry, ExternalContentManifestEntryKind, ExternalContentManifestObject,
     ExternalContentMode, ExternalContentMountRoot, ExternalContentRealization,

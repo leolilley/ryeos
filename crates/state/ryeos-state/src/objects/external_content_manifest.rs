@@ -278,6 +278,88 @@ pub enum ExternalRealizationDelivery {
     PrivateDescriptorRoot,
 }
 
+/// Environment slot that carries [`ExternalRealizationDescriptors`] to a
+/// trusted consumer.
+pub const EXTERNAL_REALIZATION_DESCRIPTORS_ENV: &str = "RYEOS_EXTERNAL_DESCRIPTORS";
+
+/// Schema of [`ExternalRealizationDescriptors`]. A document of any other
+/// schema has no reader.
+pub const EXTERNAL_REALIZATION_DESCRIPTORS_SCHEMA: &str =
+    "ryeos.external_realization_descriptors.v1";
+
+/// Per-realization delivery override selected by the launch owner after
+/// admission. A realization named here is not placed in the runtime view at
+/// all: the trusted consumer receives the one file itself as an inherited
+/// descriptor, at the coordinate recorded for its id. Every realization not
+/// named here follows the set-wide [`ExternalRealizationDelivery`]. The
+/// admitted realization set is untouched, so no identity or capsule digest
+/// depends on this document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalRealizationDescriptors {
+    pub schema: String,
+    /// Realization id to the inherited descriptor number holding its file.
+    pub realizations: std::collections::BTreeMap<String, u32>,
+}
+
+impl ExternalRealizationDescriptors {
+    pub fn new(realizations: std::collections::BTreeMap<String, u32>) -> anyhow::Result<Self> {
+        let document = Self {
+            schema: EXTERNAL_REALIZATION_DESCRIPTORS_SCHEMA.to_owned(),
+            realizations,
+        };
+        document.validate_shape()?;
+        Ok(document)
+    }
+
+    fn validate_shape(&self) -> anyhow::Result<()> {
+        if self.schema != EXTERNAL_REALIZATION_DESCRIPTORS_SCHEMA {
+            anyhow::bail!("external realization descriptor schema is not current");
+        }
+        if self.realizations.is_empty()
+            || self.realizations.len() > MAX_EXTERNAL_REALIZATION_ENTRIES
+        {
+            anyhow::bail!("external realization descriptor count is outside its bounds");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (id, descriptor) in &self.realizations {
+            if id.is_empty() || id.len() > 128 {
+                anyhow::bail!("external realization descriptor id is not bounded");
+            }
+            if *descriptor <= 2 || !seen.insert(*descriptor) {
+                anyhow::bail!(
+                    "external realization descriptor coordinate overlaps stdio or another entry"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode and validate one document. Every named realization must be a
+    /// pinned file in `realizations`: a tree has no single descriptor.
+    pub fn decode(
+        encoded: &str,
+        realizations: &ExternalContentRealizationSet,
+    ) -> anyhow::Result<Self> {
+        let document: Self = serde_json::from_str(encoded)?;
+        document.validate_shape()?;
+        for id in document.realizations.keys() {
+            let realization = realizations
+                .iter()
+                .find(|candidate| candidate.id == *id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("external realization descriptor names an absent realization")
+                })?;
+            if realization.kind != ExternalContentKind::File
+                || realization.mode != ExternalContentMode::Pinned
+            {
+                anyhow::bail!("external realization descriptor names a realization that is not a pinned file");
+            }
+        }
+        Ok(document)
+    }
+}
+
 impl ExternalContentMountRoot {
     /// Resolve the existing logical mount namespace inside the admitted process.
     /// This selects a location, not permission to expose or populate that location.
@@ -951,5 +1033,47 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("overlap"), "got {error}");
+    }
+    fn pinned_file(id: &str) -> ExternalContentRealization {
+        let mut entry = realization(id, &format!("bin/{id}"));
+        entry.kind = ExternalContentKind::File;
+        entry.mode = ExternalContentMode::Pinned;
+        entry
+    }
+
+    #[test]
+    fn descriptor_delivery_names_only_pinned_files_of_the_sealed_set() {
+        let set = ExternalContentRealizationSet::new(vec![
+            pinned_file("harness"),
+            realization("tree", "vendor/tree"),
+        ])
+        .unwrap();
+        let encoded = |name: &str, descriptor: u32| {
+            serde_json::to_string(
+                &ExternalRealizationDescriptors::new(BTreeMap::from([(
+                    name.to_owned(),
+                    descriptor,
+                )]))
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let decoded =
+            ExternalRealizationDescriptors::decode(&encoded("harness", 9), &set).unwrap();
+        assert_eq!(decoded.realizations["harness"], 9);
+        // A tree has no single descriptor, and an unknown id has no entry.
+        assert!(ExternalRealizationDescriptors::decode(&encoded("tree", 9), &set).is_err());
+        assert!(ExternalRealizationDescriptors::decode(&encoded("absent", 9), &set).is_err());
+        // Stdio coordinates and an old schema have no reader.
+        assert!(
+            ExternalRealizationDescriptors::new(BTreeMap::from([("harness".to_owned(), 2)]))
+                .is_err()
+        );
+        let stale = encoded("harness", 9).replace(".v1", ".v0");
+        assert!(ExternalRealizationDescriptors::decode(&stale, &set).is_err());
+        // Unknown fields are refused.
+        let mut extra: Value = serde_json::from_str(&encoded("harness", 9)).unwrap();
+        extra["extra"] = serde_json::json!(1);
+        assert!(ExternalRealizationDescriptors::decode(&extra.to_string(), &set).is_err());
     }
 }

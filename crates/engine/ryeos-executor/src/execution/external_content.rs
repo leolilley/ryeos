@@ -51,7 +51,14 @@ pub(crate) struct BoundExternalRealizations {
     guest_sources: Vec<lillux::InheritedDescriptorAuthority>,
     realized: RealizedExternalContentSet,
     /// Original cache parents returned by each materialization, in set order.
-    custody_generations: Vec<(lillux::PinnedDirectory, lillux::PinnedDirectory)>,
+    /// A reference file realization has no cache generation, so its slot is
+    /// empty: nothing of it lives in the cache to retain.
+    custody_generations: Vec<Option<(lillux::PinnedDirectory, lillux::PinnedDirectory)>>,
+    /// Reference file realizations handed to the trusted workload as their
+    /// own inherited descriptor (only the retained-reference binding), by
+    /// realization id. Each is a readable descriptor of the exact file the
+    /// store leased, so the workload runs the registered inode itself.
+    retained_descriptors: BTreeMap<String, lillux::InheritedDescriptorAuthority>,
     private_workspace_identity: Option<lillux::secure_fs::PinnedDirectoryIdentity>,
     /// Canonical JSON of the sealed realization set, injected into the spawn
     /// env (`RYEOS_EXTERNAL_REALIZATIONS`) so a runtime can reference the
@@ -137,7 +144,18 @@ impl BoundExternalRealizations {
             entry
                 .mount_root
                 .destination(Some(project_path), &entry.mount)?;
-            let (cache, generation) = &source.custody_generations[index];
+            let Some((cache, generation)) = &source.custody_generations[index] else {
+                // A reference file realization is mounted straight from the
+                // file the store leased, so there is no generation to rejoin;
+                // the readable descriptor must still be that same file.
+                anyhow::ensure!(
+                    entry.kind == ExternalContentKind::File
+                        && source.guest_sources[index].mount_entry_kind()?
+                            == lillux::secure_fs::OpenMountEntryKind::Regular,
+                    "external association reference realization is not a regular file"
+                );
+                continue;
+            };
             cache.ensure_path_binding()?;
             generation.ensure_path_binding()?;
             // Descriptor-only pins have no pathname obligation: this named
@@ -188,7 +206,7 @@ impl BoundExternalRealizations {
         &self,
     ) -> (
         &RealizedExternalContentSet,
-        &[(lillux::PinnedDirectory, lillux::PinnedDirectory)],
+        &[Option<(lillux::PinnedDirectory, lillux::PinnedDirectory)>],
     ) {
         (&self.realized, &self.custody_generations)
     }
@@ -223,7 +241,8 @@ impl BoundExternalRealizations {
     /// fixed logical namespace.
     pub(crate) fn delivery(&self) -> ryeos_state::objects::ExternalRealizationDelivery {
         match self.binding_mode {
-            ExternalRealizationBinding::PrivateRuntimeView => {
+            ExternalRealizationBinding::PrivateRuntimeView
+            | ExternalRealizationBinding::RetainedReferences => {
                 ryeos_state::objects::ExternalRealizationDelivery::PrivateDescriptorRoot
             }
             _ => ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
@@ -258,6 +277,38 @@ impl BoundExternalRealizations {
     /// Absolute path of the private runtime view, when this binding used one.
     pub(crate) fn runtime_view_root(&self) -> Option<&Path> {
         self.runtime_view_root.as_deref()
+    }
+
+    /// Descriptor delivery document for the reference file realizations this
+    /// binding hands over as their own inherited descriptor, or `None` when
+    /// every realization sits in the runtime view. It names each file by
+    /// realization id and descriptor number, so the trusted workload adopts
+    /// exactly the descriptors [`Self::retained_descriptors`] keeps open.
+    pub(crate) fn descriptor_delivery_env(&self) -> anyhow::Result<Option<String>> {
+        if self.retained_descriptors.is_empty() {
+            return Ok(None);
+        }
+        let mut coordinates = BTreeMap::new();
+        for (id, authority) in &self.retained_descriptors {
+            coordinates.insert(
+                id.clone(),
+                authority
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?,
+            );
+        }
+        let document = ryeos_state::objects::ExternalRealizationDescriptors::new(coordinates)?;
+        Ok(Some(lillux::canonical_json(&serde_json::to_value(
+            document,
+        )?)?))
+    }
+
+    /// The descriptors the spawn must inherit so the document from
+    /// [`Self::descriptor_delivery_env`] is true in the child. They share
+    /// ownership with this binding; the lease that keeps each file leased
+    /// stays here.
+    pub(crate) fn retained_descriptors(&self) -> Vec<lillux::InheritedDescriptorAuthority> {
+        self.retained_descriptors.values().cloned().collect()
     }
 
     /// Bind a pre-admitted command coordinate to the exact materialized tree
@@ -489,6 +540,14 @@ enum ExternalRealizationBinding {
     /// trusted structured-session bridge resolves these copies through
     /// retained descriptors rather than claiming a read-only namespace.
     PrivateRuntimeView,
+    /// A private runtime view like [`Self::PrivateRuntimeView`], except that a
+    /// file realization held by reference in an import root the node proved
+    /// immutable is not copied into it. The premise of a private copy is that
+    /// the workload could change shared bytes; for such a file that is false
+    /// by measurement, so the trusted bridge receives a retained descriptor
+    /// of the leased file itself. Realizations the store owns are copied into
+    /// the view exactly as under `PrivateRuntimeView`.
+    RetainedReferences,
 }
 
 static PRIVATE_MATERIALIZATION_COPY_LIMIT: AtomicU64 = AtomicU64::new(0);
@@ -1621,6 +1680,25 @@ pub(crate) fn bind_external_realizations_in_private_workspace_with_budget(
     )
 }
 
+/// Like [`bind_external_realizations_in_private_runtime_view_with_budget`],
+/// but a file realization held by reference is delivered as its own retained
+/// descriptor instead of being copied into the view. Only a consumer that
+/// reads the descriptor delivery document may use this binding.
+pub(crate) fn bind_external_realizations_in_private_runtime_view_retaining_references(
+    state: &ryeos_app::state::AppState,
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    runtime_view: &Path,
+    budget: &PrivateMaterializationBudget,
+) -> anyhow::Result<Option<BoundExternalRealizations>> {
+    bind_external_realizations_with(
+        state,
+        resolution,
+        runtime_view,
+        ExternalRealizationBinding::RetainedReferences,
+        Some(budget),
+    )
+}
+
 pub(crate) fn bind_external_realizations_in_private_runtime_view_with_budget(
     state: &ryeos_app::state::AppState,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
@@ -1675,6 +1753,31 @@ fn bind_external_realizations_with(
     bind_external_realization_set_with(state, realized, project_path, binding, budget)
 }
 
+/// Lease the one file of a file-shaped large manifest when the store holds it
+/// only by reference. `None` means the realization is not such a file (a
+/// tree, a bounded file in the content tier, or bytes the store owns), and
+/// the caller binds it through a cache generation. A reference whose root or
+/// file no longer proves out is refused here by its stable code, exactly as a
+/// generation build would refuse it.
+fn lease_reference_file(
+    store: &ryeos_state::LargeObjectStore,
+    kind: ExternalContentKind,
+    manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
+) -> anyhow::Result<Option<ryeos_state::LeasedLargeObject>> {
+    if kind != ExternalContentKind::File || !manifest.is_file_shaped() {
+        return Ok(None);
+    }
+    let entry = &manifest.entries[0];
+    let (Some(file_sha256), Some(size)) = (entry.file_sha256.as_deref(), entry.size) else {
+        return Ok(None);
+    };
+    if store.has_owned_object(file_sha256)? {
+        return Ok(None);
+    }
+    let leased = store.lease_object(file_sha256, size)?;
+    Ok(leased.is_reference().then_some(leased))
+}
+
 fn bind_external_realization_set_with(
     state: &ryeos_app::state::AppState,
     realized: RealizedExternalContentSet,
@@ -1703,7 +1806,8 @@ fn bind_external_realization_set_with(
     let private_workspace = match binding {
         ExternalRealizationBinding::IsolationMounts => None,
         ExternalRealizationBinding::PrivateWorkspace
-        | ExternalRealizationBinding::PrivateRuntimeView => {
+        | ExternalRealizationBinding::PrivateRuntimeView
+        | ExternalRealizationBinding::RetainedReferences => {
             Some(lillux::PinnedDirectory::open(project_path)?.ok_or_else(|| {
                 anyhow::anyhow!(
                     "private external-realization workspace does not exist: {}",
@@ -1723,6 +1827,7 @@ fn bind_external_realization_set_with(
     let mut guest_sources = Vec::with_capacity(realized.iter().len());
     let mut leases = Vec::with_capacity(realized.iter().len());
     let mut custody_generations = Vec::with_capacity(realized.iter().len());
+    let mut retained_descriptors = BTreeMap::new();
     for entry in realized.iter() {
         if let Some(manifest) =
             ryeos_state::objects::load_if_large_content_manifest(&cas, &entry.manifest_hash)?
@@ -1744,6 +1849,49 @@ fn bind_external_realization_set_with(
                 );
             }
             let store = authority.large_object_store()?;
+            if binding != ExternalRealizationBinding::PrivateWorkspace
+                && binding != ExternalRealizationBinding::PrivateRuntimeView
+                && let Some(leased) = lease_reference_file(&store, entry.kind, &manifest)?
+            {
+                // The bytes are held by reference in a root the node proved
+                // it cannot alter, so there is no cache generation to build
+                // and nothing to copy: the leased file is the realization.
+                match binding {
+                    ExternalRealizationBinding::IsolationMounts => {
+                        guest_sources.push(
+                            lillux::secure_fs::inherited_readable_duplicate_of_open_regular_file(
+                                leased.file(),
+                            )?,
+                        );
+                        mounts.push(realization_mount_authority(
+                            entry.mount_root,
+                            leased.path().to_path_buf(),
+                            entry
+                                .mount_root
+                                .destination(Some(project_path), &entry.mount)?,
+                            lillux::secure_fs::inherited_path_pin_of_open_regular_file(
+                                leased.file(),
+                            )?,
+                        ));
+                    }
+                    ExternalRealizationBinding::RetainedReferences => {
+                        retained_descriptors.insert(
+                            entry.id.clone(),
+                            lillux::secure_fs::inherited_readable_duplicate_of_open_regular_file(
+                                leased.file(),
+                            )?,
+                        );
+                    }
+                    ExternalRealizationBinding::PrivateWorkspace
+                    | ExternalRealizationBinding::PrivateRuntimeView => {
+                        unreachable!("private copy bindings never retain a reference")
+                    }
+                }
+                custody_generations.push(None);
+                let (_, _, lease) = leased.into_parts();
+                leases.push(RetainedLease::LargeObject { _lock: lease });
+                continue;
+            }
             let generation = cache.materialize_large_with(
                 &cas,
                 &store,
@@ -1825,7 +1973,7 @@ fn bind_external_realization_set_with(
                     generation.source,
                 ));
             }
-            custody_generations.push((generation.cache_root, generation.root));
+            custody_generations.push(Some((generation.cache_root, generation.root)));
             leases.extend(generation.leases);
             continue;
         }
@@ -1903,7 +2051,7 @@ fn bind_external_realization_set_with(
                 generation.source,
             ));
         }
-        custody_generations.push((generation.cache_root, generation.root));
+        custody_generations.push(Some((generation.cache_root, generation.root)));
         leases.extend(generation.leases);
     }
     authority.ensure_guard(&guard)?;
@@ -1918,6 +2066,7 @@ fn bind_external_realization_set_with(
         guest_sources,
         realized,
         custody_generations,
+        retained_descriptors,
         private_workspace_identity: private_workspace
             .as_ref()
             .map(|root| {
@@ -1926,8 +2075,12 @@ fn bind_external_realization_set_with(
             })
             .transpose()?,
         sealed_set_env,
-        runtime_view_root: (binding == ExternalRealizationBinding::PrivateRuntimeView)
-            .then(|| project_path.to_path_buf()),
+        runtime_view_root: matches!(
+            binding,
+            ExternalRealizationBinding::PrivateRuntimeView
+                | ExternalRealizationBinding::RetainedReferences
+        )
+        .then(|| project_path.to_path_buf()),
         _leases: leases,
     }))
 }
@@ -4046,6 +4199,7 @@ mod tests {
         for binding in [
             ExternalRealizationBinding::PrivateWorkspace,
             ExternalRealizationBinding::PrivateRuntimeView,
+            ExternalRealizationBinding::RetainedReferences,
         ] {
             let root = tempfile::tempdir().unwrap();
             let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
@@ -4164,6 +4318,8 @@ mod tests {
             .is_err()
         );
         let original = owner.custody_generations[0]
+            .as_ref()
+            .unwrap()
             .1
             .open_inherited_regular(OsStr::new("alpha.txt"), false)
             .unwrap()
@@ -4349,5 +4505,285 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+    // ---- reference file realizations: bound without a copy ----
+
+    /// Vouches for one directory, named `image`, as a usable reference root.
+    struct ImageRoot(PathBuf);
+
+    impl ryeos_state::ReferenceRoots for ImageRoot {
+        fn open_root(
+            &self,
+            name: &str,
+        ) -> Result<ryeos_state::ReferenceRoot, ryeos_state::ReferenceRootRefusal> {
+            let refuse = |detail: String| ryeos_state::ReferenceRootRefusal {
+                code: ryeos_state::ReferenceRefusalCode::RootUnproven,
+                detail,
+            };
+            if name != "image" {
+                return Err(refuse(format!("root `{name}` is unknown")));
+            }
+            let directory = lillux::PinnedDirectory::open(&self.0)
+                .map_err(|error| refuse(error.to_string()))?
+                .ok_or_else(|| refuse("root is absent".to_owned()))?;
+            let identity = directory
+                .identity()
+                .map_err(|error| refuse(error.to_string()))?;
+            Ok(ryeos_state::ReferenceRoot {
+                directory,
+                identity,
+            })
+        }
+    }
+
+    /// One large file realization over `source_root/<relative>`: held by
+    /// reference when `by_reference`, else copied into the store.
+    #[cfg(target_os = "linux")]
+    fn large_file_realization(
+        state: &ryeos_app::state::AppState,
+        source_root: &Path,
+        relative: &str,
+        by_reference: bool,
+    ) -> (RealizedExternalContentSet, PathBuf) {
+        use ryeos_state::objects::{
+            ExternalContentMode, ExternalContentMountRoot, ExternalContentRealization,
+            ExternalContentRealizationSet, ExternalLargeContentManifestEntry,
+            ExternalLargeContentManifestObject,
+        };
+        ryeos_state::install_reference_roots(std::sync::Arc::new(ImageRoot(
+            source_root.to_path_buf(),
+        )));
+        let authority = state.state_store.pinned_state_authority().unwrap();
+        let cas = authority.cas_store().unwrap();
+        let store = authority.large_object_store().unwrap();
+        let path = source_root.join(relative);
+        let file = fs::File::open(&path).unwrap();
+        let identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+            file: lillux::pinned_regular_file_identity(&file).unwrap(),
+            size: file.metadata().unwrap().len(),
+        };
+        let ingested = if by_reference {
+            store
+                .register_reference(
+                    file,
+                    identity,
+                    ryeos_state::ReferenceSource {
+                        root_name: "image",
+                        root_identity: lillux::PinnedDirectory::open(source_root)
+                            .unwrap()
+                            .unwrap()
+                            .identity()
+                            .unwrap(),
+                        relative_path: relative,
+                    },
+                    None,
+                )
+                .unwrap()
+        } else {
+            store
+                .ingest_open_regular(file, identity, relative, None)
+                .unwrap()
+        };
+        let manifest = ExternalLargeContentManifestObject {
+            schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
+            kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+            entries: vec![ExternalLargeContentManifestEntry {
+                path: ryeos_engine::external_content::FILE_REALIZATION_ENTRY_PATH.to_owned(),
+                kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                mode: Some(0o755),
+                blob_hash: None,
+                file_sha256: Some(ingested.file_sha256.clone()),
+                size: Some(ingested.size),
+                chunk_size: Some(ingested.chunk_size),
+                chunk_hashes: ingested.chunk_hashes.clone(),
+                target: None,
+            }],
+            entry_count: 1,
+            total_bytes: ingested.size,
+        };
+        let manifest_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+        let set = ExternalContentRealizationSet::new(vec![ExternalContentRealization {
+            id: "harness".into(),
+            kind: ExternalContentKind::File,
+            mode: ExternalContentMode::Pinned,
+            manifest_hash,
+            entry_count: 1,
+            total_bytes: ingested.size,
+            mount_root: ExternalContentMountRoot::Project,
+            mount: "bin/harness".into(),
+        }])
+        .unwrap();
+        (set, path)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_executable(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Names of the entries below `dir`, recursively, as relative paths.
+    #[cfg(target_os = "linux")]
+    fn tree_entries(dir: &Path) -> Vec<String> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                out.push(path.strip_prefix(base).unwrap().display().to_string());
+                if path.is_dir() {
+                    walk(base, &path, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_reference_executable_is_bound_without_a_copy_in_the_runtime_view() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let image = tempfile::tempdir().unwrap();
+        write_executable(&image.path().join("harness"), &[7u8; 4096]);
+        let (set, source) = large_file_realization(&state, image.path(), "harness", true);
+        let view = tempfile::tempdir().unwrap();
+        let budget = PrivateMaterializationBudget::new(1024 * 1024);
+        let bound = bind_external_realization_set_with(
+            &state,
+            set.clone(),
+            view.path(),
+            ExternalRealizationBinding::RetainedReferences,
+            Some(&budget),
+        )
+        .unwrap()
+        .unwrap();
+
+        // Nothing was copied into the view, and no cache generation exists.
+        assert!(tree_entries(view.path()).is_empty());
+        let cache = ExternalMaterializationCache::from_runtime_state_root(
+            &state.config.runtime_state_dir(),
+        );
+        let manifest_hash = &set.iter().next().unwrap().manifest_hash;
+        assert!(!cache.root.join(manifest_hash).exists());
+        assert!(bound.custody_generations.iter().all(Option::is_none));
+        {
+            let state = budget.state.lock().unwrap();
+            assert_eq!((state.copied_files, state.reflinked_files), (0, 0));
+        }
+
+        // The retained descriptor is the registered inode itself.
+        let delivered = bound.retained_descriptors();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(
+            fs::metadata(delivered[0].path()).unwrap().ino(),
+            fs::metadata(&source).unwrap().ino()
+        );
+        let document = bound.descriptor_delivery_env().unwrap().unwrap();
+        let decoded =
+            ryeos_state::objects::ExternalRealizationDescriptors::decode(&document, &set).unwrap();
+        assert_eq!(
+            decoded.realizations["harness"],
+            delivered[0].inherited_descriptor().unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_owned_executable_keeps_its_private_copy_with_isolation_disabled() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let image = tempfile::tempdir().unwrap();
+        write_executable(&image.path().join("harness"), &[9u8; 4096]);
+        let (set, source) = large_file_realization(&state, image.path(), "harness", false);
+        for binding in [
+            ExternalRealizationBinding::PrivateRuntimeView,
+            ExternalRealizationBinding::RetainedReferences,
+        ] {
+            let view = tempfile::tempdir().unwrap();
+            let budget = PrivateMaterializationBudget::new(1024 * 1024);
+            let bound = bind_external_realization_set_with(
+                &state,
+                set.clone(),
+                view.path(),
+                binding,
+                Some(&budget),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(bound.retained_descriptors().is_empty());
+            assert!(bound.descriptor_delivery_env().unwrap().is_none());
+            assert!(bound.custody_generations.iter().all(Option::is_some));
+            let copy = view.path().join("bin/harness");
+            assert_eq!(fs::read(&copy).unwrap(), vec![9u8; 4096]);
+            assert_ne!(
+                fs::metadata(&copy).unwrap().ino(),
+                fs::metadata(&source).unwrap().ino()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_changed_reference_refuses_the_next_launch_by_its_stable_code() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let image = tempfile::tempdir().unwrap();
+        write_executable(&image.path().join("harness"), &[7u8; 4096]);
+        let (set, source) = large_file_realization(&state, image.path(), "harness", true);
+        let launch = |view: &Path| {
+            let budget = PrivateMaterializationBudget::new(1024 * 1024);
+            bind_external_realization_set_with(
+                &state,
+                set.clone(),
+                view,
+                ExternalRealizationBinding::RetainedReferences,
+                Some(&budget),
+            )
+        };
+        let view = tempfile::tempdir().unwrap();
+        assert!(launch(view.path()).unwrap().is_some());
+
+        // One byte changes under the reference (same size, new change time).
+        let mut bytes = fs::read(&source).unwrap();
+        bytes[0] ^= 1;
+        let kept = fs::metadata(&source).unwrap().permissions();
+        fs::write(&source, &bytes).unwrap();
+        fs::set_permissions(&source, kept).unwrap();
+        let error = launch(view.path()).err().unwrap();
+        let code = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectReferenceRefused>())
+            .map(|refused| refused.code.as_str());
+        assert_eq!(code, Some("reference_file_changed"));
+        assert!(tree_entries(view.path()).is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_reference_file_is_mounted_from_its_own_descriptor_under_isolation() {
+        let root = tempfile::tempdir().unwrap();
+        let (_state_owner, state) = ryeos_app::state::test_support::build(root.path()).unwrap();
+        let image = tempfile::tempdir().unwrap();
+        write_executable(&image.path().join("harness"), &[5u8; 4096]);
+        let (set, _) = large_file_realization(&state, image.path(), "harness", true);
+        let bound = std::sync::Arc::new(
+            bind_retained_external_guest_realizations(&state, &set)
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(bound.mounts().len(), 1);
+        assert!(bound.custody_generations[0].is_none());
+        assert!(bound.retained_descriptors().is_empty());
+        BoundExternalRealizations::associate_complete_set(&bound, &set, Path::new("/workspace"))
+            .unwrap();
+        let cache = ExternalMaterializationCache::from_runtime_state_root(
+            &state.config.runtime_state_dir(),
+        );
+        assert!(!cache.root.join(&set.iter().next().unwrap().manifest_hash).exists());
     }
 }
