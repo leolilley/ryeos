@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "item": "entry",
+      "id": "out:T-0001",
+      "type": "outcome",
+      "state": "failed",
+      "tone": "danger",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": null,
+      "counts_as": null,
+      "slots": {
+        "headline": "exit:1",
+        "reason": "{\"exit_code\":1,\"stderr\":\"<scrubbed stderr 2044 chars>\",\"stdout\":\"<scrubbed stdout 0 chars>\"}"
+      },
+      "seq": [
+        3,
+        3
+      ],
+      "ts": [
+        "2026-11-15T06:46:00Z",
+        "2026-11-15T06:46:00Z"
+      ]
+    }
+  ],
+  "undeclared": {}
+}

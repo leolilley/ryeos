@@ -45,6 +45,8 @@ use ryeos_state::objects::ThreadStatus;
 pub use ryeos_state::queries::{ThreadListFilter, ThreadSort};
 
 mod direct_execution;
+#[cfg(test)]
+mod dispatch_child_lineage_tests;
 mod fenced_retirement;
 pub mod managed_runtime_identity;
 mod sealed_request;
@@ -105,6 +107,17 @@ impl DurableThreadTerminal<'_> {
         self.state_store
             .admitted_launch_capsule_hash(self.thread_id)
     }
+}
+
+/// Result of recording the daemon's lineage event for a dispatched child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchChildLineage {
+    /// The daemon owes no event: the child was not created through the
+    /// runtime action callback, or the calling runtime writes its own
+    /// lineage.
+    NotOwed,
+    /// The idempotent append ran with this outcome.
+    Recorded(ChildLineageAppendOutcome),
 }
 
 pub struct ThreadLifecycleService {
@@ -6659,6 +6672,92 @@ impl ThreadLifecycleService {
             self.publish_records(&result.persisted);
         }
         Ok(result.outcome)
+    }
+
+    /// Record the portable parent→child lineage event for a child created
+    /// through a runtime's `runtime.dispatch_action` callback, unless the
+    /// calling runtime declares (`writes_child_lineage`) that it writes its own.
+    ///
+    /// The caller is the operation's first caller, read from the retained
+    /// action intent, so a replay from a later thread of the same chain
+    /// addresses the thread that owns the edge. A child with no action intent
+    /// was not created through the callback and is not owed an event. The
+    /// spawn reason is the child's effective link relation, which differs
+    /// from the requested one for a follow child. The append is idempotent: a
+    /// child that already has an edge (a same-chain child, or a repeated
+    /// drive) yields `AlreadyPresent` and writes nothing.
+    pub fn record_dispatch_child_lineage(
+        &self,
+        child_thread_id: &str,
+    ) -> Result<DispatchChildLineage> {
+        let Some(intent) = self
+            .state_store
+            .get_runtime_action_intent_by_child(child_thread_id)?
+        else {
+            return Ok(DispatchChildLineage::NotOwed);
+        };
+        let parent_thread_id = intent.first_caller_thread_id.as_str();
+        let Some(parent) = self.state_store.get_thread(parent_thread_id)? else {
+            return Ok(DispatchChildLineage::Recorded(
+                ChildLineageAppendOutcome::ParentSettled,
+            ));
+        };
+        let parent_identity = self
+            .state_store
+            .get_launch_metadata(parent_thread_id)?
+            .and_then(|metadata| metadata.admitted_artifact_identity);
+        if let Some(ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+            runtime_ref,
+            ..
+        }) = parent_identity
+        {
+            let canonical = CanonicalRef::parse(&runtime_ref)
+                .map_err(|error| anyhow!("parent runtime ref `{runtime_ref}`: {error}"))?;
+            let runtime = self.engine.runtimes.lookup_by_ref(&canonical).ok_or_else(|| {
+                anyhow!(
+                    "runtime `{runtime_ref}` of thread {parent_thread_id} is not in the runtime registry"
+                )
+            })?;
+            if runtime.yaml.writes_child_lineage {
+                return Ok(DispatchChildLineage::NotOwed);
+            }
+        }
+        let child = self
+            .state_store
+            .get_thread(child_thread_id)?
+            .ok_or_else(|| {
+                anyhow!("child thread not found while recording lineage: {child_thread_id}")
+            })?;
+        let relation = self
+            .state_store
+            .child_link_relation(child_thread_id)?
+            .ok_or_else(|| {
+                anyhow!("child thread {child_thread_id} has no recorded link to its parent")
+            })?;
+        let outcome = self.append_child_thread_spawned_once(
+            &parent.chain_root_id,
+            parent_thread_id,
+            child_thread_id,
+            json!({
+                "child_thread_id": child_thread_id,
+                "item_id": child.item_ref,
+                "operation_id": intent.operation_id,
+                "spawn_reason": relation,
+            }),
+        )?;
+        Ok(DispatchChildLineage::Recorded(outcome))
+    }
+
+    /// As [`Self::record_dispatch_child_lineage`] for a site that records the
+    /// link before the child runs: a parent that can no longer author the
+    /// event is an error, so the child never runs without its lineage.
+    pub fn require_dispatch_child_lineage(&self, child_thread_id: &str) -> Result<()> {
+        match self.record_dispatch_child_lineage(child_thread_id)? {
+            DispatchChildLineage::Recorded(ChildLineageAppendOutcome::ParentSettled) => {
+                bail!("parent settled before the lineage of child {child_thread_id} was recorded")
+            }
+            DispatchChildLineage::NotOwed | DispatchChildLineage::Recorded(_) => Ok(()),
+        }
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Value> {

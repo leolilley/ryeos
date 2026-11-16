@@ -1,0 +1,294 @@
+# ryeos:signed:2026-11-16T09:49:01Z:ac261e115d4fa30116af2837f5d207bfa628fc820717ab8aef5d75376ed011d8:mRDoKubBztb69KRrRCXnSdf/A/+kaASiWI6RgmHcWjS9TF0gREbieW9m8yKSNE2BB1JTJFfrwB7UIq+7/+xJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Thread timeline definition: how a chain's events fold into timeline items.
+# Declarative data read by the timeline service; the fold engine names no event type itself.
+category: ryeos/ui/timeline
+version: "1.0.0"
+description: How a chain's events fold into timeline items.
+
+vocabulary:
+  - {key: other, one: operation, many: operations}
+  - {key: child, one: child run, many: child runs}
+
+# Threads linked into the viewed thread's story, in either direction.
+spine:
+  - {event: thread_continued, from: thread_id, to: payload.successor_thread_id}
+  - {event: thread_created, from: payload.continuation_from, to: thread_id}
+
+events:
+  # Bookkeeping that contributes no entry, declared deliberately.
+  thread_created: [{drop: true}]
+  thread_started: [{drop: true}]
+  as_launched_resolution: [{drop: true}]
+  as_launched_ref_bindings: [{drop: true}]
+  runtime_launch_facts: [{drop: true}]
+  provider_attempt_budget_transition_v1: [{drop: true}]
+  stream_opened: [{drop: true}]
+  thread_usage: [{drop: true}]
+
+  cognition_in:
+    - when: {has: payload.content}
+      emit:
+        - {type: message, starts_exchange: true, project: {body: payload.content}}
+    - when: {has: payload.turn}
+      drop: true
+
+  # One event may carry reasoning, text and tool calls: it emits an entry per part.
+  cognition_out:
+    - emit:
+        - type: thought
+          when: {has: payload.reasoning_content}
+          project: {body: payload.reasoning_content}
+        - type: prose
+          flow: true
+          when: {has: payload.content}
+          project: {body: payload.content}
+
+
+
+  # A continuation: the predecessor names its successor and why; the
+  # successor's own record of the link adds nothing to draw.
+  thread_continued:
+    - when: {has: payload.successor_thread_id}
+      emit:
+        - type: marker
+          project:
+            headline: {join: [{path: payload.reason, prefix: "continued: "}]}
+            target: payload.successor_thread_id
+    - drop: true
+
+  # A failed thread writes two terminal events; both address one outcome entry.
+  thread_failed:
+    - when: {on_spine: true}
+      emit:
+        - type: outcome
+          key: [thread_id]
+          state: failed
+          tone: [{default: danger}]
+          project:
+            headline: {first: [payload.outcome_code, payload.message]}
+            reason: {first: [payload.message, payload.error.reason, payload.error.error, payload.error.summary, payload.error]}
+
+  thread_completed:
+    - when: {on_spine: true}
+      emit:
+        - type: outcome
+          key: [thread_id]
+          state: completed
+          tone: [{default: good}]
+          project: {headline: payload.outcome_code}
+
+  # Graph steps. A step and its tool call are one activity: the key is the node
+  # and step, which every graph event of the step carries.
+  graph_node_retry:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: retrying
+          tone: [{default: warn}]
+          project: {detail: {join: [{path: payload.attempt, prefix: "attempt "}, {path: payload.attempts, prefix: "of "}]}}
+
+  graph_started:
+    - emit:
+        - type: marker
+          starts_exchange: true
+          project: {headline: {join: [{path: payload.definition_ref, prefix: "graph "}]}}
+
+  graph_foreach_started:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: running
+          project: {detail: {join: [{path: payload.total, prefix: "items: "}]}}
+
+  graph_step_started:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: running
+          project: {headline: {join: [{path: payload.node, prefix: "step "}]}}
+
+  graph_step_completed:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: {from: payload.status, map: {ok: done, retry: retrying}, default: failed}
+          tone:
+            - {field: payload.status, map: {ok: good, retry: warn}}
+            - {default: danger}
+
+  # The graph runtime also writes tool events for an action node: they update
+  # the step's activity rather than adding a second one.
+  tool_call_start:
+    - when: {has: payload.graph_run_id}
+      emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          counts_as: other
+          project: {tool: payload.item_id}
+    - emit:
+        - type: activity
+          key: [payload.operation_id]
+          state: running
+          counts_as: other
+          project:
+            headline: payload.tool
+            detail: {lookup: {event: cognition_out, array: payload.tool_calls, find: [id, payload.call_id], get: arguments}}
+
+  tool_call_result:
+    - when: {has: payload.graph_run_id}
+      emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: {from: payload.status, map: {ok: done}, default: failed}
+    - emit:
+        - type: activity
+          key: [payload.operation_id]
+          state: {from: payload.truncated_reason, map: {error_envelope: failed}, default: done}
+          tone:
+            - {field: payload.truncated_reason, map: {error_envelope: danger, result_guard: warn}}
+            - {default: good}
+          project:
+            badge: {join: [{path: payload.result_size_bytes, format: bytes}, payload.truncated_reason]}
+
+  # Work in another thread. The child's outcome is not in this chain, so the
+  # link's state is unknown from here.
+  child_thread_spawned:
+    - when: {has: payload.node}
+      emit:
+        - type: link
+          key: [payload.child_thread_id]
+          state: unknown
+          counts_as: child
+          parent: {type: activity, key: [payload.node, payload.step]}
+          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.node, payload.step]}}
+          project: {headline: payload.item_id, target: payload.child_thread_id}
+    - emit:
+        - type: link
+          key: [payload.child_thread_id]
+          state: unknown
+          counts_as: child
+          parent: {type: activity, key: [payload.operation_id]}
+          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.operation_id]}}
+          project: {headline: payload.item_id, target: payload.child_thread_id}
+
+  artifact_published:
+    - when: {eq: [payload.artifact_type, graph_node_receipt]}
+      drop: true
+    - emit:
+        - type: marker
+          project: {headline: {join: [{path: payload.artifact_type, prefix: "artifact "}]}}
+
+  graph_completed:
+    - emit:
+        - type: outcome
+          key: [thread_id]
+          state: completed
+          tone: [{default: good}]
+          project: {detail: {join: [{path: payload.steps, prefix: "steps: "}]}}
+
+  # Provider and accounting notices.
+  provider_retry:
+    - emit:
+        - type: marker
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.attempt, prefix: "provider retry, attempt "}]}, reason: payload.error}
+  cost_untracked:
+    - emit:
+        - type: marker
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.model, prefix: "cost untracked: "}]}, reason: payload.reason}
+  milestone:
+    - emit:
+        - type: marker
+          tone: [{default: accent}]
+          project: {headline: {join: [payload.kind, {path: payload.node, prefix: "node "}]}}
+  graph_follow_suspended:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: waiting
+          project: {detail: {join: [{path: payload.item_id, prefix: "waiting on "}]}}
+  seat.facet: [{drop: true}]
+
+  # Hosted sessions. An approval is one entity: its request asks, and each
+  # later event moves its state. A candidate likewise.
+  hosted_session.turn_started:
+    - emit:
+        - type: marker
+          tone: [{default: accent}]
+          project: {headline: {join: [{path: payload.turn_id, prefix: "hosted turn started "}]}}
+  hosted_session.turn_completed:
+    - emit:
+        - type: marker
+          tone: [{default: good}]
+          project: {headline: {join: [{path: payload.turn_id, prefix: "hosted turn completed "}]}}
+  hosted_session.approval_requested:
+    - emit:
+        - type: ask
+          key: [payload.approval_id]
+          state: pending
+          tone: [{default: warn}]
+          project: {headline: {join: [{path: payload.observation.operation_class, prefix: "approval requested: "}]}}
+  hosted_session.approval_expired:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: expired, tone: [{default: warn}]}
+  hosted_approval.decision_reserved:
+    - emit:
+        - type: ask
+          key: [payload.approval_id]
+          state: {from: payload.decision, map: {approve: approved, approved: approved, deny: denied, denied: denied}, default: decided}
+          tone: [{default: accent}]
+          project: {decision: payload.decision}
+  hosted_approval.delivery_contacting:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivering}
+  hosted_approval.delivery_unknown:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivery_unknown, tone: [{default: danger}]}
+  hosted_approval.delivery_settled:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivered, tone: [{default: good}]}
+  hosted_approval.delivery_expired:
+    - emit:
+        - {type: ask, key: [payload.approval_id], state: delivery_expired, tone: [{default: warn}]}
+  worker_session.restored:
+    - emit:
+        - type: marker
+          tone: [{default: accent}]
+          project: {headline: "session restored", target: payload.successor_placement_thread_id}
+  hosted_candidate.captured:
+    - emit:
+        - type: activity
+          key: [payload.candidate_snapshot_hash]
+          state: captured
+          tone: [{default: accent}]
+          project: {headline: {join: [{path: payload.candidate_snapshot_hash, format: short_hash, prefix: "candidate "}]}}
+  hosted_candidate.qualified:
+    - emit:
+        - {type: activity, key: [payload.candidate_evaluation.candidate_snapshot_hash], state: qualified, tone: [{default: good}]}
+  hosted_candidate.publication_reserved:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: publishing}
+  hosted_candidate.published:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: published, tone: [{default: good}]}
+  hosted_candidate.publication_not_applied:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: not_applied, tone: [{default: warn}]}
+  hosted_candidate.publication_superseded:
+    - emit:
+        - type: activity
+          key: [payload.candidate_snapshot_hash]
+          state: superseded
+          tone: [{default: warn}]
+          project: {detail: {join: [{path: payload.observed_head, format: short_hash, prefix: "head "}]}}
+  hosted_candidate.publication_unknown:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: unknown, tone: [{default: danger}]}
+  hosted_candidate.discarded:
+    - emit:
+        - {type: activity, key: [payload.candidate_snapshot_hash], state: discarded}
+  hosted_bounded_execution.terminal_outcome:
+    - emit:
+        - type: marker
+          project: {headline: {join: [{path: payload.outcome.kind, prefix: "hosted execution: "}]}, reason: payload.terminal_reason}

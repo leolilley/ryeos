@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T02:44:25Z:e785671f8da41f89fca037f30804caf9b001e778502ea02a83dfad0baf10375b:zlZ/G2x3h+Jy+e7NBumiZtfMTHJ/evbcN1h8FOXuHAOGYH+yLJrdrxFalEQ6KfsZpsv5KT/ptl7tmjqurGxfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T07:56:53Z:f2c9caa833c5b5d3f96bf5ee8cf10bba7c5c6db2d32de05a30f8f527ba4d805d:q5SNl+ohGlDPh8GUIF4XrnEh8NbpN3sq/19QNnWyeEwcHiQgW4YkAvPjR3Lyi2FtN9o32WJgqJvWtDgatcolBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "frame-v1"
@@ -29,7 +29,7 @@ mode flag.
 | `rows` | selectable list | `{primary, meta?, tone?, raw}` |
 | `key_value` | field/value detail | `[(key, value)]` |
 | `text` | text body | string/detail fallback |
-| `timeline` | append-ordered events | `{primary, meta?, tone?, role?, pair_key?, raw}` per event |
+| `timeline` | folded timeline items | `{item: entry\|cluster\|recap, ...}` per item |
 | `field` | multi-source entity/relation evidence field | `ryeos.ui.field.facts.v1` documents |
 
 Engine chrome (not content-targetable in v1): notice, tile chrome.
@@ -58,8 +58,7 @@ projections:
   meta: <field path>
   tone: { field: <path>, missing: <tone>, map: {value: tone}, default: <tone> }
   detail: [<field path>...]   # key_value
-  event_kinds: { <event_type>: {primary,...} }   # timeline, per kind
-  default: { ... }            # timeline fallback
+  default: { ... }            # fallback projection for rows
 selection:                    # OPTIONAL: explicit row-activation binding (rows widget)
   activate: <affordance_id>   # row activation fires this affordance; reads {record.<field>}
 input:                        # OPTIONAL, SINGULAR: one transient view-local buffer per view
@@ -193,25 +192,12 @@ palette; content never names colors). A tone map's optional `missing` tone is
 used when the configured field is absent; `default` is used when the field is
 present but unmapped.
 
-Timeline projection blocks may also declare:
-
-```yaml
-role: flow | boundary | pair_open | pair_close
-pair_key: <field path>        # required for pair_open / pair_close
-```
-
-Roles are mechanism vocabulary only. Event-kind names stay in signed content:
-the engine knows how to fold `flow`, `boundary`, and pairs, but it never knows
-which runtime event kind means cognition, tool start, or tool result.
-
-- `flow` records merge with adjacent flow records into one prose block; if the
-  projected primary is absent, the record is skipped rather than rendered as raw
-  JSON so ephemeral replay deltas do not leak into durable UI state.
-- `boundary` records render as timeline separators.
-- `pair_open` records emit a pending collapsed pair under `pair_key`.
-- `pair_close` records with the same `pair_key` update the open pair in place.
-- Unknown or absent roles degrade to line records.
-- Pair roles with no resolvable `pair_key` degrade to line records.
+A `timeline` view reads the daemon timeline service
+(`service:ui/ryeos-ui/timeline/thread`, `collection: items`). The service folds
+a chain's events into typed items by a signed definition; the client only maps
+items (entries, clusters, recaps) to the renderer entries and offers
+`projections.expand.fields` over the item for detail. A view's `limit` source
+param bounds how many top-level items the service returns.
 
 ## Backdrop
 

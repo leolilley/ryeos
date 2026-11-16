@@ -58,15 +58,28 @@ fn response(view_ref: &str, long: bool) -> Option<Value> {
               "project": { "name": "ryeos-next" }, "status": "failed", "created_at": "2026-11-12T07:03:00Z" }
         ], "coverage": { "complete": false, "returned": 3 } }),
         "view:ryeos/development/execution" => serde_json::from_str(BUILD_DEPLOY).ok()?,
-        "view:ryeos/chain/timeline" => json!({ "events": [
-            { "event_type": "cognition_in", "chain_seq": 1, "payload": { "turn": 1 } },
-            { "event_type": "cognition_out", "chain_seq": 2, "payload": { "content": "Reading the layout module first." } },
-            { "event_type": "tool_call_start", "chain_seq": 3, "payload": { "tool": "read_file", "call_id": "c1" } },
-            { "event_type": "tool_call_result", "chain_seq": 4, "payload": { "tool": "read_file", "call_id": "c1", "result_size_bytes": 4096 } },
-            { "event_type": "cognition_out", "chain_seq": 5, "payload": { "content": "Tile sizes are pixels in both renderers." } }
+        "view:ryeos/chain/timeline" => json!({ "older": 0, "items": [
+            fixture_entry("m1", "message", "x1", json!({ "body": "Review the layout module." })),
+            fixture_entry("p1", "prose", "x1", json!({ "body": "Reading the layout module first." })),
+            with_state(fixture_entry("a1", "activity", "x1", json!({ "headline": "read_file", "badge": "4.0 KiB" })), "done"),
+            fixture_entry("p2", "prose", "x1", json!({ "body": "Tile sizes are pixels in both renderers." }))
         ]}),
         _ => return None,
     })
+}
+
+/// One timeline-service entry item.
+fn fixture_entry(id: &str, kind: &str, exchange: &str, slots: Value) -> Value {
+    json!({
+        "item": "entry", "id": id, "type": kind, "state": null, "tone": null,
+        "thread": "T-7f3a", "parent": null, "exchange": exchange, "counts_as": null,
+        "slots": slots, "seq": [1, 1], "ts": ["t", "t"]
+    })
+}
+
+fn with_state(mut entry: Value, state: &str) -> Value {
+    entry["state"] = json!(state);
+    entry
 }
 
 /// Rows past the length at which lists build only what is in view.
@@ -87,23 +100,17 @@ fn long_response(view_ref: &str) -> Option<Value> {
             json!({ "threads": threads, "coverage": { "complete": true, "returned": LONG_ROWS } })
         }
         "view:ryeos/chain/timeline" => {
-            // A turn boundary before each step keeps every step its own entry:
-            // consecutive outputs braid into one block.
-            let events: Vec<Value> = (0..LONG_ROWS)
-                .flat_map(|index| {
-                    [
-                        json!({
-                            "event_type": "cognition_in", "chain_seq": 2 * index + 1,
-                            "payload": { "turn": index + 1 }
-                        }),
-                        json!({
-                            "event_type": "cognition_out", "chain_seq": 2 * index + 2,
-                            "payload": { "content": format!("Step {} of the run.", index + 1) }
-                        }),
-                    ]
+            let items: Vec<Value> = (0..LONG_ROWS)
+                .map(|index| {
+                    fixture_entry(
+                        &format!("p{index}"),
+                        "prose",
+                        &format!("x{index}"),
+                        json!({ "body": format!("Step {} of the run.", index + 1) }),
+                    )
                 })
                 .collect();
-            json!({ "events": events })
+            json!({ "older": 0, "items": items })
         }
         _ => return None,
     })
