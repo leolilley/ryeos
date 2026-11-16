@@ -17,7 +17,7 @@ external_lifecycle_adapters:
     restoration_verifier: ryeos-external-guest-restoration-verifier
     provider_spec:
       path: specs/provider-spec.json
-      sha256: "b8596dc59f4e12314ca0cd22125b2eae1804db218594cc3351be810d00db4bf4"
+      sha256: "f354deb2b1fa6d9f54019acac7f1072caced44d2fa68dda78e7f466fe80be5f0"
     snapshot_production_spec:
       path: specs/snapshot-production-spec.json
       sha256: "5cec9da4b46523ffc79aaf581d84b9302bafc511b91a4f54aed1ec3d93af12d8"

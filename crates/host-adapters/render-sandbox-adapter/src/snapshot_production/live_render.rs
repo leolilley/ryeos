@@ -697,6 +697,7 @@ fn run_chain(live: &Live, guard: &Guard<'_>) -> Result<()> {
         &live.region,
         &creation.snapshot_id,
         RESTORE_LIFETIME_SECONDS,
+        &std::collections::BTreeSet::new(),
     )?;
     let restore_url = route_url(
         live,

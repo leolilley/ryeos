@@ -43,6 +43,18 @@ struct QualificationSettings {
     tls_roots_der_base64: Vec<String>,
 }
 
+/// The egress hosts the occurrence's launch shape asks its sandbox to reach;
+/// empty for a deny-all shape.
+fn qualification_egress_hosts(
+    shape: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+) -> std::collections::BTreeSet<String> {
+    use ryeos_external_execution_contract::runtime_snapshot::LaunchSandboxNetworkPolicy;
+    match &shape.sandbox_network_policy {
+        LaunchSandboxNetworkPolicy::DenyAll => std::collections::BTreeSet::new(),
+        LaunchSandboxNetworkPolicy::AllowList { hosts } => hosts.clone(),
+    }
+}
+
 fn selected_qualification_settings(
     bytes: &[u8],
     digest: &str,
@@ -148,6 +160,7 @@ pub(crate) fn create_restored_sandbox(
         &selected.region,
         &request.locator.snapshot_id,
         request.intent.maximum_lifetime_seconds,
+        &qualification_egress_hosts(&request.intent.launch_shape),
     )?;
     let route = spec
         .qualification_create_route()
