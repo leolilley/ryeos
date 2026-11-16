@@ -568,7 +568,10 @@ mod tests {
         let error = check_ready_network_inputs(&observed, &provider)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("/ryeos/activation/network-resolver"), "{error}");
+        assert!(
+            error.contains("/ryeos/activation/network-resolver"),
+            "{error}"
+        );
         assert!(error.contains("/etc/resolv.conf"), "{error}");
         // A missing source is a different source list too.
         let error = check_ready_network_inputs(&observed_from(&provider)[..1], &provider)
@@ -867,7 +870,8 @@ mod tests {
         let bytes = bootstrap.canonical_bytes().unwrap();
         let wrong_key = lillux::crypto::generate_signing_key();
         assert!(Controller::new(&bytes, wrong_key, Vec::new(), Vec::new()).is_err());
-        let mut controller = Controller::new(&bytes, owner, vec!["1".repeat(64)], provider_inputs()).unwrap();
+        let mut controller =
+            Controller::new(&bytes, owner, vec!["1".repeat(64)], provider_inputs()).unwrap();
         let get = crate::loopback_tls::HttpsRequest {
             method: "GET".into(),
             path: EXTERNAL_CHANNEL_ATTACH_PATH.into(),

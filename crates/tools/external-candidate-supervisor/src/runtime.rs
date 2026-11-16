@@ -1079,11 +1079,12 @@ fn observe_network_inputs(
     captured: &ExternalCapturedNetworkInputs,
 ) -> Result<Vec<ObservedNetworkInput>> {
     captured.validate_for(policy)?;
-    let observe = |selection: &ExternalNetworkInputSelection, bytes: Vec<u8>| ObservedNetworkInput {
-        source: selection.source.clone(),
-        bytes: bytes.len() as u64,
-        sha256: lillux::sha256_hex(&bytes),
-    };
+    let observe =
+        |selection: &ExternalNetworkInputSelection, bytes: Vec<u8>| ObservedNetworkInput {
+            source: selection.source.clone(),
+            bytes: bytes.len() as u64,
+            sha256: lillux::sha256_hex(&bytes),
+        };
     Ok(vec![
         observe(&policy.resolver, captured.resolver_bytes()?),
         observe(&policy.hosts, captured.hosts_bytes()?),
