@@ -494,6 +494,7 @@ pub enum RuntimeEventType {
     // ── Spawning / continuation / commands ──────────────────────
     EdgeRecorded,
     ChildThreadSpawned,
+    ChildThreadSettled,
     ContinuationRequested,
     ContinuationAccepted,
     CommandSubmitted,
@@ -589,6 +590,7 @@ impl RuntimeEventType {
             Self::ThreadContinued => wire::THREAD_CONTINUED,
             Self::EdgeRecorded => wire::EDGE_RECORDED,
             Self::ChildThreadSpawned => wire::CHILD_THREAD_SPAWNED,
+            Self::ChildThreadSettled => wire::CHILD_THREAD_SETTLED,
             Self::ContinuationRequested => wire::CONTINUATION_REQUESTED,
             Self::ContinuationAccepted => wire::CONTINUATION_ACCEPTED,
             Self::CommandSubmitted => wire::COMMAND_SUBMITTED,
@@ -647,6 +649,7 @@ impl RuntimeEventType {
             wire::THREAD_CONTINUED => Ok(Self::ThreadContinued),
             wire::EDGE_RECORDED => Ok(Self::EdgeRecorded),
             wire::CHILD_THREAD_SPAWNED => Ok(Self::ChildThreadSpawned),
+            wire::CHILD_THREAD_SETTLED => Ok(Self::ChildThreadSettled),
             wire::CONTINUATION_REQUESTED => Ok(Self::ContinuationRequested),
             wire::CONTINUATION_ACCEPTED => Ok(Self::ContinuationAccepted),
             wire::COMMAND_SUBMITTED => Ok(Self::CommandSubmitted),
@@ -751,6 +754,7 @@ impl RuntimeEventType {
             | Self::ThreadContinued
             | Self::EdgeRecorded
             | Self::ChildThreadSpawned
+            | Self::ChildThreadSettled
             | Self::ContinuationRequested
             | Self::ContinuationAccepted
             | Self::CommandSubmitted
@@ -824,6 +828,7 @@ impl RuntimeEventType {
             | Self::ThreadContinued
             | Self::EdgeRecorded
             | Self::ChildThreadSpawned
+            | Self::ChildThreadSettled
             | Self::ContinuationRequested
             | Self::ContinuationAccepted
             | Self::CommandSubmitted
@@ -956,6 +961,7 @@ mod tests {
             RuntimeEventType::ThreadContinued,
             RuntimeEventType::EdgeRecorded,
             RuntimeEventType::ChildThreadSpawned,
+            RuntimeEventType::ChildThreadSettled,
             RuntimeEventType::ContinuationRequested,
             RuntimeEventType::ContinuationAccepted,
             RuntimeEventType::CommandSubmitted,
@@ -1071,6 +1077,7 @@ mod tests {
             wire::THREAD_CONTINUED,
             wire::EDGE_RECORDED,
             wire::CHILD_THREAD_SPAWNED,
+            wire::CHILD_THREAD_SETTLED,
             wire::CONTINUATION_REQUESTED,
             wire::CONTINUATION_ACCEPTED,
             wire::COMMAND_SUBMITTED,

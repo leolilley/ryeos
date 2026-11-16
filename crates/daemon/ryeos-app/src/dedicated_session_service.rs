@@ -515,6 +515,7 @@ fn append_authoritative_observation_batch(
                     "first_sequence": first_sequence,
                     "through_sequence": through_sequence,
                     "upstream_event_type": event.event_type,
+                    "result": event.result,
                     "observation": event.payload,
                 }),
             })
@@ -2367,6 +2368,10 @@ pub fn reconcile_command_outboxes(state: &AppState) -> Result<()> {
 struct WorkerEvent {
     event_type: String,
     payload: Value,
+    /// Set by the worker on the one notification its profile marks as the
+    /// execution's result; absent on every other event.
+    #[serde(default)]
+    result: bool,
 }
 
 #[derive(Clone)]
@@ -5512,6 +5517,116 @@ pub fn verify_terminal_candidate_publication(
     Ok(())
 }
 
+/// The closed classification a following parent branches on. It is derived
+/// only from the durable bounded outcome and the lifecycle terminal reason:
+/// `completed`, `deadline` (budget exhausted on the duration dimension),
+/// `budget` (any other budget dimension), `approval_required`,
+/// `outcome_unknown`, `worker_failure`, `cancelled` (no bounded outcome, the
+/// session was cancelled) or `failed` (retry exhaustion without contact, or no
+/// bounded outcome and any other terminal reason).
+pub fn terminal_outcome_kind(
+    terminal_reason: Option<&str>,
+    outcome: Option<&DedicatedSessionBoundedOutcome>,
+) -> &'static str {
+    use ryeos_runtime::callback::DedicatedSessionBoundedBudgetDimension as Dimension;
+    match outcome {
+        Some(outcome) => match outcome.kind {
+            DedicatedSessionBoundedOutcomeKind::Completed => "completed",
+            DedicatedSessionBoundedOutcomeKind::BudgetExhausted => {
+                if outcome.dimension == Some(Dimension::Duration) {
+                    "deadline"
+                } else {
+                    "budget"
+                }
+            }
+            DedicatedSessionBoundedOutcomeKind::ApprovalRequired => "approval_required",
+            DedicatedSessionBoundedOutcomeKind::RetryableUncontactedExhausted => "failed",
+            DedicatedSessionBoundedOutcomeKind::OutcomeUnknown => "outcome_unknown",
+            DedicatedSessionBoundedOutcomeKind::WorkerFailure => "worker_failure",
+        },
+        None => match terminal_reason {
+            Some("completed") => "completed",
+            Some("cancelled") => "cancelled",
+            _ => "failed",
+        },
+    }
+}
+
+/// The durable payload of the result-marked notification for the turn named by
+/// the session's completion fence, read back from the retained observation
+/// batch that carried the turn's completion. `Null` when the session has no
+/// completion fence or the batch carried no result-marked event. Reading is
+/// pure: it only follows the already-validated completion fact to its batch.
+fn completion_worker_result(state: &AppState, session: &DedicatedSessionRecord) -> Result<Value> {
+    let Some(fence) = session.completion_fence.as_ref() else {
+        return Ok(Value::Null);
+    };
+    let Some((_, completion)) =
+        hosted_turn_completion_payload(state, session, fence.worker_boot_epoch, &fence.turn_id)?
+    else {
+        return Ok(Value::Null);
+    };
+    let source = completion.get("source").unwrap_or(&Value::Null);
+    let batch = match source.get("kind").and_then(Value::as_str) {
+        Some("pushed_observation_batch") => {
+            let digest = source.get("batch_digest").and_then(Value::as_str);
+            let first = source.get("first_sequence").and_then(Value::as_u64);
+            let through = source.get("through_sequence").and_then(Value::as_u64);
+            match (digest, first, through) {
+                (Some(digest), Some(first), Some(through)) => find_authoritative_batch(
+                    state,
+                    session,
+                    fence.worker_boot_epoch,
+                    digest,
+                    first,
+                    through,
+                )?,
+                _ => None,
+            }
+        }
+        Some("command_response") => {
+            let sequence = source.get("command_sequence").and_then(Value::as_u64);
+            let digest = source.get("request_digest").and_then(Value::as_str);
+            match (sequence, digest) {
+                (Some(sequence), Some(digest)) => find_authoritative_command_observation_batch(
+                    state,
+                    session,
+                    fence.worker_boot_epoch,
+                    sequence,
+                    digest,
+                )?
+                .map(|(batch, _)| batch),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    Ok(batch
+        .map(|batch| select_result_payload(&batch, &fence.turn_id))
+        .unwrap_or(Value::Null))
+}
+
+/// Pick the result payload for `turn_id` from one canonical batch. One
+/// result-marked event is that turn's result; when a batch carries several,
+/// the payload's own `turn_id` must name the fence's turn.
+fn select_result_payload(batch: &Value, turn_id: &str) -> Value {
+    let marked: Vec<&Value> = batch
+        .get("events")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|event| event.get("result").and_then(Value::as_bool) == Some(true))
+        .filter_map(|event| event.get("payload"))
+        .collect();
+    match marked.as_slice() {
+        [only] => (*only).clone(),
+        many => many
+            .iter()
+            .find(|payload| payload.get("turn_id").and_then(Value::as_str) == Some(turn_id))
+            .map_or(Value::Null, |payload| (*payload).clone()),
+    }
+}
+
 /// Build the bounded worker's compact terminal evidence from its existing
 /// durable authorities. The controller's process-local return value is never
 /// retained as proof: command contact is revalidated against root facts, the
@@ -5529,6 +5644,24 @@ pub fn canonical_terminal_session_projection(
         bail!("canonical terminal session projection requires terminal state");
     }
     let mut result = serde_json::to_value(&session)?;
+    // Both sit beside, never inside, `bounded_execution`: the outcome
+    // testimony digests only the bounded execution, so these presentation
+    // fields cannot disturb it.
+    let worker_result = completion_worker_result(state, &session)?;
+    let outcome_kind = terminal_outcome_kind(
+        session.terminal_reason.as_deref(),
+        session.bounded_outcome.as_ref(),
+    );
+    {
+        let object = result
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("dedicated session projection is not an object"))?;
+        object.insert("worker_result".to_owned(), worker_result);
+        object.insert(
+            "outcome_kind".to_owned(),
+            Value::String(outcome_kind.to_owned()),
+        );
+    }
     if session.candidate_disposition
         != crate::runtime_db::DedicatedCandidateDisposition::RetainedForReview
     {
@@ -6476,6 +6609,119 @@ pub fn abort_session_for_root_stop(state: &AppState, placement_thread_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bounded(
+        kind: DedicatedSessionBoundedOutcomeKind,
+        dimension: Option<ryeos_runtime::callback::DedicatedSessionBoundedBudgetDimension>,
+    ) -> DedicatedSessionBoundedOutcome {
+        DedicatedSessionBoundedOutcome {
+            kind,
+            dimension,
+            approval: None,
+        }
+    }
+
+    #[test]
+    fn terminal_outcome_kind_maps_every_bounded_outcome() {
+        use DedicatedSessionBoundedOutcomeKind as Kind;
+        use ryeos_runtime::callback::DedicatedSessionBoundedBudgetDimension as Dimension;
+        let cases = [
+            (
+                bounded(Kind::Completed, None),
+                Some("completed"),
+                "completed",
+            ),
+            (
+                bounded(Kind::BudgetExhausted, Some(Dimension::Duration)),
+                Some("cancelled"),
+                "deadline",
+            ),
+            (
+                bounded(Kind::BudgetExhausted, Some(Dimension::WorkerExecutions)),
+                Some("cancelled"),
+                "budget",
+            ),
+            (
+                bounded(Kind::BudgetExhausted, Some(Dimension::ProviderContacts)),
+                Some("cancelled"),
+                "budget",
+            ),
+            (
+                bounded(Kind::ApprovalRequired, None),
+                Some("cancelled"),
+                "approval_required",
+            ),
+            (
+                bounded(Kind::OutcomeUnknown, None),
+                Some("cancelled"),
+                "outcome_unknown",
+            ),
+            (
+                bounded(Kind::WorkerFailure, None),
+                Some("cancelled"),
+                "worker_failure",
+            ),
+            (
+                bounded(Kind::RetryableUncontactedExhausted, None),
+                Some("cancelled"),
+                "failed",
+            ),
+        ];
+        for (outcome, reason, expected) in cases {
+            assert_eq!(
+                terminal_outcome_kind(reason, Some(&outcome)),
+                expected,
+                "{outcome:?}"
+            );
+        }
+        // With no bounded outcome the lifecycle terminal reason decides.
+        assert_eq!(terminal_outcome_kind(Some("cancelled"), None), "cancelled");
+        assert_eq!(terminal_outcome_kind(Some("completed"), None), "completed");
+        assert_eq!(
+            terminal_outcome_kind(Some("credential_revoked"), None),
+            "failed"
+        );
+        assert_eq!(terminal_outcome_kind(None, None), "failed");
+    }
+
+    #[test]
+    fn the_result_payload_is_the_marked_event_for_the_fence_turn() {
+        let marked = |turn: &str, text: &str| {
+            json!({"event_type":"turn.completed","result":true,
+                   "payload":{"turn_id":turn,"result":{"text":text}}})
+        };
+        let plain = json!({"event_type":"turn.started","payload":{"turn_id":"t1"}});
+        let batch =
+            json!({"events":[plain.clone(), marked("t1", "one")],"session_observations":[]});
+        assert_eq!(
+            select_result_payload(&batch, "t1"),
+            json!({"turn_id":"t1","result":{"text":"one"}})
+        );
+        // Several marked events in one batch: the payload names its own turn.
+        let two = json!({"events":[marked("t1", "one"), marked("t2", "two")],
+                         "session_observations":[]});
+        assert_eq!(select_result_payload(&two, "t2")["result"]["text"], "two");
+        assert_eq!(select_result_payload(&two, "t3"), Value::Null);
+        // No marked event, no result.
+        let none = json!({"events":[plain],"session_observations":[]});
+        assert_eq!(select_result_payload(&none, "t1"), Value::Null);
+    }
+
+    #[test]
+    fn a_worker_event_may_carry_the_result_marker_and_defaults_to_unmarked() {
+        let marked: WorkerEvent = serde_json::from_value(
+            json!({"event_type":"turn.completed","payload":{},"result":true}),
+        )
+        .unwrap();
+        assert!(marked.result);
+        let plain: WorkerEvent =
+            serde_json::from_value(json!({"event_type":"turn.started","payload":{}})).unwrap();
+        assert!(!plain.result);
+        assert!(
+            serde_json::from_value::<WorkerEvent>(json!({"event_type":"x","payload":{},"extra":1}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn workload_child_identity_refuses_thread_root_and_owner_contradictions() {

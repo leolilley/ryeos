@@ -712,6 +712,7 @@ pub fn compile(
         }
     }
     let mut notification_methods = BTreeSet::new();
+    let mut result_notifications = 0usize;
     for item in bounded_array(object, "notifications", 0, 256)? {
         let item = item
             .as_object()
@@ -726,6 +727,7 @@ pub fn compile(
                 "payload",
                 "observations",
                 "ceremony_clear",
+                "result",
             ],
             &["upstream_session_pointer"],
         )?;
@@ -740,8 +742,16 @@ pub fn compile(
                 .get("ceremony_clear")
                 .and_then(Value::as_bool)
                 .is_none()
+            || item.get("result").and_then(Value::as_bool).is_none()
         {
             bail!("structured-session notification flags are invalid");
+        }
+        if item["result"] == true {
+            result_notifications += 1;
+            if result_notifications > 1 {
+                bail!("structured-session profile marks more than one result notification");
+            }
+            validate_result_notification(item)?;
         }
         validate_template(item.get("payload"), 0, &mut 0)?;
         if let Some(pointer) = item.get("upstream_session_pointer") {
@@ -1907,6 +1917,57 @@ fn validate_predicates(value: Option<&Value>, maximum: usize) -> Result<()> {
     Ok(())
 }
 
+/// A result notification is the execution's result: it must be retained
+/// (durable), its evaluated payload is the result so every pointer in it must
+/// be byte-bounded, and it must carry the `turn_running -> idle` observation
+/// so the result is bound to the turn it completes.
+fn validate_result_notification(item: &serde_json::Map<String, Value>) -> Result<()> {
+    if item["durable"] != true {
+        bail!("structured-session result notification must be durable");
+    }
+    if !template_pointers_are_bounded(&item["payload"]) {
+        bail!("structured-session result notification payload has an unbounded pointer");
+    }
+    let carries_completion =
+        item["observations"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|observation| {
+                let literal = |field: &str, expected: &str| {
+                    observation
+                        .pointer(&format!("/value/fields/{field}"))
+                        .is_some_and(|value| {
+                            *value == serde_json::json!({"op":"literal","value":expected})
+                        })
+                };
+                literal("kind", "state")
+                    && literal("expected", "turn_running")
+                    && literal("next", "idle")
+            });
+    if !carries_completion {
+        bail!(
+            "structured-session result notification must carry the turn_running to idle observation"
+        );
+    }
+    Ok(())
+}
+
+fn template_pointers_are_bounded(template: &Value) -> bool {
+    match template.get("op").and_then(Value::as_str) {
+        Some("pointer") => template.get("max_string_bytes").is_some(),
+        Some("object") => template
+            .get("fields")
+            .and_then(Value::as_object)
+            .is_some_and(|fields| fields.values().all(template_pointers_are_bounded)),
+        Some("array") => template
+            .get("values")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().all(template_pointers_are_bounded)),
+        _ => true,
+    }
+}
+
 fn validate_observations(value: Option<&Value>, maximum: usize) -> Result<()> {
     let observations = value
         .and_then(Value::as_array)
@@ -2532,10 +2593,101 @@ mod tests {
             .find(|rule| rule["method"] == "turn/completed")
             .unwrap();
         assert_eq!(completed["durable"], true);
+        assert_eq!(completed["result"], true);
         assert_eq!(
             completed["observations"][0]["value"]["fields"]["completed_turn_id"]["pointer"],
             "/message/params/completed_turn_id"
         );
+    }
+
+    fn claude_code_profile_with(mutate: impl FnOnce(&mut Value)) -> Result<()> {
+        let mut files = bundle_source_set("bundles/claude-code/.ai/workers/claude-code/lib/hosted");
+        let mut profile: Value =
+            serde_json::from_slice(&files["structured-session.profile.json"]).unwrap();
+        mutate(&mut profile);
+        let bytes = serde_json::to_vec(&profile).unwrap();
+        files.insert("structured-session.profile.json".to_owned(), bytes.clone());
+        compile(&bytes, &files).map(drop)
+    }
+
+    #[test]
+    fn result_marker_is_a_required_boolean_on_every_notification() {
+        claude_code_profile_with(|_| {}).unwrap();
+        for bad in [json!(null), json!("true"), json!(1)] {
+            let error = claude_code_profile_with(|profile| {
+                profile["notifications"][1]["result"] = bad.clone();
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("notification flags are invalid"));
+        }
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("result");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+    }
+
+    #[test]
+    fn at_most_one_notification_carries_the_result_marker() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result"] = json!(true);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("more than one result notification")
+        );
+        // No result notification at all is a valid profile.
+        claude_code_profile_with(|profile| {
+            profile["notifications"][0]["result"] = json!(false);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn the_result_notification_carries_the_turn_completion_observation() {
+        // The turn-start notification carries the idle to turn_running edge,
+        // not the completion edge.
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["result"] = json!(false);
+            profile["notifications"][1]["result"] = json!(true);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("turn_running to idle observation")
+        );
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["observations"] = json!([]);
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("turn_running to idle observation")
+        );
+    }
+
+    #[test]
+    fn the_result_notification_is_durable_and_its_pointers_are_bounded() {
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["durable"] = json!(false);
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("must be durable"));
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]["payload"]["fields"]["result"]
+                .as_object_mut()
+                .unwrap()
+                .remove("max_string_bytes");
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("unbounded pointer"));
     }
 
     #[test]
@@ -2750,7 +2902,8 @@ mod tests {
                         "durable":false,
                         "payload":{"op":"literal","value":null},
                         "observations":[],
-                        "ceremony_clear":false
+                        "ceremony_clear":false,
+                        "result":false
                     })
                 })
                 .collect(),

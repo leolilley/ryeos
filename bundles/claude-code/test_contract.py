@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-16T09:38:06Z:4a6b72f487d501be181bf31353a7a2ef1427e4cda5a0034294369feb8613b96c:7CG5VWGIwj0aSDV2Rt6aO+pM8VhWp8avLhYsh0JDsWD3U2kp4AB470xBT9exBOfTC/zDv/Oi8A0cE53AZXglBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T10:06:19Z:ddfb8673a45158bbe0e34a40ef7bae29cdaa9f8d695f78e25e7d6c6875e6abc6:US+zC3ff4ANxbELe2rTaM5agQSBcvi85jWxQ1AMI8zc2uVv3G8Of5Wy9U5izUEb9ePZmq4zY1gaSNnwXf02mCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the claude-code provider data.
 
 These checks pin the authored shape the Rust validators judge: the profile
@@ -96,7 +96,7 @@ class ClaudeCodeContractTests(unittest.TestCase):
 
     def test_profile_declares_every_required_top_level_key_and_nothing_else(self) -> None:
         self.assertEqual(set(self.profile), TOP_LEVEL_KEYS)
-        self.assertEqual(self.profile["schema_version"], 12)
+        self.assertEqual(self.profile["schema_version"], 13)
         self.assertEqual(self.profile["transport"], "stdio_jsonrpc")
         self.assertIsNone(self.profile["http_sse"])
         self.assertIsNone(self.profile["external_candidate"])
@@ -179,6 +179,8 @@ class ClaudeCodeContractTests(unittest.TestCase):
         self.assertIn("completed_turn_id", finished)
         self.assertIn("result", done["payload"]["fields"])
         self.assertIn("status", done["payload"]["fields"])
+        self.assertTrue(done["result"])
+        self.assertFalse(notifications["turn/started"]["result"])
         turn_start = next(route for route in self.profile["routes"] if route["id"] == "turn.start")
         self.assertEqual(turn_start["progress_notifications"], ["turn/started"])
         self.assertEqual(

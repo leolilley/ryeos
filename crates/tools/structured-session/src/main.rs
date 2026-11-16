@@ -532,6 +532,11 @@ struct NotificationRule {
     observations: Vec<ObservationRule>,
     #[serde(default)]
     ceremony_clear: bool,
+    /// Marks the notification whose durable payload is the execution's
+    /// result. The pushed event carries the marker so the daemon can read the
+    /// result back from the retained observation batch.
+    #[serde(default)]
+    result: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -3646,7 +3651,7 @@ impl StructuredWorkload {
                     self.emit_command_progress(&observations)?;
                     // The notification's lifecycle authority is request-correlated,
                     // not duplicated in the independent pushed-observation stream.
-                    return self.push_event(json!({"event_type":rule.event_type,"payload":payload,"session_observations":[]}));
+                    return self.push_event(notification_event(&rule, payload, Vec::new()));
                 }
                 if self.profile.routes.iter().any(|route| {
                     route
@@ -3661,11 +3666,7 @@ impl StructuredWorkload {
                 if rule.ceremony_clear {
                     self.ceremony_active = false;
                 }
-                self.push_event(json!({
-                    "event_type":rule.event_type,
-                    "payload":payload,
-                    "session_observations":observations
-                }))
+                self.push_event(notification_event(&rule, payload, observations))
             }
             (None, None) => bail!("structured workload message has neither id nor method"),
         }
@@ -3893,6 +3894,21 @@ impl StructuredWorkload {
             .map_err(|_| anyhow!("structured-session event queue is poisoned"))?
             .push(event)
     }
+}
+
+/// The pushed event for one durable notification. Only a result-marked
+/// notification carries the `result` flag, so every other event keeps its
+/// exact prior shape.
+fn notification_event(rule: &NotificationRule, payload: Value, observations: Vec<Value>) -> Value {
+    let mut event = json!({
+        "event_type":rule.event_type,
+        "payload":payload,
+        "session_observations":observations
+    });
+    if rule.result {
+        event["result"] = Value::Bool(true);
+    }
+    event
 }
 
 fn render_workload_invocation_result(
@@ -4953,6 +4969,28 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt as _;
+
+    #[test]
+    fn only_the_result_notification_event_carries_the_result_marker() {
+        let profile: Value = serde_json::from_str(include_str!(
+            "../../../../bundles/claude-code/.ai/workers/claude-code/lib/hosted/structured-session.profile.json"
+        ))
+        .unwrap();
+        let rules: Vec<NotificationRule> =
+            serde_json::from_value(profile["notifications"].clone()).unwrap();
+        for rule in rules {
+            let event = notification_event(&rule, json!({"turn_id":"t1"}), Vec::new());
+            if rule.method == "turn/completed" {
+                assert!(rule.result);
+                assert_eq!(event["result"], json!(true));
+            } else {
+                assert!(!rule.result);
+                assert!(event.get("result").is_none(), "{}", rule.method);
+            }
+            assert_eq!(event["payload"], json!({"turn_id":"t1"}));
+            assert_eq!(event["event_type"], json!(rule.event_type));
+        }
+    }
 
     fn external_request_contract(route_id: &str) -> (RouteRule, HashMap<String, Value>) {
         let profile: Value = serde_json::from_str(include_str!(

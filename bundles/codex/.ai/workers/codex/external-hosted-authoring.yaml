@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T05:59:32Z:1919921d6ad2ae97ef33395e5b9ba79d0c5b80a76a27b51dd845d4ce2a15e517:3Yy+6d9jqxM6oc+CFMNToxRpCgU58gSyIaqRZ//NUdb5Wrnz3StjC82vYNFCXz2dP5zfJfTNYSH6Uw3FP2nBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T10:06:41Z:85f32607b8226cab1d7e32f060f0d4e623a6edb093e033736030d082496be7ca:FYyDZ+I+TpExtno2NhbY3fmIvGtXJJwMEex9V039NuzH5MysmgJwXyF1EntpJ1T322evDXvb2pBRKVkyvRodCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -23,7 +23,7 @@ session_resources:
 source:
   root: lib/hosted
   entry: external-authoring.profile.json
-  digest: d27da37177e506f6068764c9a96a8fce9ceb71b7d17abfff8cbb617beeb9de48
+  digest: 983bc1ea2ab6e77dd3c74cc779f8485f01ad17c4d70cbeec4a14a89c2079a623
 external_content:
   - id: codex
     kind: file

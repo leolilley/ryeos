@@ -40,15 +40,42 @@ pub fn dedicated_session_terminal_result(
         Some("credential_revoked") => RuntimeResultStatus::Failed,
         _ => RuntimeResultStatus::Failed,
     };
+    let cost = worker_result_cost(&session);
     RuntimeResult {
         success: status.is_success(),
         status,
         thread_id,
         result: Some(serde_json::json!({"session": session})),
         outputs: serde_json::json!({}),
-        cost: None,
+        cost,
         warnings: Vec::new(),
     }
+}
+
+/// The cost a worker's result reports, in the shared runtime cost shape.
+///
+/// A worker result that carries `result.usage` with `input_tokens`,
+/// `output_tokens` and `cost_micro_usd` (all non-negative integers) is the
+/// turn's own spend: micro-dollars are exact multiples of the fixed-point
+/// nano-dollar unit. A result with no such usage, or one that does not satisfy
+/// the shared cost contract, reports no cost.
+pub fn worker_result_cost(session: &serde_json::Value) -> Option<RuntimeCost> {
+    let usage = session.pointer("/worker_result/result/usage")?;
+    let input_tokens = usage.get("input_tokens")?.as_u64()?;
+    let output_tokens = usage.get("output_tokens")?.as_u64()?;
+    let nanos = usage
+        .get("cost_micro_usd")?
+        .as_u64()?
+        .checked_mul(1_000)
+        .and_then(|nanos| i64::try_from(nanos).ok())?;
+    let cost = RuntimeCost {
+        input_tokens,
+        output_tokens,
+        total_usd: UsdNanos::from_nanos(nanos).ok()?,
+        basis: None,
+    };
+    cost.validate().ok()?;
+    Some(cost)
 }
 
 #[derive(serde::Deserialize)]
@@ -613,6 +640,61 @@ pub fn encode_follow_terminal_envelope(
     }))
 }
 
+/// Item kind of a bounded worker execution, whose followed value is its
+/// outcome record rather than a kind-defined action result.
+pub const WORKER_EXECUTION_ITEM_KIND: &str = "worker_execution";
+
+/// The outcome classification a settled thread status implies when its child
+/// reported no classification of its own.
+pub const fn status_outcome_kind(status: RuntimeResultStatus) -> &'static str {
+    match status {
+        RuntimeResultStatus::Completed => "completed",
+        RuntimeResultStatus::Cancelled | RuntimeResultStatus::Killed => "cancelled",
+        RuntimeResultStatus::TimedOut => "deadline",
+        RuntimeResultStatus::Failed | RuntimeResultStatus::Continued => "failed",
+    }
+}
+
+/// The terminal session projection inside a settled worker result, whether it
+/// is the result itself (`{session}`) or wrapped in a failure payload
+/// (`{reason, result: {session}}`).
+pub fn worker_terminal_session(result: &serde_json::Value) -> Option<&serde_json::Value> {
+    result
+        .get("session")
+        .or_else(|| result.pointer("/result/session"))
+        .filter(|session| session.is_object())
+}
+
+/// The value a parent receives for a followed worker child, for every
+/// terminal status: the child thread, its terminal status, the closed
+/// `outcome_kind`, the worker's own result payload (`null` when the worker
+/// produced none) and its cost in the shared cost shape. A settled value that
+/// carries no terminal session projection falls back to the classification its
+/// thread status implies.
+pub fn worker_follow_value(
+    child_thread_id: &str,
+    status: RuntimeResultStatus,
+    result: &serde_json::Value,
+    cost: Option<&RuntimeCost>,
+) -> serde_json::Value {
+    let session = worker_terminal_session(result);
+    let outcome_kind = session
+        .and_then(|session| session.get("outcome_kind"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| status_outcome_kind(status));
+    let worker_result = session
+        .and_then(|session| session.get("worker_result"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "child_thread_id": child_thread_id,
+        "status": status,
+        "outcome_kind": outcome_kind,
+        "result": worker_result,
+        "cost": cost,
+    })
+}
+
 /// Apply the default native-kind action projection shared by direct dispatch
 /// and followed-child settlement. Kinds with a stronger contract, such as
 /// graph, project through their kind-owned decoder instead.
@@ -644,6 +726,108 @@ pub fn follow_envelope_terminal_status(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn session_with(kind: &str, worker_result: serde_json::Value) -> serde_json::Value {
+        json!({"outcome_kind": kind, "worker_result": worker_result, "state": "terminal"})
+    }
+
+    #[test]
+    fn worker_follow_value_projects_a_completed_result() {
+        let worker_result = json!({"turn_id":"t1","result":{"text":"hello"}});
+        let cost = RuntimeCost {
+            input_tokens: 3,
+            output_tokens: 4,
+            total_usd: UsdNanos::from_nanos(5_000).unwrap(),
+            basis: None,
+        };
+        let value = worker_follow_value(
+            "T-child",
+            RuntimeResultStatus::Completed,
+            &json!({"session": session_with("completed", worker_result.clone())}),
+            Some(&cost),
+        );
+        assert_eq!(
+            value,
+            json!({
+                "child_thread_id":"T-child","status":"completed","outcome_kind":"completed",
+                "result":worker_result,
+                "cost":{"input_tokens":3,"output_tokens":4,"total_usd":"0.000005"},
+            })
+        );
+    }
+
+    #[test]
+    fn worker_follow_value_projects_every_failure_kind_with_a_null_result() {
+        for kind in [
+            "deadline",
+            "budget",
+            "approval_required",
+            "outcome_unknown",
+            "worker_failure",
+            "cancelled",
+            "failed",
+        ] {
+            let session = session_with(kind, serde_json::Value::Null);
+            // The session may be the result itself or wrapped in a failure
+            // payload; both project identically.
+            for result in [
+                json!({"session": session}),
+                json!({"reason":"runtime_exited_without_callback_finalization",
+                       "runtime_status":"cancelled","result":{"session": session}}),
+            ] {
+                let value =
+                    worker_follow_value("T-child", RuntimeResultStatus::Cancelled, &result, None);
+                assert_eq!(value["outcome_kind"], kind);
+                assert_eq!(value["status"], "cancelled");
+                assert_eq!(value["result"], serde_json::Value::Null);
+                assert_eq!(value["cost"], serde_json::Value::Null);
+                assert_eq!(value["child_thread_id"], "T-child");
+            }
+        }
+    }
+
+    #[test]
+    fn worker_follow_value_without_a_session_uses_the_status_classification() {
+        for (status, kind) in [
+            (RuntimeResultStatus::Failed, "failed"),
+            (RuntimeResultStatus::Cancelled, "cancelled"),
+            (RuntimeResultStatus::Killed, "cancelled"),
+            (RuntimeResultStatus::TimedOut, "deadline"),
+        ] {
+            let value = worker_follow_value("T-child", status, &json!({"error":"boom"}), None);
+            assert_eq!(value["outcome_kind"], kind);
+            assert_eq!(value["result"], serde_json::Value::Null);
+        }
+    }
+
+    #[test]
+    fn worker_result_usage_maps_to_the_shared_runtime_cost() {
+        let session = json!({
+            "state":"terminal", "terminal_reason":"completed",
+            "worker_result":{"turn_id":"t1","result":{"text":"hi","usage":{
+                "input_tokens":120,"output_tokens":34,"cost_micro_usd":2500}}},
+        });
+        let result = dedicated_session_terminal_result("T-done".to_owned(), session);
+        let cost = result.cost.expect("usage maps to cost");
+        assert_eq!(cost.input_tokens, 120);
+        assert_eq!(cost.output_tokens, 34);
+        assert_eq!(cost.total_usd.to_canonical_string(), "0.0025");
+        assert_eq!(cost.basis, None);
+    }
+
+    #[test]
+    fn worker_result_without_usable_usage_reports_no_cost() {
+        for session in [
+            json!({"terminal_reason":"completed"}),
+            json!({"terminal_reason":"completed","worker_result":null}),
+            json!({"worker_result":{"result":{"text":"x"}}}),
+            json!({"worker_result":{"result":{"usage":{"input_tokens":1,"output_tokens":1}}}}),
+            json!({"worker_result":{"result":{"usage":{
+                "input_tokens":-1,"output_tokens":1,"cost_micro_usd":1}}}}),
+        ] {
+            assert!(worker_result_cost(&session).is_none(), "{session}");
+        }
+    }
 
     #[test]
     fn dedicated_session_callback_settlement_requires_a_terminalizing_state() {

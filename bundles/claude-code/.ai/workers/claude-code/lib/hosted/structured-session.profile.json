@@ -1,5 +1,5 @@
 {
-  "schema_version": 12,
+  "schema_version": 13,
   "external_candidate": null,
   "transport": "stdio_jsonrpc",
   "http_sse": null,
@@ -451,6 +451,7 @@
         }
       ],
       "ceremony_clear": false,
+      "result": true,
       "upstream_session_pointer": "/message/params/session_id"
     },
     {
@@ -501,6 +502,7 @@
         }
       ],
       "ceremony_clear": false,
+      "result": false,
       "upstream_session_pointer": "/message/params/session_id"
     }
   ],

@@ -1268,9 +1268,10 @@ pub const MAX_SESSION_CONFIGURATION_FILE_BYTES: usize = 64 * 1024;
 /// without accepting an unbounded document before parsing.
 pub const MAX_STRUCTURED_SESSION_PROFILE_BYTES: usize = 192 * 1024;
 /// Current signed source and retained compiled profile vocabulary.
-/// v12 removes the approval `cancel` response template: RyeOS records only
-/// `accept` and `decline`, so no decision can render it.
-pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 12;
+/// v13 makes the `result` flag a required boolean on every notification: at
+/// most one notification is the execution's result, carrying the
+/// turn-completion observation, and its durable payload is that result.
+pub const STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION: u32 = 13;
 
 /// A signed structured-session profile whose `schema_version` is not the
 /// current one. There is no compatibility reader: an older profile is refused
@@ -1289,8 +1290,8 @@ impl std::fmt::Display for StructuredSessionProfileSchemaRefusal {
             formatter,
             "structured-session profile schema_version {found} is not admitted; current is \
              {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION}. Cure: migrate the profile to \
-             schema_version {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION} (v12 removes every \
-             server request's `cancel` response template), then update its Worker's source \
+             schema_version {STRUCTURED_SESSION_PROFILE_SCHEMA_VERSION} (v13 requires a \
+             boolean `result` flag on every notification), then update its Worker's source \
              digest and re-sign the Worker"
         )
     }

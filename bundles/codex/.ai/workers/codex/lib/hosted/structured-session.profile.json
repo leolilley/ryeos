@@ -1,5 +1,5 @@
 {
-  "schema_version": 12,
+  "schema_version": 13,
   "external_candidate": null,
   "transport": "stdio_jsonrpc",
   "http_sse": null,
@@ -829,7 +829,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "account/login/completed",
@@ -875,7 +876,8 @@
           }
         }
       ],
-      "ceremony_clear": true
+      "ceremony_clear": true,
+      "result": false
     },
     {
       "method": "account/rateLimits/updated",
@@ -892,7 +894,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "account/updated",
@@ -909,7 +912,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "turn/completed",
@@ -964,7 +968,8 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": true
     },
     {
       "method": "item/agentMessage/delta",
@@ -997,7 +1002,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "item/commandExecution/outputDelta",
@@ -1029,7 +1035,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "item/fileChange/outputDelta",
@@ -1061,7 +1068,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "item/fileChange/patchUpdated",
@@ -1093,7 +1101,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "thread/started",
@@ -1111,7 +1120,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "thread/status/changed",
@@ -1134,7 +1144,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "turn/started",
@@ -1157,7 +1168,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "configWarning",
@@ -1174,7 +1186,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "deprecationNotice",
@@ -1191,7 +1204,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "error",
@@ -1208,7 +1222,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "warning",
@@ -1225,7 +1240,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "item/reasoning/summaryPartAdded",
@@ -1237,7 +1253,8 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "item/reasoning/summaryTextDelta",
@@ -1249,7 +1266,8 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "item/reasoning/textDelta",
@@ -1261,7 +1279,8 @@
         "value": null
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "thread/environment/connected",
@@ -1278,7 +1297,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "thread/environment/disconnected",
@@ -1295,7 +1315,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "thread/compacted",
@@ -1312,7 +1333,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "guardianWarning",
@@ -1329,7 +1351,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     }
   ],
   "ignored_notifications": {

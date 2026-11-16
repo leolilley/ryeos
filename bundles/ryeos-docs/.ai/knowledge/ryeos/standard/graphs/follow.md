@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T06:25:48Z:1fb61a88cebeedc704f1138c9524ad89c5c79a307739604b9936487c2c2c8197:yg0k2AQVTw83i6LzPlsybJlTNTT42PS75cIqKDgiwAvn6M62wM8yO228hLwjZhHIFEjF1JpO86Z62RPDugkfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T10:06:19Z:a442f39f4ffbfc0ae521302ab744b68a5eccee9ecd62abc078af0e6b9a1dcfe9:kw6ExRS1LzUvzWOQMoXnjdRSLRgwnrc5O042V5EIUd/V9xZiky/DQC0qwLDQEdo0REY9DS+HBM7d0/y+qbS7BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -146,6 +146,57 @@ daemon restart or interrupted resume, the runtime reuses the checkpointed cohort
 and terminal child results rather than launching completed items again, then
 continues the parent when all slots are terminal.
 
+## Following a worker execution
+
+When the followed item is a `worker_execution:` item (a bounded turn of an
+external worker), the followed value is the child's **outcome record** for
+every terminal status, never the raw session projection:
+
+```yaml
+child_thread_id: T-...          # the followed child thread
+status: completed               # the child's terminal status
+outcome_kind: completed         # closed classification, below
+result: {...}                   # the worker's own result payload, or null
+cost: {input_tokens: .., output_tokens: .., total_usd: ".."}   # or null
+```
+
+`outcome_kind` is one of `completed`, `deadline` (the duration budget ran
+out), `budget` (another budget dimension ran out), `approval_required`,
+`outcome_unknown`, `worker_failure`, `cancelled` and `failed`. `result` is the
+durable payload of the worker profile's result notification for the completed
+turn (for a profile that reports text and usage, `result.result.text` and
+`result.result.usage`); it is `null` whenever no turn completed. `cost` is the
+shared runtime cost shape, present when the worker's result reports usage, so a
+graph can subtract it from a budget held in state.
+
+On success the whole record is the value `assign` and `next` see:
+
+```yaml
+review:
+  node_type: action
+  action: {item_id: "worker_execution:example/review", params: {}}
+  follow: true
+  assign:
+    summary: "${result.result.result.text}"
+  on_error: failed
+  next: {type: unconditional, to: done}
+```
+
+On failure the record is still produced. Under a node-level `on_error` target,
+or under `continue`, it is written to graph state as `state._outcome` before
+routing, so the recovery node can branch on `state._outcome.outcome_kind` and
+read a partial `state._outcome.result`; the next failed worker node overwrites
+it. Under `fail` the graph terminates as before. In a cohort follow, a failed
+worker child's slot holds its record (not `null`), so
+`${state.reviews[0].outcome_kind}` is readable after a `continue` policy.
+
+The parent also receives a `child_thread_settled` event on its thread for each
+followed child, once, when the child settles: `child_thread_id` (the id the
+follow's `child_thread_spawned` named), `follow_key`, `node`, `cohort_index`,
+`status`, `outcome_kind` (always present), `result_summary` (at most 2 KiB of
+the result text, cut on a UTF-8 boundary), `truncated` and `cost`. It is
+observation only and never changes follow semantics.
+
 ## What follow does
 
 1. The parent (a checkpoint-resumable / native-resume execution) hits a
@@ -175,7 +226,8 @@ terminal error, never `continued` with no child behind it. See
   parent with a visible in-band failure envelope. Choose the graph's `fail` or
   `continue` policy, or a node-level `on_error` target, deliberately; a redirect
   does not receive the discarded follow candidate or its collected partial
-  results.
+  results. A failed worker child's outcome record is the one exception: it is
+  exposed as `state._outcome` (see above).
 - `retry` on a `follow: true` node is a validation error — retrying a follow
   needs a fresh follow lifecycle per attempt; route a failed follow with an edge
   to a fresh follow node instead.

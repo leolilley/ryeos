@@ -55,6 +55,10 @@ pub fn outcome_code_is_failure(code: &str) -> bool {
 
 pub const EDGE_RECORDED: &str = "edge_recorded";
 pub const CHILD_THREAD_SPAWNED: &str = "child_thread_spawned";
+/// Written to a following parent when a followed child settles: the child,
+/// its follow, status, closed `outcome_kind`, a bounded result summary and
+/// cost. One per followed child, keyed by the child thread id.
+pub const CHILD_THREAD_SETTLED: &str = "child_thread_settled";
 pub const CONTINUATION_REQUESTED: &str = "continuation_requested";
 pub const CONTINUATION_ACCEPTED: &str = "continuation_accepted";
 pub const COMMAND_SUBMITTED: &str = "command_submitted";

@@ -1,5 +1,5 @@
 {
-  "schema_version": 12,
+  "schema_version": 13,
   "external_candidate": null,
   "transport": "http_sse",
   "http_sse": {
@@ -356,7 +356,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "session.idle",
@@ -369,7 +370,8 @@
         "fields": {
           "session_id": {
             "op": "pointer",
-            "pointer": "/message/params/sessionID"
+            "pointer": "/message/params/sessionID",
+            "max_string_bytes": 256
           }
         }
       },
@@ -395,7 +397,8 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": true
     },
     {
       "method": "session.next.prompted",
@@ -438,7 +441,8 @@
           }
         }
       ],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "session.next.text.delta",
@@ -460,7 +464,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "session.next.tool.called",
@@ -484,7 +489,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "session.error",
@@ -501,7 +507,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     },
     {
       "method": "installation.update-available",
@@ -518,7 +525,8 @@
         }
       },
       "observations": [],
-      "ceremony_clear": false
+      "ceremony_clear": false,
+      "result": false
     }
   ],
   "ignored_notifications": {
