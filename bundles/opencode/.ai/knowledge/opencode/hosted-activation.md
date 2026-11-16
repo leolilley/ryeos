@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T10:38:49Z:4f07929a2e2fce51bbbfda29d0902680d37cae017807f59142510b299c4c5089:Y76H3jnkotHKwEusZFnC2lbF7A1f2J9o6zPgemX5KGAUWY3kYdF8e1iCYBv/jbNWJPUGlLQir5bIK4zGxcI1Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T08:18:29Z:6041a886caacb2d22f2e17da0a484e6045520dfbc0a40e7e23f4e9511b1e2b90:gZbjrisMmrBahs3HNHlN/J1h1X6AcKZWOGmcF9m1mH0VEWC7RSQanGBtdnurNKM5F2K8+aUE6goC7ao+NQBGCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: opencode
 tags: [opencode, hosted-worker, activation, runbook]
@@ -48,11 +48,13 @@ flow of the Codex bundle README; only the opencode-specific facts live here.
 - There is intentionally no `worker_execution:opencode/login` and no public
   raw-key route. A hosted command is durable testimony, so an API key, OAuth
   token or refresh token must not enter its payload even when its response is
-  ephemeral. OpenCode remains non-contact-qualified until RyeOS's existing
-  vault/credential-profile owner exposes a provider-neutral late-secret
-  projection to structured sessions. That future projection must carry only a
-  secret slot/reference in durable testimony and construct the vendor request
-  only at the final in-memory contact boundary.
+  ephemeral. OpenCode remains non-contact-qualified. The substrate now has the generic
+  mechanism: a worker environment may name a `delivered_secret`, read at
+  session start under the root's sealed environment authority and installed
+  only in the workload's environment, with only the name retained in durable
+  testimony. OpenCode's own environment and credential profile are not yet
+  wired to it; that needs a slot-backed credential profile, which is not
+  built. Until then no OpenCode turn is credentialed.
 - Account facts are not projected: `credential_subject` is null because
   API-key providers expose no account identity through the server API.
 - Session state lives in the credential-bearing unified `opencode.db`;

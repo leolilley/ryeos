@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T19:53:53Z:553e8a001b45f82b16606e519d3688807e14e8476740eca322c1b68e061b7bc9:BKh26+1nNIKbOXWJJ20CTPw91pMBzYbuP5qjfBnPUYZxoDaFnidwV+pPOLCvCEtHCoJz8LTkugKmpx8PGfdWAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T09:15:43Z:0b351c26fe16ea8b77496746e8a005242f153549f44f62a9b8c3a9777cce55b3:yEx4/8Ynnmx+Eaot2K2aoGpSjVJBUlNKvklWIPS7/L9GiiS5ZfxFh9RjsaKqKPwQZMGY8tCBvX5xcfAYRSnyDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Codex
 
 First-class signed integration for hosting the pinned Codex App Server on a
@@ -207,7 +207,7 @@ ryeos --no-project execute service:remote/run --input - <<'JSON'
   "item_ref": "service:credential-profiles/create",
   "ref_bindings": {},
   "outbound_principal": "delegated",
-  "parameters": {"profile_id": "personal"},
+  "parameters": {"profile_id": "personal", "activation": {"kind": "ceremony"}},
   "execution_policy": {
     "schema_version": 2,
     "ownership": "daemon_owned",

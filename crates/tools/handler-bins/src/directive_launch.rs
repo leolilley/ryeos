@@ -614,6 +614,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             .environment_contributions
             .max_variables_per_contribution
             != 0
+        || request.environment_contributions.max_delivered_secrets != 0
     {
         return Err("environment_contributions must be disabled".into());
     }

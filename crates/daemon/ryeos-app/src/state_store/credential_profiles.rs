@@ -3,8 +3,8 @@ use super::*;
 
 pub(super) fn operational_credential_profile(
     profile: &runtime_db::CredentialProfileRecord,
-) -> ryeos_state::OperationalCredentialProfileRecord {
-    ryeos_state::OperationalCredentialProfileRecord {
+) -> Result<ryeos_state::OperationalCredentialProfileRecord> {
+    Ok(ryeos_state::OperationalCredentialProfileRecord {
         profile_id: profile.profile_id.clone(),
         owner_principal: profile.owner_principal.clone(),
         home_id: profile.home_id.clone(),
@@ -17,7 +17,13 @@ pub(super) fn operational_credential_profile(
         sanitized_account: profile.sanitized_account.clone(),
         created_at_ms: profile.created_at_ms,
         updated_at_ms: profile.updated_at_ms,
-    }
+        activation_json: profile.activation.canonical_json()?,
+        slot_value_digests_json: profile
+            .slot_value_digests
+            .as_ref()
+            .map(runtime_db::encode_slot_value_digests)
+            .transpose()?,
+    })
 }
 
 pub(super) fn reconcile_credential_profile_authority(
@@ -49,7 +55,7 @@ pub(super) fn reconcile_credential_profile_authority(
                 })?;
         }
         let stable = state_db.merge_operational_credential_profile(
-            &operational_credential_profile(&runtime_profile),
+            &operational_credential_profile(&runtime_profile)?,
         )?;
         runtime_db.reconcile_credential_profile_projection(&stable)?;
     }
@@ -73,7 +79,7 @@ pub(super) fn persist_credential_profile_authority_locked(
         .ok_or_else(|| anyhow!("credential profile projection disappeared before persistence"))?;
     let stable = inner
         .state_db
-        .merge_operational_credential_profile(&operational_credential_profile(&profile))?;
+        .merge_operational_credential_profile(&operational_credential_profile(&profile)?)?;
     if stable.authority_revision != profile.authority_revision {
         anyhow::bail!(
             "stable credential authority advanced beyond the committed runtime transition"
@@ -177,6 +183,33 @@ impl StateStore {
         let profile_id = profile.profile_id.to_owned();
         g.runtime_db.create_credential_profile(profile)?;
         persist_credential_profile_authority_locked(&g, &profile_id)
+    }
+
+    /// Fence a slot-backed profile against the current keyed slot value
+    /// digests and fold any resulting generation advance into stable
+    /// operational authority. Returns the resulting credential generation.
+    pub fn fence_credential_slot_digests(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        digests: &BTreeMap<String, String>,
+    ) -> Result<u64> {
+        let g = self.lock()?;
+        let before = g
+            .runtime_db
+            .credential_profile(profile_id)?
+            .map(|profile| profile.authority_revision);
+        let generation =
+            g.runtime_db
+                .fence_credential_slot_digests(profile_id, owner_principal, digests)?;
+        let after = g
+            .runtime_db
+            .credential_profile(profile_id)?
+            .map(|profile| profile.authority_revision);
+        if before != after {
+            persist_credential_profile_authority_locked(&g, profile_id)?;
+        }
+        Ok(generation)
     }
 
     pub fn credential_profile(&self, profile_id: &str) -> Result<Option<CredentialProfileRecord>> {

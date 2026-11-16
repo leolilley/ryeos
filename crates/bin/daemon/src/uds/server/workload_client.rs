@@ -962,6 +962,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let db = ryeos_app::test_support::TestRuntime::open(&temp.path().join("runtime.sqlite3"));
         db.create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-test",
             owner_principal: "fp:operator",
             home_id: "home-test",

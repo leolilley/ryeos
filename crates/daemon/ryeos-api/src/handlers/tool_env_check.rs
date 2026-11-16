@@ -262,6 +262,7 @@ pub async fn handle(
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: &isolation_item_ref,
                     thread_id: "tool-env-check",
                     verbatim_env_names: &[],

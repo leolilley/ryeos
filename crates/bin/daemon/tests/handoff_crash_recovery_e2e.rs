@@ -603,6 +603,7 @@ requires:
         &BTreeMap::new(),
     )?;
     store.create_credential_profile(NewCredentialProfile {
+        activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
         profile_id: PORTABLE_CREDENTIAL_PROFILE_ID,
         owner_principal,
         home_id: "handoff-portable-fixture",
@@ -3141,6 +3142,7 @@ fn plant_target_abort_state(
 
     let store = open_daemon_state(state_path)?;
     store.create_credential_profile(NewCredentialProfile {
+        activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
         profile_id: TARGET_CREDENTIAL_PROFILE_ID,
         owner_principal: &source.operation.owner_principal,
         home_id: "home:handoff-target-fixture",

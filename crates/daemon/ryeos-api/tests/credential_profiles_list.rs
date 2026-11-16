@@ -60,6 +60,7 @@ fn add_profile(state: &AppState, id: &str, owner: &str) {
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: id,
             owner_principal: owner,
             home_id: &format!("private-{id}"),

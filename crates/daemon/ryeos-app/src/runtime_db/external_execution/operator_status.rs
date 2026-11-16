@@ -258,6 +258,7 @@ mod tests {
     fn released_custody_not_listed() {
         let (_dir, db) = open();
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-loose",
             owner_principal: "fp:operator",
             home_id: "home-loose",

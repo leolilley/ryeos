@@ -320,6 +320,7 @@ pub fn start_scoped_producer(
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &prepared_mounts,
             target_channels: &target_channels,
+            target_sealed_payloads: &[],
             item_ref: "scoped-producer",
             thread_id: &key.root_thread_id,
             verbatim_env_names: &[],

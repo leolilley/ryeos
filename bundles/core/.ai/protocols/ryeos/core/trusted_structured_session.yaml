@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-17T03:41:16Z:b21cdc449421febe07b9060f0d735b1d9be7349f7d2680ad43d1a16fc9194d16:pOozNmTXGq7bSEGJATyk9M16pazU8PZJRFqF+T54t3wuiwxRIUx5f06L5uRLWwApX7sssylnK6nIgNH/OYB0AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T08:18:29Z:ad764cc562caeb34b6b780571d37312435d3f9daa26207597755c8d3aa8cb444:fyLsSi4FKdxWgLd1D1Po1uVRBfb7mpQd8t8gBfUwlDlSbsn4PIRkiPPAmhXx4oUowNbXl+sic5r4GI5KVZUjAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: trusted_structured_session
 category: ryeos/core
@@ -30,6 +30,7 @@ session:
     - RYEOS_STRUCTURED_SESSION_EFFECT_CLASSES
     - RYEOS_STRUCTURED_SESSION_PROFILE_HASH
     - RYEOS_SESSION_PROCESS_ENVIRONMENT
+    - RYEOS_SESSION_SECRET_FD
   readiness_identity_env: RYEOS_SESSION_BOOT_IDENTITY
   channel: inherited_unix_socket
   channel_env: RYEOS_SESSION_FD

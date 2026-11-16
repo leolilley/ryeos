@@ -353,7 +353,9 @@ impl ExternalRealizationDescriptors {
             if realization.kind != ExternalContentKind::File
                 || realization.mode != ExternalContentMode::Pinned
             {
-                anyhow::bail!("external realization descriptor names a realization that is not a pinned file");
+                anyhow::bail!(
+                    "external realization descriptor names a realization that is not a pinned file"
+                );
             }
         }
         Ok(document)
@@ -1058,8 +1060,7 @@ mod tests {
             )
             .unwrap()
         };
-        let decoded =
-            ExternalRealizationDescriptors::decode(&encoded("harness", 9), &set).unwrap();
+        let decoded = ExternalRealizationDescriptors::decode(&encoded("harness", 9), &set).unwrap();
         assert_eq!(decoded.realizations["harness"], 9);
         // A tree has no single descriptor, and an unknown id has no entry.
         assert!(ExternalRealizationDescriptors::decode(&encoded("tree", 9), &set).is_err());

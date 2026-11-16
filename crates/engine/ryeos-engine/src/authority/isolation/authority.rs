@@ -817,6 +817,84 @@ impl IsolationTargetChannelAuthority {
     }
 }
 
+/// One daemon-sealed secret payload that may be delivered to an isolated
+/// target as an immutable in-memory file. Callers cannot construct this
+/// authority from a raw descriptor, and the descriptor is verified to carry all
+/// four seals before the authority exists, so a writable or ordinary file never
+/// acquires sealed-payload meaning by assertion. The descriptor stays
+/// close-on-exec everywhere except at its exact target coordinate.
+#[derive(Debug, Clone)]
+pub struct IsolationTargetSealedPayloadAuthority {
+    payload: lillux::InheritedDescriptorAuthority,
+    target_fd: u32,
+    env_name: String,
+}
+
+impl IsolationTargetSealedPayloadAuthority {
+    pub fn new(
+        payload: lillux::InheritedDescriptorAuthority,
+        target_fd: u32,
+        env_name: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let env_name = env_name.into();
+        if env_name.is_empty()
+            || env_name.len() > 128
+            || !env_name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_uppercase() || (index != 0 && byte.is_ascii_digit())
+            })
+        {
+            anyhow::bail!("target sealed-payload environment name is not canonical");
+        }
+        if target_fd <= 2 {
+            anyhow::bail!("target sealed payload cannot replace a standard descriptor");
+        }
+        payload.inherited_descriptor().map_err(anyhow::Error::msg)?;
+        lillux::sealed_secret_descriptor::validate_sealed_secret_descriptor(&payload)
+            .map_err(anyhow::Error::msg)?;
+        Ok(Self {
+            payload,
+            target_fd,
+            env_name,
+        })
+    }
+
+    pub(crate) fn inherited_descriptor(&self) -> anyhow::Result<u32> {
+        self.payload
+            .inherited_descriptor()
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Declared child descriptor slot. This exposes no source descriptor or
+    /// OS operation authority.
+    pub fn target_fd(&self) -> u32 {
+        self.target_fd
+    }
+
+    pub(crate) fn env_name(&self) -> &str {
+        &self.env_name
+    }
+
+    pub(crate) fn bind_to_subprocess_request(
+        &self,
+        request: &mut lillux::SubprocessRequest,
+    ) -> anyhow::Result<()> {
+        lillux::sealed_secret_descriptor::bind_sealed_secret_to_subprocess_request(
+            &self.payload,
+            request,
+            &self.env_name,
+            self.target_fd,
+        )
+        .map_err(anyhow::Error::msg)
+    }
+
+    pub(crate) fn retain_for_child(
+        &self,
+        inherited_fds: &mut Vec<lillux::InheritedDescriptorAuthority>,
+    ) {
+        inherited_fds.push(self.payload.clone());
+    }
+}
+
 /// Where an enforced launch sees its one node-owned bundle state namespace.
 pub const BUNDLE_STATE_ISOLATION_DESTINATION: &str = "/run/ryeos/bundle-state";
 
@@ -879,6 +957,10 @@ pub struct IsolationLaunchContext<'a> {
     /// workspace. Their destinations derive only from signed logical IDs.
     pub producer_prepared_mounts: &'a [IsolationProducerPreparedDirectoryAuthority],
     pub target_channels: &'a [IsolationTargetChannelAuthority],
+    /// Daemon-sealed secret payloads delivered at exact target descriptors.
+    /// Their target descriptors are unique across this slice and
+    /// `target_channels`.
+    pub target_sealed_payloads: &'a [IsolationTargetSealedPayloadAuthority],
     pub item_ref: &'a str,
     pub thread_id: &'a str,
     /// Environment names delivered verbatim to the target. Their values are
@@ -1275,6 +1357,52 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("stdout or stderr")
+        );
+    }
+
+    #[test]
+    fn target_sealed_payload_authority_retains_sealed_memfd_and_exact_binding() {
+        let sealed = lillux::sealed_secret_descriptor::seal_secret_payload(b"value").unwrap();
+        let authority =
+            IsolationTargetSealedPayloadAuthority::new(sealed, 197, "RYEOS_SESSION_SECRET_FD")
+                .unwrap();
+        assert_eq!(authority.target_fd(), 197);
+        assert_eq!(authority.env_name(), "RYEOS_SESSION_SECRET_FD");
+        assert!(authority.inherited_descriptor().unwrap() > 2);
+    }
+
+    #[test]
+    fn target_sealed_payload_authority_refuses_noncanonical_binding() {
+        let sealed = lillux::sealed_secret_descriptor::seal_secret_payload(b"value").unwrap();
+        for (target_fd, name, expected) in [
+            (197, "lowercase", "not canonical"),
+            (197, "", "not canonical"),
+            (0, "RYEOS_SESSION_SECRET_FD", "standard descriptor"),
+            (2, "RYEOS_SESSION_SECRET_FD", "standard descriptor"),
+        ] {
+            let error = IsolationTargetSealedPayloadAuthority::new(sealed.clone(), target_fd, name)
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_sealed_payload_authority_refuses_a_plain_file_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("plain"), b"value").unwrap();
+        let root = lillux::PinnedDirectory::open(directory.path())
+            .unwrap()
+            .unwrap();
+        let plain = root
+            .open_pinned_regular_descendant(Path::new("plain"), false)
+            .unwrap()
+            .unwrap()
+            .into_inherited_descriptor_path()
+            .unwrap();
+        assert!(
+            IsolationTargetSealedPayloadAuthority::new(plain, 197, "RYEOS_SESSION_SECRET_FD")
+                .is_err()
         );
     }
 }

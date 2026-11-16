@@ -428,6 +428,7 @@ impl StateStore {
         let profile = format!("P-{}", reservation.placement_thread_id);
         g.runtime_db
             .create_credential_profile(runtime_db::NewCredentialProfile {
+                activation: crate::runtime_db::CredentialActivation::Ceremony,
                 profile_id: &profile,
                 owner_principal,
                 home_id: "external-placement-test",

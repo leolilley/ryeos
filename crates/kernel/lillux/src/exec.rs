@@ -3001,7 +3001,7 @@ pub(crate) fn configure_command_piped_stdio(command: &mut process::Command) {
     }
 }
 
-fn bind_inherited_channel_to_subprocess_request(
+pub(crate) fn bind_inherited_channel_to_subprocess_request(
     channel: &InheritedDescriptorAuthority,
     request: &mut SubprocessRequest,
     descriptor_env_name: Option<&str>,

@@ -362,6 +362,11 @@ fn validate_launch_environment_binding(
                 anyhow::bail!("prepared runtime-view environment path is not canonical");
             }
         }
+        LaunchEnvironmentValueWire::DeliveredSecret { name } => {
+            if ryeos_state::objects::validate_session_process_environment_name(name).is_err() {
+                anyhow::bail!("prepared delivered-secret name is protected or invalid");
+            }
+        }
     }
     Ok(())
 }
@@ -2107,6 +2112,7 @@ fn resolve_environment_contributions(
     }
     let mut aggregate_bytes = 0usize;
     let mut variables_by_target: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut delivered_secret_names: BTreeSet<String> = BTreeSet::new();
     let mut prepared = BTreeMap::new();
     for (name, request) in requests {
         if !valid_ref_binding_name(&name) {
@@ -2159,6 +2165,20 @@ fn resolve_environment_contributions(
             }
         }
         for value in contribution.variables.values() {
+            if let ryeos_handler_protocol::LaunchEnvironmentValueWire::DeliveredSecret {
+                name: secret_name,
+            } = value
+            {
+                delivered_secret_names.insert(secret_name.clone());
+                if delivered_secret_names.len() > usize::from(policy.max_delivered_secrets) {
+                    return Err(preparation_error(
+                        "environment_contribution_delivered_secret_limit_exceeded",
+                        "launch preparation exceeded its signed delivered-secret ceiling",
+                        LaunchPrepareErrorClass::Internal,
+                    ));
+                }
+                continue;
+            }
             let ryeos_handler_protocol::LaunchEnvironmentValueWire::ContentPath {
                 content_dependency,
                 ..

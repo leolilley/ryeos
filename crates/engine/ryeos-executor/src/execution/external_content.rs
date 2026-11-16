@@ -4784,6 +4784,11 @@ mod tests {
         let cache = ExternalMaterializationCache::from_runtime_state_root(
             &state.config.runtime_state_dir(),
         );
-        assert!(!cache.root.join(&set.iter().next().unwrap().manifest_hash).exists());
+        assert!(
+            !cache
+                .root
+                .join(&set.iter().next().unwrap().manifest_hash)
+                .exists()
+        );
     }
 }

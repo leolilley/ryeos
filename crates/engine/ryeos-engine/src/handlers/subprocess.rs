@@ -159,6 +159,7 @@ pub(crate) fn run_handler_subprocess_bounded(
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref: &canonical_ref,
             thread_id: "handler",
             verbatim_env_names: &[],

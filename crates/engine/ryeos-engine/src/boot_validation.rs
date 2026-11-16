@@ -772,6 +772,7 @@ fn launch_preparer_validation_request(
             max_variables_per_contribution: contract
                 .environment_contributions
                 .max_variables_per_contribution,
+            max_delivered_secrets: contract.environment_contributions.max_delivered_secrets,
         },
         financial_authority: match contract.financial_authority {
             crate::runtime_registry::FinancialAuthorityDecl::None => {

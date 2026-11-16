@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v15";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v16";
 /// Second PID-first status document. The adapter may publish this only after
 /// Lillux's child-owned pre-exec observation; the parent requires EOF after
 /// exactly one document before accepting it.
@@ -160,7 +160,7 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationAdapterProtocolVersion {
-    #[serde(rename = "ryeos.isolation-adapter/v15")]
+    #[serde(rename = "ryeos.isolation-adapter/v16")]
     Current,
 }
 
@@ -246,6 +246,8 @@ pub enum IsolationCapability {
     ProcessTargetLimits,
     #[serde(rename = "ipc.target_unix_stream")]
     IpcTargetUnixStream,
+    #[serde(rename = "ipc.target_sealed_payload")]
+    IpcTargetSealedPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -376,6 +378,7 @@ pub enum IsolationAuthorityPurpose {
     WorkspaceView,
     WorkspaceViewDescendant,
     TargetDuplexChannel,
+    TargetSealedPayload,
     CharacterDevice,
 }
 
@@ -523,6 +526,20 @@ pub struct IsolationTargetChannel {
     pub env_name: String,
 }
 
+/// One daemon-sealed secret payload delivered at a fixed target descriptor as
+/// an immutable in-memory file. The source authority is operational; the
+/// target descriptor and environment name are the complete admitted
+/// target-side contract. The target descriptor is unique across both this
+/// collection and the plan's target channels; the collection is target-fd
+/// sorted and every descriptor lies above stderr.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationTargetSealedPayload {
+    pub source: IsolationAuthorityId,
+    pub target_fd: u32,
+    pub env_name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationNetwork {
@@ -657,6 +674,7 @@ pub struct IsolationPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_workspace: Option<IsolationProjectWorkspace>,
     pub target_channels: Vec<IsolationTargetChannel>,
+    pub target_sealed_payloads: Vec<IsolationTargetSealedPayload>,
     pub environment: IsolationEnvironment,
     pub network: IsolationNetwork,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1055,6 +1073,75 @@ impl IsolationPlan {
             }
             used_authorities.insert(channel.source.clone());
         }
+        if self.target_sealed_payloads.len() > MAX_AUTHORITIES {
+            return Err(ProtocolValidationError::new(
+                "too many target sealed payloads",
+            ));
+        }
+        let mut previous_payload_fd = None;
+        for payload in &self.target_sealed_payloads {
+            if authority_ids.get(&payload.source)
+                != Some(&IsolationAuthorityPurpose::TargetSealedPayload)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload authority is missing or has the wrong purpose",
+                ));
+            }
+            if payload.target_fd <= 2 {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload cannot replace standard descriptors",
+                ));
+            }
+            if previous_payload_fd.is_some_and(|previous| previous >= payload.target_fd)
+                || self
+                    .target_channels
+                    .iter()
+                    .any(|channel| channel.target_fd == payload.target_fd)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payloads must be sorted with target descriptors unique across channels",
+                ));
+            }
+            previous_payload_fd = Some(payload.target_fd);
+            if !channel_sources.insert(payload.source.clone()) {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload source authority is duplicated",
+                ));
+            }
+            validate_environment_name(&payload.env_name)?;
+            if !channel_environment.insert(payload.env_name.as_str()) {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload environment name is duplicated",
+                ));
+            }
+            let expected_target_fd = payload.target_fd.to_string();
+            if self
+                .environment
+                .values
+                .get(&payload.env_name)
+                .map(String::as_str)
+                != Some(expected_target_fd.as_str())
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload environment must name its exact target descriptor",
+                ));
+            }
+            if self
+                .mounts
+                .iter()
+                .any(|mount| mount.source == payload.source)
+                || self.target.executable == payload.source
+                || self
+                    .project_workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.view == payload.source)
+            {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload authority cannot supply filesystem or executable authority",
+                ));
+            }
+            used_authorities.insert(payload.source.clone());
+        }
         if target_mounts != 1 {
             return Err(ProtocolValidationError::new(
                 "target executable authority must have exactly one mount",
@@ -1107,6 +1194,9 @@ impl IsolationPlan {
         }
         if !self.target_channels.is_empty() {
             capabilities.insert(IsolationCapability::IpcTargetUnixStream);
+        }
+        if !self.target_sealed_payloads.is_empty() {
+            capabilities.insert(IsolationCapability::IpcTargetSealedPayload);
         }
         if self.private_tmp {
             capabilities.insert(IsolationCapability::FilesystemPrivateTmp);
@@ -1798,6 +1888,23 @@ impl AdapterLaunchRequest {
                 ));
             }
         }
+        for payload in &self.plan.target_sealed_payloads {
+            let source_fd = self
+                .authorities
+                .iter()
+                .find(|authority| authority.id == payload.source)
+                .map(|authority| authority.inherited_fd)
+                .ok_or_else(|| {
+                    ProtocolValidationError::new(
+                        "target sealed payload source disappeared after plan validation",
+                    )
+                })?;
+            if payload.target_fd != source_fd && descriptors.contains(&payload.target_fd) {
+                return Err(ProtocolValidationError::new(
+                    "target sealed payload destination aliases an inherited protocol descriptor",
+                ));
+            }
+        }
         Ok(required)
     }
 }
@@ -2028,6 +2135,7 @@ mod tests {
                 fixed_parent_views: Vec::new(),
                 project_workspace: None,
                 target_channels: Vec::new(),
+                target_sealed_payloads: Vec::new(),
                 environment: IsolationEnvironment {
                     values: BTreeMap::from([("PATH".to_string(), "/bin".to_string())]),
                 },
@@ -2426,8 +2534,8 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_duplicate_keys_at_every_depth() {
-        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v15","protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
-        let nested = r#"{"protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
+        let top_level = r#"{"protocol":"ryeos.isolation-adapter/v16","protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let nested = r#"{"protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3,"launcher":4}}"#;
         for document in [top_level, nested] {
             let error = from_json_str_strict::<AdapterInspectionRequest>(document).unwrap_err();
             assert!(error.to_string().contains("duplicate JSON object key"));
@@ -2436,7 +2544,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
-        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
+        let unknown = r#"{"protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(unknown)
                 .unwrap_err()
@@ -2444,7 +2552,7 @@ mod tests {
                 .contains("unknown field")
         );
 
-        let valid = r#"{"protocol":"ryeos.isolation-adapter/v15","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
+        let valid = r#"{"protocol":"ryeos.isolation-adapter/v16","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
             from_json_str_strict::<AdapterInspectionRequest>(&format!("{valid} true"))
                 .unwrap_err()
@@ -2847,6 +2955,78 @@ mod tests {
     }
 
     #[test]
+    fn target_sealed_payload_requires_exact_role_environment_and_unique_descriptor() {
+        let (mut plan, mut authorities) = complete_plan();
+        let source = IsolationAuthorityId::new("sealed-payload").unwrap();
+        plan.target_sealed_payloads = vec![IsolationTargetSealedPayload {
+            source: source.clone(),
+            target_fd: 5,
+            env_name: "RYEOS_SESSION_SECRET_FD".to_owned(),
+        }];
+        plan.environment
+            .values
+            .insert("RYEOS_SESSION_SECRET_FD".to_owned(), "5".to_owned());
+        authorities.push(IsolationAuthority {
+            id: source.clone(),
+            inherited_fd: 6,
+            purpose: IsolationAuthorityPurpose::TargetSealedPayload,
+        });
+        assert!(
+            plan.validate(&authorities)
+                .unwrap()
+                .contains(&IsolationCapability::IpcTargetSealedPayload)
+        );
+
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("target_sealed_payloads");
+        assert!(serde_json::from_value::<IsolationPlan>(value).is_err());
+
+        let mut wrong_purpose = authorities.clone();
+        wrong_purpose.last_mut().unwrap().purpose = IsolationAuthorityPurpose::TargetDuplexChannel;
+        assert!(plan.validate(&wrong_purpose).is_err());
+
+        let mut standard = plan.clone();
+        standard.target_sealed_payloads[0].target_fd = 2;
+        standard
+            .environment
+            .values
+            .insert("RYEOS_SESSION_SECRET_FD".to_owned(), "2".to_owned());
+        assert!(standard.validate(&authorities).is_err());
+
+        let mut wrong_environment = plan.clone();
+        wrong_environment
+            .environment
+            .values
+            .insert("RYEOS_SESSION_SECRET_FD".to_owned(), "6".to_owned());
+        assert!(wrong_environment.validate(&authorities).is_err());
+
+        let mut colliding = plan.clone();
+        colliding.target_channels = vec![IsolationTargetChannel {
+            source: IsolationAuthorityId::new("session-channel").unwrap(),
+            target_fd: 5,
+            env_name: "RYEOS_SESSION_FD".to_owned(),
+        }];
+        colliding
+            .environment
+            .values
+            .insert("RYEOS_SESSION_FD".to_owned(), "5".to_owned());
+        let mut with_channel = authorities.clone();
+        with_channel.push(IsolationAuthority {
+            id: IsolationAuthorityId::new("session-channel").unwrap(),
+            inherited_fd: 7,
+            purpose: IsolationAuthorityPurpose::TargetDuplexChannel,
+        });
+        assert!(colliding.validate(&with_channel).is_err());
+
+        let mut filesystem = plan.clone();
+        filesystem.mounts[1].source = source;
+        assert!(filesystem.validate(&authorities).is_err());
+    }
+
+    #[test]
     fn launch_request_rejects_descriptor_reuse_across_roles() {
         let (plan, authorities) = complete_plan();
         let request = AdapterLaunchRequest {
@@ -3198,7 +3378,7 @@ mod tests {
         let request = workspace_request(WorkspaceLifecycleOperation::Create);
         request.validate().unwrap();
         let encoded = serde_json::to_value(&request).unwrap();
-        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v15");
+        assert_eq!(encoded["protocol"], "ryeos.isolation-adapter/v16");
         let purposes = encoded["authorities"]
             .as_array()
             .unwrap()
@@ -3608,6 +3788,7 @@ mod tests {
             "ryeos.isolation-adapter/v12",
             "ryeos.isolation-adapter/v13",
             "ryeos.isolation-adapter/v14",
+            "ryeos.isolation-adapter/v15",
         ] {
             let mut altered = value.clone();
             altered["protocol"] = serde_json::json!(old);
@@ -3688,7 +3869,7 @@ mod tests {
         let request = original_occupancy_request();
         request.validate().unwrap();
         let value = serde_json::to_value(&request).unwrap();
-        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v15");
+        assert_eq!(value["protocol"], "ryeos.isolation-adapter/v16");
         let mut missing = value.clone();
         missing
             .as_object_mut()

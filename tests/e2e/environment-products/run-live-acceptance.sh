@@ -283,7 +283,7 @@ if [[ -n $continue_selected_worker_from ]]; then
   confirmed_profile=$(python3 "$assert_response" confirmed-profile \
     "$profile_source" "$credential_profile")
   mapfile -t confirmed_profile_coordinate <<<"$confirmed_profile"
-  profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1]},separators=(",",":")))' \
+  profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1],"activation":{"kind":"ceremony"}},separators=(",",":")))' \
     "$credential_profile")
   run_json "$evidence_dir/19a-current-credential-profile.json" --no-project execute \
     service:credential-profiles/get --no-stream --input "$profile_request"
@@ -432,7 +432,7 @@ run_json "$evidence_dir/12-enrollment-worker-binding.json" --no-project \
 python3 "$assert_response" bind "$evidence_dir/12-enrollment-worker-binding.json" \
   "$expected_manifest" worker:fixture/enrollment
 
-profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1]},separators=(",",":")))' \
+profile_request=$(python3 -c 'import json,sys; print(json.dumps({"profile_id":sys.argv[1],"activation":{"kind":"ceremony"}},separators=(",",":")))' \
   "$credential_profile")
 run_json "$evidence_dir/13-credential-profile-create.json" --no-project execute \
   service:credential-profiles/create --no-stream --input "$profile_request"

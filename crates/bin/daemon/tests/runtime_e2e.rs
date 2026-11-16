@@ -117,6 +117,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
@@ -312,6 +313,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []

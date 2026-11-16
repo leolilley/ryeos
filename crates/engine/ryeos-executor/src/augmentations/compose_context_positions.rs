@@ -856,6 +856,7 @@ pub async fn run(
                     writable_runtime_view_mounts: &[],
                     producer_prepared_mounts: &[],
                     target_channels: &[],
+                    target_sealed_payloads: &[],
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                     verbatim_env_names: &[],

@@ -594,6 +594,18 @@ fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandb
             Ok((authority.inherited_fd, channel.target_fd))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let sealed_payloads = request
+        .plan
+        .target_sealed_payloads
+        .iter()
+        .map(|payload| {
+            let authority = authorities
+                .get(&payload.source)
+                .ok_or_else(|| "target sealed-payload authority disappeared".to_string())?;
+            sealed_payload_binding(authority, payload.target_fd)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let target_channels = merge_target_descriptors(target_channels, sealed_payloads)?;
     let character_devices = request
         .plan
         .character_devices
@@ -702,6 +714,40 @@ fn translate_launch(request: &AdapterLaunchRequest) -> Result<lillux::LinuxSandb
                 max_stderr_bytes: None,
             }),
     })
+}
+
+/// Verify one sealed-payload authority and bind it to its exact target
+/// descriptor. The source stays close-on-exec in this process; only the
+/// sandbox's placement at the target coordinate survives the target's exec.
+fn sealed_payload_binding(
+    authority: &ryeos_isolation_protocol::IsolationAuthority,
+    target_fd: u32,
+) -> Result<(u32, u32), String> {
+    if authority.purpose != IsolationAuthorityPurpose::TargetSealedPayload {
+        return Err("target sealed-payload authority has the wrong purpose".to_string());
+    }
+    if target_fd <= 2 {
+        return Err("target sealed payload cannot replace a standard descriptor".to_string());
+    }
+    lillux::sealed_secret_descriptor::validate_inherited_sealed_secret_descriptor(
+        authority.inherited_fd,
+    )?;
+    Ok((authority.inherited_fd, target_fd))
+}
+
+/// Combine duplex-channel and sealed-payload descriptor bindings into the one
+/// target-descriptor-sorted list the sandbox consumes. A target descriptor may
+/// be claimed once across both kinds.
+fn merge_target_descriptors(
+    mut channels: Vec<(u32, u32)>,
+    payloads: Vec<(u32, u32)>,
+) -> Result<Vec<(u32, u32)>, String> {
+    channels.extend(payloads);
+    channels.sort_by_key(|(_, target)| *target);
+    if channels.windows(2).any(|pair| pair[0].1 == pair[1].1) {
+        return Err("a target descriptor is claimed by more than one admitted binding".to_string());
+    }
+    Ok(channels)
 }
 
 fn workspace(request_fd: u32) -> Result<AdapterWorkspaceResponse, String> {
@@ -991,6 +1037,7 @@ fn supported_capabilities(
     capabilities.extend([
         IsolationCapability::ProcessTargetPidReporting,
         IsolationCapability::IpcTargetUnixStream,
+        IsolationCapability::IpcTargetSealedPayload,
     ]);
     if inspection.process_group_containment {
         capabilities.insert(IsolationCapability::LifecycleSharedProcessGroup);
@@ -1064,6 +1111,47 @@ fn fail(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn payload_authority(fd: u32) -> ryeos_isolation_protocol::IsolationAuthority {
+        ryeos_isolation_protocol::IsolationAuthority {
+            id: ryeos_isolation_protocol::IsolationAuthorityId::new("sealed-payload").unwrap(),
+            inherited_fd: fd,
+            purpose: IsolationAuthorityPurpose::TargetSealedPayload,
+        }
+    }
+
+    #[test]
+    fn sealed_payload_binding_accepts_only_a_fully_sealed_memory_file() {
+        let sealed = lillux::sealed_secret_descriptor::seal_secret_payload(b"value").unwrap();
+        let fd = sealed.inherited_descriptor().unwrap();
+        assert_eq!(
+            sealed_payload_binding(&payload_authority(fd), 5).unwrap(),
+            (fd, 5)
+        );
+        assert!(sealed_payload_binding(&payload_authority(fd), 2).is_err());
+        let mut wrong = payload_authority(fd);
+        wrong.purpose = IsolationAuthorityPurpose::TargetDuplexChannel;
+        assert!(sealed_payload_binding(&wrong, 5).is_err());
+
+        let directory = std::env::temp_dir().join(format!(
+            "lillux-adapter-plain-{}-{}",
+            std::process::id(),
+            fd
+        ));
+        std::fs::write(&directory, b"value").unwrap();
+        let plain = std::fs::File::open(&directory).unwrap();
+        let _ = std::fs::remove_file(&directory);
+        let plain_fd = std::os::fd::AsRawFd::as_raw_fd(&plain) as u32;
+        let error = sealed_payload_binding(&payload_authority(plain_fd), 5).unwrap_err();
+        assert!(error.contains("sealable memory file"), "{error}");
+    }
+
+    #[test]
+    fn target_descriptors_merge_sorted_and_refuse_a_shared_target() {
+        let merged = merge_target_descriptors(vec![(9, 0), (10, 7)], vec![(11, 5)]).unwrap();
+        assert_eq!(merged, vec![(9, 0), (11, 5), (10, 7)]);
+        assert!(merge_target_descriptors(vec![(9, 5)], vec![(11, 5)]).is_err());
+    }
 
     #[test]
     fn applied_status_requires_exact_held_mount_echo_before_publication() {
