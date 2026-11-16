@@ -10,6 +10,24 @@ use crate::callback::{
 use crate::envelope::EnvelopeCallback;
 use crate::events::RuntimeEventType;
 
+/// What a `tool_call_start` event records about one tool call.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolDispatchEvent<'a> {
+    pub operation_id: &'a str,
+    /// The tool name the model called.
+    pub tool: &'a str,
+    pub call_id: Option<&'a str>,
+    /// The canonical reference of the item the call resolves to; absent when
+    /// the call resolves to no item, as for the lifecycle `directive_return`
+    /// signal.
+    pub item_ref: Option<&'a str>,
+    /// The turn number along the chain that proposed the call.
+    pub turn: u32,
+    /// The ordinal of this call among the tool calls of that turn.
+    pub call_index: usize,
+    pub effective_caps: &'a [String],
+}
+
 /// Inline cap for tool result bodies in `tool_call_result` SSE
 /// payloads. Bodies up to this size are serialized into the event
 /// directly; larger bodies are persisted in the transcript and the
@@ -1169,24 +1187,23 @@ impl CallbackClient {
     /// Maps to `tool_call_start`. Includes the thread's effective
     /// capabilities so event consumers can see what the thread was
     /// authorized to do at dispatch time.
-    pub async fn emit_tool_dispatch(
-        &self,
-        operation_id: &str,
-        tool: &str,
-        call_id: Option<&str>,
-        effective_caps: &[String],
-    ) -> Result<()> {
-        if !crate::callback::valid_action_operation_id(operation_id) {
+    pub async fn emit_tool_dispatch(&self, dispatch: &ToolDispatchEvent<'_>) -> Result<()> {
+        if !crate::callback::valid_action_operation_id(dispatch.operation_id) {
             anyhow::bail!("tool dispatch operation_id is not a canonical lowercase SHA-256 digest");
         }
         let mut data = serde_json::json!({
-            "operation_id": operation_id,
-            "tool": tool,
+            "operation_id": dispatch.operation_id,
+            "tool": dispatch.tool,
+            "turn": dispatch.turn,
+            "call_index": dispatch.call_index,
         });
-        if let Some(id) = call_id {
+        if let Some(id) = dispatch.call_id {
             data["call_id"] = serde_json::json!(id);
         }
-        data["effective_caps"] = serde_json::json!(effective_caps);
+        if let Some(item_ref) = dispatch.item_ref {
+            data["item_ref"] = serde_json::json!(item_ref);
+        }
+        data["effective_caps"] = serde_json::json!(dispatch.effective_caps);
         self.append_runtime_event(RuntimeEventType::ToolCallStart, data)
             .await
     }
@@ -1595,7 +1612,15 @@ mod tests {
     async fn tool_start_and_result_retain_one_exact_operation_id() {
         let (callback, recorder) = make_recorder_client();
         callback
-            .emit_tool_dispatch(TEST_OPERATION_ID, "test/tool", Some("call-1"), &[])
+            .emit_tool_dispatch(&ToolDispatchEvent {
+                operation_id: TEST_OPERATION_ID,
+                tool: "test/tool",
+                call_id: Some("call-1"),
+                item_ref: Some("tool:test/tool"),
+                turn: 3,
+                call_index: 1,
+                effective_caps: &[],
+            })
             .await
             .unwrap();
         callback
@@ -1612,10 +1637,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            recorder.last("tool_call_start").unwrap()["operation_id"],
-            TEST_OPERATION_ID
-        );
+        let start = recorder.last("tool_call_start").unwrap();
+        assert_eq!(start["operation_id"], TEST_OPERATION_ID);
+        assert_eq!(start["item_ref"], "tool:test/tool");
+        assert_eq!(start["turn"], 3);
+        assert_eq!(start["call_index"], 1);
+        assert!(start.get("graph_run_id").is_none());
         assert_eq!(
             recorder.last("tool_call_result").unwrap()["operation_id"],
             TEST_OPERATION_ID
@@ -1627,7 +1654,15 @@ mod tests {
         let (callback, recorder) = make_recorder_client();
         let uppercase = "A".repeat(64);
         let start = callback
-            .emit_tool_dispatch(&uppercase, "test/tool", Some("call-1"), &[])
+            .emit_tool_dispatch(&ToolDispatchEvent {
+                operation_id: &uppercase,
+                tool: "test/tool",
+                call_id: Some("call-1"),
+                item_ref: None,
+                turn: 1,
+                call_index: 0,
+                effective_caps: &[],
+            })
             .await
             .unwrap_err();
         let result = callback

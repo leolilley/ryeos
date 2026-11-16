@@ -402,6 +402,8 @@ fn recover_tool_state(
                                 turn,
                                 call_index,
                             ),
+                            turn,
+                            call_index,
                             start_recorded: false,
                             counted: false,
                             spawn_counted: false,
@@ -1634,6 +1636,35 @@ mod tests {
         assert_eq!(started.started.len(), 2);
         assert_eq!(started.started[0].operation_id, first);
         assert_eq!(started.started[1].operation_id, second);
+    }
+
+    #[test]
+    fn recovered_occurrences_carry_their_turn_and_call_index_and_accept_the_recorded_keys() {
+        let (mut events, mut sources, first, second) = proposed_tool_batch();
+        for (operation_id, call_id, tool, call_index) in [
+            (first.clone(), "call-a", "tool:a", 0),
+            (second.clone(), "call-b", "tool:b", 1),
+        ] {
+            events.push(ReplayedEventRecord {
+                event_type: "tool_call_start".to_string(),
+                payload: json!({
+                    "operation_id": operation_id,
+                    "call_id": call_id,
+                    "tool": tool,
+                    "item_ref": tool,
+                    "turn": 3,
+                    "call_index": call_index,
+                }),
+            });
+            sources.push("T-source".to_string());
+        }
+        let recovered = recover_tool_state(&events, &sources).unwrap();
+        assert_eq!(recovered.pending.len(), 2);
+        for (index, occurrence) in recovered.pending.iter().enumerate() {
+            assert!(occurrence.start_recorded);
+            assert_eq!(occurrence.turn, 3);
+            assert_eq!(occurrence.call_index, index);
+        }
     }
 
     #[test]

@@ -85,6 +85,10 @@ struct RenderedToolResult {
 pub(crate) struct ToolOccurrence {
     pub call: crate::directive::ToolCall,
     pub operation_id: String,
+    /// The turn number along the chain that proposed the call.
+    pub turn: u32,
+    /// The ordinal of the call among the tool calls of that turn.
+    pub call_index: usize,
     /// The braid already contains this occurrence's `tool_call_start`.
     pub start_recorded: bool,
     /// The harness already charged this proposed non-lifecycle tool call.
@@ -2740,6 +2744,8 @@ impl Runner {
                                                     turn,
                                                     call_index,
                                                 ),
+                                            turn,
+                                            call_index,
                                             start_recorded: false,
                                             counted: false,
                                             spawn_counted: false,
@@ -2811,10 +2817,15 @@ impl Runner {
                             if let Err(e) = self
                                 .callback
                                 .emit_tool_dispatch(
-                                    &occurrence.operation_id,
-                                    &tc.name,
-                                    tc.id.as_deref(),
-                                    self.harness.effective_caps(),
+                                    &ryeos_runtime::callback_client::ToolDispatchEvent {
+                                        operation_id: &occurrence.operation_id,
+                                        tool: &tc.name,
+                                        call_id: tc.id.as_deref(),
+                                        item_ref: self.dispatcher.item_ref(&tc.name).as_deref(),
+                                        turn: occurrence.turn,
+                                        call_index: occurrence.call_index,
+                                        effective_caps: self.harness.effective_caps(),
+                                    },
                                 )
                                 .await
                             {
@@ -2976,10 +2987,15 @@ impl Runner {
                             if let Err(e) = self
                                 .callback
                                 .emit_tool_dispatch(
-                                    &occurrence.operation_id,
-                                    &tc.name,
-                                    tc.id.as_deref(),
-                                    self.harness.effective_caps(),
+                                    &ryeos_runtime::callback_client::ToolDispatchEvent {
+                                        operation_id: &occurrence.operation_id,
+                                        tool: &tc.name,
+                                        call_id: tc.id.as_deref(),
+                                        item_ref: self.dispatcher.item_ref(&tc.name).as_deref(),
+                                        turn: occurrence.turn,
+                                        call_index: occurrence.call_index,
+                                        effective_caps: self.harness.effective_caps(),
+                                    },
                                 )
                                 .await
                             {
@@ -4909,6 +4925,8 @@ mod tests {
                 arguments: serde_json::json!({}),
             },
             operation_id: "1".repeat(64),
+            turn: 1,
+            call_index: 0,
             start_recorded: false,
             counted: false,
             spawn_counted: false,
