@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:33:58Z:439779439ed9a7e6294b453fa21420c0ac43dcee0362edc6e42f824e558b480b:w/yZbmr25ewwlbQXWZ0/+aK/I2tA645t+YX9YtSEiWmrA0UUN4ljdoV56juFitHvSAiEdTq4ZFHREe86Fz+BCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T08:18:29Z:e4680fba00d7881a4635d6a251e7a2c12e91b01a1419f74ed2b71920d0765c0f:EFvpATlddoTco3n7Mf3LLgVXqaCm/fBot0ZrDGfrXdBwZusAEh3S9ZdE3Unhhew8chch/wjKqcBCR5J8MkdLBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, vault, secrets, remote]
@@ -136,3 +136,10 @@ Security notes:
 - Request signing authenticates and protects integrity, but it is not
   transport encryption.
 - Use TLS for non-loopback deployments.
+
+## Delivery to structured sessions
+
+A structured session can receive vault secrets as named environment values,
+read under the root's sealed environment authority with the session owner as
+recipient. See "Delivered secrets for structured sessions" in
+`knowledge:ryeos/core/execution/worker-hosted-execution`.

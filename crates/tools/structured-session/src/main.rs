@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use lillux::time::{Duration, MonotonicDeadline};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use zeroize::Zeroizing;
 
 mod configuration_absence;
 mod workload_client_broker;
@@ -1138,6 +1139,12 @@ fn main() {
 
 fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
     lillux::disable_process_core_dumps().map_err(anyhow::Error::msg)?;
+    // Read and close the secret descriptor before anything else is started, so
+    // no later child can ever hold it. The descriptor number is consumed from
+    // the environment here and is never visible to the workload.
+    // SAFETY: the signed launch protocol gives this process unique ownership of
+    // the named descriptor; this runs during single-threaded startup.
+    let delivered_secrets = unsafe { read_delivered_session_secrets(SESSION_SECRET_FD_ENV)? };
     let workspace = required_env("RYEOS_WORKSPACE")?;
     let workload_home = required_env("RYEOS_WORKLOAD_HOME")?;
     let route_set = required_env("RYEOS_STRUCTURED_SESSION_ROUTE_SET")?;
@@ -1225,13 +1232,14 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         )?;
     let session_process_environment =
         optional_env(ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV)?;
-    let (mut session_process_environment, mut environment_descriptors) =
+    let (mut session_process_environment, mut environment_descriptors, secret_environment) =
         resolve_session_process_environment_with_delivery(
             std::path::Path::new(&workspace),
             std::path::Path::new(&external_root),
             &external_realizations,
             session_process_environment.as_deref(),
             external_delivery,
+            delivered_secrets,
         )?;
     inherited_descriptors.append(&mut environment_descriptors);
     inherited_descriptors.append(&mut workload_handles);
@@ -1311,11 +1319,12 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
     let (workload_result_sender, workload_results) = sync_channel::<WorkloadCommandResult>(32);
     let (pending_control_sender, pending_controls) = sync_channel::<PendingControl>(32);
     for name in &profile.required_process_environment {
-        if !session_process_environment.contains_key(name) {
+        if !session_process_environment.contains_key(name) && !secret_environment.contains_key(name)
+        {
             bail!("required process environment `{name}` is absent from admitted session inputs");
         }
     }
-    let mut app = StructuredWorkload::start(
+    let mut app = StructuredWorkload::start_with_secrets(
         lifecycle,
         executable.to_str().ok_or_else(|| {
             anyhow!("pinned structured-session workload executable path is not UTF-8")
@@ -1335,6 +1344,7 @@ fn run(lifecycle: &mut BridgeLifecycle) -> Result<()> {
         executable_path.as_deref(),
         &session_process_environment,
         inherited_descriptors,
+        secret_environment,
     )?;
     // Retain the broker owner for the complete workload lifetime. Its worker
     // threads retain the listener and protected channel; this guard documents
@@ -2018,6 +2028,103 @@ fn resolve_pinned_executable_search_with_delivery(
     Ok((Some(paths.join(":")), handles))
 }
 
+/// Environment slot holding the number of the sealed secret descriptor. It
+/// carries a descriptor number only, never a value.
+const SESSION_SECRET_FD_ENV: &str = "RYEOS_SESSION_SECRET_FD";
+const SESSION_SECRET_PAYLOAD_SCHEMA: u32 = 1;
+/// Largest sealed payload accepted: every admitted secret at the value bound
+/// with worst-case JSON escaping, plus generous room for names and framing.
+const MAX_SESSION_SECRET_PAYLOAD_BYTES: usize = ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS
+    * (ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES * 6 + 512)
+    + 256;
+
+/// Delivered secret values by secret name, in zeroizing buffers.
+type DeliveredSessionSecrets = BTreeMap<String, Zeroizing<String>>;
+/// Delivered secret values by environment variable name, in zeroizing buffers.
+type SessionSecretEnvironment = BTreeMap<String, Zeroizing<String>>;
+
+struct SessionSecretValue(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for SessionSecretValue {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct ValueVisitor;
+        impl serde::de::Visitor<'_> for ValueVisitor {
+            type Value = SessionSecretValue;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+            fn visit_str<E: serde::de::Error>(
+                self,
+                value: &str,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(SessionSecretValue(Zeroizing::new(value.to_owned())))
+            }
+            fn visit_string<E: serde::de::Error>(
+                self,
+                value: String,
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(SessionSecretValue(Zeroizing::new(value)))
+            }
+        }
+        deserializer.deserialize_string(ValueVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionSecretPayload {
+    schema: u32,
+    values: BTreeMap<String, SessionSecretValue>,
+}
+
+/// Adopt, read and close the sealed secret descriptor named by the
+/// environment slot `slot`. An absent slot means nothing was delivered.
+///
+/// # Safety
+/// The trusted parent must have installed the descriptor exactly once for this
+/// process, and this must run during single-threaded startup.
+unsafe fn read_delivered_session_secrets(slot: &str) -> Result<Option<DeliveredSessionSecrets>> {
+    if std::env::var_os(slot).is_none() {
+        return Ok(None);
+    }
+    // SAFETY: upheld by this function's caller.
+    let payload = unsafe {
+        lillux::sealed_secret_descriptor::take_sealed_secret_payload_from_env(
+            slot,
+            MAX_SESSION_SECRET_PAYLOAD_BYTES,
+        )
+    }
+    .map_err(anyhow::Error::msg)
+    .context("read session secret descriptor")?;
+    decode_session_secret_payload(&payload).map(Some)
+}
+
+/// Decode and bound one sealed payload. Errors name secrets, never carry values.
+fn decode_session_secret_payload(payload: &[u8]) -> Result<DeliveredSessionSecrets> {
+    let decoded: SessionSecretPayload = serde_json::from_slice(payload)
+        .map_err(|_| anyhow!("session secret payload is malformed"))?;
+    if decoded.schema != SESSION_SECRET_PAYLOAD_SCHEMA {
+        bail!("session secret payload has an unsupported schema");
+    }
+    if decoded.values.len() > ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS {
+        bail!("session secret payload carries more secrets than a session may name");
+    }
+    let mut values = BTreeMap::new();
+    for (name, value) in decoded.values {
+        let text = value.0;
+        if text.len() > ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES {
+            bail!("delivered secret `{name}` exceeds its byte bound");
+        }
+        if text.chars().any(char::is_control) {
+            bail!("delivered secret `{name}` holds control characters");
+        }
+        values.insert(name, text);
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 fn resolve_session_process_environment(
     workspace: &std::path::Path,
@@ -2028,13 +2135,15 @@ fn resolve_session_process_environment(
     BTreeMap<String, String>,
     Vec<lillux::InheritedDescriptorAuthority>,
 )> {
-    resolve_session_process_environment_with_delivery(
+    let (environment, handles, _) = resolve_session_process_environment_with_delivery(
         workspace,
         external_root,
         sealed_realizations,
         encoded,
         ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
-    )
+        None,
+    )?;
+    Ok((environment, handles))
 }
 
 fn resolve_session_process_environment_with_delivery(
@@ -2043,12 +2152,17 @@ fn resolve_session_process_environment_with_delivery(
     sealed_realizations: &str,
     encoded: Option<&str>,
     external_delivery: ryeos_state::objects::ExternalRealizationDelivery,
+    delivered_secrets: Option<DeliveredSessionSecrets>,
 ) -> Result<(
     BTreeMap<String, String>,
     Vec<lillux::InheritedDescriptorAuthority>,
+    SessionSecretEnvironment,
 )> {
     let Some(encoded) = encoded else {
-        return Ok((BTreeMap::new(), Vec::new()));
+        if delivered_secrets.is_some() {
+            bail!("a session secret descriptor was supplied but no process environment names one");
+        }
+        return Ok((BTreeMap::new(), Vec::new(), BTreeMap::new()));
     };
     if encoded.len() > ryeos_state::objects::MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES {
         bail!("prepared session process environment exceeds its encoded byte bound");
@@ -2058,6 +2172,28 @@ fn resolve_session_process_environment_with_delivery(
     prepared.validate()?;
     let bindings = prepared.bindings;
     let delivery = prepared.runtime_view_delivery;
+    // The retained bindings name which secrets the session expects; the
+    // descriptor must carry exactly those, so a missing, extra or stray
+    // delivery fails before any workload exists.
+    let named_secrets =
+        ryeos_state::objects::session_process_environment_delivered_secret_names(&bindings);
+    match (&delivered_secrets, named_secrets.is_empty()) {
+        (None, false) => bail!(
+            "session process environment names delivered secrets but no session secret descriptor was supplied"
+        ),
+        (Some(_), true) => bail!(
+            "a session secret descriptor was supplied but no process environment names a delivered secret"
+        ),
+        (Some(delivered), false)
+            if !named_secrets
+                .iter()
+                .map(String::as_str)
+                .eq(delivered.keys().map(String::as_str)) =>
+        {
+            bail!("session secret descriptor names differ from the delivered secret bindings")
+        }
+        _ => {}
+    }
     let realizations = ryeos_state::objects::ExternalContentRealizationSet::from_value(
         &serde_json::from_str(sealed_realizations)
             .context("decode sealed external realizations for session process environment")?,
@@ -2095,10 +2231,25 @@ fn resolve_session_process_environment_with_delivery(
     };
 
     let mut resolved = BTreeMap::new();
+    let mut secret_environment = BTreeMap::new();
     let mut handles = Vec::new();
     for (name, binding) in bindings {
         let value = match binding {
             ryeos_state::objects::SessionProcessEnvironmentValue::Literal { value } => value,
+            ryeos_state::objects::SessionProcessEnvironmentValue::DeliveredSecret {
+                name: secret,
+            } => {
+                // The value stays in a zeroizing buffer and is kept out of the
+                // plain environment map; the workload spawn alone consumes it.
+                let value = delivered_secrets
+                    .as_ref()
+                    .and_then(|delivered| delivered.get(&secret))
+                    .ok_or_else(|| {
+                        anyhow!("delivered secret `{secret}` is absent from the session secret descriptor")
+                    })?;
+                secret_environment.insert(name, Zeroizing::new(value.as_str().to_owned()));
+                continue;
+            }
             ryeos_state::objects::SessionProcessEnvironmentValue::RuntimeViewDirectory {
                 relative_path,
             } => {
@@ -2202,7 +2353,7 @@ fn resolve_session_process_environment_with_delivery(
         };
         resolved.insert(name, value);
     }
-    Ok((resolved, handles))
+    Ok((resolved, handles, secret_environment))
 }
 
 fn open_pinned_directory(
@@ -2282,6 +2433,7 @@ fn protect_profile_home(root: &std::path::Path) -> Result<()> {
 }
 
 impl StructuredWorkload {
+    #[cfg(test)]
     fn start(
         lifecycle: &mut BridgeLifecycle,
         executable: &str,
@@ -2298,6 +2450,44 @@ impl StructuredWorkload {
         executable_path: Option<&str>,
         session_process_environment: &BTreeMap<String, String>,
         inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
+    ) -> Result<Self> {
+        Self::start_with_secrets(
+            lifecycle,
+            executable,
+            workspace,
+            workload_home,
+            profile,
+            route_set,
+            allowed_effect_classes,
+            schemas,
+            events,
+            pending_controls,
+            control_results,
+            workload_argv0,
+            executable_path,
+            session_process_environment,
+            inherited_descriptors,
+            BTreeMap::new(),
+        )
+    }
+
+    fn start_with_secrets(
+        lifecycle: &mut BridgeLifecycle,
+        executable: &str,
+        workspace: &str,
+        workload_home: &str,
+        profile: StructuredSessionProfile,
+        route_set: String,
+        allowed_effect_classes: HashSet<RouteEffectClass>,
+        schemas: HashMap<String, Value>,
+        events: Arc<Mutex<EventQueue>>,
+        pending_controls: Receiver<PendingControl>,
+        control_results: SyncSender<WorkloadCommandResult>,
+        workload_argv0: &str,
+        executable_path: Option<&str>,
+        session_process_environment: &BTreeMap<String, String>,
+        inherited_descriptors: Vec<lillux::InheritedDescriptorAuthority>,
+        secret_environment: SessionSecretEnvironment,
     ) -> Result<Self> {
         // The trusted app-server still starts in the controller's pinned B
         // workspace. Its signed route cwd must instead name the guest view
@@ -2368,6 +2558,15 @@ impl StructuredWorkload {
         if lifecycle.process.is_some() || lifecycle.diagnostics.is_some() {
             bail!("structured workload lifecycle already owns a child or reader");
         }
+        for (name, value) in &secret_environment {
+            if process_environment.contains_key(name) {
+                bail!("delivered secret `{name}` collides with the workload environment");
+            }
+            process_environment.insert(name.clone(), value.as_str().to_owned());
+        }
+        // The zeroizing copies end here; the workload's own environment is the
+        // only place the values continue to live.
+        drop(secret_environment);
         lifecycle.executable_authorities = inherited_descriptors.clone();
         lifecycle.process = Some(
             lillux::SubordinateProcess::spawn(lillux::SubordinateProcessRequest {
@@ -6871,14 +7070,16 @@ server.serve_forever()
             "kind":"realization_path", "realization_id":"fixture",
             "relative_path":"worker", "path_kind":"file"
         }}));
-        let (environment, environment_handles) = resolve_session_process_environment_with_delivery(
-            runtime.path(),
-            runtime.path(),
-            &sealed,
-            Some(&bindings),
-            delivery,
-        )
-        .unwrap();
+        let (environment, environment_handles, _) =
+            resolve_session_process_environment_with_delivery(
+                runtime.path(),
+                runtime.path(),
+                &sealed,
+                Some(&bindings),
+                delivery,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(std::fs::read(executable).unwrap(), b"worker");
         assert!(argv0.starts_with("/proc/self/fd"));
@@ -7310,5 +7511,204 @@ server.serve_forever()
                 .is_err(),
             "raw authored bindings are not prepared launch delivery"
         );
+    }
+
+    fn secret_payload(values: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({"schema": 1, "values": values})).unwrap()
+    }
+
+    fn secret_bindings() -> String {
+        descriptor_environment_fixture(json!({
+            "API_KEY": {"kind": "delivered_secret", "name": "API_KEY"},
+            "PLAIN": {"kind": "literal", "value": "visible"}
+        }))
+    }
+
+    #[test]
+    fn session_secret_payload_decodes_within_its_bounds() {
+        let secrets =
+            decode_session_secret_payload(&secret_payload(json!({"API_KEY": "token-value"})))
+                .unwrap();
+        assert_eq!(secrets["API_KEY"].as_str(), "token-value");
+    }
+
+    #[test]
+    fn session_secret_payload_refuses_bad_values_without_echoing_them() {
+        let oversize =
+            "v".repeat(ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES + 1);
+        for (payload, expected) in [
+            (secret_payload(json!({"API_KEY": oversize})), "byte bound"),
+            (
+                secret_payload(json!({"API_KEY": "line\nbreak-secret"})),
+                "control characters",
+            ),
+            (
+                secret_payload(json!({"API_KEY": "nul\u{0}-secret"})),
+                "control characters",
+            ),
+            (
+                serde_json::to_vec(&json!({"schema": 2, "values": {"API_KEY": "x-secret"}}))
+                    .unwrap(),
+                "unsupported schema",
+            ),
+            (
+                serde_json::to_vec(&json!({"schema": 1, "values": {}, "extra": "extra-secret"}))
+                    .unwrap(),
+                "malformed",
+            ),
+        ] {
+            let error = decode_session_secret_payload(&payload)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            for token in [
+                "break-secret",
+                "nul-secret",
+                "x-secret",
+                "extra-secret",
+                "vvvv",
+            ] {
+                assert!(!error.contains(token), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn delivered_secret_binding_resolves_from_the_descriptor_only() {
+        let root = tempfile::tempdir().unwrap();
+        let delivered =
+            decode_session_secret_payload(&secret_payload(json!({"API_KEY": "token-value"})))
+                .unwrap();
+        let (environment, handles, secrets) = resolve_session_process_environment_with_delivery(
+            root.path(),
+            root.path(),
+            "[]",
+            Some(&secret_bindings()),
+            ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+            Some(delivered),
+        )
+        .unwrap();
+        assert!(handles.is_empty());
+        assert_eq!(
+            environment.get("PLAIN").map(String::as_str),
+            Some("visible")
+        );
+        assert!(!environment.contains_key("API_KEY"));
+        assert_eq!(secrets["API_KEY"].as_str(), "token-value");
+    }
+
+    #[test]
+    fn delivered_secret_resolution_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let resolve = |encoded: &str, delivered: Option<DeliveredSessionSecrets>| {
+            resolve_session_process_environment_with_delivery(
+                root.path(),
+                root.path(),
+                "[]",
+                Some(encoded),
+                ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+                delivered,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        let delivered = |names: &[&str]| -> DeliveredSessionSecrets {
+            names
+                .iter()
+                .map(|name| ((*name).to_owned(), Zeroizing::new("value-text".to_owned())))
+                .collect()
+        };
+        // Bindings name a secret and no descriptor arrived.
+        let error = resolve(&secret_bindings(), None);
+        assert!(error.contains("no session secret descriptor"), "{error}");
+        // A descriptor arrived and no binding names a secret.
+        let plain = descriptor_environment_fixture(json!({
+            "PLAIN": {"kind": "literal", "value": "visible"}
+        }));
+        let error = resolve(&plain, Some(delivered(&["API_KEY"])));
+        assert!(error.contains("no process environment names"), "{error}");
+        // The descriptor misses a named secret, or carries an unnamed one.
+        for names in [&["OTHER"][..], &["API_KEY", "OTHER"][..], &[][..]] {
+            let error = resolve(&secret_bindings(), Some(delivered(names)));
+            assert!(error.contains("names differ"), "{error}");
+            assert!(!error.contains("value-text"), "{error}");
+        }
+        // No environment at all, with a descriptor present.
+        assert!(
+            resolve_session_process_environment_with_delivery(
+                root.path(),
+                root.path(),
+                "[]",
+                None,
+                ryeos_state::objects::ExternalRealizationDelivery::FixedNamespace,
+                Some(delivered(&["API_KEY"])),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn secret_descriptor_is_consumed_from_the_environment_and_read_once() {
+        const SLOT: &str = "RYEOS_TEST_SESSION_SECRET_FD_SLOT";
+        let sealed = lillux::sealed_secret_descriptor::seal_secret_payload(&secret_payload(
+            json!({"API_KEY": "token-value"}),
+        ))
+        .unwrap();
+        // The reader adopts and closes its own descriptor, so hand it a
+        // duplicate and keep the original owner intact.
+        let original = sealed.inherited_descriptor().unwrap() as i32;
+        let duplicate = unsafe { libc::fcntl(original, libc::F_DUPFD_CLOEXEC, 3) };
+        assert!(duplicate >= 3);
+        // SAFETY: this test is the only user of the slot name.
+        unsafe { std::env::set_var(SLOT, duplicate.to_string()) };
+        // SAFETY: the duplicate is uniquely owned and adopted exactly once.
+        let secrets = unsafe { read_delivered_session_secrets(SLOT) }
+            .unwrap()
+            .unwrap();
+        assert_eq!(secrets["API_KEY"].as_str(), "token-value");
+        assert!(std::env::var_os(SLOT).is_none());
+        // An absent slot delivers nothing.
+        assert!(
+            unsafe { read_delivered_session_secrets(SLOT) }
+                .unwrap()
+                .is_none()
+        );
+        drop(sealed);
+    }
+
+    #[test]
+    fn workload_launch_does_not_inherit_the_secret_descriptor() {
+        let sealed =
+            lillux::sealed_secret_descriptor::seal_secret_payload(b"secret-bytes").unwrap();
+        let number = sealed.inherited_descriptor().unwrap();
+        let probe = |present: bool, inherited: Vec<lillux::InheritedDescriptorAuthority>| {
+            let check = if present { "" } else { "! " };
+            let mut process =
+                lillux::SubordinateProcess::spawn(lillux::SubordinateProcessRequest {
+                    cmd: "/bin/sh".to_owned(),
+                    argv0: None,
+                    args: vec![
+                        "-c".to_owned(),
+                        format!("test {check}-e /proc/self/fd/{number}"),
+                    ],
+                    cwd: "/".to_owned(),
+                    envs: Vec::new(),
+                    limits: None,
+                    inherited_fds: inherited,
+                })
+                .unwrap();
+            process
+                .wait_exact_child_until(MonotonicDeadline::after(Duration::from_secs(10)))
+                .unwrap()
+                .expect("probe exits")
+                .success
+        };
+        // The launch the bridge performs for its workload retains only the
+        // pinned executable authorities, never the secret descriptor.
+        assert!(probe(false, Vec::new()));
+        // Control: an explicitly retained descriptor is visible to the child,
+        // so the absence above is the close-on-exec protection and not a
+        // property of the probe.
+        assert!(probe(true, vec![sealed.clone()]));
     }
 }

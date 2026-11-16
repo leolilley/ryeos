@@ -50,7 +50,7 @@ impl QualificationWorkerLaunchContract {
         // null selection is valid request data but cannot satisfy this lane.
         ensure!(
             environment.get("schema").and_then(Value::as_str)
-                == Some("ryeos.worker_environment.v6"),
+                == Some("ryeos.worker_environment.v7"),
             "Q environment has no supported accepted credential contract"
         );
         let credential_requirement: QualificationWorkerCredentialRequirement =
@@ -330,7 +330,7 @@ mod tests {
             "max_lifetime_seconds":100, "recover_upstream_session":true,
             "mode":{"kind":"bounded_turn","session_start_route":"session.start","turn_start_route":"turn.start","max_uncontacted_attempts":3}
         });
-        let environment = json!({"schema":"ryeos.worker_environment.v6",
+        let environment = json!({"schema":"ryeos.worker_environment.v7",
             "credential_requirement":{"workload_family":"fixture","required_state":"active","subject_projection_contract":"fixture.account.v1"},
             "workload_client":null
         });

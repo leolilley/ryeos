@@ -85,6 +85,7 @@ async fn status_and_doctor_name_a_held_profile_lock() {
         let operator = "fp:status-e2e";
         store
             .create_credential_profile(NewCredentialProfile {
+                activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
                 profile_id: "personal",
                 owner_principal: operator,
                 home_id: "status-e2e-home",

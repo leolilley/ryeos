@@ -333,6 +333,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             .environment_contributions
             .max_variables_per_contribution
             != 0
+        || request.environment_contributions.max_delivered_secrets != 0
         || request.financial_authority != FinancialAuthorityDeclWire::None
         || request.external_effect_authority != ExternalEffectAuthorityDeclWire::None
     {

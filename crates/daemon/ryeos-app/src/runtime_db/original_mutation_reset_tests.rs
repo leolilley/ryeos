@@ -339,6 +339,8 @@ fn explicit_history_reset_rebuilds_credentials_only_from_stable_authority() {
         sanitized_account: Some(serde_json::json!({"account_id":"account-stable"})),
         created_at_ms: 1,
         updated_at_ms: 2,
+        activation_json: r#"{"kind":"ceremony"}"#.to_owned(),
+        slot_value_digests_json: None,
     };
 
     with_reset_host(dir.path(), |host, root, namespace| {

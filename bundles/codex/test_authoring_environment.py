@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-11T02:56:41Z:908ade3dcd3e4fd7c4141d4354671d0d9c4c4fd2d0da6eccdfa6e1fc0475d9a4:Y4Wrh8IfF9vgj/h33yscCL7AcQIJ/ixn0hHH9jcX0EWiwyL3bQoFADkWOh2A7nbZlUNLfckAxsFibHT88GNdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T08:18:29Z:a67ccb6d801ffd095d2a9bbb4438233d3bb6604c478f8c112f28b08c55125f82:qNafLFNbR2f9JijAeVjfyGETxxvYDyOZ46dMIPP1V41fVi1R68/dDGPJ5bw5D7bQtLQsPoi6pJxqA55chwcgDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Data contracts for the explicit authoring worker/environment composition."""
 
 import copy
@@ -64,7 +64,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         self.assertEqual(self.default["worker_ref"], "worker:codex/hosted")
 
     def test_explicit_worker_uses_existing_environment_contract(self):
-        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v6")
+        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v7")
         self.assertEqual(self.environment["external_product_slots"], [])
         self.assertEqual(self.environment["worker_ref"], "worker:codex/hosted-authoring")
         for key in ("credential_requirement", "portable_state_contract", "workload_client"):

@@ -461,6 +461,7 @@ fn import_one(
             writable_runtime_view_mounts: &[],
             producer_prepared_mounts: &[],
             target_channels: &[],
+            target_sealed_payloads: &[],
             item_ref,
             thread_id: "offline-doctor",
             verbatim_env_names: &[],

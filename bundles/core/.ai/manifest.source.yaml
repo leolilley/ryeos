@@ -8,7 +8,7 @@ runtime_authority:
   project_snapshots: [status, log, show, create]
 isolation_backends:
   - id: linux-lillux
-    protocol: ryeos.isolation-adapter/v15
+    protocol: ryeos.isolation-adapter/v16
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
@@ -36,3 +36,4 @@ isolation_backends:
       - process.target_limits
       - process.nested_sandbox
       - ipc.target_unix_stream
+      - ipc.target_sealed_payload

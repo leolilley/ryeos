@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T11:33:58Z:ed13acdf643133561fe5635f5c77fb0118045dcf7676e85d4917de9c615fcc47:FuTfByMnw1Pzhu/g5RBB6WsuWaEybpdS1p1tSqbd67vAo3gL3l+qwAYXpnPZvSO3aXYMIc8YeOENm5Yt+b1ZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T08:18:29Z:5622d68d61c7f91531d5a3e2f0ec598238b51402c8df058cbeac0c0728ae46dd:4U4YaScNQrFghgzxVgLh0ejZhAXjOO0TDInGvdnOXCGtQJXBrle0FozNzDFZYzrZkGtCioviYHoxRL+hktdUCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [secrets, vault, env, dotenv, providers, security]
@@ -197,3 +197,11 @@ explicit.
 - Sourcing a whole project `.env` into your shell before `ryeos` CLI commands:
   that injects client/control vars (`RYEOSD_URL`) into the CLI and can break it.
   Pass tool inputs via `--input`; let the daemon resolve secrets.
+
+## Delivering a secret to a structured session
+
+A structured-session worker environment can name a secret for delivery to its
+workload under the root's sealed environment authority. See "Delivered secrets
+for structured sessions" in `knowledge:ryeos/core/execution/worker-hosted-execution`
+for who may receive, the refusal codes, and what delivery does and does not
+protect.

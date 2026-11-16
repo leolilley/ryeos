@@ -68,6 +68,10 @@ struct WorkerExecutionConfig {
     mode: WorkerExecutionMode,
     candidate_disposition: String,
     workload_client_delegation_caps: Vec<String>,
+    /// The environment's subject-projection contract, judged by the daemon at
+    /// admission; the runtime only accepts its presence.
+    #[allow(dead_code)]
+    credential_subject_contract: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1271,6 +1275,7 @@ mod tests {
             },
             candidate_disposition: "retained_for_review".to_owned(),
             workload_client_delegation_caps: vec!["ryeos.execute.tool.*".to_owned()],
+            credential_subject_contract: None,
         };
         validate_runtime_mode_policy(&config).unwrap();
 

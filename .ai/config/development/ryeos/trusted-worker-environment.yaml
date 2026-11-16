@@ -1,8 +1,8 @@
-# ryeos:signed:2026-09-17T03:43:53Z:ef469b4082111fa1399f162823fbcc414aa7dee15502eee9e3ba2c8b44a20176:IOWsBsTmemnb0O+56oUM9FB05O0NyaaEuThhKUypfzq4weg2uRGBnixg0g002UgxsnbjugCM1j8HtxUrnqQVAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T08:18:29Z:625548455c5ceea1acf8f6625d08980ec03e8d6c34e2b8d7c987726564cc82af:2te8SFZpkDqfzr5ES5xckDxFe5fBNGgUoXGdW9pcV5ai9yc4Gs5RBp1+fP4rbLQV8n5VcbQcOGy6QOl2KusBAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Trusted/disposable hosted lane. This differs from the hard-contained
 # authoring environment only in the exact worker protocol it selects.
 category: development/ryeos
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 worker_ref: worker:codex/trusted-hosted-authoring
 external_product_slots:
   - id: authoring-tools

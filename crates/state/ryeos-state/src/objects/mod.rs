@@ -162,6 +162,7 @@ pub use persistent_session_capsule::{
     MAX_EXECUTABLE_SEARCH_PATH_ENTRIES, MAX_PERSISTENT_SESSION_CAPSULE_BYTES,
     MAX_PERSISTENT_SESSION_EXACT_PROGRAM_BYTES, MAX_PREPARED_SESSION_PROCESS_ENVIRONMENT_BYTES,
     MAX_SESSION_AUXILIARY_CONFIGS, MAX_SESSION_CONFIGURATION_FILE_BYTES,
+    MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES, MAX_SESSION_DELIVERED_SECRETS,
     MAX_SESSION_PROCESS_ENVIRONMENT_ENCODED_BYTES, MAX_SESSION_PROCESS_ENVIRONMENT_ENTRIES,
     MAX_STRUCTURED_SESSION_PROFILE_BYTES, PERSISTENT_SESSION_CAPSULE_KIND,
     PERSISTENT_SESSION_CAPSULE_SCHEMA_VERSION, PersistentSessionAuthority,
@@ -174,10 +175,11 @@ pub use persistent_session_capsule::{
     SessionProcessEnvironmentPathKind, SessionProcessEnvironmentValue,
     SessionRuntimeConfigurationFile, SessionRuntimeViewDelivery,
     StructuredSessionProfileSchemaRefusal, runtime_view_mount_destination,
-    session_runtime_endpoint_destination, validate_session_auxiliary_configs,
-    validate_session_configuration_destination, validate_session_process_environment,
-    validate_session_process_environment_name, validate_session_process_environment_relative_path,
-    validate_session_runtime_configs, validate_session_runtime_configuration_destination,
+    session_process_environment_delivered_secret_names, session_runtime_endpoint_destination,
+    validate_session_auxiliary_configs, validate_session_configuration_destination,
+    validate_session_process_environment, validate_session_process_environment_name,
+    validate_session_process_environment_relative_path, validate_session_runtime_configs,
+    validate_session_runtime_configuration_destination,
 };
 pub use placement_runtime_seed::{
     MAX_PLACEMENT_RUNTIME_METADATA_BYTES, PLACEMENT_RUNTIME_SEED_KIND,

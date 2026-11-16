@@ -43,7 +43,12 @@ pub use original::{
 pub use original_mutation::OriginalOperationalMutationAuthority;
 
 const OPERATIONAL_APP_ID: i32 = 0x5259_4f50; // "RYOP"
-const OPERATIONAL_SCHEMA_VERSION: i32 = 6;
+// Schema 7: `credential_profiles` carries the owner-defined activation
+// (`activation_json`, required) and the keyed slot-value digests
+// (`slot_value_digests_json`, nullable), so a runtime projection rebuilt from
+// this record reproduces the profile exactly. A schema-6 store lacks both
+// columns and is refused.
+const OPERATIONAL_SCHEMA_VERSION: i32 = 7;
 pub(crate) const MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES: usize = 1;
 /// One main Operational source plus its current-schema reference source.
 pub const MAX_LIVE_OPERATIONAL_PACKET_SOURCES: usize = MAX_LIVE_OPERATIONAL_SCHEMA_REFERENCES + 1;
@@ -71,7 +76,7 @@ pub(crate) const SCHEMA_SQL: &str = concat!(
     r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
-PRAGMA user_version=6;
+PRAGMA user_version=7;
 
 CREATE TABLE cas_entries (
     hash TEXT NOT NULL,
@@ -191,7 +196,9 @@ CREATE TABLE credential_profiles (
     login_expires_at_ms INTEGER,
     sanitized_account_json TEXT,
     created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
+    updated_at_ms INTEGER NOT NULL,
+    activation_json TEXT NOT NULL,
+    slot_value_digests_json TEXT
 );
 
 CREATE INDEX idx_credential_profiles_owner_state
@@ -644,6 +651,18 @@ pub(crate) fn operational_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: true,
                     },
+                    sqlite_schema::ColumnSpec {
+                        name: "activation_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "slot_value_digests_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
         ],
@@ -796,6 +815,11 @@ pub struct OperationalCredentialProfileRecord {
     pub sanitized_account: Option<serde_json::Value>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// The owner's canonical activation source for the profile. State stores
+    /// it opaquely and gives it no meaning.
+    pub activation_json: String,
+    /// The owner's canonical keyed slot-value digests, once recorded.
+    pub slot_value_digests_json: Option<String>,
 }
 
 impl OperationalCredentialProfileRecord {
@@ -846,6 +870,19 @@ fn validate_operational_credential_profile(
     if profile.created_at_ms < 0 || profile.updated_at_ms < 0 {
         anyhow::bail!("credential profile timestamps must be non-negative");
     }
+    for (label, value) in [
+        ("activation", Some(profile.activation_json.as_str())),
+        (
+            "slot value digests",
+            profile.slot_value_digests_json.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value
+            && (value.is_empty() || value.len() > 16 * 1024)
+        {
+            anyhow::bail!("credential profile {label} record is empty or exceeds 16384 bytes");
+        }
+    }
     if profile.state == "deleted"
         && (profile.active_login_id.is_some()
             || profile.login_expires_at_ms.is_some()
@@ -889,6 +926,8 @@ fn operational_credential_profile_from_row(
         sanitized_account,
         created_at_ms: row.get(10)?,
         updated_at_ms: row.get(11)?,
+        activation_json: row.get(12)?,
+        slot_value_digests_json: row.get(13)?,
     })
 }
 
@@ -1174,7 +1213,7 @@ impl OperationalDb {
                     "SELECT profile_id, owner_principal, home_id, authority_revision,
                         credential_generation, state, active_login_id, login_epoch,
                         login_expires_at_ms, sanitized_account_json, created_at_ms,
-                        updated_at_ms
+                        updated_at_ms, activation_json, slot_value_digests_json
                    FROM credential_profiles WHERE profile_id=?1",
                     [profile_id],
                     operational_credential_profile_from_row,
@@ -1194,7 +1233,7 @@ impl OperationalDb {
                 "SELECT profile_id, owner_principal, home_id, authority_revision,
                     credential_generation, state, active_login_id, login_epoch,
                     login_expires_at_ms, sanitized_account_json, created_at_ms,
-                    updated_at_ms
+                    updated_at_ms, activation_json, slot_value_digests_json
                FROM credential_profiles ORDER BY profile_id",
             )?;
             let profiles = statement
@@ -1240,7 +1279,7 @@ impl OperationalDb {
                     "SELECT profile_id, owner_principal, home_id, authority_revision,
                         credential_generation, state, active_login_id, login_epoch,
                         login_expires_at_ms, sanitized_account_json, created_at_ms,
-                        updated_at_ms
+                        updated_at_ms, activation_json, slot_value_digests_json
                    FROM credential_profiles WHERE profile_id=?1",
                     [&candidate.profile_id],
                     operational_credential_profile_from_row,
@@ -1277,8 +1316,9 @@ impl OperationalDb {
                 "INSERT INTO credential_profiles (
                 profile_id, owner_principal, home_id, authority_revision,
                 credential_generation, state, active_login_id, login_epoch,
-                login_expires_at_ms, sanitized_account_json, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                login_expires_at_ms, sanitized_account_json, created_at_ms, updated_at_ms,
+                activation_json, slot_value_digests_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(profile_id) DO UPDATE SET
                 authority_revision=excluded.authority_revision,
                 credential_generation=excluded.credential_generation,
@@ -1287,7 +1327,9 @@ impl OperationalDb {
                 login_epoch=excluded.login_epoch,
                 login_expires_at_ms=excluded.login_expires_at_ms,
                 sanitized_account_json=excluded.sanitized_account_json,
-                updated_at_ms=excluded.updated_at_ms",
+                updated_at_ms=excluded.updated_at_ms,
+                activation_json=excluded.activation_json,
+                slot_value_digests_json=excluded.slot_value_digests_json",
                 rusqlite::params![
                     &candidate.profile_id,
                     &candidate.owner_principal,
@@ -1301,6 +1343,8 @@ impl OperationalDb {
                     account_json,
                     candidate.created_at_ms,
                     candidate.updated_at_ms,
+                    &candidate.activation_json,
+                    &candidate.slot_value_digests_json,
                 ],
             )?;
             tx.commit()
@@ -3755,6 +3799,8 @@ mod tests {
             sanitized_account: None,
             created_at_ms: 1,
             updated_at_ms: 1,
+            activation_json: r#"{"kind":"ceremony"}"#.to_string(),
+            slot_value_digests_json: None,
         };
         assert_eq!(db.merge_credential_profile(&profile).unwrap(), profile);
 
@@ -4129,7 +4175,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let db = TestOperational::at(tempdir.path()).unwrap();
         let path = db.path().to_path_buf();
-        db.with_sql(|connection| Ok(connection.execute_batch("PRAGMA user_version=5;")?))
+        db.with_sql(|connection| Ok(connection.execute_batch("PRAGMA user_version=6;")?))
             .unwrap();
         drop(db);
 

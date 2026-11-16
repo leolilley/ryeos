@@ -116,6 +116,7 @@ async fn status_rows_carry_fix() {
         state
             .state_store
             .create_credential_profile(NewCredentialProfile {
+                activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
                 profile_id: id,
                 owner_principal: operator,
                 home_id: &format!("home-{id}"),

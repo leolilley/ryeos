@@ -56,6 +56,8 @@ fn history_reset_composes_replay_cutover_and_preserves_stable_credentials() {
         sanitized_account: Some(serde_json::json!({"account_id":"retained-account"})),
         created_at_ms: 1,
         updated_at_ms: 2,
+        activation_json: r#"{"kind":"ceremony"}"#.to_owned(),
+        slot_value_digests_json: None,
     };
     let mut enrolling = profile.clone();
     enrolling.profile_id = "retired-enrollment".to_owned();

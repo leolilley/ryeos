@@ -1,6 +1,6 @@
-# ryeos:signed:2026-09-09T18:08:16Z:d1862d44fe8298e640ca5c41fcbe397478bd50aa678864c50c05703cfe6672fe:Xo1TpfGpeH+5K7/JXRkuYY6So+g2ISvOwVbgaVd9D3jkdU19NIE4pJ9uRzxY98qFewRbl+jtSDDhFJUL20nQCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T08:18:29Z:e9c28949e773c3158ef295e88ea0719340ee42b57effbb2afea0ad16bd948789:ZmaUJ1x1gOPivzKLZMeBnXaJI+AzT0PzHz0LOnTs9W3D+DQ21aMSRzUEP8cTU13dXQoIPC4kLB6d5x4MrcAXDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/environments
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 external_product_slots: []
 worker_ref: worker:codex/hosted
 external_content:

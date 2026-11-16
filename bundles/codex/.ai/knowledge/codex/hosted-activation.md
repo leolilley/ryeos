@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:ce491cd6ae5a03df77e7a993927f782b1c4561c85ad0d59a2dec51842efbf61a:T93gY2A9I0gqi3U3w2X7Ha4Sgb9X03T6RNZbuLr491hvvO4nANRUfwPiQdTbCKQfTNnYNL9pO4ebefE8eL//DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T08:18:29Z:af097c703273ff3d3a5d496b6c9b70918a3d8d678b06e14de6bd3c0071a5e5a8:nDZGrgBfkfVwK9m76e9d/4sO1cXFwFC29se6kgpAuZzDKEUffA59x1oC+oZUTcvVrlAE0Log1BfCUbmjNuBvDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -170,7 +170,7 @@ configured-operator forwarding route to inspect profiles on a remote node.
    whose signed policy advertises trusted process-group readiness.
 
    `config:codex/environments/default` uses the closed
-   `ryeos.worker_environment.v6` contract. Its `executable_search` contributes
+   `ryeos.worker_environment.v7` contract. Its `executable_search` contributes
    only the exact activated command-tool tree to `PATH`. Its independent
    `process_environment` map may contribute bounded literals, paths inside an
    explicitly named activated realization, or directories below the

@@ -32,6 +32,22 @@ pub const REQUIRED_CLAIMS: &[&str] = &[
 pub const QUALIFICATION_CONTEXT_SCHEMA: &str = "ryeos.external_candidate_qualification_context.v3";
 pub const QUALIFICATION_CONTEXT_PARAMETER: &str = "external_candidate_qualification_context";
 
+/// Refuses an environment that asks for a delivered secret. A secret is
+/// delivered from the vault of the node that runs the session; an external
+/// placement, qualification or guest transfer does not re-authorise delivery
+/// on the target, so the value would be absent or substituted there.
+pub fn ensure_no_delivered_secrets(
+    environment: &BTreeMap<String, SessionProcessEnvironmentValue>,
+) -> Result<()> {
+    let names = crate::objects::session_process_environment_delivered_secret_names(environment);
+    ensure!(
+        names.is_empty(),
+        "external execution cannot carry delivered secret(s) {}: a delivered secret does not travel to another node",
+        names.join(", ")
+    );
+    Ok(())
+}
+
 /// Domain-owned use context for an independently qualified runtime. A product
 /// witness proves exact bytes, while the verifier must also have exercised the
 /// exact command, routing and placement requirement that consumes those bytes.
@@ -105,6 +121,7 @@ impl ExternalCandidateGuestEnvironment {
     ) -> Result<Self> {
         recipe.validate()?;
         crate::objects::validate_session_process_environment(process_environment)?;
+        ensure_no_delivered_secrets(process_environment)?;
         ensure!(
             executable_search.len() <= crate::objects::MAX_EXECUTABLE_SEARCH_PATH_ENTRIES,
             "external guest executable search exceeds its bound"
@@ -137,6 +154,11 @@ impl ExternalCandidateGuestEnvironment {
                         .to_str()
                         .context("external guest scratch destination is not UTF-8")?
                         .to_owned()
+                }
+                SessionProcessEnvironmentValue::DeliveredSecret { name: secret } => {
+                    anyhow::bail!(
+                        "external guest environment variable `{name}` names delivered secret `{secret}`, which does not travel to another node"
+                    )
                 }
             };
             ensure!(
@@ -247,6 +269,7 @@ impl ExternalCandidateQualificationUse {
             );
         }
         crate::objects::validate_session_process_environment(process_environment)?;
+        ensure_no_delivered_secrets(process_environment)?;
         for value in process_environment.values() {
             if let SessionProcessEnvironmentValue::RealizationPath { realization_id, .. } = value {
                 ensure!(

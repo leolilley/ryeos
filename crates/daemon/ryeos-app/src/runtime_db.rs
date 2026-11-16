@@ -2612,7 +2612,9 @@ CREATE TABLE IF NOT EXISTS credential_profile (
     lock_owner TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
-    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0)
+    authority_revision INTEGER NOT NULL CHECK (authority_revision > 0),
+    activation_json TEXT NOT NULL,
+    slot_value_digests_json TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_credential_profile_owner_state
@@ -2670,7 +2672,11 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 135: `runtime_snapshot_qualification_authority` retains the signed
 // generation and lifecycle closure each qualification occurrence was created
 // under; an epoch-134 store lacks the table and refuses.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 135;
+// Epoch 136: `credential_profile` records its activation source
+// (`activation_json`, required) and the keyed digests of slot values it was
+// last used with (`slot_value_digests_json`, nullable); an epoch-135 store
+// lacks both columns and refuses.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 136;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -6439,6 +6445,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         pk: false,
                         not_null: true,
                     },
+                    sqlite_schema::ColumnSpec {
+                        name: "activation_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "slot_value_digests_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -7821,11 +7839,104 @@ pub struct DedicatedSessionRecord {
     pub updated_at_ms: i64,
 }
 
+/// What makes a credential profile usable, fixed when the profile is created.
+///
+/// A `Ceremony` profile becomes active through the operator login ceremony.
+/// A `DeliveredSecret` profile is active from creation and is judged at use:
+/// it names the delivered secrets its sessions must receive, and carries no
+/// login, account or home credential of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CredentialActivation {
+    Ceremony,
+    DeliveredSecret { names: Vec<String> },
+}
+
+impl CredentialActivation {
+    /// A slot-backed activation over the given names. The names are sorted
+    /// and deduplicated, and each must satisfy the session environment name
+    /// rule; there must be between one and `MAX_SESSION_DELIVERED_SECRETS`.
+    pub fn delivered_secret<I, S>(names: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let names: BTreeSet<String> = names.into_iter().map(Into::into).collect();
+        let activation = Self::DeliveredSecret {
+            names: names.into_iter().collect(),
+        };
+        activation.validate()?;
+        Ok(activation)
+    }
+
+    /// The names a slot-backed profile requires; `None` for a ceremony profile.
+    pub fn slot_names(&self) -> Option<&[String]> {
+        match self {
+            Self::Ceremony => None,
+            Self::DeliveredSecret { names } => Some(names),
+        }
+    }
+
+    pub fn is_slot_backed(&self) -> bool {
+        matches!(self, Self::DeliveredSecret { .. })
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let Self::DeliveredSecret { names } = self else {
+            return Ok(());
+        };
+        if names.is_empty() || names.len() > ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS {
+            bail!(
+                "a delivered-secret credential activation names between 1 and {} secrets",
+                ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS
+            );
+        }
+        if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+            bail!("a delivered-secret credential activation names sorted, distinct secrets");
+        }
+        for name in names {
+            ryeos_state::objects::validate_session_process_environment_name(name)
+                .with_context(|| format!("delivered-secret credential activation name `{name}`"))?;
+        }
+        Ok(())
+    }
+
+    /// The stored form: canonical JSON.
+    pub fn canonical_json(&self) -> Result<String> {
+        self.validate()?;
+        Ok(lillux::canonical_json(&serde_json::to_value(self)?)?)
+    }
+
+    /// Decode and require the exact canonical stored form.
+    pub fn from_canonical_json(raw: &str) -> Result<Self> {
+        let activation: Self =
+            serde_json::from_str(raw).context("decode credential profile activation")?;
+        if activation.canonical_json()? != raw {
+            bail!("credential profile activation is not canonical");
+        }
+        Ok(activation)
+    }
+}
+
+pub(crate) fn encode_slot_value_digests(digests: &BTreeMap<String, String>) -> Result<String> {
+    Ok(lillux::canonical_json(&serde_json::to_value(digests)?)?)
+}
+
+fn decode_slot_value_digests(raw: &str) -> Result<BTreeMap<String, String>> {
+    let digests: BTreeMap<String, String> =
+        serde_json::from_str(raw).context("decode credential slot value digests")?;
+    if encode_slot_value_digests(&digests)? != raw {
+        bail!("credential slot value digests are not canonical");
+    }
+    Ok(digests)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCredentialProfile<'a> {
     pub profile_id: &'a str,
     pub owner_principal: &'a str,
     pub home_id: &'a str,
+    pub activation: CredentialActivation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7844,6 +7955,10 @@ pub struct CredentialProfileRecord {
     pub lock_owner: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub activation: CredentialActivation,
+    /// Keyed digests of the slot values the profile was last used with, by
+    /// slot name. `None` until the first use of a slot-backed profile.
+    pub slot_value_digests: Option<BTreeMap<String, String>>,
 }
 
 pub const CREDENTIAL_PROFILE_LIST_MAX_LIMIT: usize = 200;
@@ -10056,12 +10171,18 @@ impl RuntimeDb {
                 validate_bounded_runtime_text(label, value, 256)?;
             }
             let now = lillux::time::timestamp_millis() as i64;
+            let activation_json = profile.activation.canonical_json()?;
+            let initial_state = if profile.activation.is_slot_backed() {
+                "active"
+            } else {
+                "unauthenticated"
+            };
             let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
                 .context("begin credential-profile creation")?;
             let prior = tx
                 .query_row(
                     "SELECT owner_principal, home_id, credential_generation, state,
-                        authority_revision
+                        authority_revision, activation_json
                    FROM credential_profile WHERE profile_id=?1",
                     [profile.profile_id],
                     |row| {
@@ -10071,11 +10192,12 @@ impl RuntimeDb {
                             row.get::<_, i64>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, i64>(4)?,
+                            row.get::<_, String>(5)?,
                         ))
                     },
                 )
                 .optional()?;
-            if let Some((owner, home_id, generation, state, revision)) = prior {
+            if let Some((owner, home_id, generation, state, revision, prior_activation)) = prior {
                 // Deletion is a durable tombstone, not removal of the logical
                 // profile identity. Recreating that profile therefore advances
                 // the same owner/home authority. The new credential generation
@@ -10085,6 +10207,12 @@ impl RuntimeDb {
                     bail!("deleted credential profile identity changed during recreation");
                 }
                 if state != "deleted" {
+                    if prior_activation != activation_json {
+                        bail!(
+                            "credential_profile_activation_mismatch: credential profile already \
+                             exists with a different activation source"
+                        );
+                    }
                     bail!("credential profile already exists");
                 }
                 let next_generation = generation
@@ -10095,10 +10223,11 @@ impl RuntimeDb {
                     .context("credential authority revision overflow during recreation")?;
                 let changed = tx.execute(
                     "UPDATE credential_profile
-                    SET credential_generation=?4, state='unauthenticated',
+                    SET credential_generation=?4, state=?9,
                         active_login_id=NULL, login_expires_at_ms=NULL,
                         sanitized_account_json=NULL, lock_owner=NULL,
-                        updated_at_ms=?5, authority_revision=?6
+                        updated_at_ms=?5, authority_revision=?6,
+                        activation_json=?10, slot_value_digests_json=NULL
                   WHERE profile_id=?1 AND owner_principal=?2 AND home_id=?3
                     AND credential_generation=?7 AND state='deleted'
                     AND authority_revision=?8",
@@ -10111,6 +10240,8 @@ impl RuntimeDb {
                         next_revision,
                         generation,
                         revision,
+                        initial_state,
+                        activation_json,
                     ],
                 )?;
                 if changed != 1 {
@@ -10121,13 +10252,16 @@ impl RuntimeDb {
                     "INSERT INTO credential_profile (
                     profile_id, owner_principal, home_id, credential_generation, state,
                     active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                    lock_owner, created_at_ms, updated_at_ms, authority_revision
-                 ) VALUES (?1, ?2, ?3, 1, 'unauthenticated', NULL, 0, NULL, NULL, NULL, ?4, ?4, 1)",
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision,
+                    activation_json, slot_value_digests_json
+                 ) VALUES (?1, ?2, ?3, 1, ?5, NULL, 0, NULL, NULL, NULL, ?4, ?4, 1, ?6, NULL)",
                     params![
                         profile.profile_id,
                         profile.owner_principal,
                         profile.home_id,
-                        now
+                        now,
+                        initial_state,
+                        activation_json
                     ],
                 )?;
                 if changed != 1 {
@@ -10206,7 +10340,8 @@ impl RuntimeDb {
                 .query_row(
                     "SELECT profile_id, owner_principal, home_id, credential_generation, state,
                     active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                    lock_owner, created_at_ms, updated_at_ms, authority_revision
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision,
+                    activation_json, slot_value_digests_json
                FROM credential_profile WHERE profile_id=?1",
                     [profile_id],
                     |row| {
@@ -10224,6 +10359,8 @@ impl RuntimeDb {
                             row.get::<_, i64>(10)?,
                             row.get::<_, i64>(11)?,
                             row.get::<_, i64>(12)?,
+                            row.get::<_, String>(13)?,
+                            row.get::<_, Option<String>>(14)?,
                         ))
                     },
                 )
@@ -10250,6 +10387,12 @@ impl RuntimeDb {
                     lock_owner: row.9,
                     created_at_ms: row.10,
                     updated_at_ms: row.11,
+                    activation: CredentialActivation::from_canonical_json(&row.13)?,
+                    slot_value_digests: row
+                        .14
+                        .as_deref()
+                        .map(decode_slot_value_digests)
+                        .transpose()?,
                 })
             })
             .transpose()
@@ -10309,6 +10452,13 @@ impl RuntimeDb {
                         || existing.login_expires_at_ms != stable.login_expires_at_ms
                         || projected_account != stable_account
                         || existing.created_at_ms != stable.created_at_ms
+                        || existing.activation.canonical_json()? != stable.activation_json
+                        || existing
+                            .slot_value_digests
+                            .as_ref()
+                            .map(encode_slot_value_digests)
+                            .transpose()?
+                            != stable.slot_value_digests_json
                     {
                         bail!(
                             "credential profile revision {} has divergent runtime and operational content",
@@ -10327,12 +10477,20 @@ impl RuntimeDb {
             let lock_owner = existing
                 .as_ref()
                 .and_then(|profile| profile.lock_owner.clone());
+            // The stable record carries the activation source and the keyed
+            // slot-value digests, so a row rebuilt from it reproduces the
+            // profile exactly. Both are validated before they are stored.
+            CredentialActivation::from_canonical_json(&stable.activation_json)?;
+            if let Some(raw) = stable.slot_value_digests_json.as_deref() {
+                decode_slot_value_digests(raw)?;
+            }
             conn.execute(
                 "INSERT INTO credential_profile (
                 profile_id, owner_principal, home_id, credential_generation, state,
                 active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                lock_owner, created_at_ms, updated_at_ms, authority_revision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                lock_owner, created_at_ms, updated_at_ms, authority_revision,
+                activation_json, slot_value_digests_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(profile_id) DO UPDATE SET
                 credential_generation=excluded.credential_generation,
                 state=excluded.state,
@@ -10341,7 +10499,9 @@ impl RuntimeDb {
                 login_expires_at_ms=excluded.login_expires_at_ms,
                 sanitized_account_json=excluded.sanitized_account_json,
                 updated_at_ms=excluded.updated_at_ms,
-                authority_revision=excluded.authority_revision",
+                authority_revision=excluded.authority_revision,
+                activation_json=excluded.activation_json,
+                slot_value_digests_json=excluded.slot_value_digests_json",
                 params![
                     &stable.profile_id,
                     &stable.owner_principal,
@@ -10356,6 +10516,8 @@ impl RuntimeDb {
                     stable.created_at_ms,
                     stable.updated_at_ms,
                     i64::try_from(stable.authority_revision)?,
+                    &stable.activation_json,
+                    &stable.slot_value_digests_json,
                 ],
             )?;
             self.credential_profile_projection(&stable.profile_id)?
@@ -10952,6 +11114,7 @@ impl RuntimeDb {
                 bail!("credential enrollment expiry must be in the future");
             }
             let tx = conn.unchecked_transaction()?;
+            Self::refuse_slot_backed(&tx, profile_id)?;
             let epoch: Option<i64> = tx
                 .query_row(
                     "SELECT login_epoch FROM credential_profile
@@ -11006,6 +11169,7 @@ impl RuntimeDb {
             let now = lillux::time::timestamp_millis() as i64;
             let login_epoch =
                 i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
+            Self::refuse_slot_backed(conn, profile_id)?;
             let changed = conn.execute(
                 "UPDATE credential_profile
                 SET state='active', active_login_id=NULL, login_expires_at_ms=NULL,
@@ -11051,6 +11215,21 @@ impl RuntimeDb {
             )?;
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
+            let session_profile: Option<String> = tx
+                .query_row(
+                    "SELECT credential_profile_id FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3",
+                    params![
+                        placement_thread_id,
+                        worker_instance_id,
+                        i64::try_from(worker_boot_epoch)?
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(session_profile) = session_profile.as_deref() {
+                Self::refuse_slot_backed(&tx, session_profile)?;
+            }
             let profile: (String, String, i64) = tx.query_row(
                 "SELECT credential_profile_id, active_login_id, login_epoch
                FROM dedicated_session JOIN credential_profile
@@ -11096,6 +11275,7 @@ impl RuntimeDb {
             }
             let now = lillux::time::timestamp_millis() as i64;
             let tx = conn.unchecked_transaction()?;
+            Self::refuse_slot_backed(&tx, profile_id)?;
             let account_json: Option<String> = tx
                 .query_row(
                     "SELECT sanitized_account_json FROM credential_profile
@@ -11166,6 +11346,7 @@ impl RuntimeDb {
             let epoch =
                 i64::try_from(login_epoch).context("login epoch exceeds SQLite range")?;
             let tx = conn.unchecked_transaction()?;
+            Self::refuse_slot_backed(&tx, profile_id)?;
             let changed = tx.execute(
                 "UPDATE credential_profile SET state='unauthenticated', active_login_id=NULL,
                     login_expires_at_ms=NULL, sanitized_account_json=NULL, updated_at_ms=?4,
@@ -11210,6 +11391,27 @@ impl RuntimeDb {
             tx.commit()?;
             u64::try_from(revision).context("negative credential authority revision")
         })
+    }
+
+    /// Every ceremony step refuses a slot-backed profile: it has no login to
+    /// begin, observe, confirm, abandon or cancel.
+    fn refuse_slot_backed(conn: &Connection, profile_id: &str) -> Result<()> {
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT activation_json FROM credential_profile WHERE profile_id=?1",
+                [profile_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = raw
+            && CredentialActivation::from_canonical_json(&raw)?.is_slot_backed()
+        {
+            return Err(CredentialCeremonyRefusal::SlotBacked {
+                profile_id: profile_id.to_string(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     fn credential_ceremony_row(
@@ -11361,6 +11563,7 @@ impl RuntimeDb {
         login_epoch: u64,
     ) -> Result<()> {
         self.conn.with_sql(|conn| {
+            Self::refuse_slot_backed(conn, profile_id)?;
             let changed = conn.execute(
                 "UPDATE credential_profile SET state='unauthenticated', active_login_id=NULL,
                     login_expires_at_ms=NULL, updated_at_ms=?5,
@@ -11379,6 +11582,107 @@ impl RuntimeDb {
                 bail!("credential enrollment cancellation lost its ceremony CAS");
             }
             Ok(())
+        })
+    }
+
+    /// Record the keyed digests of the slot values a slot-backed profile is
+    /// being used with, in one transaction, and return the resulting
+    /// credential generation.
+    ///
+    /// The first use stores the digests and advances the authority revision
+    /// (so stable authority records them) but not the generation. Equal
+    /// digests change nothing. A different set means the slot values changed since the profile was last
+    /// used: the generation and authority revision advance and the new
+    /// digests are stored, so the existing generation checks fence every
+    /// session started under the old values. The digest names must be exactly
+    /// the profile's slot names. A ceremony profile, a non-owner and a
+    /// profile that is not `active` are refused.
+    pub fn fence_credential_slot_digests(
+        &self,
+        profile_id: &str,
+        owner_principal: &str,
+        digests: &BTreeMap<String, String>,
+    ) -> Result<u64> {
+        self.conn.with_sql(|conn| {
+            for (name, digest) in digests {
+                ryeos_state::objects::validate_session_process_environment_name(name)?;
+                if digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    bail!("credential slot value digest for `{name}` is not 64 lowercase hex");
+                }
+            }
+            let encoded = encode_slot_value_digests(digests)?;
+            let now = lillux::time::timestamp_millis() as i64;
+            let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+                .context("begin credential slot digest fence")?;
+            let row = tx
+                .query_row(
+                    "SELECT owner_principal, state, credential_generation, activation_json,
+                        slot_value_digests_json
+                   FROM credential_profile WHERE profile_id=?1",
+                    [profile_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| anyhow!("credential profile does not exist"))?;
+            let (owner, state, generation, activation, stored) = row;
+            if owner != owner_principal {
+                bail!("credential profile is not owned by the session principal");
+            }
+            let activation = CredentialActivation::from_canonical_json(&activation)?;
+            let Some(names) = activation.slot_names() else {
+                bail!("credential profile is not slot-backed");
+            };
+            if state != "active" {
+                bail!("credential profile is {state}, not active");
+            }
+            if names
+                .iter()
+                .map(String::as_str)
+                .ne(digests.keys().map(String::as_str))
+            {
+                bail!("credential slot digests do not cover exactly the profile's slot names");
+            }
+            if stored.as_deref() == Some(encoded.as_str()) {
+                return u64::try_from(generation).context("negative credential generation");
+            }
+            let bump = stored.is_some();
+            let changed = tx.execute(
+                "UPDATE credential_profile
+                    SET slot_value_digests_json=?3,
+                        credential_generation=credential_generation+?4,
+                        authority_revision=authority_revision+1,
+                        updated_at_ms=?5
+                  WHERE profile_id=?1 AND owner_principal=?2 AND state='active'
+                    AND credential_generation=?6",
+                params![
+                    profile_id,
+                    owner_principal,
+                    encoded,
+                    i64::from(bump),
+                    now,
+                    generation
+                ],
+            )?;
+            if changed != 1 {
+                bail!("credential slot digest fence lost its profile CAS");
+            }
+            tx.commit()?;
+            let next = generation
+                .checked_add(i64::from(bump))
+                .context("credential generation overflow")?;
+            u64::try_from(next).context("negative credential generation")
         })
     }
 
@@ -24015,6 +24319,7 @@ mod tests {
 
     fn create_locked_profile(db: &RuntimeDb, profile_id: &str, lock_owner: &str) {
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id,
             owner_principal: "fp:operator",
             home_id: &format!("home-{profile_id}"),
@@ -24292,6 +24597,7 @@ mod tests {
     fn dedicated_admission_acquires_profile_in_the_session_transaction() {
         let (_tmp, db) = fresh_db();
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-atomic",
             owner_principal: "fp:operator",
             home_id: "home-P-atomic",
@@ -24329,6 +24635,7 @@ mod tests {
     fn handoff_credential_reservation_survives_reconcile_and_is_consumed_atomically() {
         let (_tmp, db) = fresh_db();
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-handoff-reserved",
             owner_principal: "fp:operator",
             home_id: "home-P-handoff-reserved",
@@ -24420,6 +24727,7 @@ mod tests {
     fn released_handoff_credential_reservation_allows_a_new_operation_for_the_same_successor() {
         let (_tmp, db) = fresh_db();
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-handoff-retry",
             owner_principal: "fp:operator",
             home_id: "home-P-handoff-retry",
@@ -25221,6 +25529,8 @@ mod tests {
             sanitized_account: enrolling.sanitized_account.clone(),
             created_at_ms: enrolling.created_at_ms,
             updated_at_ms: enrolling.updated_at_ms,
+            activation_json: CredentialActivation::Ceremony.canonical_json().unwrap(),
+            slot_value_digests_json: None,
         };
         db.settle_worker_process("worker-one", "T-one", 1, "reaped", "fixture restart")
             .unwrap();
@@ -26678,9 +26988,11 @@ mod tests {
                     "INSERT INTO credential_profile(
                     profile_id, owner_principal, home_id, credential_generation, state,
                     active_login_id, login_epoch, login_expires_at_ms, sanitized_account_json,
-                    lock_owner, created_at_ms, updated_at_ms, authority_revision
+                    lock_owner, created_at_ms, updated_at_ms, authority_revision,
+                    activation_json
                  ) VALUES ('P-observe', 'fp:operator', 'home-observe', 1, 'active',
-                           NULL, 0, NULL, NULL, 'worker-observe', 1, 1, 1)",
+                           NULL, 0, NULL, NULL, 'worker-observe', 1, 1, 1,
+                           '{\"kind\":\"ceremony\"}')",
                     [],
                 )?)
             })
@@ -26930,6 +27242,7 @@ mod tests {
     fn deleted_credential_profile_recreation_advances_the_same_fenced_identity() {
         let (_tmp, db) = fresh_db();
         let profile = NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-recreated",
             owner_principal: "fp:operator",
             home_id: "home-P-recreated",
@@ -26961,6 +27274,7 @@ mod tests {
 
         assert!(
             db.create_credential_profile(NewCredentialProfile {
+                activation: crate::runtime_db::CredentialActivation::Ceremony,
                 profile_id: "P-recreated",
                 owner_principal: "fp:other",
                 home_id: "home-P-recreated",
@@ -26970,10 +27284,307 @@ mod tests {
         );
     }
 
+    fn slot_profile(db: &RuntimeDb, profile_id: &str, names: &[&str]) {
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id,
+            owner_principal: "fp:operator",
+            home_id: &format!("home-{profile_id}"),
+            activation: CredentialActivation::delivered_secret(names.iter().copied()).unwrap(),
+        })
+        .unwrap();
+    }
+
+    fn slot_digests(pairs: &[(&str, char)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, fill)| ((*name).to_owned(), fill.to_string().repeat(64)))
+            .collect()
+    }
+
+    #[test]
+    fn slot_backed_profile_is_active_at_create_and_activation_is_exact() {
+        let (_tmp, db) = fresh_db();
+        slot_profile(&db, "P-slot", &["B_KEY", "A_KEY", "B_KEY"]);
+        let created = db.credential_profile("P-slot").unwrap().unwrap();
+        assert_eq!(created.state, "active");
+        assert_eq!(created.credential_generation, 1);
+        assert_eq!(
+            created.activation,
+            CredentialActivation::DeliveredSecret {
+                names: vec!["A_KEY".into(), "B_KEY".into()]
+            }
+        );
+        assert!(created.slot_value_digests.is_none());
+
+        let same = db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-slot",
+            owner_principal: "fp:operator",
+            home_id: "home-P-slot",
+            activation: created.activation.clone(),
+        });
+        assert!(format!("{:#}", same.unwrap_err()).contains("already exists"));
+        let mismatch = db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-slot",
+            owner_principal: "fp:operator",
+            home_id: "home-P-slot",
+            activation: CredentialActivation::Ceremony,
+        });
+        assert!(
+            format!("{:#}", mismatch.unwrap_err())
+                .contains("credential_profile_activation_mismatch")
+        );
+
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-ceremony",
+            owner_principal: "fp:operator",
+            home_id: "home-P-ceremony",
+            activation: CredentialActivation::Ceremony,
+        })
+        .unwrap();
+        assert_eq!(
+            db.credential_profile("P-ceremony").unwrap().unwrap().state,
+            "unauthenticated"
+        );
+    }
+
+    #[test]
+    fn activation_names_follow_the_session_environment_name_rule() {
+        assert!(CredentialActivation::delivered_secret(Vec::<String>::new()).is_err());
+        assert!(CredentialActivation::delivered_secret(["lowercase"]).is_err());
+        assert!(CredentialActivation::delivered_secret(["PATH"]).is_err());
+        assert!(CredentialActivation::delivered_secret(["RYEOS_TOKEN"]).is_err());
+        let nine: Vec<String> = (0..=ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS)
+            .map(|index| format!("KEY_{index}"))
+            .collect();
+        assert!(CredentialActivation::delivered_secret(nine).is_err());
+        let canonical = CredentialActivation::delivered_secret(["A_KEY"])
+            .unwrap()
+            .canonical_json()
+            .unwrap();
+        assert_eq!(
+            canonical,
+            r#"{"kind":"delivered_secret","names":["A_KEY"]}"#
+        );
+        assert!(
+            CredentialActivation::from_canonical_json(
+                r#"{"names":["A_KEY"],"kind":"delivered_secret"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn deleted_profile_recreation_takes_the_new_activation() {
+        let (_tmp, db) = fresh_db();
+        slot_profile(&db, "P-switch", &["A_KEY"]);
+        let revoked = db
+            .revoke_credential_profile("P-switch", "fp:operator", 1)
+            .unwrap();
+        db.finish_credential_profile_revocation("P-switch", "fp:operator", revoked)
+            .unwrap();
+        let deleting = db
+            .begin_credential_profile_deletion("P-switch", "fp:operator", revoked)
+            .unwrap();
+        db.finish_credential_profile_deletion("P-switch", "fp:operator", deleting)
+            .unwrap();
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-switch",
+            owner_principal: "fp:operator",
+            home_id: "home-P-switch",
+            activation: CredentialActivation::Ceremony,
+        })
+        .unwrap();
+        let recreated = db.credential_profile("P-switch").unwrap().unwrap();
+        assert_eq!(recreated.activation, CredentialActivation::Ceremony);
+        assert_eq!(recreated.state, "unauthenticated");
+        assert!(recreated.slot_value_digests.is_none());
+        assert_eq!(recreated.credential_generation, deleting + 1);
+    }
+
+    #[test]
+    fn ceremony_steps_refuse_slot_backed_profiles_with_one_code() {
+        let (_tmp, db) = fresh_db();
+        slot_profile(&db, "P-slot", &["A_KEY"]);
+        db.acquire_credential_profile("P-slot", "fp:operator", "worker-slot")
+            .unwrap();
+        let code = |error: anyhow::Error| {
+            error
+                .downcast_ref::<CredentialCeremonyRefusal>()
+                .expect("typed ceremony refusal")
+                .code()
+        };
+        let soon = lillux::time::timestamp_millis() as i64 + 60_000;
+        assert_eq!(
+            code(
+                db.begin_credential_enrollment("P-slot", "worker-slot", "login", soon)
+                    .unwrap_err()
+            ),
+            "credential_profile_slot_backed"
+        );
+        assert_eq!(
+            code(
+                db.complete_credential_enrollment(
+                    "P-slot",
+                    "worker-slot",
+                    "login",
+                    1,
+                    &serde_json::json!({"type":"fixture"})
+                )
+                .unwrap_err()
+            ),
+            "credential_profile_slot_backed"
+        );
+        assert_eq!(
+            code(
+                db.confirm_credential_enrollment("P-slot", "fp:operator", 1, &"a".repeat(64))
+                    .unwrap_err()
+            ),
+            "credential_profile_slot_backed"
+        );
+        assert_eq!(
+            code(
+                db.abandon_credential_enrollment("P-slot", "fp:operator", 1)
+                    .unwrap_err()
+            ),
+            "credential_profile_slot_backed"
+        );
+        assert_eq!(
+            code(
+                db.cancel_credential_enrollment("P-slot", "worker-slot", "login", 1)
+                    .unwrap_err()
+            ),
+            "credential_profile_slot_backed"
+        );
+        let untouched = db.credential_profile("P-slot").unwrap().unwrap();
+        assert_eq!(untouched.state, "active");
+        assert_eq!(untouched.credential_generation, 1);
+        assert_eq!(untouched.authority_revision, 1);
+        // Revoke and delete work unchanged.
+        let revoked = db
+            .revoke_credential_profile("P-slot", "fp:operator", 1)
+            .unwrap();
+        assert_eq!(revoked, 2);
+    }
+
+    #[test]
+    fn slot_fence_stores_then_holds_then_bumps_on_change() {
+        let (_tmp, db) = fresh_db();
+        slot_profile(&db, "P-fence", &["A_KEY", "B_KEY"]);
+        let first = slot_digests(&[("A_KEY", 'a'), ("B_KEY", 'b')]);
+        assert_eq!(
+            db.fence_credential_slot_digests("P-fence", "fp:operator", &first)
+                .unwrap(),
+            1
+        );
+        let stored = db.credential_profile("P-fence").unwrap().unwrap();
+        assert_eq!(stored.slot_value_digests.as_ref(), Some(&first));
+        assert_eq!(stored.authority_revision, 2);
+
+        assert_eq!(
+            db.fence_credential_slot_digests("P-fence", "fp:operator", &first)
+                .unwrap(),
+            1,
+            "equal digests change nothing"
+        );
+        let held = db.credential_profile("P-fence").unwrap().unwrap();
+        assert_eq!(held.credential_generation, 1);
+        assert_eq!(held.authority_revision, 2);
+
+        let changed = slot_digests(&[("A_KEY", 'a'), ("B_KEY", 'c')]);
+        assert_eq!(
+            db.fence_credential_slot_digests("P-fence", "fp:operator", &changed)
+                .unwrap(),
+            2
+        );
+        let bumped = db.credential_profile("P-fence").unwrap().unwrap();
+        assert_eq!(bumped.credential_generation, 2);
+        assert_eq!(bumped.authority_revision, 3);
+        assert_eq!(bumped.slot_value_digests.as_ref(), Some(&changed));
+    }
+
+    #[test]
+    fn slot_backed_profile_rebuilt_from_stable_authority_keeps_its_activation() {
+        let (_tmp, db) = fresh_db();
+        slot_profile(&db, "P-rebuild", &["B_KEY", "A_KEY"]);
+        let digests = slot_digests(&[("A_KEY", 'a'), ("B_KEY", 'b')]);
+        db.fence_credential_slot_digests("P-rebuild", "fp:operator", &digests)
+            .unwrap();
+        let source = db.credential_profile("P-rebuild").unwrap().unwrap();
+        let stable = ryeos_state::OperationalCredentialProfileRecord {
+            profile_id: source.profile_id.clone(),
+            owner_principal: source.owner_principal.clone(),
+            home_id: source.home_id.clone(),
+            authority_revision: source.authority_revision,
+            credential_generation: source.credential_generation,
+            state: source.state.clone(),
+            active_login_id: source.active_login_id.clone(),
+            login_epoch: source.login_epoch,
+            login_expires_at_ms: source.login_expires_at_ms,
+            sanitized_account: source.sanitized_account.clone(),
+            created_at_ms: source.created_at_ms,
+            updated_at_ms: source.updated_at_ms,
+            activation_json: source.activation.canonical_json().unwrap(),
+            slot_value_digests_json: Some(encode_slot_value_digests(&digests).unwrap()),
+        };
+
+        let (_other_tmp, rebuilt_db) = fresh_db();
+        let rebuilt = rebuilt_db
+            .reconcile_credential_profile_projection(&stable)
+            .unwrap();
+        assert_eq!(
+            rebuilt.activation,
+            CredentialActivation::DeliveredSecret {
+                names: vec!["A_KEY".into(), "B_KEY".into()]
+            }
+        );
+        assert_eq!(rebuilt.slot_value_digests.as_ref(), Some(&digests));
+        assert_eq!(rebuilt, source);
+    }
+
+    #[test]
+    fn slot_fence_refuses_wrong_names_owner_ceremony_and_inactive_profiles() {
+        let (_tmp, db) = fresh_db();
+        slot_profile(&db, "P-fence", &["A_KEY"]);
+        let fence = |profile: &str, owner: &str, digests: &BTreeMap<String, String>| {
+            db.fence_credential_slot_digests(profile, owner, digests)
+        };
+        assert!(
+            fence(
+                "P-fence",
+                "fp:operator",
+                &slot_digests(&[("OTHER_KEY", 'a')])
+            )
+            .is_err()
+        );
+        assert!(
+            fence(
+                "P-fence",
+                "fp:operator",
+                &slot_digests(&[("A_KEY", 'a'), ("OTHER_KEY", 'a')])
+            )
+            .is_err()
+        );
+        assert!(fence("P-fence", "fp:other", &slot_digests(&[("A_KEY", 'a')])).is_err());
+        let not_hex = BTreeMap::from([("A_KEY".to_owned(), "z".repeat(64))]);
+        assert!(fence("P-fence", "fp:operator", &not_hex).is_err());
+        db.create_credential_profile(NewCredentialProfile {
+            profile_id: "P-ceremony",
+            owner_principal: "fp:operator",
+            home_id: "home-P-ceremony",
+            activation: CredentialActivation::Ceremony,
+        })
+        .unwrap();
+        assert!(fence("P-ceremony", "fp:operator", &BTreeMap::new()).is_err());
+        db.revoke_credential_profile("P-fence", "fp:operator", 1)
+            .unwrap();
+        assert!(fence("P-fence", "fp:operator", &slot_digests(&[("A_KEY", 'a')])).is_err());
+    }
+
     #[test]
     fn credential_ceremony_and_dedicated_ledgers_are_epoch_fenced() {
         let (_tmp, db) = fresh_db();
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-one",
             owner_principal: "fp:operator",
             home_id: "home-one",
@@ -33696,6 +34307,7 @@ mod tests {
         lock_owner: &str,
     ) -> (u64, String) {
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id,
             owner_principal: "fp:operator",
             home_id: "home-ceremony",

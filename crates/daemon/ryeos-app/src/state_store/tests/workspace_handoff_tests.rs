@@ -226,6 +226,7 @@ fn workspace_capture_refuses_pending_and_identity_unknown_worker_start() {
         );
         store
             .create_credential_profile(NewCredentialProfile {
+                activation: crate::runtime_db::CredentialActivation::Ceremony,
                 profile_id: "P-capture",
                 owner_principal: "fp:operator",
                 home_id: "home-capture",
@@ -691,6 +692,7 @@ fn handoff_reservation_fences_the_exact_project_head_until_adoption() {
 
     store
         .create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-project-fence",
             owner_principal: "fp:operator",
             home_id: "home-project-fence",
@@ -1324,6 +1326,7 @@ fn credential_authority_reconciles_a_runtime_commit_gap_on_reopen() {
     let store = open();
     store
         .create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "profile-gap",
             owner_principal: "fp:operator",
             home_id: "credential-gap",
@@ -1378,6 +1381,7 @@ fn recreated_credential_profile_persists_its_advanced_generation() {
 
     let store = open();
     let profile = NewCredentialProfile {
+        activation: crate::runtime_db::CredentialActivation::Ceremony,
         profile_id: "profile-recreated",
         owner_principal: "fp:operator",
         home_id: "credential-recreated",
@@ -1474,6 +1478,7 @@ fn terminal_credential_cancellation_folds_stable_authority_and_reopens() {
     }
     store
         .create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-terminal-profile",
             owner_principal: "fp:operator",
             home_id: "credential-terminal-profile",
@@ -2469,4 +2474,60 @@ fn cancelled_planning_refuses_continuation_publication_with_typed_inactivity() {
         .expect("continuation source");
     assert_eq!(source.status, ThreadStatus::Created.as_str());
     assert!(source.successor_thread_id.is_none());
+}
+
+#[test]
+fn concurrent_slot_fences_on_one_profile_bump_the_generation_once() {
+    use crate::runtime_db::CredentialActivation;
+    let store_owner = test_store();
+    let store = Arc::clone(store_owner.store());
+    store
+        .create_credential_profile(NewCredentialProfile {
+            profile_id: "profile-slot",
+            owner_principal: "fp:operator",
+            home_id: "credential-slot",
+            activation: CredentialActivation::delivered_secret(["SLOT_KEY"]).unwrap(),
+        })
+        .unwrap();
+    let digest = |fill: char| {
+        std::collections::BTreeMap::from([("SLOT_KEY".to_owned(), fill.to_string().repeat(64))])
+    };
+    assert_eq!(
+        store
+            .fence_credential_slot_digests("profile-slot", "fp:operator", &digest('a'))
+            .unwrap(),
+        1,
+        "first use stores the digests without advancing the generation"
+    );
+    let ready = Arc::new(std::sync::Barrier::new(3));
+    let generations = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let ready = Arc::clone(&ready);
+                let changed = digest('b');
+                scope.spawn(move || {
+                    ready.wait();
+                    store
+                        .fence_credential_slot_digests("profile-slot", "fp:operator", &changed)
+                        .unwrap()
+                })
+            })
+            .collect();
+        ready.wait();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(generations, vec![2, 2], "both racers see the one bump");
+    let profile = store.credential_profile("profile-slot").unwrap().unwrap();
+    assert_eq!(profile.credential_generation, 2);
+    assert_eq!(profile.authority_revision, 3);
+    assert_eq!(profile.slot_value_digests, Some(digest('b')));
+    let stable = store
+        .with_state_db(|db| db.operational_credential_profiles())
+        .unwrap();
+    assert_eq!(stable[0].credential_generation, 2);
+    assert_eq!(stable[0].authority_revision, 3);
 }

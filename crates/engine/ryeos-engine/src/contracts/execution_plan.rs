@@ -263,6 +263,12 @@ pub struct EngineContext {
     /// and environment bindings. These are deliberately distinct from generic
     /// inherited descriptors and cannot be supplied as raw file descriptors.
     pub isolation_target_channels: Vec<crate::isolation::IsolationTargetChannelAuthority>,
+    /// Daemon-sealed secret payloads delivered to the isolated target as
+    /// immutable in-memory files at exact descriptors, never as environment
+    /// values. Distinct from channels and from raw inherited descriptors, and
+    /// ordered by target descriptor.
+    pub isolation_target_sealed_payloads:
+        Vec<crate::isolation::IsolationTargetSealedPayloadAuthority>,
     /// Explicit daemon-owned execution workspace used only by isolation.
     /// This does not change item-resolution authority or project semantics;
     /// it gives projectless admitted mechanics (for example a persistent

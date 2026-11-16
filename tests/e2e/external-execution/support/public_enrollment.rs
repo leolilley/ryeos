@@ -176,7 +176,7 @@ pub async fn create_profile(harness: &DaemonHarness, profile_id: &str) -> Result
     let result = service(
         harness,
         "service:credential-profiles/create",
-        json!({"profile_id":profile_id}),
+        json!({"profile_id":profile_id,"activation":{"kind":"ceremony"}}),
     )
     .await?;
     ensure!(

@@ -32,6 +32,7 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
         let worker = format!("worker-{suffix}");
         let profile = format!("profile-{suffix}");
         db.create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id: &profile,
             owner_principal: "fp:test",
             home_id: &format!("home-{suffix}"),
@@ -2138,6 +2139,7 @@ async fn hosted_startup_replays_root_outboxes_before_detaching_the_old_worker_ep
     state
         .state_store
         .create_credential_profile(NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id,
             owner_principal: "fp:test",
             home_id: "home-hosted-root-replay",

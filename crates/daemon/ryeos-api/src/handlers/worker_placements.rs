@@ -5277,6 +5277,8 @@ mod authority_tests {
             lock_owner: Some("worker-unproved".to_owned()),
             created_at_ms: 1,
             updated_at_ms: 2,
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
+            slot_value_digests: None,
         };
         let expected_session_capsules =
             BTreeMap::from([("worker".to_owned(), capsule_hash.clone())]);
