@@ -56,6 +56,12 @@ struct PartialConfig {
     app_root: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
     authorized_keys_dir: Option<PathBuf>,
+    /// Retired: nodes initialized before the daemon stopped loading the
+    /// operator private key stored its path here. The value is never read.
+    /// Accepting it keeps the documented cure for such nodes (stop, then
+    /// `ryeos init` on the same app root) from refusing on the stored file.
+    #[serde(default, rename = "operator_signing_key_path")]
+    _retired_operator_signing_key_path: Option<serde::de::IgnoredAny>,
 }
 
 fn publish_bootstrap_config(
@@ -483,6 +489,35 @@ mod tests {
         .unwrap();
         assert_eq!(first.bind, "127.0.0.1:7400".parse().unwrap());
         assert_eq!(second.bind, first.bind);
+    }
+
+    #[test]
+    fn a_stored_config_with_the_retired_operator_key_path_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("node");
+        let node_dir = app_root.join(ryeos_engine::AI_DIR).join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let stored = Config::load(&ConfigSources {
+            app_root: Some(app_root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut yaml = serde_yaml::to_string(&stored).unwrap();
+        yaml.push_str("operator_signing_key_path: /old/operator/private_key.pem\n");
+        std::fs::write(node_dir.join("config.yaml"), yaml).unwrap();
+
+        let loaded = Config::load(&ConfigSources {
+            app_root: Some(app_root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(loaded.bind, stored.bind);
+        assert!(
+            !serde_yaml::to_string(&loaded)
+                .unwrap()
+                .contains("operator_signing_key_path"),
+            "the retired path is never carried forward"
+        );
     }
 
     #[test]
