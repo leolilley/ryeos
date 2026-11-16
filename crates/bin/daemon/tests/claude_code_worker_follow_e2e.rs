@@ -485,10 +485,22 @@ async fn run_graph(
             .await;
         eprintln!("--- worker execution {child} ---\n{session:#?}");
     }
-    eprintln!(
-        "--- daemon stderr ---\n{}",
-        daemon.drain_stderr_nonblocking().await
-    );
+    // The whole daemon log, filtered to the lines that explain a failed
+    // worker: warnings, errors and dedicated-session activity.
+    let log = daemon.stderr_so_far();
+    let relevant = log
+        .lines()
+        .filter(|line| {
+            line.contains(" WARN ")
+                || line.contains(" ERROR ")
+                || line.contains("dedicated")
+                || line.contains("persistent_session")
+                || line.contains("isolation")
+        })
+        .filter(|line| !line.contains("contention summary"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!("--- daemon log (filtered) ---\n{relevant}");
     let probe = find_key(&thread, "probe")
         .cloned()
         .with_context(|| format!("the resumed thread returned no `probe`: {thread:#}"))?;
