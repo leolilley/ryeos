@@ -1,270 +1,31 @@
-# ryeos:signed:2026-11-13T06:48:58Z:cbdd5863581574bc777549bae034d5ca9638fe01b07fb8e0574e48389e5cfe7a:+R12agbX+timvizwAAIgnpmvg5Gx9F5pEHZWcyhXQwpTCaxEWSeW3Va5U+cE6GZm/lHYkyPzAgS39JzoVyUKBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T07:56:53Z:bcb75690df67ebe9a7c2690f36b60e5224ecdfd96c16bef05770d87bef711075:2I9T3JzGJow46NQboKH0rnmrq37+0g+C2U2Y7BEHBlRbzvSUtL4R37pzj0rEQgQ8vK8xH4YOi3voWW/6MkUpAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-transcript
 title: Activity
 version: "1.0.0"
 description: >-
-  Coherent activity feed for the input route's durable work chain. It preserves
-  the exact event braid while presenting operator intent, cognition, tool
-  operations, children, placement boundaries, artifacts, receipts, and raw
-  event detail through the shared semantic timeline.
+  Coherent activity feed for the input route's durable work chain: operator
+  intent, cognition, operations, children and outcomes, folded by the daemon's
+  timeline service from the chain's events.
 
 widget: timeline
 sources:
   default:
-    ref: service:events/chain_replay
+    ref: service:ui/ryeos-ui/timeline/thread
     params:
       chain_root_id: "@facet:input.route.chain_root"
-    collection: events
+      limit: "200"
+    collection: items
 projections:
   expand:
     fields:
-      - payload.payload.key
-      - payload.payload.value
-      - event_type
-      - chain_seq
-      - payload.graph_run_id
-      - payload.node
-      - payload.step
-      - payload.item_id
-      - payload.tool
-      - payload.status
-      - payload.error
-      - payload.result_size_bytes
-      - payload.truncated_reason
-      - payload.uri
-      - payload.content_hash
-      - payload.turn_id
-      - payload.approval_id
-      - payload.observation.operation_class
-      - payload.decision
-      - payload.worker_boot_epoch
-      - payload.source_placement_thread_id
-      - payload.successor_placement_thread_id
-      - payload.candidate_snapshot_hash
-      - payload.candidate_evaluation.candidate_snapshot_hash
-      - payload.base_snapshot_hash
-      - payload.outcome.kind
-      - payload.terminal_reason
-  event_kinds:
-    seat.facet:
-      primary: payload.payload.key
-      meta: event_type
-      role: boundary
-    cognition_out:
-      primary: payload.content
-      role: flow
-    thread_continued:
-      primary: payload.previous_thread_id
-      meta: event_type
-      role: boundary
-    cognition_in:
-      primary: payload.turn
-      meta: event_type
-      role: boundary
-    tool_call_start:
-      primary: payload.tool
-      meta: payload.call_id
-      role: pair_open
-      pair_key: payload.call_id
-    tool_call_result:
-      primary: payload.tool
-      meta: payload.result_size_bytes
-      role: pair_close
-      pair_key: payload.call_id
-      tone:
-        field: payload.truncated_reason
-        missing: good
-        map:
-          error_envelope: danger
-          size_cap_exceeded: warn
-          result_guard: warn
-        default: good
-    provider_retry:
-      primary: payload.error
-      meta: payload.attempt
-      role: boundary
-      tone:
-        field: event_type
-        missing: warn
-        map:
-          provider_retry: warn
-        default: warn
-    cost_untracked:
-      primary: payload.model
-      meta: payload.reason
-      role: boundary
-      tone:
-        field: event_type
-        missing: warn
-        map:
-          cost_untracked: warn
-        default: warn
-    graph_follow_suspended:
-      primary: payload.node
-      meta: payload.item_id
-      role: boundary
-    hosted_session.turn_started:
-      primary: payload.turn_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_session.turn_started: accent
-        default: accent
-    hosted_session.turn_completed:
-      primary: payload.turn_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_session.turn_completed: good
-        default: good
-    hosted_session.approval_requested:
-      primary: payload.observation.operation_class
-      meta: payload.approval_id
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_session.approval_requested: warn
-        default: warn
-    hosted_session.approval_expired:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_session.approval_expired: warn
-        default: warn
-    hosted_approval.decision_reserved:
-      primary: payload.decision
-      meta: payload.approval_id
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_approval.decision_reserved: accent
-        default: accent
-    hosted_approval.delivery_contacting:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-    hosted_approval.delivery_unknown:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_approval.delivery_unknown: danger
-        default: danger
-    hosted_approval.delivery_settled:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_approval.delivery_settled: good
-        default: good
-    hosted_approval.delivery_expired:
-      primary: payload.approval_id
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_approval.delivery_expired: warn
-        default: warn
-    worker_session.restored:
-      primary: payload.successor_placement_thread_id
-      meta: payload.source_placement_thread_id
-      role: line
-      tone:
-        field: event_type
-        map:
-          worker_session.restored: accent
-        default: accent
-    hosted_candidate.captured:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.captured: accent
-        default: accent
-    hosted_candidate.qualified:
-      primary: payload.candidate_evaluation.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.qualified: good
-        default: good
-    hosted_candidate.publication_reserved:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-    hosted_candidate.published:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.published: good
-        default: good
-    hosted_candidate.publication_not_applied:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.publication_not_applied: warn
-        default: warn
-    hosted_candidate.publication_superseded:
-      primary: payload.candidate_snapshot_hash
-      meta: payload.observed_head
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.publication_superseded: warn
-        default: warn
-    hosted_candidate.publication_unknown:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-      tone:
-        field: event_type
-        map:
-          hosted_candidate.publication_unknown: danger
-        default: danger
-    hosted_candidate.discarded:
-      primary: payload.candidate_snapshot_hash
-      meta: event_type
-      role: line
-    hosted_bounded_execution.terminal_outcome:
-      primary: payload.outcome.kind
-      meta: payload.terminal_reason
-      role: line
-    milestone:
-      primary: payload.kind
-      meta: payload.node
-      role: line
-      tone:
-        field: event_type
-        map:
-          milestone: accent
-        default: accent
-  default:
-    primary: event_type
-    meta: ts
+      - id
+      - type
+      - state
+      - thread
+      - slots.body
+      - slots.detail
+      - slots.reason
+      - slots.tool
+      - slots.target
 refresh:
   on_hint: thread

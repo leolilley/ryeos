@@ -12,32 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Timeline roles: how a projected record participates in the
-/// coalesced timeline. Mechanism vocabulary — which event kinds map
-/// to which roles is declared in the view item, never here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TimelineRole {
-    Flow,
-    Boundary,
-    PairOpen,
-    PairClose,
-    #[default]
-    Line,
-}
-
-impl TimelineRole {
-    fn from_projection(projection: &Value) -> Self {
-        match projection.get("role").and_then(Value::as_str) {
-            Some("flow") => Self::Flow,
-            Some("boundary") => Self::Boundary,
-            Some("pair_open") => Self::PairOpen,
-            Some("pair_close") => Self::PairClose,
-            _ => Self::Line,
-        }
-    }
-}
-
 /// A resolved `view:` item, embedded in the effective surface at session
 /// time. Every view remains an addressable, overridable item; this is its
 /// composed value as the engine consumes it.
@@ -655,30 +629,20 @@ pub struct ProjectedRecord {
     pub meta: Option<String>,
     #[serde(default)]
     pub tone: Option<String>,
-    #[serde(default)]
-    pub role: TimelineRole,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pair_key: Option<String>,
     pub raw: Value,
 }
 
 /// Project one record through a `{primary, meta, tone}` projection block.
-/// Missing projections degrade to compact raw JSON, never error. Flow records
-/// with no primary are skipped by timeline folding instead of showing raw JSON,
-/// because replay deltas are ephemeral and durable fields may be absent on old
-/// events.
+/// Missing projections degrade to compact raw JSON (or the record's
+/// `event_type` when it is an event record), never error.
 pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
-    let projected_primary = projection
+    let primary = projection
         .get("primary")
         .and_then(Value::as_str)
-        .and_then(|path| field_text(record, path));
-    let role = TimelineRole::from_projection(projection);
-    let primary = if role == TimelineRole::Flow && projected_primary.is_none() {
-        String::new()
-    } else {
-        projected_primary.clone().unwrap_or_else(|| {
+        .and_then(|path| field_text(record, path))
+        .unwrap_or_else(|| {
             // A declared projection that misses must NOT dump raw event JSON
-            // into the feed. Degrade to the record's `event_type` (its honest
+            // into the view. Degrade to the record's `event_type` (its honest
             // kind) when it is an event; only non-event records (rows over a
             // service) fall back to compact JSON. The full record stays in
             // `raw` for an inspector.
@@ -687,32 +651,16 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| compact(record))
-        })
-    };
+        });
     let meta = projection
         .get("meta")
         .and_then(Value::as_str)
         .and_then(|path| field_text(record, path));
     let tone = project_tone(record, projection);
-    let pair_key = match role {
-        TimelineRole::PairOpen | TimelineRole::PairClose => projection
-            .get("pair_key")
-            .and_then(Value::as_str)
-            .and_then(|path| field_text(record, path)),
-        _ => None,
-    };
-    let role =
-        if matches!(role, TimelineRole::PairOpen | TimelineRole::PairClose) && pair_key.is_none() {
-            TimelineRole::Line
-        } else {
-            role
-        };
     ProjectedRecord {
         primary,
         meta,
         tone,
-        role,
-        pair_key,
         raw: record.clone(),
     }
 }
@@ -1064,19 +1012,12 @@ pub fn source_collection<'a>(binding: &ViewBinding, response: &'a Value) -> &'a 
 }
 
 pub fn project_record_for_binding(binding: &ViewBinding, record: &Value) -> ProjectedRecord {
-    let event_kinds = binding.projections.get("event_kinds");
     let default_projection = binding
         .projections
         .get("default")
         .cloned()
         .unwrap_or_else(|| binding.projections.clone());
-    let projection = event_kinds
-        .and_then(|kinds| {
-            let kind = record.get("event_type").and_then(Value::as_str)?;
-            kinds.get(kind)
-        })
-        .unwrap_or(&default_projection);
-    project_record(record, projection)
+    project_record(record, &default_projection)
 }
 
 /// One projected table row: a cell per column (in column order), the per-cell
@@ -1135,10 +1076,8 @@ pub fn project_table_record(
     }
 }
 
-/// Project a rows/timeline source response: pull the collection, apply
-/// per-record projections. Timeline uses per-event-kind blocks keyed by
-/// the record's `event_type`, falling back to `default`, falling back to
-/// raw — degradation is the v0, not an error path.
+/// Project a rows source response: pull the collection, apply the binding's
+/// record projection — degradation is the v0, not an error path.
 pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<ProjectedRecord> {
     source_collection(binding, response)
         .iter()
@@ -1147,7 +1086,7 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 }
 
 /// Project one section's source response into records, applying the section's
-/// single projection (no per-event-kind blocks — that's `project_records`).
+/// single projection.
 /// A section with a `collection` is a list source: one row per record. A
 /// section without one is a *detail* source: the whole response is a single
 /// record — one row — so a sections view can carry a singular status line
@@ -2671,128 +2610,6 @@ mod tests {
         assert_eq!(rows[0].tone.as_deref(), Some("danger"));
         assert_eq!(rows[1].tone.as_deref(), Some("neutral"));
         assert_eq!(rows[1].meta.as_deref(), Some("running"));
-    }
-
-    #[test]
-    fn timeline_event_kinds_with_default_degradation() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": { "message_delta": { "primary": "payload.delta" } },
-                "default": { "primary": "event_type", "meta": "ts" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "message_delta", "payload": { "delta": "hel" }, "ts": "t1" },
-            { "event_type": "totally_unknown_kind", "payload": {}, "ts": "t2" }
-        ]});
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].primary, "hel");
-        assert_eq!(rows[1].primary, "totally_unknown_kind");
-        assert_eq!(rows[1].meta.as_deref(), Some("t2"));
-    }
-
-    #[test]
-    fn timeline_roles_and_pair_keys_are_projected_from_content() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "delta": { "primary": "payload.text", "role": "flow" },
-                    "start": { "primary": "payload.name", "role": "pair_open", "pair_key": "payload.id" },
-                    "done": { "primary": "payload.result", "role": "pair_close", "pair_key": "payload.id" },
-                    "turn": { "primary": "payload.label", "role": "boundary" },
-                    "typo": { "primary": "payload.text", "role": "FLOW" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "delta", "payload": { "text": "hello" } },
-            { "event_type": "start", "payload": { "name": "tool", "id": "call-1" } },
-            { "event_type": "done", "payload": { "result": "ok", "id": "call-1" } },
-            { "event_type": "turn", "payload": { "label": "turn 1" } },
-            { "event_type": "typo", "payload": { "text": "literal" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Flow);
-        assert_eq!(rows[1].role, TimelineRole::PairOpen);
-        assert_eq!(rows[1].pair_key.as_deref(), Some("call-1"));
-        assert_eq!(rows[2].role, TimelineRole::PairClose);
-        assert_eq!(rows[2].pair_key.as_deref(), Some("call-1"));
-        assert_eq!(rows[3].role, TimelineRole::Boundary);
-        assert_eq!(rows[4].role, TimelineRole::Line);
-    }
-
-    #[test]
-    fn pair_roles_without_resolvable_key_degrade_to_line() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "start": { "primary": "payload.name", "role": "pair_open", "pair_key": "payload.missing" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "start", "payload": { "name": "tool", "id": "call-1" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Line);
-        assert_eq!(rows[0].pair_key, None);
-    }
-
-    #[test]
-    fn flow_role_without_projected_primary_is_empty_for_fold_skip() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "message_delta": { "primary": "payload.delta", "role": "flow" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "message_delta", "payload": { "content": "final answer" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Flow);
-        assert!(rows[0].primary.is_empty());
-    }
-
-    #[test]
-    fn flow_role_uses_durable_content_projection() {
-        let binding: ViewBinding = serde_json::from_value(json!({
-            "widget": "timeline",
-            "sources": { "default": { "ref": "service:events/chain_replay", "collection": "events" } },
-            "projections": {
-                "event_kinds": {
-                    "message_delta": { "primary": "payload.content", "role": "flow" }
-                },
-                "default": { "primary": "event_type" }
-            }
-        }))
-        .unwrap();
-        let response = json!({ "events": [
-            { "event_type": "message_delta", "payload": { "delta": "partial", "content": "final answer" } }
-        ]});
-
-        let rows = project_records(&binding, &response);
-        assert_eq!(rows[0].role, TimelineRole::Flow);
-        assert_eq!(rows[0].primary, "final answer");
     }
 
     #[test]

@@ -1,0 +1,232 @@
+{
+ "events": [
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 1,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "event_id": 120,
+   "event_type": "thread_created",
+   "payload": {
+    "executor_ref": "native:ryeos-directive-runtime",
+    "item_ref": "directive:test/continuation/force_continue_with_hook",
+    "kind": "directive_run",
+    "launch_mode": "wait"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 1,
+   "ts": "2026-11-16T03:25:31Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 2,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "event_id": 121,
+   "event_type": "as_launched_resolution",
+   "payload": {
+    "ancestors": [],
+    "effective_trust_class": "trusted_project",
+    "policy_facts": {
+     "effective_caps": [
+      "ryeos.execute.tool.test/anchor_demo/anchor_demo",
+      "ryeos.execute.directive.test/continuation/summarize_hook"
+     ]
+    },
+    "referenced_items": [],
+    "root": {
+     "raw_content_digest": "0000000000000000000000000000000000000000000000000000000000000003",
+     "requested_id": "directive:test/continuation/force_continue_with_hook",
+     "resolved_ref": "directive:test/continuation/force_continue_with_hook",
+     "signer_fingerprint": "0000000000000000000000000000000000000000000000000000000000000004",
+     "source_root": {
+      "kind": "project"
+     },
+     "source_space": "project",
+     "trust_class": "trusted_project"
+    }
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 2,
+   "ts": "2026-11-16T03:25:31Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 3,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "event_id": 122,
+   "event_type": "as_launched_ref_bindings",
+   "payload": {
+    "records": {
+     "model": {
+      "canonical_ref": "directive:test/continuation/force_continue_with_hook",
+      "effective_trust_class": "trusted_project",
+      "resolution": {
+       "ancestors": [],
+       "effective_trust_class": "trusted_project",
+       "policy_facts": {
+        "effective_caps": [
+         "ryeos.execute.tool.test/anchor_demo/anchor_demo",
+         "ryeos.execute.directive.test/continuation/summarize_hook"
+        ]
+       },
+       "referenced_items": [],
+       "root": {
+        "raw_content_digest": "0000000000000000000000000000000000000000000000000000000000000003",
+        "requested_id": "directive:test/continuation/force_continue_with_hook",
+        "resolved_ref": "directive:test/continuation/force_continue_with_hook",
+        "signer_fingerprint": "0000000000000000000000000000000000000000000000000000000000000004",
+        "source_root": {
+         "kind": "project"
+        },
+        "source_space": "project",
+        "trust_class": "trusted_project"
+       }
+      },
+      "source_space": "project"
+     }
+    },
+    "ref_bindings": {}
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 3,
+   "ts": "2026-11-16T03:25:31Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 4,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "event_id": 123,
+   "event_type": "runtime_launch_facts",
+   "payload": {
+    "facts": {
+     "authority_digest": "0000000000000000000000000000000000000000000000000000000000000007",
+     "config_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+     "config_sources": [
+      "bundle:directive"
+     ],
+     "config_value_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+     "context_window": 500,
+     "matched_profile": "openai_compat",
+     "model_name": "gpt-5.4-nano",
+     "provider_id": "zen",
+     "reasoning": null,
+     "sampling": null,
+     "spend_bound": "advisory_only"
+    },
+    "node_requirements_met_by": {}
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 4,
+   "ts": "2026-11-16T03:25:31Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 5,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "event_id": 124,
+   "event_type": "thread_started",
+   "payload": {},
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 5,
+   "ts": "2026-11-16T03:25:31Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 6,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "event_id": 125,
+   "event_type": "cognition_in",
+   "payload": {
+    "content": "<scrubbed content 2454 chars>"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 6,
+   "ts": "2026-11-16T03:25:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 7,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000c",
+   "event_id": 126,
+   "event_type": "cognition_in",
+   "payload": {
+    "turn": 1
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 7,
+   "ts": "2026-11-16T03:25:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 8,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "event_id": 127,
+   "event_type": "thread_failed",
+   "payload": {
+    "message": "<scrubbed message 546 chars>"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000c",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000c",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 8,
+   "ts": "2026-11-16T03:25:32Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 9,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "event_id": 128,
+   "event_type": "thread_failed",
+   "payload": {
+    "artifact_count": 0,
+    "error": {
+     "code": "directive_failed",
+     "diagnostic_locator": {
+      "attempt_id": "T-fe3fde97-4e2b-d42c-5e41-cb9e7e08964a:1:1",
+      "event_type": "thread_failed",
+      "thread_id": "T-0001",
+      "turn": 1
+     },
+     "kind": "runtime_failure",
+     "retryable": false,
+     "summary": "<scrubbed summary 546 chars>",
+     "version": 1
+    },
+    "error_digest": "000000000000000000000000000000000000000000000000000000000000000f",
+    "error_size_bytes": 829,
+    "has_error": true,
+    "outcome_code": "failed",
+    "result_digest": null,
+    "result_present": false,
+    "result_project_snapshot_hash": null,
+    "result_size_bytes": 0,
+    "result_workspace_output_capture_hash": null
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 9,
+   "ts": "2026-11-16T03:25:32Z"
+  }
+ ]
+}

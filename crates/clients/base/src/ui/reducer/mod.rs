@@ -182,9 +182,9 @@ impl RyeOsCore {
             } => self.apply_transport_state(channel, freshness, observed_at_ms, error),
             RyeOsEvent::ThreadTail {
                 thread_id,
-                event_type,
+                event_type: _,
                 payload,
-            } => self.apply_thread_tail(&thread_id, &event_type, &payload),
+            } => self.apply_thread_tail(&thread_id, &payload),
             RyeOsEvent::Tick { now_ms } => {
                 let dt_ms = now_ms.saturating_sub(self.runtime.last_tick_ms);
                 self.runtime.last_tick_ms = now_ms;

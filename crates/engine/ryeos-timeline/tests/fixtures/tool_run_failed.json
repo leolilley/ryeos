@@ -1,0 +1,65 @@
+{
+ "events": [
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 1,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "event_id": 46,
+   "event_type": "thread_created",
+   "payload": {
+    "executor_ref": "@subprocess",
+    "item_ref": "tool:gemma-agent/attempt",
+    "kind": "tool_run",
+    "launch_mode": "wait"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 1,
+   "ts": "2026-11-15T06:45:59Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 2,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "event_id": 47,
+   "event_type": "thread_started",
+   "payload": {},
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 2,
+   "ts": "2026-11-15T06:45:59Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 3,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000003",
+   "event_id": 48,
+   "event_type": "thread_failed",
+   "payload": {
+    "artifact_count": 0,
+    "error": {
+     "exit_code": 1,
+     "stderr": "<scrubbed stderr 2044 chars>",
+     "stdout": "<scrubbed stdout 0 chars>"
+    },
+    "error_digest": "0000000000000000000000000000000000000000000000000000000000000004",
+    "error_size_bytes": 2132,
+    "has_error": true,
+    "outcome_code": "exit:1",
+    "result_digest": null,
+    "result_present": false,
+    "result_project_snapshot_hash": null,
+    "result_size_bytes": 0,
+    "result_workspace_output_capture_hash": null
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 3,
+   "ts": "2026-11-15T06:46:00Z"
+  }
+ ]
+}
