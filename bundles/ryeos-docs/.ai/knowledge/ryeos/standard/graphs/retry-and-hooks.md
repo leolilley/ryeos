@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-08-11T02:28:38Z:23bbe6edf52a0926dfc765674697a99bf700718306a4a9fe553b72f51f80dc10:QzDnsQuemROlh0k1D/HdqVdVP/YLMhHn/7JzuCuHXNUa39zeXrCaIhvgegf1lQ169DEnpE4qr6NgqJf+XYUdCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T04:13:42Z:8c5756044560374a98776a37a4c6c96f06056ca54c92c4b61fe1b47c83ed1190:ozs3GS25ul7iNdbiMg0PGGsD/Na4NbyLBYjPxzCqeyqf1Qih1r8gS5fitRD6RP2N6Bvm22nxeZwBsBBAbGGNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, authoring, retry, hooks, resilience]
@@ -13,7 +13,7 @@ Two resilience/observability features on the graph runtime, both opt-in.
 ## Per-step retry
 
 Add an optional `retry` block to an action node (a plain action or a
-`foreach`). When a dispatch fails, the walker re-runs it up to a bounded number
+`foreach`). When a dispatch fails with a *retryable* failure (see below), the walker re-runs it up to a bounded number
 of attempts with an exponential backoff before falling through to the node's
 existing `on_error` routing.
 
@@ -30,6 +30,14 @@ nodes:
 
 Semantics:
 
+- **Retry applies only to failures classified retryable**, not to every
+  failure. Transport and callback failures the daemon marks retryable, and
+  child failures that report `retryable: true` in their structured failure,
+  consume the budget. A tool that exits nonzero or raises, an unauthorized
+  or rejected dispatch, and integrity failures are not retryable: they
+  dispatch once and go straight to `on_error`. The step error then ends with
+  `retry not attempted: failure not classified retryable (retry.attempts=N ...)`
+  so the refusal is visible, and no `graph_node_retry` event is emitted.
 - `attempts` is the total count including the first dispatch, so `attempts: 3`
   is one initial call plus up to two retries. Exhaustion routes through the
   node's `on_error` (or the graph-level `on_error` policy) unchanged.

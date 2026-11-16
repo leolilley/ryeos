@@ -3159,6 +3159,32 @@ async fn retry_redispatches_until_success() {
 }
 
 #[tokio::test]
+async fn non_retryable_leaf_failure_with_retry_budget_states_the_refusal() {
+    // A tool that exits nonzero is not classified retryable: it dispatches
+    // once, emits no graph_node_retry, and the error says why no retry ran.
+    let graph = make_graph(RETRY_YAML);
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![subprocess_failure(), subprocess_success()],
+        None,
+    );
+    let result = walker.execute(json!({}), None).await;
+    assert_eq!(recorder.dispatch_count(), 1, "no second attempt");
+    assert!(
+        !recorder
+            .recorded_events()
+            .iter()
+            .any(|(_, event, _)| event == "graph_node_retry")
+    );
+    let errors = format!("{result:?}");
+    assert!(
+        errors.contains("retry not attempted: failure not classified retryable")
+            && errors.contains("retry.attempts=3"),
+        "refusal must be explicit: {errors}"
+    );
+}
+
+#[tokio::test]
 async fn unknown_unary_dispatch_outcome_exits_without_step_commit_or_authored_retry() {
     let graph = make_graph(RETRY_YAML);
     for (label, marker) in [

@@ -16,6 +16,17 @@ pub(super) fn retry_attempts_remaining(node: &GraphNode, retry_attempt: u32) -> 
     (failed_attempt < rc.attempts).then_some(failed_attempt)
 }
 
+/// Suffix appended to a failure diagnostic when the node declares a retry
+/// budget with attempts left but the failure was not classified retryable, so
+/// the refusal to retry is visible instead of silent.
+pub(crate) fn retry_refused_note(total_attempts: u32) -> String {
+    format!(
+        "; retry not attempted: failure not classified retryable \
+         (retry.attempts={total_attempts}; only transport/callback failures and \
+         child failures that declare themselves retryable consume the budget)"
+    )
+}
+
 /// Resolve what to do on error based on node-level `on_error` and
 /// graph-level `on_error` mode.
 pub(super) fn resolve_next_on_error(node: &GraphNode, cfg: &GraphConfig) -> NextOnError {
