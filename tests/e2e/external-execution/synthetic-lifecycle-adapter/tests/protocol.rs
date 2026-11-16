@@ -95,6 +95,21 @@ fn admit_external_worker_evidence(
     evidence
 }
 
+/// The placement requirements of the shipped external-authoring codex profile:
+/// the real controller, credential, lease and guest floors a hosted session
+/// is judged with.
+fn real_codex_placement_requires(repository_source_root: &Path) -> serde_json::Value {
+    let profile: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            repository_source_root
+                .join("bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    profile["requires"].clone()
+}
+
 /// The placement the real admission derives for the test Worker: its
 /// profile's `requires` and the Worker kind's readiness budget.
 fn admitted_placement(
@@ -1260,7 +1275,7 @@ async fn prepare_external_worker_program_and_binding(
         .resolve_for_use(
             Some(&selected),
             &qualification_use,
-            admitted_placement(&state),
+            admitted_placement(state),
         )
         .unwrap();
     let consumer = ryeos_app::external_content_admission::derive_consumer_authority_for_test(
@@ -3767,8 +3782,7 @@ fn lease_lane_budget(
 /// The capability names the real codex profile's controller and credential
 /// requirements need, one per entry: the environment the lease-lane node states.
 fn lease_lane_environment_names() -> Vec<String> {
-    let requires =
-        candidate_authoring::real_codex_placement_requires(fixture_repository_source_root());
+    let requires = real_codex_placement_requires(fixture_repository_source_root());
     let requirements = ryeos_engine::structured_session_profile::placement_requirements(
         &serde_json::json!({"external_candidate": {}, "requires": requires}),
     )
@@ -4324,7 +4338,7 @@ async fn run_production_tls_candidate(
         )
         .then(|| {
             let mut requires =
-                candidate_authoring::real_codex_placement_requires(fixture_repository_source_root());
+                real_codex_placement_requires(fixture_repository_source_root());
             if publication == PublicationScenario::LeaseUnmetGuarantee {
                 let entries = requires["lease"].as_array_mut().unwrap();
                 entries.push(

@@ -3,6 +3,8 @@
 //! requirements, and the reader refuses a report that lacks one of them, one
 //! signed by another key, and one from another policy generation.
 
+// This binary reads reports; it does not stand a node up, so `install` is unused here.
+#[allow(dead_code)]
 #[path = "../../support/node_capability_report.rs"]
 mod node_capability_report;
 
