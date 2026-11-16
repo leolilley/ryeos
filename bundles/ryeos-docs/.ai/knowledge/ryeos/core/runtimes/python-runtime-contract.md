@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T04:15:23Z:834e1bd5e0e66c652470992da76a90f4d79301e5a9fc02353221088a198a7933:cl+zvKU4vi7QN1PXLoH/WB+MTpNP/lj2S/4Jcd1R43iiA6OpkbZvVRWENfuR6PjowJm/At2UfOQISrb5fNbXDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T01:59:27Z:94b95ad72f84a45a91382046c64513fb153ddf7a4aea0a936608e7fa04a45ae9:s4+hkrD9MBWxHZhmTihgsKbSADziIwcZOrOKr/pEFRbMs/awB4enLUCfSiSfBkJ6iBbXrDrC3io2puyyYk86CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/runtimes
 tags: [runtime, python, contract, tools]
@@ -58,10 +58,16 @@ a separate environment declaration even when it uses the same artifact.
 ## Working directory
 
 The subprocess runs with its **current working directory set to the selected
-execution workspace**. For an ordinary live definition with no retained
-filesystem bindings this is the live project root. When the finalized
-definition retains source or external content, it is a daemon-private,
-possibly sparse and ephemeral view containing those admitted bytes. Relative
+execution workspace**. For a live launch of an ordinary definition with no
+retained filesystem bindings this is the live project root. The python script
+and function runtimes declare `source_scope`, so a tool on them always retains
+source: it never sees the live project, and a launch with live project
+authority (read-only or read-write) is refused with
+`live_project_unavailable_to_sourced_runtime`. Launch it pinned
+(`--pin-project` or a pinned project policy) or projectless, where the
+workspace is a daemon-private, possibly sparse and ephemeral view containing
+those admitted bytes (a pinned launch gets its generation). For live project
+access use an `@subprocess` tool without `source_scope`. Relative
 file reads/writes are relative to that view; the path is not resolution or
 publication authority. Writes to an ephemeral workspace are discarded when
 the process ends and never fold back into the live project. Durable results
