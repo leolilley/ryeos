@@ -1023,6 +1023,9 @@ impl std::error::Error for ReplayIndexActivationRequired {}
 pub enum ReplayIndexResetScope {
     Unchanged,
     AllReplayRecords,
+    /// No Operational store exists to reset: the operator set aside a store
+    /// this binary has no migration for. The next start creates a fresh one.
+    AbsentStore,
 }
 
 /// The same epoch-based retirement decision is used for preview and commit.
@@ -1032,6 +1035,18 @@ pub struct ReplayIndexResetReport {
     pub stored_epoch: i32,
     pub current_epoch: i32,
     pub scope: ReplayIndexResetScope,
+}
+
+impl ReplayIndexResetReport {
+    /// The report for a wholly absent store: nothing is stored, and the
+    /// fresh store the next start creates holds the current epoch.
+    pub fn absent_store() -> Self {
+        Self {
+            stored_epoch: REPLAY_INDEX_EPOCH,
+            current_epoch: REPLAY_INDEX_EPOCH,
+            scope: ReplayIndexResetScope::AbsentStore,
+        }
+    }
 }
 
 /// Offline reset preparation, deliberately not a usable replay database.

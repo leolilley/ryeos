@@ -1074,3 +1074,94 @@ async fn scheduling_node_follows_the_remedy_to_a_ready_core_node() -> Result<()>
     );
     Ok(())
 }
+
+/// Step a SQLite store back to its predecessor stamp, as a node issued before
+/// a cut holds it: `edit` maps the current value to the predecessor one.
+fn stamp_predecessor(path: &Path, pragma: &str, edit: impl Fn(i64) -> i64) -> Result<i64> {
+    let connection = rusqlite::Connection::open(path)
+        .with_context(|| format!("open {} to stamp it", path.display()))?;
+    let current: i64 = connection.query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))?;
+    let predecessor = edit(current);
+    connection.execute_batch(&format!("PRAGMA {pragma} = {predecessor};"))?;
+    Ok(predecessor)
+}
+
+/// A node issued before two clean cuts that ship together (a runtime schema
+/// epoch and an Operational schema version) crosses both through the real
+/// CLI. The reset refuses the predecessor Operational store and names the
+/// cure; once the operator sets that store aside as instructed, the reset
+/// completes carrying no Operational authority, and the next start creates a
+/// fresh current store.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_crosses_a_runtime_epoch_cut_and_an_operational_schema_cut_together() -> Result<()> {
+    let mut h = stopped_core_only_node().await?;
+    let runtime = runtime_dir(&h);
+    let operational = ryeos_state::operational::OPERATIONAL_DB_FILENAME;
+    let marker = ryeos_state::operational::OPERATIONAL_INITIALIZED_FILENAME;
+
+    // The runtime epoch is the low byte of the runtime store's application id.
+    let current_epoch = ryeos_app::runtime_db::RuntimeDb::current_operator_schema_epoch();
+    let predecessor_epoch = i64::from(
+        current_epoch
+            .checked_sub(1)
+            .context("the current runtime epoch has a predecessor")?,
+    );
+    stamp_predecessor(&runtime.join("runtime.sqlite3"), "application_id", |id| {
+        (id & !0xff) | predecessor_epoch
+    })?;
+    stamp_predecessor(&runtime.join(operational), "user_version", |version| {
+        version - 1
+    })?;
+
+    // 1. The reset cannot carry a store this binary has no migration for.
+    let refused = reset_command(&h)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("spawn the refused reset")?;
+    let refusal = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    anyhow::ensure!(
+        !refused.status.success() && refusal.contains("this binary has no migration"),
+        "the predecessor Operational store must be refused with its cure: {refusal}"
+    );
+
+    // 2. The operator sets the whole store aside, as the refusal instructs.
+    let aside = tempfile::tempdir()?;
+    for name in [
+        operational.to_owned(),
+        format!("{operational}-wal"),
+        format!("{operational}-shm"),
+        marker.to_owned(),
+    ] {
+        let source = runtime.join(&name);
+        if source.exists() {
+            std::fs::rename(&source, aside.path().join(&name))
+                .with_context(|| format!("set aside {name}"))?;
+        }
+    }
+
+    // 3. The reset now crosses the runtime epoch cut carrying nothing.
+    let report = reset_to_completion(&h).await?;
+    assert_eq!(report["performed"], true, "{report}");
+    assert_eq!(
+        report["replay_indexes"]["scope"], "absent_store",
+        "{report}"
+    );
+    assert!(
+        !runtime.join(marker).exists() && !runtime.join(operational).exists(),
+        "the reset must not invent an Operational store"
+    );
+
+    // 4. The next start creates a fresh current Operational store.
+    h.respawn_with(|_| {}).await?;
+    anyhow::ensure!(
+        runtime.join(marker).is_file() && runtime.join(operational).is_file(),
+        "the first start after the cut must create a fresh Operational store"
+    );
+    Ok(())
+}
