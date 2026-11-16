@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T01:59:27Z:73d4aaf95d22dde6741cda4e355585808660f4728182c8ddcb203850787d064f:N5YbClFFaCV8pW1TGW9XhOKeUNutegKEOB3vcZULHSz957jD9h7/ebnMbD0SJGhKFcuf8I0qhx29mQJXTFlGCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T03:56:04Z:63d7572ac2e7f6117c6ae63f797f4b264eedf99660c5974b58c7624e35fec386:AgHkFnwIYvXZK9Wl1CKLikfAn4P2i8SGodXSU85X9ZBdT0Lebd4J+SgHYd8TJOi3dxs79m1KpMFzFNShzbVfCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -52,7 +52,7 @@ evaluator as graph/directive runtime bodies.
 | `${tool_path}`       | Absolute path to the tool source file        |
 | `${tool_dir}`        | Parent directory of the tool source file     |
 | `${tool_parent}`     | Grandparent of the tool source file          |
-| `${project_path}`    | Absolute path to the selected execution workspace; the live project only for tools whose executor chain declares no `source_scope` and retains no external content; otherwise a sparse ephemeral admitted-input view (a live launch of a python/bash runtime tool is refused instead) |
+| `${project_path}`    | Absolute path to the selected execution workspace; the live project only for tools whose executor chain declares no `source_scope` and retains no external content; for every python or bash runtime tool (which declare `source_scope`) it is a sparse ephemeral admitted-input view holding only the verified source, never the live project |
 | `${params_json}`     | Full parameters as JSON string               |
 | `${interpreter}`     | Resolved Python binary (from env config)     |
 | `${runtime_dir}`     | Current chain element's directory            |

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T01:59:27Z:e8c6b165ebcaf7d743fa5cc17cde3e84644bdcd78e1ef2e736123f87639a5191:KGpC23GPapKrOmamPH3gKXdlAotlLKKs7W0BVXdjwvD8s0xXNo7rVyDAZVbM7kwrVtEqpAERAUAqP/zByHUSCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T03:56:03Z:0e8eecf6beab4724e9aef43d63d83d80467bbc593117f2d353dd9638c7e37a44:gXDiQQjx68z3RNHRBZjsb7HALzSseax6WzvQVCgwkmafH3OEZAh8WHXprTx6P/UkhSgkb5iTF60HfF0MjAlxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -224,9 +224,10 @@ The policy has two modes:
   bytes there by descriptor-safe reflink or bounded copy. A live launch with no
   retained filesystem bindings keeps the ordinary live project path; a live
   launch of a program that does retain bindings (every tool on a runtime that
-  declares `source_scope`) is refused with
-  `live_project_unavailable_to_sourced_runtime`, because the project would never
-  reach the process. This input
+  declares `source_scope`) gets the sparse private root instead, so the live
+  project never reaches the process; a schedule fire that granted such a
+  launch live project authority is refused with
+  `live_project_unavailable_to_sourced_runtime`. This input
   delivery is not a substitute for OS isolation: disabled mode still provides no
   confinement from other host paths visible to the process.
   A signed captured-filesystem or isolated-network requirement refuses in
@@ -315,8 +316,8 @@ the new HEAD and the base it advanced from, with the generation joined to the
 terminal, since the run never confirmed its own completion. A not-applied result is never retried or
 merged onto the new HEAD; re-run against the current HEAD.
 Sparse admitted-input roots are process inputs and scratch, not project
-publication, and they never hold the live project: a launch with live project
-authority that would need one is refused rather than run. Their writes are discarded at process cleanup and never fold back
+publication, and they never hold the live project (a schedule fire with live
+project authority that would need one is refused rather than run). Their writes are discarded at process cleanup and never fold back
 to the live project. Durable outputs use structured results or explicit
 daemon-owned authoring, vault, and bundle-event callbacks; generic opaque file
 ingest is not currently a runtime callback contract.

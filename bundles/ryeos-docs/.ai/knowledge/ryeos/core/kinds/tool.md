@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T01:59:27Z:10a3e1d5fe88645e3ac27f4be1b1daa2657eeb1415b65281cb8010d0492c6a4e:YuD7rQkom3LgyJhU8EuJANzXGWB4881gCjsOCkPB57EZDmEfkgoAdtMHz+/zB+c1i3uZx4fP1en7s3oayHNMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T03:56:03Z:1c623ef57c29b39aa292ed286c23e77406bd7ef83e5b1bed10c6d16239eb8bad:ultF/+B/PJrHp3PkC0A9WLaU4+qOg1G2lZLtBeZiFUu1HA5V8BadczuBvTu8dDQqWAzfzhI7+Ev/lAWZGItUBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
@@ -41,16 +41,21 @@ does not declare its own files through `external_content` and must not hash or
 reopen live source to establish execution identity.
 
 Tools on a runtime that declares `source_scope` (the python script and function
-runtimes and the bash script runtime) never see the live project. A launch with
-live project authority (`live_direct`, read-only or read-write, which includes a
-plain project-backed `ryeos execute` and a scheduled `live_direct` policy) is
-refused before the tool starts with `live_project_unavailable_to_sourced_runtime`;
-it is never run with the project silently absent. To give a tool the live
-project, write it as an `@subprocess` tool without `source_scope`
-(`executor_id: "@subprocess"` with its own `command`). To run a python or bash
-runtime tool, launch it pinned (`--pin-project`, or a pinned project policy),
-which gives a copy-on-write generation, or run it projectless and return
-structured results.
+runtimes and the bash script runtime) never see the live project, whatever the
+launch's project authority says. Their working directory and `${project_path}`
+are the private input root, which holds only the verified source, and any file
+they write there is discarded when the process ends. A schedule fire whose
+`execution_policy` grants live project authority (`live_direct`, read-only or
+read-write) is refused before the tool starts with
+`live_project_unavailable_to_sourced_runtime`, so it cannot exit 0 with its
+project writes silently lost. Other live launches (a project-backed
+`ryeos execute`, handler routes, children of those) resolve to live authority by
+default and are not refused; they run from the private root and the same rule
+applies. To give a tool the live project, write it as an `@subprocess` tool
+without `source_scope` (`executor_id: "@subprocess"` with its own `command`).
+To run a python or bash runtime tool on a project, launch it pinned
+(`--pin-project` or a pinned project policy), which gives a copy-on-write
+generation, or return structured results.
 
 The protocol treats stdin and terminal stdout as opaque while explicitly
 declaring callback socket, callback token, thread-auth, thread, and project env
