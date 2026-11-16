@@ -1547,7 +1547,10 @@ mod tests {
                 .process_environment
                 .values()
                 .filter(|value| {
-                    matches!(value, AuthoredWorkerEnvironmentValue::DeliveredSecret { .. })
+                    matches!(
+                        value,
+                        AuthoredWorkerEnvironmentValue::DeliveredSecret { .. }
+                    )
                 })
                 .count();
             assert_eq!(delivered, required.len(), "{file}");

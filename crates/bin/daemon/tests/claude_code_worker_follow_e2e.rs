@@ -446,6 +446,29 @@ async fn run_graph(
         status.is_success(),
         "threads/get failed: {status} {thread:#}"
     );
+    // Shown by the test runner only when the test fails: the settled child
+    // threads' own records and the daemon's log, which carry the reason a
+    // worker turn failed when the graph only reports the redirect.
+    for (thread_id, event, payload) in &events {
+        if *thread_id != parent_thread_id || event != "child_thread_settled" {
+            continue;
+        }
+        let Some(child) = payload.get("child_thread_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let record = daemon
+            .post_execute(
+                "service:threads/get",
+                project.to_str().context("project path is not UTF-8")?,
+                json!({ "thread_id": child }),
+            )
+            .await;
+        eprintln!("--- settled child {child} ---\n{record:#?}");
+    }
+    eprintln!(
+        "--- daemon stderr ---\n{}",
+        daemon.drain_stderr_nonblocking().await
+    );
     let probe = find_key(&thread, "probe")
         .cloned()
         .with_context(|| format!("the resumed thread returned no `probe`: {thread:#}"))?;
