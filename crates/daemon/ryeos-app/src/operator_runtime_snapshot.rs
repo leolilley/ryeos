@@ -1508,6 +1508,21 @@ impl PreparedConsumerAttempt {
     }
 }
 
+/// One occurrence is one sandbox with one shape: a consumer attempt may run on
+/// it only when the signed scenario declares exactly the shape it was created
+/// under.
+fn require_occurrence_shape_matches_scenario(
+    declared: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    occurrence: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+) -> Result<()> {
+    if let Some(difference) = declared.first_difference(occurrence) {
+        anyhow::bail!(
+            "the qualified occurrence was created under a launch shape the scenario does not declare: {difference} (scenario first, occurrence second)"
+        );
+    }
+    Ok(())
+}
+
 pub fn prepare_consumer_verifier_attempt_for_callback(
     state: &AppState,
     token: &str,
@@ -1563,11 +1578,7 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
         .get(&admitted.coordinate().scenario_id)
         .context("consumer challenge has no retained verifier source")?
         .launch_shape;
-    if let Some(difference) = declared_shape.first_difference(&qualification.intent.launch_shape) {
-        anyhow::bail!(
-            "the qualified occurrence was created under a launch shape the scenario does not declare: {difference} (scenario first, occurrence second)"
-        );
-    }
+    require_occurrence_shape_matches_scenario(declared_shape, &qualification.intent.launch_shape)?;
     let mut intent = RestoredVerifierAttemptIntent {
         schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
@@ -3398,6 +3409,24 @@ mod tests {
                 panic!("owner-measurement fixture contains a consumer result")
             }
         }
+    }
+
+    #[test]
+    fn an_occurrence_shape_the_scenario_does_not_declare_is_refused_with_both_values() {
+        use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+        let https = LaunchShape::https_allow_list(["controller.invalid".to_owned()]);
+        require_occurrence_shape_matches_scenario(&https, &https).unwrap();
+        let message = format!(
+            "{:#}",
+            require_occurrence_shape_matches_scenario(&https, &LaunchShape::relay_deny_all())
+                .unwrap_err()
+        );
+        assert!(
+            message.contains("created under a launch shape the scenario does not declare")
+                && message.contains("launch_shape.controller_transport: Https versus Relay")
+                && message.contains("(scenario first, occurrence second)"),
+            "{message}"
+        );
     }
 
     #[test]
