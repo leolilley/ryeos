@@ -2061,6 +2061,38 @@ fn validate_observations(value: Option<&Value>, maximum: usize) -> Result<()> {
         require_keys(observation, &["when", "value"], &[])?;
         validate_predicates(observation.get("when"), 16)?;
         validate_template(observation.get("value"), 0, &mut 0)?;
+        validate_observation_kind(observation.get("value"))?;
+    }
+    Ok(())
+}
+
+/// The observation kinds the dedicated-session runtime records. An
+/// observation is an object template whose `kind` is one of these literals,
+/// so a misnamed kind is refused when the profile is validated rather than
+/// when a session first reports it.
+const WORKER_OBSERVATION_KINDS: &[&str] = &[
+    "approval_expired",
+    "credential_enrollment_cancelled",
+    "credential_enrollment_observed",
+    "credential_enrollment_started",
+    "remote_thread",
+    "remote_thread_recovered",
+    "remote_thread_recovery_status",
+    "state",
+];
+
+fn validate_observation_kind(template: Option<&Value>) -> Result<()> {
+    let kind = template
+        .filter(|template| template.get("op").and_then(Value::as_str) == Some("object"))
+        .and_then(|template| template.pointer("/fields/kind"))
+        .filter(|kind| kind.get("op").and_then(Value::as_str) == Some("literal"))
+        .and_then(|kind| kind.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("structured-session observation must be an object with a literal kind")
+        })?;
+    if !WORKER_OBSERVATION_KINDS.contains(&kind) {
+        bail!("structured-session observation kind `{kind}` is not a worker observation kind");
     }
     Ok(())
 }
@@ -2865,6 +2897,28 @@ mod tests {
             error
                 .to_string()
                 .contains("turn_running to idle observation")
+        );
+    }
+
+    #[test]
+    fn an_observation_kind_outside_the_worker_set_is_refused() {
+        let error = claude_code_profile_with(|profile| {
+            profile["routes"][0]["observations"][0]["value"]["fields"]["kind"]["value"] =
+                json!("remote_session");
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("`remote_session` is not a worker observation kind"),
+            "{error:#}"
+        );
+        let error = claude_code_profile_with(|profile| {
+            profile["routes"][0]["observations"][0]["value"]["fields"]["kind"] =
+                json!({"op": "pointer", "pointer": "/response/result/kind", "max_string_bytes": 64});
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("an object with a literal kind"),
+            "{error:#}"
         );
     }
 

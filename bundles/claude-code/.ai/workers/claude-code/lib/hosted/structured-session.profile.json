@@ -109,7 +109,7 @@
             "fields": {
               "kind": {
                 "op": "literal",
-                "value": "remote_session"
+                "value": "remote_thread"
               },
               "id": {
                 "op": "pointer",
@@ -156,7 +156,7 @@
             "fields": {
               "kind": {
                 "op": "literal",
-                "value": "remote_session"
+                "value": "remote_thread"
               },
               "id": {
                 "op": "pointer",
@@ -207,7 +207,7 @@
             "fields": {
               "kind": {
                 "op": "literal",
-                "value": "remote_session_recovered"
+                "value": "remote_thread_recovered"
               },
               "id": {
                 "op": "pointer",
@@ -251,7 +251,7 @@
             "fields": {
               "kind": {
                 "op": "literal",
-                "value": "remote_session_recovery_status"
+                "value": "remote_thread_recovery_status"
               },
               "id": {
                 "op": "pointer",
@@ -277,7 +277,7 @@
             "fields": {
               "kind": {
                 "op": "literal",
-                "value": "remote_session_recovery_status"
+                "value": "remote_thread_recovery_status"
               },
               "id": {
                 "op": "pointer",
@@ -303,7 +303,7 @@
             "fields": {
               "kind": {
                 "op": "literal",
-                "value": "remote_session_recovery_status"
+                "value": "remote_thread_recovery_status"
               },
               "id": {
                 "op": "pointer",

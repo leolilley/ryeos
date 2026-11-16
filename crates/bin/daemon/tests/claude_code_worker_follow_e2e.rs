@@ -174,6 +174,7 @@ const GRAPH_REQUIRES: &str = r#"requires:
   capabilities:
     declared:
       - ryeos.execute.worker_execution.claude-code/bounded-turn
+      - ryeos.execute.worker_execution.claude-code-short-turn-fixture/bounded-turn
       - ryeos.execute.config.claude-code/environments/trusted-lane
       - ryeos.runtime.dedicated_session.start
       - ryeos.runtime.dedicated_session.command
@@ -475,6 +476,14 @@ async fn run_graph(
             )
             .await;
         eprintln!("--- settled child {child} ---\n{record:#?}");
+        let session = daemon
+            .post_execute(
+                "service:worker-executions/status",
+                project.to_str().context("project path is not UTF-8")?,
+                json!({ "chain_root_id": child }),
+            )
+            .await;
+        eprintln!("--- worker execution {child} ---\n{session:#?}");
     }
     eprintln!(
         "--- daemon stderr ---\n{}",
