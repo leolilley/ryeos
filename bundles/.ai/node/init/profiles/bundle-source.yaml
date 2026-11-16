@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T07:47:54Z:4dbed7ce598455b5b3fe91b2699d0a185027a390131b30b5a2f383e448f44f91:7sRj5i/KAFgXMZID50XOihmj+p7+/bbJzuwcPxTZ9SYpmLFK/QoBKfbnC89WT42BM+h6CIVJkHEHQyyG2wNgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T06:28:53Z:4852499e14381388a2a926411815395b692772b8ef47b05e0110502587c1adc0:agx1KsJtvA9kGbi29x+nqq0Et58pp0ZGHYnTi1Za4uSmGTkJC28lfEaw2gX1+kgsXRDppGdHVgSLErSZn9sMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-source
@@ -232,6 +232,24 @@ policies:
       # class requires is this profile's own; the same class carries a
       # different floor and lane in another profile.
       host_classes:
+        hosted:
+          # A hosting provider's container. It has no qualified per-job
+          # process scopes and commonly no swap and no CAP_IPC_LOCK, so the
+          # floor accepts a resident region proven only by the absence of swap
+          # at startup (residency:swap_absent). Jobs die with the node because
+          # the node is pid 1 of its container, or its parent is a pid 1 named
+          # in enclosure_inits. Jobs run without a sandbox: the catalog
+          # services are daemon endpoints that execute no captured source, and
+          # consumers verify publisher evidence under their own policy, so the
+          # host can withhold or delay a catalog head but cannot forge one.
+          requires_capabilities: [{any_of: [accounting, residency:swap_absent]}, {name: recovery:enclosure_trusted_init, accept: [measured, trusted]}, storage:durable_root, {name: termination:enclosure_trusted_init, accept: [measured, trusted]}, time]
+          process_scopes:
+            mode: unconfigured
+          trusted_process_group_sessions: false
+          mode: disabled
+          backend: null
+          proc_filesystem: empty
+          host_direct: unavailable
         local:
           # A host the operator runs where the daemon is spawned directly,
           # without an administrator-owned host association. Jobs run in the
@@ -422,9 +440,7 @@ policies:
       - ryeos.execute.tool.ryeos/core/verify
       - ryeos.execute.tool.ryeos/core/node/doctor
       - ryeos.execute.tool.ryeos/knowledge/compose
-      - ryeos.execute.knowledge.ryeos/core/*
-      - ryeos.execute.knowledge.ryeos/standard/*
-      - ryeos.execute.knowledge.ryeos/ui/*
+      - ryeos.execute.knowledge.*
       - ryeos.execute.tool.core/snapshot-status
       - ryeos.execute.tool.core/snapshot-show
       - ryeos.execute.tool.core/snapshot-log

@@ -2195,6 +2195,8 @@ mod tests {
                 project_authority_id: authority_id,
                 source_identity: format!("dotenv:{path}/.env"),
                 include_operator_vault: true,
+                recipient_principal: "operator".to_string(),
+                recipient_scopes: Vec::new(),
                 name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
             },
             capability_ceiling: Vec::new(),

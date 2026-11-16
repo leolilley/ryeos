@@ -9,13 +9,13 @@ The `ryeos` package has two immutable inputs:
 
 - the signed-tag source archive, used to build the host binaries; and
 - `ryeos-bundles-<version>-x86_64.tar.gz`, produced by the release workflow
-  after populating and signing the full bundle set with the official publisher
-  key.
+  after populating and signing the release bundle sets with the official
+  publisher key. The archive carries the standard and hosted-controller sets.
 
 The AUR build copies the second artifact verbatim into `/usr/share/ryeos`. It
 does not regenerate CAS data, re-sign bundle content, or import packaged trust
-documents as authority. `ryeos init --node-profile full --host-class local` verifies the installed
-artifact and its complete full-distribution init profile against the official
+documents as authority. `ryeos init --node-profile standard --host-class local` verifies the installed
+artifact and its complete standard-distribution init profile against the official
 publisher key compiled into the release binary. Fresh init refuses an absent
 profile.
 

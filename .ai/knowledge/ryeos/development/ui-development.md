@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-11-13T01:27:48Z:c5c2624d5b4f7d9b7fb50e4d3ca77beb29079a63db268fa323859b5da31eaa28:vJXArxf9m2bEHyMs48FVVZJ2TSprzie3aZ4edAv3+tCScIgLU5OKEcSY6qEhJQaiEl91df3+mEa2OX9RrKMxBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T01:55:23Z:f10c74e90539188b7eb036c9b75630f09a0e4a5cfdeed68d487781c18ef49e7e:E2y2HniMoaN+MC1c0eaaEXasTLh7MYkvQlifrlWZiBy/mGC4IkUgXNQIN0TWst1J1/bCUzKHKNNppiOZ4DngDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
 description: "How to develop and qualify the RyeOS Rune renderer in the browser"
 entry_type: reference
-version: "4.0.0"
+version: "4.1.0"
 ```
 
 # Browser UI Development Workflow
@@ -26,8 +26,8 @@ local view selectors, not surface instance-level view-set tabs.
 
 The shared presentation is authored through a typed signed config item using
 the existing config kind. "Session shell" is an implementation responsibility,
-not a new kind or operator identity. It declares shared dialog View references,
-four optional dock mounts and initial Surface references. Resolve its selected
+not a new kind or operator identity. It declares shared dialog View references
+and initial Surface references. Resolve its selected
 default through existing launch/config owners and compile/admit its View closure
 through the existing binding compiler. A signature or installed bundle does not
 grant every referenced operation. No hidden Surface or union of open-Surface
@@ -38,16 +38,19 @@ available before a Surface opens. Surfaces may add scoped contextual dialog
 Views. Shared and contextual entries retain their exact admitted mount identities;
 equal labels/refs do not merge bindings. New bundles do not silently inject UI.
 
-Opening and composition decision (2026-10-08): the generic `ryeos-ui` presentation
-opens neutral Home/background with the shared launcher. It is not a mandatory
-node dashboard or maintenance console. Purpose-specific bundles can author a
+Opening and composition decision (revised 2026-11-13): the generic `ryeos-ui`
+presentation opens Home with the shared launcher. Home observes the Assistant's
+work read-only (`surface:ryeos/ui/base-observe` extends the Assistant, reads every
+service and admits no affordance) and lands on its Overview set: projects and
+sites, the home overview, recent threads and work. Development, Work and Review
+follow as tabs. Purpose-specific bundles can author a
 shared presentation config, Surfaces and Views, arranging ViewSets through the
 existing composition mechanisms; this introduces no new ViewSet kind. An explicitly selected presentation chooses initial
 Surfaces; an explicitly opened Surface supplies its tab seeds. Bundle installation
 does not replace a user's selected presentation, append tabs or confer grants.
 
-Neutral Home has no eager domain polling, conversation input or View library;
-its authored background is sufficient. Chrome derives connection state from
+The neutral base surface (`surface:ryeos/ui/base`) keeps no polling, input or
+View library, for presentations that want a quiet start. Chrome derives connection state from
 transport and identity context from the authenticated BrowserSession, not from
 an optional Node status source or an invented health assertion.
 
@@ -92,12 +95,12 @@ exact compiled dispatch, not weaken the admission owner to accept a unit wrapper
 Validate independent source channels independently: a failed authenticated event
 observation invalidates its accumulated events, not a separately verified pulse.
 
-The top/left/right/bottom docks belong to shared presentation, outside any tab.
-Their visibility and temporary focus can change without detaching mounted Views.
+Shared presentation owns the launcher and shared dialogs, outside any tab. Edge
+placement is just ordinary splits of views and tiles inside a view set.
 In one document, Surface/tab changes do not recreate shared mounts. Additional
 documents require explicit mount/seat coordinates and producer ownership; they
 cannot share one mutable producer. Review that ownership before implementing
-cross-document shared state. Dock position never selects another View's target.
+cross-document shared state.
 
 The source composition owner keeps shared mounts outside Surface tab layouts.
 Dialogs render ordinary admitted Views; each input has an exact mount address.
@@ -109,7 +112,7 @@ Immediate scope is the reusable UI foundation and platform-aligned inspection
 through ordinary retained sources and admitted operations. Node operations and
 later ARC/application arrangements compose those same Views. Conversation history sharing,
 automatic context following, global assistant orchestration and provider chat
-integration are deferred. Keep existing composers explicitly bound. Shared dock
+integration are deferred. Keep existing composers explicitly bound. Shared dialog
 availability does not decide whether a future conversation follows a Surface or
 retains one subject across Surfaces.
 
@@ -408,10 +411,9 @@ Saving or duplicating an unresolved mount preserves only that relationship
 shape. Explicit upfront subject supply and particular-set resume remain strict:
 missing or partial inputs fail atomically and never degrade to unresolved.
 
-For the shared presentation migration, move dock declarations out of reusable
-view-set compositions and preserve their explicit mounted binding relationships
-under the shared owner. Advance schema, compiler, saved records and fixtures
-together; current per-set slot keys are not aliases for session mounts.
+Shared presentation declares only dialogs and initial Surface selections.
+Advance schema, compiler, saved records and fixtures together; per-set slot
+keys are not aliases for session mounts.
 
 Particular view sets have a separate revisioned principal-config collection.
 They retain reusable composition plus only a registered project `local_id` and
@@ -473,13 +475,24 @@ The browser is a renderer, not a second application model:
 - `crates/clients/rune/` (`ryeos-client-rune`) is the renderer: it projects the
   view model to Rune elements and turns presses and keys back into core events.
 - `crates/clients/rune/pkg/` is generated, reviewed installed output. Never edit
-  it directly; `scripts/build-rune-web.sh` writes it.
+  it directly; `build-rune-web.sh` in the browser-assets-production tool's `lib/` writes it.
 - `crates/daemon/ryeos-ui/web-assets.json` is the closed asset manifest.
 - `crates/daemon/ryeos-ui/src/assets.rs` serves only that registered closure.
 
 The installed closure is exactly `index.html`, `ryeos_boot.js`, `ryeos_rune.js`,
-`ryeos_rune_bg.wasm`, `rune_bridge.js` and `rune_platform.js`. There is no
-alternate browser renderer, compatibility bootstrap or runtime fallback.
+`ryeos_rune_bg.wasm`, `rune_bridge.js`, `rune_platform.js`, `ryeos-cjk.ttf` and
+`ryeos-emoji.ttf`. The renderer and the two fonts are stored gzip-encoded
+(`.gz` in `pkg/`) and served that way; a client that does not accept gzip gets
+them decoded. There is no alternate browser renderer, compatibility bootstrap
+or runtime fallback.
+
+On the web Rune draws only the faces it is given. Inter and IBM Plex Mono are
+compiled in; `ryeos-cjk.ttf` (common Chinese and Japanese, kana) and
+`ryeos-emoji.ttf` (monochrome Noto Emoji) cover content in other scripts. The
+boot module fetches them beside the renderer and hands them over (`add_font`)
+before `start`; one that fails to load leaves its characters undrawn and the
+client still starts. `browser-assets-production/lib/build-rune-fonts.py` produces them from pinned
+upstream Noto sources.
 `crates/clients/web/` is only the `web` launcher binary: it mints a launch URL
 and opens the browser.
 
@@ -524,7 +537,7 @@ Keep the installed node running and iterate against it without rebuilding the
 daemon:
 
 ```bash
-scripts/build-rune-web.sh            # WASM_BINDGEN must be the CLI the lock names
+.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh  # WASM_BINDGEN must be the CLI the lock names
 .ai/tools/ryeos/development/interactive-host/lib/dev-ui-assets.sh --background --port 7411 \
   --upstream http://127.0.0.1:PORT --asset-dir crates/clients/rune/pkg
 ```
@@ -604,7 +617,7 @@ detail records already projected by Rust. Pointer disclosure names the exact
 mounted instance and stable item id; it must not synthesize a select-then-expand
 sequence against whichever row later has focus. Detail rendering is plain
 field/value text and never interprets evidence into renderer-owned status.
-Dock mounts use the same exact disclosure event and Rust-owned expansion state
+Dialog mounts use the same exact disclosure event and Rust-owned expansion state
 as center mounts. Tables retain native button semantics inside explicit ARIA
 rows and cells rather than assigning row semantics to a button.
 

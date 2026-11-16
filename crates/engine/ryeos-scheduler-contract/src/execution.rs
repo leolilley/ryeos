@@ -418,6 +418,7 @@ mod tests {
                         source_node_fingerprint: "66".repeat(32),
                         source_node_grant_hash: "77".repeat(32),
                         delegation_digest: None,
+                        delegation_not_after: None,
                     },
                 ),
             },
@@ -487,6 +488,7 @@ mod tests {
                         source_node_fingerprint: "66".repeat(32),
                         source_node_grant_hash: "77".repeat(32),
                         delegation_digest: None,
+                        delegation_not_after: None,
                     },
                 )
             };

@@ -3949,9 +3949,14 @@ async fn run(
         anyhow::bail!("native and external host-runtime authorities are both present");
     }
     if let Some(service) = &host_service {
-        // Refuse a misconfigured root/wrong-account daemon before init checks,
-        // state-lock creation, tracing or lifecycle metadata writes.
-        service.binding.runtime.account.require_current_process()?;
+        // Refuse a root or wrong-account process before init checks,
+        // state-lock creation, tracing or lifecycle metadata writes, and take
+        // the no-new-privileges transition so no child can escalate. The
+        // standalone subcommands below run from an operator session on a
+        // stopped node, which keeps its supplementary groups. The supervised
+        // route proves the supervisor's full credential drop together with
+        // placement (`require_current_process_placed`).
+        service.binding.runtime.account.enter_current_process()?;
     }
     if let Some(runtime) = &external_host_runtime {
         runtime.binding().account.require_current_process()?;

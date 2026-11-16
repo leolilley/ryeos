@@ -38,7 +38,14 @@ def validate(manifest: dict) -> None:
             raise SystemExit(f"duplicate asset route or filename: {route} / {filename}")
         routes.add(route)
         filenames.add(filename)
-        if route != "/ui" and route != f"/ui/assets/{filename}":
+        encoding = asset.get("encoding")
+        if encoding not in {None, "gzip"}:
+            raise SystemExit(f"unsupported encoding for {route}: {encoding}")
+        # A gzip-encoded member is stored as `<served name>.gz` and served as is.
+        served = filename.removesuffix(".gz") if encoding == "gzip" else filename
+        if encoding == "gzip" and served == filename:
+            raise SystemExit(f"gzip-encoded asset must be stored as .gz: {filename}")
+        if route != "/ui" and route != f"/ui/assets/{served}":
             raise SystemExit(f"non-canonical asset route: {route}")
         if Path(filename).name != filename:
             raise SystemExit(f"asset filename must be one path component: {filename}")
@@ -64,7 +71,7 @@ def validate(manifest: dict) -> None:
         path.name
         for path in PACKAGE.iterdir()
         if path.is_file()
-        and path.suffix in {".html", ".js", ".css", ".wasm", ".png", ".svg", ".ico"}
+        and path.suffix in {".html", ".js", ".css", ".wasm", ".png", ".svg", ".ico", ".ttf", ".gz"}
     }
     if packaged != filenames:
         raise SystemExit(
@@ -89,6 +96,7 @@ def render(manifest: dict) -> str:
                 f'        content_type: {json.dumps(asset["mime"])},',
                 f'        cache_control: {json.dumps(asset["cache"])},',
                 f'        sha256: {json.dumps(asset["sha256"])},',
+                f'        encoding: {"Some(" + json.dumps(asset["encoding"]) + ")" if asset.get("encoding") else "None"},',
             ]
         )
         if asset["imports"]:

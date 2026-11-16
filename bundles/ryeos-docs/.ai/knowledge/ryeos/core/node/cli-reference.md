@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T14:32:56Z:0b572ac8c06ce1af61bf783ee8c1f45826818f43706fb758a41e97f016e031dd:aam8/a0fF+3ZmZS0+jVemnUE0nTgGIksygUtG2LA6kOSRelxwNuywuq8/t1e8AzIwzMoPrd3d24z4dkD6aukDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T01:11:15Z:c4de4749099d285dc89dff8272f55f97d400cae3112fdc27f633eef912ec53d4:xEcSWbkejbld9RVKzU3DBwUFclqfX6JlpB3TE6ErcnbGYNeZg/5VGZmSRsQj8eCzYZFQy6fw+dBjTEkFaYMHBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -56,17 +56,17 @@ Signed command aliases still use their declared selector-to-service mappings.
 ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
 ```
 
-Packaged installs use `/usr/share/ryeos` by default. The full package selects
+Packaged installs use `/usr/share/ryeos` by default. The standard package selects
 its exact complete seed explicitly:
 
 ```bash
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ```
 
 Fresh init refuses an absent selector; bundle presence never implies one.
 `--host-class` is given exactly when `--node-profile` is, and names one of the
-profile's declared host classes (`full` declares `local` and
-`local_unconfined`). `local` enforces the sandbox lane: init refuses when the
+profile's declared host classes (`standard` declares `hosted`, `local`
+and `local_unconfined`). `local` enforces the sandbox lane: init refuses when the
 host's sandbox probe cannot prove it, and the refusal names
 `--host-class local_unconfined`, the explicit opt-out that runs jobs as the
 daemon user. Init never selects the opt-out for you, and `ryeos node doctor`
@@ -74,7 +74,7 @@ warns while a node runs it.
 Development usage:
 
 ```bash
-ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --source bundles --node-profile standard --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
 ### `ryeos start`
@@ -286,11 +286,9 @@ The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
 cure, for a record that is unsigned (`remote_pin_unsigned`), signed by a key
 other than the node key (`remote_pin_wrong_signer`), edited after signing
-(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`), and for
-an unsigned remotes config file this node no longer reads
-(`remote_config_file_unsupported`): re-pin each remote with
-`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`,
-then delete the file.
+(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`): re-pin
+the remote with
+`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and

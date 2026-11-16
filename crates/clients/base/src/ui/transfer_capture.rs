@@ -209,24 +209,6 @@ pub(crate) fn capture_selected_transfer_export(
             });
             UiTransferExportContent::ViewSets { active_set, sets }
         }
-        Source::SharedDock { edge } => {
-            let name = match edge {
-                super::model::RyeOsDockEdge::Top => "top",
-                super::model::RyeOsDockEdge::Bottom => "bottom",
-                super::model::RyeOsDockEdge::Left => "left",
-                super::model::RyeOsDockEdge::Right => "right",
-            };
-            let dock = presentation
-                .docks()
-                .get(name)
-                .ok_or("source shared dock absent")?;
-            UiTransferExportContent::SharedDock {
-                edge: *edge,
-                visible: dock.visible,
-                size: dock.size,
-                mount: mount(dock.view().instance_key())?,
-            }
-        }
     };
     let requested = UiTransferExport {
         schema: super::transfer_export::UI_TRANSFER_EXPORT_SCHEMA,
@@ -259,7 +241,6 @@ pub(crate) fn capture_transfer_export_from_core(
         UiTransferExportContent::SurfaceMount {
             source_view_set_id, ..
         } => BTreeSet::from([*source_view_set_id]),
-        UiTransferExportContent::SharedDock { .. } => BTreeSet::new(),
     };
     if core
         .pending_effects
@@ -323,30 +304,6 @@ pub(crate) fn capture_transfer_export_from_core(
                 });
         }
         UiTransferExportContent::SurfaceMount { mount, .. } => {
-            capture_mount(core, captured.mode, mount)?;
-        }
-        UiTransferExportContent::SharedDock {
-            edge,
-            visible,
-            size,
-            mount,
-        } => {
-            let edge = match edge {
-                super::model::RyeOsDockEdge::Top => "top",
-                super::model::RyeOsDockEdge::Bottom => "bottom",
-                super::model::RyeOsDockEdge::Left => "left",
-                super::model::RyeOsDockEdge::Right => "right",
-            };
-            let dock = core
-                .presentation
-                .as_ref()
-                .and_then(|presentation| presentation.docks().get(edge))
-                .ok_or("transfer source shared dock is absent")?;
-            if dock.view().instance_key() != &mount.source_instance {
-                return Err("transfer source shared dock changed instance".into());
-            }
-            *visible = dock.visible;
-            *size = dock.size;
             capture_mount(core, captured.mode, mount)?;
         }
     }

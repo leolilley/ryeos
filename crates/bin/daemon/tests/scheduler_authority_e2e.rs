@@ -475,13 +475,21 @@ async fn rewritten_grant_then_reauthorize_restores_fires() {
         .await;
     result(status, &body, "owner resumes the reauthorized schedule");
 
+    await_dispatched_fire(&h, &owner, "reauthorized-owner").await;
+}
+
+/// Wait until the owner's fire history shows the schedule dispatched a fire.
+/// The fire journal records a refusal under its `outcome`, but a fire that
+/// went out is a record whose `status` is `dispatched` and later `completed`,
+/// so the owner reads the history the schedule service itself reports.
+async fn await_dispatched_fire(h: &DaemonHarness, owner: &SecondPrincipal, schedule_id: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
     loop {
         let (status, body) = owner
             .exec(
-                &h,
+                h,
                 "service:scheduler/show_fires",
-                json!({"schedule_id": "reauthorized-owner"}),
+                json!({"schedule_id": schedule_id}),
             )
             .await;
         let fires = result(status, &body, "owner reads fire history");
@@ -490,11 +498,11 @@ async fn rewritten_grant_then_reauthorize_restores_fires() {
             .iter()
             .any(|fire| matches!(fire["status"].as_str(), Some("dispatched" | "completed")))
         {
-            break;
+            return;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the reauthorized schedule did not dispatch a fire: {fires:#?}"
+            "schedule {schedule_id} did not dispatch a fire: {fires:#?}"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -563,7 +571,7 @@ async fn grant_renewal_keeps_schedule_firing() {
     let explained = explain_as(&h, &owner, "renewed-owner", |_| true).await;
     assert_eq!(explained["authority"]["valid"], true, "{explained:#}");
     assert_eq!(explained["enabled"], true, "{explained:#}");
-    journal_records(&h, "renewed-owner", "dispatched").await;
+    await_dispatched_fire(&h, &owner, "renewed-owner").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -572,8 +580,10 @@ async fn grant_expiry_pauses_schedule_with_typed_outcome() {
         .await
         .expect("start Core+Scheduling daemon");
     let owner = SecondPrincipal::new();
-    // The grant lapses before the schedule's first five-second boundary.
-    owner.grant_for(&h, OWNER_SCOPES, 3).await;
+    // The grant outlives registration, which refuses an already-lapsed
+    // authority, and lapses a few five-second boundaries later; the first fire
+    // after it lapses pauses the schedule.
+    owner.grant_for(&h, OWNER_SCOPES, 15).await;
     let project = doctor_project(&h);
     let (status, body) = owner
         .exec(

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::effect::{RyeOsEffectResult, RyeOsUiError};
-use super::model::{BrowserSession, BrowserViewport, RyeOsDockEdge};
+use super::model::{BrowserSession, BrowserViewport};
 use crate::ids::RyeOsViewInstanceKey;
 use crate::view_set::{FieldCursorState, FocusDirection, ViewSpec};
 
@@ -193,12 +193,6 @@ pub enum RyeOsUiIntent {
     },
     ToggleTopStatusBar,
     ToggleBottomStatusBar,
-    ToggleDock {
-        edge: RyeOsDockEdge,
-    },
-    ResizeFocused {
-        direction: FocusDirection,
-    },
     InspectItem {
         canonical_ref: String,
     },
@@ -263,9 +257,6 @@ pub enum UiTransferSourceSelection {
     SurfaceViewSets {
         surface_instance_id: crate::ids::SurfaceInstanceId,
     },
-    SharedDock {
-        edge: RyeOsDockEdge,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -278,9 +269,6 @@ pub enum UiTransferContactIntent {
     },
     AcceptTabs {
         surface_instance_id: crate::ids::SurfaceInstanceId,
-    },
-    AcceptSharedDock {
-        edge: String,
     },
     Commit,
     Abort,
@@ -365,9 +353,6 @@ pub enum RyeOsUiEvent {
     FocusChanged {
         target: Option<String>,
     },
-    FocusDock {
-        edge: RyeOsDockEdge,
-    },
     FocusDirection {
         direction: FocusDirection,
     },
@@ -423,7 +408,7 @@ pub enum RyeOsUiEvent {
     },
     /// Select a projected list point by its exact mounted view identity. This
     /// is the pointer-facing form: unlike `SetTileCursor`, it also addresses
-    /// views mounted in a dock slot without inventing a tile id.
+    /// views mounted outside a tile (dialogs) without inventing a tile id.
     SetViewCursor {
         instance_key: RyeOsViewInstanceKey,
         index: usize,
@@ -446,7 +431,7 @@ pub enum RyeOsUiEvent {
         expand: bool,
     },
     /// Fold descendants of the exact visible hierarchy item. Unlike the
-    /// keyboard-focused form, this also addresses shared docks and dialogs.
+    /// keyboard-focused form, this also addresses shared dialogs.
     SetViewTreeItemCollapsed {
         instance_key: RyeOsViewInstanceKey,
         item_id: String,
@@ -464,7 +449,7 @@ pub enum RyeOsUiEvent {
         instance_key: RyeOsViewInstanceKey,
         section_id: String,
     },
-    /// Fold a section in an exactly addressed tile or dock view instance.
+    /// Fold a section in an exactly addressed mounted view instance.
     SetViewFold {
         instance_key: RyeOsViewInstanceKey,
         section: usize,

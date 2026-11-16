@@ -182,12 +182,15 @@ impl Fixture {
     }
 
     fn local_wildcard_grant(&self) {
-        let key = lillux::crypto::generate_signing_key();
+        self.local_wildcard_grant_for(&lillux::crypto::generate_signing_key());
+    }
+
+    fn local_wildcard_grant_for(&self, key: &SigningKey) {
         let encoded =
             base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes());
         reconcile_authorized_key_toml_scopes(
             &authorized_keys_dir(self.path()),
-            &fingerprint(&key),
+            &fingerprint(key),
             &encoded,
             &["*".to_owned()],
             "local operator",
@@ -490,6 +493,18 @@ fn wildcard_grants_are_reported_at_startup() {
         report.wildcard_grants[0]
             .operations
             .contains(&"node.allow-restart")
+    );
+}
+
+#[test]
+fn the_local_operators_own_wildcard_grant_is_not_reported() {
+    let fx = fixture();
+    fx.local_wildcard_grant_for(&fx.operator);
+    let report = fx.run();
+    assert!(
+        report.wildcard_grants.is_empty(),
+        "{:?}",
+        report.wildcard_grants
     );
 }
 

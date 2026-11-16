@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:24ff8904d9b53b61067c2999fd314e99deb9b58896049a8a010a394126436c9a:givVCGIs79TpV3WQsJ6ulwJQbc1dVM8Vix4/TDEueOVOJf31+2RvMlJwgE1k4tDlvkQQRz6tuyyuaZQ7pnZuDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:04:42Z:580e9522caad7d627fbf03e60756bd5fcfaf0468f78d6249764a14299c18ca40:MYz7hW70yHTjTsmhqFrJvuawOpAlNQBRr4efNC9oPt173uPpZLczWgZSFfll8k6wsfZxaC2Wz1bVHoXQS46pDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "central-auth"
 name: "check-capability"
@@ -16,8 +16,20 @@ requires:
             from_param: realm_id
           access: read_write
 
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
 config:
-  command: "python3"
+  command: "${interpreter}"
   args:
     - "${tool_dir}/lib/central_auth.py"
     - "check-capability"

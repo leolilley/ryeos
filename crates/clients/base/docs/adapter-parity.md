@@ -120,8 +120,6 @@ producers of the same intents, not a second command vocabulary.
 | [x] `ResizeSplit` | shared | shared | guarded ratio edit |
 | [x] `ToggleTopStatusBar` | shared | shared | surface presentation |
 | [x] `ToggleBottomStatusBar` | shared | shared | surface presentation |
-| [x] `ToggleDock` | shared | shared | surface presentation |
-| [x] `ResizeFocused` | shared | shared | keyboard layout edit |
 | [x] `InspectItem` | shared | shared | derived inspector |
 | [x] `InspectThread` | shared | shared | derived inspector |
 | [x] `InspectSummary` | shared | shared | inert summary |
@@ -157,7 +155,6 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `ContinueFieldExpansion` | native | shared | shared effect path |
 | [x] `ClearFieldExpansion` | native | gap | browser expansion control only |
 | [x] `FocusChanged` | native | gap | TUI reaches focus through directional shared commands |
-| [x] `FocusDock` | native | shared | dock focus |
 | [x] `FocusDirection` | native | shared | directional focus |
 | [x] `OpenLauncher` | native | shared | launcher button or shared key command |
 | [x] `OpenDialog` | shared | shared | projected dialog action |
@@ -174,12 +171,12 @@ exact `InputAt` addresses; character-level events remain shared keymap paths.
 | [x] `SubmitInput` | shared | shared | shared keymap |
 | [x] `SubmitInputInterrupt` | shared | shared | shared keymap |
 | [x] `SetTileCursor` | native | shared | pointer/key selection |
-| [x] `SetViewCursor` | native | gap | exact tile-or-dock instance pointer selection |
+| [x] `SetViewCursor` | native | gap | exact mounted instance pointer selection |
 | [x] `ChooseViewItem` | native | gap | atomic semantic-identity selection and current-intent activation |
 | [x] `ToggleViewItemExpansion` | native | gap | exact mounted instance and semantic item identity disclosure |
 | [x] `DismissNotice` | native | gap | exact idempotent browser notice dismissal |
 | [x] `ToggleViewSection` | native | gap | semantic section identity resolved atomically in current projection |
-| [x] `SetViewFold` | native | gap | exact tile-or-dock instance fold |
+| [x] `SetViewFold` | native | gap | exact mounted instance fold |
 | [x] `ExpandSelectedRow` | shared | shared | shared keymap |
 | [x] `SetTreeRowCollapsed` | shared | shared | shared keymap |
 | [x] `SetViewTreeItemCollapsed` | native | gap | Browser hierarchy button addresses exact visible mount and stable row identity; terminal uses focused tree-fold keys. |

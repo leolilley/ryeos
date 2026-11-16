@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Local full daemon + bundles composition image. Release publication uses the
+# Local standard daemon + bundles composition image. Release publication uses the
 # explicitly scoped Dockerfile.standard and Dockerfile.central-host images.
 
 # ── Stage 1: Build all binaries + publish bundles ──
@@ -101,12 +101,10 @@ COPY --from=builder /build/target/release/ryeos-core-tools   /usr/local/bin/ryeo
 COPY --from=builder /build/bundles/.ai       /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core      /opt/ryeos/core
 COPY --from=builder /build/bundles/scheduling /opt/ryeos/scheduling
-COPY --from=builder /build/bundles/central-auth /opt/ryeos/central-auth
 COPY --from=builder /build/bundles/knowledge /opt/ryeos/knowledge
 COPY --from=builder /build/bundles/directive /opt/ryeos/directive
 COPY --from=builder /build/bundles/graph /opt/ryeos/graph
 COPY --from=builder /build/bundles/ryeos-docs /opt/ryeos/ryeos-docs
-COPY --from=builder /build/bundles/environment-qualification /opt/ryeos/environment-qualification
 COPY --from=builder /build/bundles/web       /opt/ryeos/web
 COPY --from=builder /build/bundles/browser   /opt/ryeos/browser
 COPY --from=builder /build/bundles/ryeos-ui  /opt/ryeos/ryeos-ui
@@ -121,7 +119,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV RYEOS_APP_ROOT=/data/app
 LABEL io.ryeos.node-uid="10000"
 LABEL io.ryeos.node-gid="10000"
-ENV RYEOS_INIT_NODE_PROFILE=full
+ENV RYEOS_INIT_NODE_PROFILE=standard
 EXPOSE 8000
 
 # Re-declared here: build-stage ARGs do not carry across FROM boundaries.

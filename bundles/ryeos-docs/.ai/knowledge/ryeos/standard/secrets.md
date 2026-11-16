@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:17:08Z:b1a202a28d62a5a52623a6f32b77b577e7208b20277c4290b4e9c0933eee6080:tu1kl76fOVZ9HCqXv2Fh1QqojM7jKiESgitENQTSe91bFH2lXoMwBcYzFsPLltxFMmv1ySaWxl5pHrd7mWP6DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:33:58Z:ed13acdf643133561fe5635f5c77fb0118045dcf7676e85d4917de9c615fcc47:FuTfByMnw1Pzhu/g5RBB6WsuWaEybpdS1p1tSqbd67vAo3gL3l+qwAYXpnPZvSO3aXYMIc8YeOENm5Yt+b1ZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [secrets, vault, env, dotenv, providers, security]
@@ -118,15 +118,21 @@ names:
   with 403 `vault_name_not_writable`. `vault/list` shows a caller only the
   names it may receive or write.
 - Delivery judges every vault name a launch declares against `recipients`,
-  under the principal and the capability ceiling the launch was admitted
-  with, and refuses with 403 `vault_name_not_delivered`. This covers a
-  project overlay that includes the operator vault and the `operator` vault
-  namespace. A projectless launch carries no capability ceiling, so only
-  listed principals (and the operator) receive. Principals without a grant of
-  their own, such as `session:<id>` and `route-handler:<bundle>:<id>`, are
-  judged by that exact string and must be listed by name; a route that
-  declares `operator_vault: true` needs its `route-handler:` principal listed
-  as a recipient for each name its handler declares.
+  and refuses with 403 `vault_name_not_delivered`. The recipient is sealed at
+  admission: a project overlay that includes the operator vault and the
+  `operator` vault namespace record the admitted caller and that caller's own
+  capability scopes (the same as provider environments). Delivery judges the
+  name against exactly that principal and scope set, never against the
+  project's access ceiling, so a projectless launch by a principal holding a
+  listed capability receives as the principal would anywhere else. A child
+  or continuation inherits the sealed recipient; a launch running under a
+  different principal, such as a child acting for someone else, receives no
+  operator-vault name and is refused with a message naming the sealed
+  principal. Principals without a grant of their own, such as `session:<id>`
+  and `route-handler:<bundle>:<id>`, carry no scopes and are judged by that
+  exact string, which must be listed by name; a route that declares
+  `operator_vault: true` needs its `route-handler:` principal listed as a
+  recipient for each name its handler declares.
 - Every refusal names the fix: apply a `sealed_vault_names` section with the
   node stopped, `ryeos node policy-apply sealed_vault_names <source.yaml>`.
   The change takes effect at the next start. The section is carried across a

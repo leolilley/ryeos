@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:17:08Z:943c6b9b989676be0f107265af1aa827c295f4c9f93229968c2516c63afe554d:grWIU84YwsfVGUgID481hvrr3yDEVh5+p8MksDP0XVycpS6RGNrcv2N4hMjxWaLw35j1BxoxMC/mux4XUxAPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-14T11:33:58Z:439779439ed9a7e6294b453fa21420c0ac43dcee0362edc6e42f824e558b480b:w/yZbmr25ewwlbQXWZ0/+aK/I2tA645t+YX9YtSEiWmrA0UUN4ljdoV56juFitHvSAiEdTq4ZFHREe86Fz+BCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, vault, secrets, remote]
@@ -30,7 +30,10 @@ Per-name ceilings come from the node's signed `sealed_vault_names` policy:
   403 `vault_name_has_no_ceiling`. `ryeos node doctor` warns
   (`vault_names_without_ceiling`) for each stored name in this state.
 - Delivery into a launch requires the principal to be a **recipient**, refused
-  with 403 `vault_name_not_delivered`.
+  with 403 `vault_name_not_delivered`. The recipient judged is the admitted
+  caller and its own scopes, sealed into the launch's vault environment
+  authority at admission and inherited by children and continuations; a launch
+  under any other principal receives no operator-vault name.
 
 Each refusal names the fix, `ryeos node policy-apply sealed_vault_names
 <source.yaml>` on a stopped node. See

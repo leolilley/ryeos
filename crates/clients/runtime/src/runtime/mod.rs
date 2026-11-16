@@ -787,6 +787,21 @@ impl<P: Platform + 'static> ClientRuntime<P> {
         Ok(choice.start_mode(&self.prepared_presentation()?))
     }
 
+    /// [`ClientRuntime::reconnect_mode_without_core`] for a start that was
+    /// refused before it prepared anything (its seat was held): the choice
+    /// applies to `presentation_id`, the presentation the start asked for.
+    pub fn reconnect_mode_for(
+        &self,
+        choice: &ReconnectChoice,
+        presentation_id: &str,
+    ) -> Result<StartMode, RuntimeError> {
+        ensure_settled_without_core(&self.shared)?;
+        if matches!(choice, ReconnectChoice::Independent) {
+            return Ok(StartMode::Fresh);
+        }
+        Ok(choice.start_mode(presentation_id))
+    }
+
     fn prepared_presentation(&self) -> Result<String, RuntimeError> {
         self.shared
             .delivery
@@ -797,6 +812,25 @@ impl<P: Platform + 'static> ClientRuntime<P> {
             .ok_or_else(|| {
                 RuntimeError::Fatal("reconnect requires an exact prepared presentation".to_owned())
             })
+    }
+
+    /// Learn this producer's own control predecessor, so the seat can be given
+    /// back as the page goes away. Runs on its own; a failure only means the
+    /// next page offers a takeover instead of resuming.
+    pub fn learn_relinquish_basis(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let shared = self.shared.clone();
+        async move { crate::seat::learn_relinquish_basis(&shared).await }
+    }
+
+    /// A hook for the page going away: the path and encoded relinquish to
+    /// send, or why the seat cannot be given back without awaiting anything.
+    pub fn unload_relinquish(
+        &self,
+    ) -> impl Fn() -> Result<(&'static str, String), &'static str> + 'static {
+        let shared = self.shared.clone();
+        move || {
+            crate::seat::unload_relinquish(&shared).map(|body| (crate::api::SEAT_CLOSE_PATH, body))
+        }
     }
 
     /// Whether a presentation was prepared, so the writer can be inspected.

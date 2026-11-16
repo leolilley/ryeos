@@ -341,8 +341,14 @@ pub struct WildcardGrant {
 }
 
 /// Grants whose wildcard scopes would match offline operations. The node
-/// reports them at each startup; they carry no offline power.
+/// reports them at each startup; they carry no offline power. The local
+/// operator's own grant is left out: the operator signs offline operations by
+/// holding the key on this node's volume, not through any grant.
 pub fn wildcard_only_grants(app_root: &Path, node: &NodeIdentity) -> Vec<WildcardGrant> {
+    let operator = local_operator(app_root)
+        .ok()
+        .flatten()
+        .map(|(fingerprint, _)| fingerprint);
     let directory = authorized_keys_dir(app_root);
     let Ok(Some(pinned)) = lillux::PinnedDirectory::open(&directory) else {
         return Vec::new();
@@ -358,6 +364,9 @@ pub fn wildcard_only_grants(app_root: &Path, node: &NodeIdentity) -> Vec<Wildcar
         let Some(fingerprint) = name.strip_suffix(".toml") else {
             continue;
         };
+        if operator.as_deref() == Some(fingerprint) {
+            continue;
+        }
         let Ok(Some(grant)) = load_verified_authorized_key(fingerprint, &directory, node) else {
             continue;
         };

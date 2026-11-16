@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:3dc0a296174019a668874cbb2e9df8ddd957edbea2aece28b92c1467102dc9b3:+p9bUZkHgOWDfX7uE0Ij1iaVcXX9AIlldkqYU4GrRW/1kIJpsdbqJIBuKypa4I9pWVV6Kh++Pt1iEYz9nB/XBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T00:19:46Z:a436402564a4cbe55f2023a4c77589795b5f269d30bded1dd5394c6d2d6c735d:cU1ATC9YAff5AiglEpcH8eerF09tpt+r3lGDyq+U017EYBdqRSeuCB7XqdyzLH1Fusid42EclIa6oeI//OL0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: central-auth/lib
 #   version: "0.1.0"
@@ -29,6 +29,7 @@ from typing import Any
 REALM_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 PRINCIPAL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
 CAPABILITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SESSION_BYTES = 32
 PBKDF2_ITERATIONS = 210_000
 # Verified against when the principal is missing, disabled or has no usable
@@ -44,6 +45,8 @@ STATE_HOME_ENV = "RYEOSD_BUNDLE_STATE_HOME"
 ENFORCED_STATE_MOUNT = "/run/ryeos/bundle-state"
 CALLER_STATE_LOCATION_KEYS = ("runtime_state_dir", "project_path")
 LOGIN_THROTTLE_FIELDS = ("max_failures", "window_secs", "lockout_secs")
+PRINCIPAL_MANAGEMENT_FIELDS = ("operator_capability", "managed_roles", "protected_capabilities")
+STATUS_OPERATION_KIND = "principal.status_change"
 
 
 class AuthError(Exception):
@@ -138,6 +141,13 @@ def optional_int(
     return out
 
 
+def require_bool(data: dict[str, Any], key: str) -> bool:
+    value = data.get(key)
+    if not isinstance(value, bool):
+        raise AuthError("invalid_request", f"{key} must be a boolean")
+    return value
+
+
 def string_list(data: dict[str, Any], key: str) -> list[str]:
     value = data.get(key, [])
     if isinstance(value, str):
@@ -164,6 +174,12 @@ def validate_principal_id(principal_id: str) -> str:
     if not PRINCIPAL_RE.match(principal_id):
         raise AuthError("invalid_principal", "principal_id contains unsupported characters")
     return principal_id
+
+
+def validate_request_id(request_id: str) -> str:
+    if not REQUEST_ID_RE.match(request_id):
+        raise AuthError("invalid_request", "request_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+    return request_id
 
 
 def validate_capability(capability: str) -> str:
@@ -213,6 +229,7 @@ def ensure_dirs(realm_dir: Path) -> None:
         realm_dir / "sessions",
         realm_dir / "invites",
         realm_dir / "failures",
+        realm_dir / "operations",
     ]:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         with contextlib.suppress(PermissionError):
@@ -289,6 +306,10 @@ def invite_path(realm_dir: Path, invite_code: str) -> Path:
     return realm_dir / "invites" / f"{sha256_hex(invite_code)}.json"
 
 
+def operation_path(realm_dir: Path, request_id: str) -> Path:
+    return realm_dir / "operations" / f"{validate_request_id(request_id)}.json"
+
+
 def failure_path(realm_dir: Path, subject: str) -> Path:
     return realm_dir / "failures" / f"{sha256_hex(subject)}.json"
 
@@ -324,6 +345,48 @@ def require_login_throttle(policy: dict[str, Any]) -> dict[str, int]:
     return validate_login_throttle(policy.get("login_throttle"))
 
 
+def validate_principal_management(value: Any, roles: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+    """Which principals an operator may manage, as realm data.
+
+    `operator_capability` marks an operator. A principal is manageable only when
+    its roles are all in `managed_roles`, it holds no direct capability, and
+    none of its effective capabilities is protected. The operator capability is
+    always protected, so no operator can manage another operator."""
+    if not isinstance(value, dict):
+        raise AuthError("invalid_policy", "principal_management must be an object")
+    unknown = sorted(set(value) - set(PRINCIPAL_MANAGEMENT_FIELDS))
+    if unknown:
+        raise AuthError("invalid_policy", f"principal_management has unknown fields: {unknown}")
+    operator = value.get("operator_capability")
+    if not isinstance(operator, str):
+        raise AuthError("invalid_policy", "principal_management.operator_capability must be a string")
+    operator = validate_capability(operator)
+    if operator not in allowed:
+        raise AuthError("invalid_policy", f"principal_management.operator_capability is outside allowed_capabilities: {operator}")
+    managed = value.get("managed_roles")
+    if not isinstance(managed, list) or not managed:
+        raise AuthError("invalid_policy", "principal_management.managed_roles must be a non-empty array")
+    for role in managed:
+        if not isinstance(role, str) or role not in roles:
+            raise AuthError("invalid_policy", f"principal_management.managed_roles names an unknown role: {role}")
+    protected = value.get("protected_capabilities", [])
+    if not isinstance(protected, list):
+        raise AuthError("invalid_policy", "principal_management.protected_capabilities must be an array")
+    protected_set = {operator}
+    for cap in protected:
+        if not isinstance(cap, str):
+            raise AuthError("invalid_policy", "principal_management.protected_capabilities must contain strings")
+        cap = validate_capability(cap)
+        if cap not in allowed:
+            raise AuthError("invalid_policy", f"principal_management.protected_capabilities is outside allowed_capabilities: {cap}")
+        protected_set.add(cap)
+    return {
+        "operator_capability": operator,
+        "managed_roles": sorted(set(managed)),
+        "protected_capabilities": sorted(protected_set),
+    }
+
+
 def validate_policy(policy: Any) -> dict[str, Any]:
     if not isinstance(policy, dict):
         raise AuthError("invalid_policy", "policy must be an object")
@@ -351,11 +414,27 @@ def validate_policy(policy: Any) -> dict[str, Any]:
                 raise AuthError("invalid_policy", f"role {role} references capability outside allowed_capabilities: {cap}")
             caps.append(cap)
         normalized_roles[role] = {"capabilities": sorted(set(caps))}
-    return {
+    out = {
         "roles": normalized_roles,
         "allowed_capabilities": sorted(allowed_set),
         "login_throttle": validate_login_throttle(policy.get("login_throttle")),
     }
+    if policy.get("principal_management") is not None:
+        out["principal_management"] = validate_principal_management(
+            policy["principal_management"], normalized_roles, allowed_set
+        )
+    return out
+
+
+def require_principal_management(policy: dict[str, Any]) -> dict[str, Any]:
+    management = policy.get("principal_management")
+    if management is None:
+        raise AuthError(
+            "principal_management_unconfigured",
+            "the realm policy has no principal_management section; rerun set-policy with "
+            "principal_management {operator_capability, managed_roles, protected_capabilities}",
+        )
+    return management
 
 
 def validate_grants(policy: dict[str, Any], roles: list[str], capabilities: list[str]) -> None:
@@ -380,6 +459,81 @@ def effective_capabilities(policy: dict[str, Any], principal: dict[str, Any]) ->
     for role in roles:
         caps.update(policy["roles"][role]["capabilities"])
     return sorted(caps)
+
+
+def principal_session_generation(principal: dict[str, Any]) -> int:
+    """Sessions record this at issue; a disable raises it, which invalidates
+    every session issued before. A principal never disabled is at 0."""
+    value = principal.get("session_generation", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AuthError("state_corrupt", "principal session_generation is invalid")
+    return value
+
+
+def validate_principal_document(path: Path, principal: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    """Check what security decisions read: the file name and the embedded id
+    agree, and the status, generation and grants are well formed. A failure is
+    state corruption, never a reason to leave the account out of a roster."""
+    embedded_id = principal.get("id")
+    if not isinstance(embedded_id, str) or validate_principal_id(embedded_id) != path.stem:
+        raise AuthError("state_corrupt", f"principal identity mismatch: {path.name}")
+    display_name = principal.get("display_name", embedded_id)
+    if not isinstance(display_name, str) or not display_name.strip():
+        raise AuthError("state_corrupt", f"principal display_name is invalid: {path.name}")
+    if not isinstance(principal.get("disabled", False), bool):
+        raise AuthError("state_corrupt", f"principal disabled is invalid: {path.name}")
+    principal_session_generation(principal)
+    effective_capabilities(policy, principal)
+    return principal
+
+
+def load_principal_strict(realm_dir: Path, principal_id: str, policy: dict[str, Any]) -> dict[str, Any] | None:
+    path = principal_path(realm_dir, principal_id)
+    principal = read_json_file(path)
+    if principal is None:
+        return None
+    return validate_principal_document(path, principal, policy)
+
+
+def strict_principal_roster(realm_dir: Path, policy: dict[str, Any]) -> list[dict[str, Any]]:
+    principals: list[dict[str, Any]] = []
+    for path in sorted((realm_dir / "principals").glob("*.json")):
+        principal = read_json_file(path)
+        if principal is None:
+            # The caller holds the realm lock, so a vanished file is not a
+            # reason to return a silently incomplete roster.
+            raise AuthError("state_corrupt", f"principal disappeared while reading: {path.name}")
+        principals.append(validate_principal_document(path, principal, policy))
+    return principals
+
+
+def is_operator(policy: dict[str, Any], management: dict[str, Any], principal: dict[str, Any]) -> bool:
+    return not principal.get("disabled") and management["operator_capability"] in effective_capabilities(policy, principal)
+
+
+def principal_manageability_reason(
+    policy: dict[str, Any], management: dict[str, Any], actor: dict[str, Any], target: dict[str, Any]
+) -> str | None:
+    """A public-safe reason the actor cannot manage the target, or None."""
+    if actor["id"] == target["id"]:
+        return "self"
+    if not is_operator(policy, management, actor):
+        return "actor_not_authorized"
+    roles = target.get("roles")
+    if not isinstance(roles, list) or not roles or not set(roles) <= set(management["managed_roles"]):
+        return "privileged_or_nonstandard_account"
+    if target.get("capabilities") != []:
+        return "privileged_or_nonstandard_account"
+    if set(effective_capabilities(policy, target)) & set(management["protected_capabilities"]):
+        return "privileged_or_nonstandard_account"
+    return None
+
+
+def load_operator(realm_dir: Path, policy: dict[str, Any], management: dict[str, Any], actor_id: str) -> dict[str, Any]:
+    actor = load_principal_strict(realm_dir, actor_id, policy)
+    if actor is None or not is_operator(policy, management, actor):
+        raise AuthError("actor_not_authorized", "the actor is not an enabled operator of this realm")
+    return actor
 
 
 def public_principal(policy: dict[str, Any], principal: dict[str, Any]) -> dict[str, Any]:
@@ -515,6 +669,7 @@ def issue_session(realm_dir: Path, policy: dict[str, Any], principal: dict[str, 
         "version": 1,
         "token_hash": sha256_hex(token),
         "principal_id": principal["id"],
+        "session_generation": principal_session_generation(principal),
         "created_at": iso(),
         "expires_at_unix": expires_at_unix,
         "expires_at": iso(expires_at_unix),
@@ -563,6 +718,7 @@ def command_create_principal(data: dict[str, Any]) -> dict[str, Any]:
             "roles": roles,
             "capabilities": capabilities,
             "disabled": bool(data.get("disabled", False)),
+            "session_generation": 0,
             "created_at": iso(),
             "updated_at": iso(),
         }
@@ -657,6 +813,7 @@ def command_login(data: dict[str, Any]) -> dict[str, Any]:
             "roles": sorted(set(roles)),
             "capabilities": sorted(set(capabilities)),
             "disabled": False,
+            "session_generation": 0,
             "created_at": iso(),
             "updated_at": iso(),
             "passphrase": hash_passphrase(passphrase),
@@ -687,6 +844,13 @@ def verify_session(data: dict[str, Any]) -> dict[str, Any]:
             raise AuthError("state_corrupt", "session principal_id is invalid")
         principal = read_json_file(principal_path(realm_dir, principal_id))
         if not principal or principal.get("disabled"):
+            return {"valid": False, "allowed": False, "error": {"code": "invalid_session"}}
+        generation = session.get("session_generation", 0)
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation != principal_session_generation(principal)
+        ):
             return {"valid": False, "allowed": False, "error": {"code": "invalid_session"}}
         try:
             public = public_principal(policy, principal)
@@ -749,26 +913,188 @@ def command_gc(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def command_list_principals(data: dict[str, Any]) -> dict[str, Any]:
-    """Read-only roster of accounts in the realm. Returns id/display_name/roles/
-    disabled only — never passphrases or any secret material. Skips unreadable
-    entries rather than failing the whole listing."""
+    """Secret-free roster of the realm's accounts, read under the realm lock.
+    An unreadable or inconsistent principal fails the listing (`state_corrupt`)
+    rather than being skipped, so `complete` is always true on success.
+
+    With `actor_principal_id`, the actor must be an enabled operator under the
+    policy's principal_management, and each entry also says whether that actor
+    may manage it (`manageable`, else `protected_reason`)."""
     realm_dir = resolve_realm_dir(data)
-    principals: list[dict[str, Any]] = []
-    for path in sorted((realm_dir / "principals").glob("*.json")):
+    requested_actor = optional_str(data, "actor_principal_id")
+    with realm_lock(realm_dir):
+        policy = load_policy(realm_dir)
+        actor: dict[str, Any] | None = None
+        management: dict[str, Any] | None = None
+        if requested_actor is not None:
+            management = require_principal_management(policy)
+            actor = load_operator(realm_dir, policy, management, validate_principal_id(requested_actor))
+        principals: list[dict[str, Any]] = []
+        for principal in strict_principal_roster(realm_dir, policy):
+            public = {
+                "id": principal["id"],
+                "display_name": principal.get("display_name", principal["id"]),
+                "roles": principal.get("roles", []),
+                "disabled": bool(principal.get("disabled", False)),
+            }
+            if actor is not None and management is not None:
+                reason = principal_manageability_reason(policy, management, actor, principal)
+                public["manageable"] = reason is None
+                if reason is not None:
+                    public["protected_reason"] = reason
+            principals.append(public)
+    return {"ok": True, "complete": True, "principals": principals}
+
+
+def sweep_principal_sessions(realm_dir: Path, principal_id: str) -> tuple[int, bool, list[str]]:
+    """Mark every readable session of the principal revoked. The raised
+    session generation already invalidates them; this leaves durable revocation
+    records. An unreadable unrelated session does not undo the disable."""
+    revoked = 0
+    errors: list[str] = []
+    for path in sorted((realm_dir / "sessions").glob("*.json")):
         try:
-            p = read_json_file(path)
-        except Exception:
-            continue
-        if not p:
-            continue
-        roles = p.get("roles", [])
-        principals.append({
-            "id": p.get("id", path.stem),
-            "display_name": p.get("display_name", p.get("id", path.stem)),
-            "roles": roles if isinstance(roles, list) else [],
-            "disabled": bool(p.get("disabled", False)),
-        })
-    return {"ok": True, "principals": principals}
+            session = read_json_file(path)
+            if session is None:
+                raise AuthError("state_corrupt", "session disappeared while reading")
+            if session.get("principal_id") != principal_id or session.get("revoked_at"):
+                continue
+            session["revoked_at"] = iso()
+            atomic_write_json(path, session)
+            revoked += 1
+        except Exception as exc:
+            errors.append(f"{path.name}:{type(exc).__name__}")
+    return revoked, not errors, errors[:20]
+
+
+def load_status_operation(realm_dir: Path, request_id: str) -> dict[str, Any] | None:
+    operation = read_json_file(operation_path(realm_dir, request_id))
+    if operation is None:
+        return None
+    if operation.get("version") != 1 or operation.get("kind") != STATUS_OPERATION_KIND:
+        raise AuthError("state_corrupt", f"operation {request_id} is not an account status change")
+    return operation
+
+
+def status_operation_result(operation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "request_id": operation["request_id"],
+        "principal": {"id": operation["principal_id"], "disabled": operation["disabled"]},
+        "changed": bool(operation.get("changed", False)),
+        "session_generation": operation.get("session_generation") or 0,
+        "revoked_sessions": int(operation.get("revoked_sessions", 0)),
+        "session_sweep_complete": bool(operation.get("session_sweep_complete", False)),
+        "audit_recorded": bool(operation.get("audit_recorded", False)),
+        "complete": operation.get("status") == "complete",
+    }
+
+
+def command_set_principal_disabled(data: dict[str, Any]) -> dict[str, Any]:
+    """Disable or re-enable one manageable account, idempotent per request_id.
+
+    Only the disabled flag changes; passphrase, display name, roles and
+    capabilities are untouched. Disabling raises the principal's session
+    generation before anything else, so every earlier session stops verifying
+    even if the session sweep or the audit write does not finish; a retry with
+    the same request_id resumes those steps. A completed request replays its
+    result and is never applied again."""
+    realm_dir = resolve_realm_dir(data)
+    actor_id = validate_principal_id(require_str(data, "actor_principal_id"))
+    principal_id = validate_principal_id(require_str(data, "principal_id"))
+    disabled = require_bool(data, "disabled")
+    request_id = validate_request_id(require_str(data, "request_id"))
+    with realm_lock(realm_dir):
+        policy = load_policy(realm_dir)
+        management = require_principal_management(policy)
+        actor = load_operator(realm_dir, policy, management, actor_id)
+        target = load_principal_strict(realm_dir, principal_id, policy)
+        if target is None:
+            raise AuthError("principal_not_found", "principal was not found")
+
+        operation = load_status_operation(realm_dir, request_id)
+        if operation is not None:
+            if (
+                operation.get("actor_principal_id") != actor_id
+                or operation.get("principal_id") != principal_id
+                or operation.get("disabled") is not disabled
+            ):
+                raise AuthError("request_id_conflict", "request_id was already used for another operation")
+            if operation.get("status") == "complete":
+                return status_operation_result(operation)
+        # Checked again when a pending request resumes: the target may have
+        # gained a protected role since.
+        reason = principal_manageability_reason(policy, management, actor, target)
+        if reason is not None:
+            raise AuthError("principal_not_manageable", f"principal cannot be managed: {reason}")
+        if operation is None:
+            operation = {
+                "version": 1,
+                "kind": STATUS_OPERATION_KIND,
+                "request_id": request_id,
+                "actor_principal_id": actor_id,
+                "principal_id": principal_id,
+                "disabled": disabled,
+                "created_at": iso(),
+                "status": "pending",
+                "changed": None,
+                "session_generation": None,
+                "revoked_sessions": 0,
+                "session_sweep_complete": False,
+                "session_sweep_errors": [],
+                "audit_recorded": False,
+            }
+            atomic_write_json(operation_path(realm_dir, request_id), operation)
+
+        if operation.get("status") == "pending":
+            was_disabled = bool(target.get("disabled", False))
+            generation = principal_session_generation(target)
+            if disabled and not was_disabled:
+                generation += 1
+            target["disabled"] = disabled
+            target["session_generation"] = generation
+            target["updated_at"] = iso()
+            atomic_write_json(principal_path(realm_dir, principal_id), target)
+            operation.update({
+                "status": "state_applied",
+                "changed": was_disabled != disabled,
+                "session_generation": generation,
+                "state_applied_at": iso(),
+            })
+            atomic_write_json(operation_path(realm_dir, request_id), operation)
+
+        if disabled and not operation.get("session_sweep_complete", False):
+            revoked, complete, errors = sweep_principal_sessions(realm_dir, principal_id)
+            operation["revoked_sessions"] = int(operation.get("revoked_sessions", 0)) + revoked
+            operation["session_sweep_complete"] = complete
+            operation["session_sweep_errors"] = errors
+            atomic_write_json(operation_path(realm_dir, request_id), operation)
+            if not complete:
+                return status_operation_result(operation)
+        elif not disabled and not operation.get("session_sweep_complete", False):
+            operation["session_sweep_complete"] = True
+            atomic_write_json(operation_path(realm_dir, request_id), operation)
+
+        if not operation.get("audit_recorded", False):
+            try:
+                append_audit(realm_dir, "principal.status_changed", {
+                    "request_id": request_id,
+                    "actor_principal_id": actor_id,
+                    "principal_id": principal_id,
+                    "disabled": disabled,
+                    "changed": bool(operation.get("changed", False)),
+                    "session_generation": operation.get("session_generation") or 0,
+                    "revoked_sessions": operation.get("revoked_sessions", 0),
+                })
+            except OSError as exc:
+                operation["audit_error"] = type(exc).__name__
+                atomic_write_json(operation_path(realm_dir, request_id), operation)
+                return status_operation_result(operation)
+            operation["audit_recorded"] = True
+        operation["status"] = "complete"
+        operation["completed_at"] = iso()
+        atomic_write_json(operation_path(realm_dir, request_id), operation)
+        return status_operation_result(operation)
 
 
 COMMANDS = {
@@ -780,6 +1106,7 @@ COMMANDS = {
     "verify-session": verify_session,
     "check-capability": command_check_capability,
     "revoke-session": command_revoke_session,
+    "set-principal-disabled": command_set_principal_disabled,
     "gc": command_gc,
 }
 

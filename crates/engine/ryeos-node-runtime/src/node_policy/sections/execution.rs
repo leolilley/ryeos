@@ -777,7 +777,7 @@ mod tests {
         profiles.sort();
         assert_eq!(
             profiles.len(),
-            16,
+            15,
             "update init-profile policy expectations"
         );
 
@@ -790,11 +790,10 @@ mod tests {
             policy.validate().unwrap();
             assert_eq!(policy.schema, 4, "{}", path.display());
             match profile.as_str() {
-                "full" | "contained-workflow" | "development" | "release-authority" => {
+                "standard" | "contained-workflow" | "development" | "release-authority" => {
                     assert!(policy.producer_resource_ceiling.is_some(), "{profile}");
                 }
                 "central-host"
-                | "standard"
                 | "standard-central-auth"
                 | "local-inference"
                 | "hosted-node"

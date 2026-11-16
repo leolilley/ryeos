@@ -32,6 +32,10 @@ pub struct ForwardingAuthorityEvidence {
     /// carried, when the source node acted for the principal under one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_digest: Option<String>,
+    /// Unix time after which that delegation no longer admits anything.
+    /// Present exactly when `delegation_digest` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_not_after: Option<u64>,
 }
 
 /// Stable grant-generation evidence produced by authenticated RyeOS request
@@ -57,8 +61,17 @@ impl AuthenticatedGrantAuthority {
                     "forwarding source-node grant hash",
                     &forwarding.source_node_grant_hash,
                 )?;
-                if let Some(digest) = forwarding.delegation_digest.as_deref() {
-                    validate_sha256("forwarding delegation digest", digest)?;
+                match (
+                    forwarding.delegation_digest.as_deref(),
+                    forwarding.delegation_not_after,
+                ) {
+                    (Some(digest), Some(_)) => {
+                        validate_sha256("forwarding delegation digest", digest)?;
+                    }
+                    (None, None) => {}
+                    _ => anyhow::bail!(
+                        "forwarding delegation digest and expiry must be recorded together"
+                    ),
                 }
             }
             (AuthorizedKeyPrincipalClass::RemotePrincipal, None) => {

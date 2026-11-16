@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:8142429ebb5a96f891a4050c8d4f1b898fce676955c534441a2f82e981e040f5:IZxAGUyxKk28ITnEg3TddRU+hx6afUEFrFjSc0fkdDS2ZXUlqd2pWwwpQ2kl/Fo2YuYI494iRdWP52XgyptaDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:04:42Z:687db5bc97d7aeb3bc0e81ef9cbb1f75b02ae3beabd178c642e4fa4cae9fd241:dJo+Yjmi7qInhhfHwI8354TxnsQUPGaO1uWX14QOd6CFKrhGY4NFn2AOJzmMSUtmxUYGqwRbrlbpy3lqmCWfAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "central-auth"
 name: "verify-session"
@@ -16,8 +16,20 @@ requires:
             from_param: realm_id
           access: read_write
 
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
 config:
-  command: "python3"
+  command: "${interpreter}"
   args:
     - "${tool_dir}/lib/central_auth.py"
     - "verify-session"

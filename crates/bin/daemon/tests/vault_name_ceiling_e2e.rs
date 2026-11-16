@@ -79,10 +79,10 @@ transport:
   kind: remote_http
   base_url: "{mock_base_url}"
 body_template:
-  model: "{{{{model}}}}"
-  messages: "{{{{messages}}}}"
-  tools: "{{{{tools}}}}"
-  stream: "{{{{stream}}}}"
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
 auth:
   env_var: "{SECRET_NAME}"
   header_name: "Authorization"
@@ -351,6 +351,11 @@ async fn a_second_principal_is_bounded_by_the_name_ceilings() {
     recipients.sort();
     write_sealed_vault_names(&h.state_path, &fixture.node, &recipients, &[&operator])
         .expect("apply the new ceiling");
+    // The signed init completion binds the policy generation, so the stopped
+    // node's completion is sealed again over the edited policy, as the offline
+    // policy-apply operation leaves it.
+    common::fast_fixture::seal_initialized_state(&h.state_path)
+        .expect("seal the node over the new ceiling");
     h.respawn_with(|_| {})
         .await
         .expect("restart on the new policy");

@@ -2176,7 +2176,7 @@ mod tests {
         let presentation =
             ryeos_client_base::ids::PresentationId::try_new("11111111-1111-4111-8111-111111111111")
                 .unwrap();
-        RyeOsViewInstanceKey::shared_dock(&presentation, "top").unwrap()
+        RyeOsViewInstanceKey::shared_dialog(&presentation, "top").unwrap()
     }
 
     fn source(

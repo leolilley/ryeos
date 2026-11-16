@@ -4,7 +4,7 @@ pub(crate) use crate::ui::dto::RyeOsThreadsDto;
 pub(crate) use crate::ui::effect::{RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
 pub(crate) use crate::ui::event::{RyeOsEvent, RyeOsUiEvent, RyeOsUiIntent};
 pub(crate) use crate::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
-pub(crate) use crate::ui::view_model::{available_command_items, build_view_model};
+pub(crate) use crate::ui::view_model::build_view_model;
 pub(crate) use crate::view_set::{FocusDirection, ViewSpec};
 
 pub(crate) const FIXTURE_PRESENTATION_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -159,7 +159,7 @@ pub(crate) fn session() -> BrowserSession {
         session_id: "session-1".to_string(),
         user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
         // The actual Shared Config is installed below. Surface content remains
-        // at index zero for callers; its slots do not own the shared docks.
+        // at index zero for callers; its slots do not own shared mounts.
         root_attachment_id: "fixture-shared-attachment".into(),
         presentations: vec![],
         binding_attachments: vec![crate::ui::binding::UiBindingAttachment {
@@ -197,21 +197,17 @@ fn install_fixture_membership(session: &mut BrowserSession) {
         presentation: serde_json::from_value(serde_json::json!({
             "definition": {"kind":"shared_presentation", "config": {
                 "category":"ui", "shared_presentation": {
-                    "schema":1,"title":"Fixture presentation","launcher":"launcher",
-                    "dialogs":[{"id":"launcher","title":"Launcher","view":"view:ryeos/launcher"}],
-                    "docks": {
-                        "bottom":{"content":"view:ryeos/input","open":true,"size":7},
-                        "left":{"content":"view:ryeos/threads/list","open":false,"size":32},
-                        "right":{"content":"view:ryeos/item/inspector","open":false,"size":40}
-                    },
+                    "schema":2,"title":"Fixture presentation","launcher":"launcher",
+                    "dialogs":[
+                        {"id":"launcher","title":"Launcher","view":"view:ryeos/launcher"},
+                        {"id":"input","title":"Input","view":"view:ryeos/input"}
+                    ],
                     "capabilities":{"sources":[],"affordances":[]}
                 }
             }},
             "views": {
                 "view:ryeos/launcher":{"widget":"rows"},
-                "view:ryeos/input":{"widget":"text","input":{"id":"line","placeholder":"Ask or run a command","submit":"route"}},
-                "view:ryeos/threads/list":{"widget":"rows"},
-                "view:ryeos/item/inspector":{"widget":"rows"}
+                "view:ryeos/input":{"widget":"text","input":{"id":"line","placeholder":"Ask or run a command","submit":"route"}}
             }
         })).expect("actual Shared Config fixture decodes"),
         project_path: Some("/tmp/project".into()),
@@ -331,24 +327,35 @@ pub(crate) fn session_with_surface(effective_surface: serde_json::Value) -> Brow
     session
 }
 
-/// Explicit fixture inputs for distinct authored Surface and Shared Config.
-/// Docks are never read from or admitted through the Surface declaration.
-pub(crate) fn session_with_surface_and_docks(
-    effective_surface: serde_json::Value,
-    docks: serde_json::Value,
-) -> BrowserSession {
-    let mut session = session_with_surface(effective_surface);
-    let surface_views = session.binding_attachments[0].presentation.views.clone();
-    let root = session.binding_attachments.last_mut().unwrap();
-    let crate::presentation::UiCompositionDefinition::SharedPresentation { config } =
-        &mut root.presentation.definition
-    else {
-        panic!("fixture root must be actual Shared Config");
-    };
-    config.shared_presentation.docks =
-        serde_json::from_value(docks).expect("explicit authored Config docks");
-    root.presentation.views.extend(surface_views);
-    session
+/// Open the fixture's shared input dialog and return its mounted instance, the
+/// one view instance that owns the input buffer in tests that need one.
+pub(crate) fn fixture_input(core: &mut RyeOsCore) -> Option<crate::ids::RyeOsViewInstanceKey> {
+    let presentation = core.presentation.as_mut()?;
+    presentation.open_dialog("input", None).ok()?;
+    Some(
+        presentation
+            .dialogs()
+            .get("input")?
+            .view()
+            .instance_key()
+            .clone(),
+    )
+}
+
+/// The exact input address of the fixture's shared input dialog.
+pub(crate) fn fixture_input_address(core: &mut RyeOsCore) -> crate::ui::model::RyeOsInputAddress {
+    fixture_input(core).expect("fixture shared input dialog");
+    fixture_input_vm(&crate::ui::view_model::build_view_model(core))
+        .expect("fixture input projection")
+        .address
+        .clone()
+}
+
+/// The input projection of the fixture's shared input dialog.
+pub(crate) fn fixture_input_vm(
+    vm: &crate::ui::view_model::RyeOsViewModel,
+) -> Option<&crate::ui::view_model::RyeOsInputVm> {
+    vm.dialogs.iter().find_map(|dialog| dialog.input.as_ref())
 }
 
 pub(crate) fn fixture_attachment(
@@ -427,10 +434,7 @@ pub(crate) fn seed_view_value(core: &mut RyeOsCore, view_ref: &str, value: serde
         .expect("fixture attachment is retained")
         .views
         .insert(view_ref.to_string(), serde_json::from_value(value).unwrap());
-    if matches!(
-        view_ref,
-        "view:ryeos/input" | "view:ryeos/threads/list" | "view:ryeos/item/inspector"
-    ) {
+    if matches!(view_ref, "view:ryeos/input" | "view:ryeos/launcher") {
         let root_id = core.data.session.as_ref().unwrap().presentations[0]
             .root_binding
             .binding_attachment_id
@@ -445,7 +449,7 @@ pub(crate) fn seed_view_value(core: &mut RyeOsCore, view_ref: &str, value: serde
 }
 
 /// Seed the `view:ryeos/input` chat box (`submit: route`) so the
-/// shared bottom dock instance owns input; it never targets another View.
+/// shared input dialog instance owns input; it never targets another View.
 pub(crate) fn seed_input_view(core: &mut RyeOsCore) {
     seed_view_value(
         core,
@@ -490,13 +494,9 @@ pub(crate) fn active_selection(core: &RyeOsCore) -> serde_json::Value {
 /// Seed the `view:ryeos/input` completion source (the slash grammar) into
 /// the generic keyed source store, as `initial_effects`' FetchSource would.
 pub(crate) fn seed_commands(core: &mut RyeOsCore, commands: serde_json::Value) {
+    let input = fixture_input(core).expect("fixture shared input dialog");
     core.data.sources.insert(
-        crate::ui::source_key::RyeOsSourceInstanceKey::completion(
-            core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-                .expect("fixture shared input dock"),
-            "line",
-        )
-        .encode(),
+        crate::ui::source_key::RyeOsSourceInstanceKey::completion(input, "line").encode(),
         commands,
     );
 }
@@ -536,7 +536,7 @@ pub(crate) fn focused_route_value(core: &RyeOsCore) -> serde_json::Value {
 
 /// Focus a center tile the way `FocusChanged` would: both the view_set
 /// pointer and the explicit UI target move. Tests that poke
-/// `view_set.focused_tile` alone leave the initial dock focus standing.
+/// `view_set.focused_tile` alone leave the prior focus standing.
 pub(crate) fn focus_tile(core: &mut RyeOsCore, tile_id: crate::ids::TileId) {
     core.focused_input = None;
     let set = core
@@ -570,7 +570,10 @@ fn fixture_shared_root_and_surface_have_distinct_actual_kinds() {
     assert!(shared.active_surface().is_none());
     assert!(
         shared
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-            .is_some()
+            .presentation
+            .as_ref()
+            .unwrap()
+            .dialogs()
+            .contains_key("input")
     );
 }

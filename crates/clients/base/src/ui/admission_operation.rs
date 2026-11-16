@@ -871,7 +871,7 @@ mod tests {
             "request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":131072},
             "body":{"kind":"admission","purpose":"resume_particular_view_set","surface_open_target":null,
                 "particular_selection":{"kind":"view_set","id":"current","expected_revision":7,"surface_ref":"surface:test/work"},
-                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dock:left",
+                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dialog:left",
                 "request":{"binding_attachment_id":"root","binding_generation":1,"binding_digest":"cd".repeat(32),"coordinate":{"kind":"affordance","view_ref":"view:test/open","affordance_id":"open"},"payload":{"kind":"selection","record":{"creation_request_id":"11111111-1111-4111-8111-111111111111"}}},"success_notice":null}
         })).unwrap();
         prepared.assign_identity().unwrap();
@@ -923,7 +923,7 @@ mod tests {
             "request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":131072},
             "body":{"kind":"admission","purpose":"resume_particular_surface","surface_open_target":null,
                 "particular_selection":{"kind":"surface","id":"workspace","expected_revision":4},
-                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dock:left",
+                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dialog:left",
                 "request":{"binding_attachment_id":"root","binding_generation":1,"binding_digest":"cd".repeat(32),"coordinate":{"kind":"affordance","view_ref":"view:test/open","affordance_id":"open"},"payload":{"kind":"selection","record":{"creation_request_id":"11111111-1111-4111-8111-111111111111"}}},"success_notice":null}
         })).unwrap();
         prepared.assign_identity().unwrap();
@@ -952,7 +952,7 @@ mod tests {
             "root_binding":{"binding_attachment_id":"root","binding_generation":1,"binding_digest":"cd".repeat(32)},
             "request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":131072},
             "body":{"kind":"admission","purpose":"open_surface","surface_open_target":{"selection":{"kind":"reusable","id":"solver","expected_revision":3,"fresh_subjects":{"run":{"subject":{"selection.work":"run-one"}}}},"placement":{"kind":"new_surface"}},"particular_selection":null,
-                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dock:left",
+                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dialog:left",
                 "request":{"binding_attachment_id":"root","binding_generation":1,"binding_digest":"cd".repeat(32),"coordinate":{"kind":"affordance","view_ref":"view:test/open","affordance_id":"open"},"payload":{"kind":"selection","record":{"creation_request_id":"11111111-1111-4111-8111-111111111111"}}},"success_notice":null}
         })).unwrap();
         prepared.assign_identity().unwrap();
@@ -1057,7 +1057,7 @@ mod tests {
             "request_bounds":{"max_request_bytes":65536,"max_input_bytes":4096,"max_seat_append_bytes":131072},
             "body":{"kind":"admission","purpose":"resume_particular_surface","surface_open_target":null,
                 "particular_selection":{"kind":"surface","id":"workspace","expected_revision":4},
-                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dock:left",
+                "invocation_origin":"seat:22222222-2222-4222-8222-222222222222:dialog:left",
                 "request":{"binding_attachment_id":"root","binding_generation":1,"binding_digest":"cd".repeat(32),"coordinate":{"kind":"affordance","view_ref":"view:test/open","affordance_id":"open"},"payload":{"kind":"selection","record":{"creation_request_id":"untrusted-self-id","selected":"work"}}},"success_notice":null}
         })).unwrap();
         operation.assign_identity().unwrap();

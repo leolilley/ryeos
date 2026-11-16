@@ -134,6 +134,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             ryeos_app::execution_policy::resolve_standard_local_live_authority(
                 &project_ctx.effective_path,
                 principal_scopes.clone(),
+                &principal_id,
                 &ctx.state.isolation,
             )
             .map_err(|error| RouteDispatchError::BadRequest(format!("{error:#}")))?;

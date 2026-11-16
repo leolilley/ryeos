@@ -44,8 +44,11 @@ fn fatal(message: impl Into<String>) -> RuntimeError {
 /// How a retained presentation is claimed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetainedClaim {
-    /// A first claim of a prepared presentation nobody has claimed.
-    Fresh,
+    /// Reopen the presentation as its seat stands at claim time: a first
+    /// claim when nobody has claimed it, or the writer that relinquished it.
+    /// A writer still active, or a closed seat, is the operator's choice
+    /// ([`RuntimeError::WriterHeld`]), never an implicit takeover.
+    Reopen,
     /// Resume the writer that relinquished, observed at claim time.
     ResumeRelinquished,
     /// Resume a relinquished writer the operator already saw.
@@ -247,7 +250,21 @@ async fn build_claim_request<P: Platform>(
                     }
                     UiSeatProducerClaim::Fresh
                 }
-                SeatStart::Retained { .. } => UiSeatProducerClaim::Fresh,
+                SeatStart::Retained {
+                    claim: RetainedClaim::Reopen,
+                    ..
+                } => match &observation.producer {
+                    UiObservedPresentationProducer::Unclaimed => UiSeatProducerClaim::Fresh,
+                    UiObservedPresentationProducer::Relinquished {
+                        producer_incarnation,
+                    } if is_lower_hex_64(producer_incarnation) => UiSeatProducerClaim::Resume {
+                        expected_producer_incarnation: producer_incarnation.clone(),
+                    },
+                    _ => return Err(RuntimeError::WriterHeld(Box::new(observation.clone()))),
+                },
+                SeatStart::Retained { .. } => {
+                    return Err(fatal("an explicit replacement carries its own predecessor"));
+                }
             };
             (observation.control_predecessor, claim)
         }

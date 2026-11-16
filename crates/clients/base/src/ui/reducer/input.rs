@@ -427,7 +427,7 @@ impl RyeOsCore {
     /// `submit: route` — classify the line and dispatch through the engine
     /// route-fold. Behaviour (slash/plain, route_seq, read-only/empty) is
     /// unchanged; it is now reached through the `input` grammar instead of
-    /// the deleted Input dock special-case.
+    /// a special-case input kind.
     pub(crate) fn submit_route(&mut self, text: &str, interrupt: bool) -> Vec<RyeOsEffect> {
         let Some((origin_key, _)) = self.focused_input_instance() else {
             return Vec::new();
@@ -729,8 +729,7 @@ mod tests {
     fn seed_input_view(core: &mut RyeOsCore) {
         crate::ui::reducer::test_support::seed_input_view(core);
         if core.focused_input_instance().is_none() {
-            core.focused_input =
-                core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom);
+            core.focused_input = crate::ui::reducer::test_support::fixture_input(core);
         }
         assert!(core.focused_input_instance().is_some());
     }
@@ -795,13 +794,7 @@ mod tests {
             .binding_request_bounds
             .max_input_bytes = 4;
         let mut core = test_support_core(session);
-        let address = build_view_model(&core)
-            .docks
-            .bottom
-            .unwrap()
-            .input
-            .unwrap()
-            .address;
+        let address = crate::ui::reducer::test_support::fixture_input_address(&mut core);
         core.dispatch_addressed_input(
             address.clone(),
             crate::ui::event::RyeOsInputAction::SetText {
@@ -871,13 +864,7 @@ mod tests {
     #[test]
     fn paste_inserts_unicode_and_newlines_into_exact_shared_input() {
         let mut core = test_support_core(shared_session());
-        let address = build_view_model(&core)
-            .docks
-            .bottom
-            .unwrap()
-            .input
-            .unwrap()
-            .address;
+        let address = crate::ui::reducer::test_support::fixture_input_address(&mut core);
         let storage = address.buffer.storage_key();
         core.dispatch_addressed_input(
             address,
@@ -910,22 +897,15 @@ mod tests {
 
     #[test]
     fn paste_without_live_input_or_with_invalid_cursor_is_inert() {
-        let mut core = test_support_core(session_with_surface_and_docks(
+        let mut core = test_support_core(session_with_surface(
             serde_json::json!({"name":"No input","tiles":["view:test/text"],"views":{"view:test/text":{"widget":"text","body":"Text"}}}),
-            serde_json::json!({}),
         ));
         assert!(!core.has_focused_input());
         let generation = core.generation;
         assert!(core.insert_focused_input_text("ignored").is_empty());
         assert_eq!(core.generation, generation);
         let mut core = test_support_core(shared_session());
-        let address = build_view_model(&core)
-            .docks
-            .bottom
-            .unwrap()
-            .input
-            .unwrap()
-            .address;
+        let address = crate::ui::reducer::test_support::fixture_input_address(&mut core);
         core.dispatch_addressed_input(address, crate::ui::event::RyeOsInputAction::Focus);
         let buffer = core.focused_input_buffer_mut().unwrap();
         buffer.text = "é".into();
@@ -938,13 +918,7 @@ mod tests {
     fn shared_input_remains_addressable_without_any_surface() {
         let mut core = test_support_core(shared_session());
         assert!(core.active_view_set().is_none());
-        let address = build_view_model(&core)
-            .docks
-            .bottom
-            .unwrap()
-            .input
-            .unwrap()
-            .address;
+        let address = crate::ui::reducer::test_support::fixture_input_address(&mut core);
         assert!(matches!(
             &address.owner,
             crate::ui::model::RyeOsInputOwner::Shared { .. }
@@ -963,27 +937,26 @@ mod tests {
     #[test]
     fn addressed_live_filter_navigates_its_mount_and_rejects_stale_addresses() {
         use crate::ui::event::RyeOsInputAction;
-        let session = session_with_surface_and_docks(
-            serde_json::json!({
-                "name":"Filter fixture", "views": {
-                    "view:test/filter": {
-                        "title":"Filter", "widget":"rows",
-                        "sources":{"default":{"ref":"service:test/read","collection":"rows"}},
-                        "projections":{"primary":"title"},
-                        "input":{"id":"filter","feeds":{"fields":[{"param":"query","label":"query"}]}}
-                    }
+        let session = session_with_surface(serde_json::json!({
+            "name":"Filter fixture", "tiles": ["view:test/filter"], "views": {
+                "view:test/filter": {
+                    "title":"Filter", "widget":"rows",
+                    "sources":{"default":{"ref":"service:test/read","collection":"rows"}},
+                    "projections":{"primary":"title"},
+                    "input":{"id":"filter","feeds":{"fields":[{"param":"query","label":"query"}]}}
                 }
-            }),
-            serde_json::json!({"left":{"content":"view:test/filter","open":true,"size":32}}),
-        );
+            }
+        }));
         let mut core = test_support_core(session);
-        let address = build_view_model(&core)
-            .docks
-            .left
-            .unwrap()
-            .input
-            .unwrap()
-            .address;
+        let address = {
+            let vm = build_view_model(&core);
+            let Some(crate::ui::view_model::RyeOsLayoutNodeVm::Tile { input, .. }) =
+                vm.view_set.as_ref().and_then(|set| set.root.as_ref())
+            else {
+                panic!("one filter tile")
+            };
+            input.as_ref().unwrap().address.clone()
+        };
         let key = address.buffer.view_instance_key.clone();
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::named(key.clone(), "default").encode(),
@@ -1092,13 +1065,7 @@ mod tests {
     fn list_actions_do_not_reinterpret_an_ordinary_composer_or_change_focus() {
         use crate::ui::event::RyeOsInputAction;
         let mut core = test_support_core(session());
-        let address = build_view_model(&core)
-            .docks
-            .bottom
-            .unwrap()
-            .input
-            .unwrap()
-            .address;
+        let address = crate::ui::reducer::test_support::fixture_input_address(&mut core);
         core.focused_input = None;
         assert!(
             core.dispatch_addressed_input(address.clone(), RyeOsInputAction::ActivateSelection)
@@ -1118,13 +1085,7 @@ mod tests {
     fn addressed_input_rejects_stale_scope_and_edits_the_named_instance() {
         use crate::ui::event::RyeOsInputAction;
         let mut core = test_support_core(session());
-        let address = build_view_model(&core)
-            .docks
-            .bottom
-            .unwrap()
-            .input
-            .unwrap()
-            .address;
+        let address = crate::ui::reducer::test_support::fixture_input_address(&mut core);
         // Browser focus may still be on a different region; address, not that
         // focus, decides which admitted input receives the edit.
         core.active_view_set_mut().unwrap().focus_target = None;
@@ -1634,7 +1595,7 @@ mod tests {
     #[test]
     fn shared_input_cannot_borrow_the_active_surface_route() {
         let mut core = surface_route_core();
-        core.focused_input = core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom);
+        core.focused_input = crate::ui::reducer::test_support::fixture_input(&mut core);
         seed_service_route(&mut core);
         set_focused_input(&mut core, "private shared draft");
         let buffers = core.input_buffers.clone();
@@ -1838,7 +1799,7 @@ mod tests {
         };
 
         // A separate Surface tab mounts an ordinary input View. The shared
-        // bottom dock remains one mount across tab switches, not a copied dock.
+        // input dialog remains one mount across tab switches, not a copy.
         let producer = claim_fixture_producer(&mut core);
         settle_pending_prefix(&mut core, &producer);
         core.new_view_set();

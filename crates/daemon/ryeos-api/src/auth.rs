@@ -584,6 +584,7 @@ pub(crate) fn verify_request(
                         source_node_fingerprint: forwarding_fingerprint,
                         source_node_grant_hash: forwarding_key.source_file_hash,
                         delegation_digest: None,
+                        delegation_not_after: None,
                     },
                 ),
             )
@@ -777,6 +778,7 @@ fn verify_delegated(
                         .to_owned(),
                     source_node_grant_hash: node_key.source_file_hash.clone(),
                     delegation_digest: Some(digest),
+                    delegation_not_after: Some(signed.body.not_after),
                 },
             ),
         },

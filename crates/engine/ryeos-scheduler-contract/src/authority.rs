@@ -32,6 +32,12 @@ pub enum ScheduledAuthorityRefusalKind {
     /// The forwarding node's grant no longer covers forwarded-operator
     /// attestation.
     ForwardingAttestationNotCovered,
+    /// The principal-signed delegation the schedule was registered under
+    /// carries a revocation tombstone on this node.
+    DelegationRevoked,
+    /// The principal-signed delegation the schedule was registered under has
+    /// passed its end time.
+    DelegationExpired,
     /// A node-owned schedule no longer names this node's identity or site.
     NodeAuthorityChanged,
 }
@@ -47,6 +53,8 @@ impl ScheduledAuthorityRefusalKind {
             Self::ForwardingGrantRevoked => "forwarding_grant_revoked",
             Self::ForwardingGrantChanged => "forwarding_grant_changed",
             Self::ForwardingAttestationNotCovered => "forwarding_attestation_not_covered",
+            Self::DelegationRevoked => "delegation_revoked",
+            Self::DelegationExpired => "delegation_expired",
             Self::NodeAuthorityChanged => "node_authority_changed",
         }
     }
@@ -54,10 +62,12 @@ impl ScheduledAuthorityRefusalKind {
     /// The pause reason, which is also the refused fire's outcome code.
     pub fn pause_reason(self) -> ScheduleAutoPauseReason {
         match self {
-            Self::GrantRevoked | Self::ForwardingGrantRevoked => {
+            Self::GrantRevoked | Self::ForwardingGrantRevoked | Self::DelegationRevoked => {
                 ScheduleAutoPauseReason::AuthorityRevoked
             }
-            Self::GrantExpired => ScheduleAutoPauseReason::AuthorityExpired,
+            Self::GrantExpired | Self::DelegationExpired => {
+                ScheduleAutoPauseReason::AuthorityExpired
+            }
             Self::GrantGenerationChanged
             | Self::ClassOrOriginChanged
             | Self::ForwardingGrantChanged

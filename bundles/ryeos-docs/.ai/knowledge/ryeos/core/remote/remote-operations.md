@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:17:08Z:eb004e3d1e114d83c9a600606207c429cf562c70f41f1a98707240d5ce505862:LzwRryAQbuOUCdQu1PrTIWYlPS9JnUcaRFqkvmDoD8xEpz2vLpOtg6y9siGtJ57LCQzVdzBTFBKY/EYlAndIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T07:30:20Z:b66b02fb2c8f88e6bebb0151ee7b25dcc75fe3bcff3c5b5a5872ffa2c325cfe1:dIkbtr0ERSom6D1VGxETis8aeIlpk23b8KVMFA+RcQvRLnUjTL7S8orDUgB0BhF9v30hT1ki4Brey07OFx/1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -207,7 +207,7 @@ principal's grant ends all of them, and `not_after` bounds the rest.
    --host-class <class>` so
    the remote has node identity, vault key material, local operator
    authorization, the exact distribution bundles, and a complete signed node
-   policy generation. Packaged full nodes use `full` with class `local`;
+   policy generation. Packaged nodes use `standard` with class `local`;
    images use the profile mapped by their bundle-set packaging, with the class
    the deployment sets in `RYEOS_INIT_HOST_CLASS` (`hosted` in a hosting
    provider's container, `local` on a host the operator runs).
@@ -328,6 +328,12 @@ forwarded `remote_principal` principal.
    | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires; `ryeos.use.vault.operator` only if the policy exposes the target's operator vault (not by default, see below) |
    | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |
    | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
+
+   `remote authorize`, `remote pull` and `remote bundle-install` go out as the
+   caller under its stored delegation (`ryeos remote delegate`), so the
+   scopes above must be in both the caller's grant on the target and the
+   delegation; a caller that is the node itself acts as the node key. With no
+   delegation they are refused with `remote_delegation_missing`.
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
    | `external-content push-product` | `ryeos.execute.service.objects/stage-chunk`, `ryeos.execute.service.external-content/product-offer`, `ryeos.execute.service.external-content/product-accept` (forwarded `remote_principal` principal) |
@@ -1001,7 +1007,4 @@ remote:
 
 The loader verifies the node signature on every read, so editing the pinned
 key, URL or a binding in place makes the record unusable until it is pinned
-again. A leftover unsigned remotes config file is refused with
-`remote_config_file_unsupported`; `ryeos node doctor` reports it in its
-`remote_pins` row. Re-pin each remote with `ryeos remote configure`, then
-delete the file.
+again.

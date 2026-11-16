@@ -3461,6 +3461,21 @@ pub fn covering_authority_for(
     }
 }
 
+/// Record the covering authority on a root launch's metadata unless it already
+/// carries one: a continuation keeps the authority that covered its seed, and a
+/// fresh root records its caller. Every launch driver must pass through this so
+/// that revoking an authorized-key grant can find the live threads it covered.
+pub(crate) fn with_root_covering_authority(
+    metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    acting_principal: &str,
+    handler_context: Option<&ryeos_app::handler_context::HandlerContext>,
+) -> ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+    if metadata.covering_authority.is_some() {
+        return metadata;
+    }
+    metadata.with_covering_authority(covering_authority_for(acting_principal, handler_context))
+}
+
 /// Typed 403 refusal naming the item, the caller, every uncovered cap, and the cure.
 fn caller_capability_not_covered_error(
     item_ref: &str,
@@ -3620,6 +3635,14 @@ fn apply_root_admission(
 fn state_home_launch_error(
     refusal: ryeos_bundle::runtime_authority::StateHomeRefusal,
 ) -> BuildAndLaunchError {
+    BuildAndLaunchError::LaunchPreparation(Box::new(state_home_dispatch_error(&refusal)))
+}
+
+/// The typed dispatch refusal for a state home refusal: its code, its message
+/// naming the fix, and the class a caller maps to a status.
+pub(crate) fn state_home_dispatch_error(
+    refusal: &ryeos_bundle::runtime_authority::StateHomeRefusal,
+) -> DispatchError {
     use ryeos_bundle::runtime_authority::StateHomeRefusal;
 
     let code = refusal.code().to_owned();
@@ -3631,7 +3654,7 @@ fn state_home_launch_error(
         binding: None,
         details: Box::default(),
     };
-    BuildAndLaunchError::LaunchPreparation(Box::new(match &refusal {
+    match refusal {
         StateHomeRefusal::Undeclared { .. } => prepared("configuration"),
         StateHomeRefusal::NamespaceInvalid { .. } => prepared("caller"),
         StateHomeRefusal::NamespaceDenied { .. } => DispatchError::LaunchPolicyForbidden {
@@ -3640,44 +3663,22 @@ fn state_home_launch_error(
             binding: None,
         },
         StateHomeRefusal::Unavailable { .. } => prepared("unavailable"),
-    }))
+    }
 }
 
 /// Open the one bundle state namespace a launch's sealed capabilities name.
-/// The access cap is minted only after the manifest backed it and the caller's
-/// grant carried the `use` cap, and the sealed set is what a recovered launch
-/// reads, so this is the single place a launch turns that authority into a
-/// directory. Two distinct namespaces on one launch are refused.
 fn open_launch_bundle_state_home(
     state: &AppState,
     engine: &ryeos_engine::engine::Engine,
     effective_caps: &[String],
 ) -> Result<Option<ryeos_engine::isolation::IsolationBundleStateHome>, BuildAndLaunchError> {
-    let grants = effective_caps
-        .iter()
-        .filter_map(|cap| ryeos_bundle::runtime_authority::parse_bundle_state_access_cap(cap))
-        .collect::<BTreeSet<_>>();
-    let mut grants = grants.into_iter();
-    let Some((bundle_id, namespace, access)) = grants.next() else {
-        return Ok(None);
-    };
-    if grants.next().is_some() {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "a launch carries more than one bundle state access capability"
-        )));
-    }
-    let opened = ryeos_app::bundle_state_home::open_or_create(
+    ryeos_app::bundle_state_home::open_for_sealed_caps(
         &state.config.app_root,
-        &bundle_id,
-        &namespace,
         &state.identity,
         &engine.registered_bundle_generation_fingerprint(),
+        effective_caps,
     )
-    .map_err(state_home_launch_error)?;
-    Ok(Some(ryeos_engine::isolation::IsolationBundleStateHome {
-        namespace_dir: opened.path,
-        writable: access == ryeos_bundle::runtime_authority::StateHomeAccess::ReadWrite,
-    }))
+    .map_err(state_home_launch_error)
 }
 
 /// Operator follow-up gate: the sender must cover every sealed cap the
@@ -5591,9 +5592,14 @@ async fn prepare_managed_launch_authority(
             item_ref: params.resolved.item_ref.clone(),
             secrets: missing_secrets_from_requirements(&names, &secret_requirements),
         },
-        VaultReadError::NameRefused(refusal) => BuildAndLaunchError::CapabilityRejected {
-            reason: refusal.to_string(),
-        },
+        // An authorization refusal carrying the ceiling's own code.
+        VaultReadError::NameRefused(refusal) => {
+            BuildAndLaunchError::LaunchPreparation(Box::new(DispatchError::LaunchPolicyForbidden {
+                code: refusal.code().to_owned(),
+                message: refusal.to_string(),
+                binding: None,
+            }))
+        }
         error @ VaultReadError::AuthorityViolation(_) => {
             BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
         }
@@ -5829,12 +5835,8 @@ async fn prepare_managed_launch_authority(
         // admitting principal, or the operator follow-up's sender); a fresh
         // root records the caller that lent it its declared caps and, when that
         // caller authenticated under an authorized-key grant, the grant digest.
-        if metadata.covering_authority.is_none() {
-            metadata = metadata.with_covering_authority(covering_authority_for(
-                params.acting_principal,
-                params.handler_context,
-            ));
-        }
+        metadata =
+            with_root_covering_authority(metadata, params.acting_principal, params.handler_context);
         if let Some(native_resume) = native_resume {
             metadata = metadata.with_native_resume(native_resume);
         }
@@ -12335,6 +12337,48 @@ fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::execution::limits::{LimitCaps, LimitValues};
+
+    fn grant_backed_context(digest: &str) -> ryeos_app::handler_context::HandlerContext {
+        ryeos_app::handler_context::HandlerContext::new_with_grant_authority(
+            "fp:grantee".to_owned(),
+            vec![],
+            ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass::LocalClient,
+            None,
+            ryeos_engine::principal_contract::AuthenticatedGrantAuthority {
+                principal_grant_hash: digest.to_owned(),
+                forwarding: None,
+            },
+        )
+    }
+
+    #[test]
+    fn a_fresh_root_records_the_grant_digest_it_authenticated_under() {
+        let digest = "ab".repeat(32);
+        let context = grant_backed_context(&digest);
+        let metadata = with_root_covering_authority(
+            ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+            "fp:grantee",
+            Some(&context),
+        );
+        let authority = metadata.covering_authority.expect("covering authority");
+        assert_eq!(authority.principal, "fp:grantee");
+        assert_eq!(authority.grant_digest.as_deref(), Some(digest.as_str()));
+    }
+
+    #[test]
+    fn a_seeded_covering_authority_is_kept() {
+        let seeded = ryeos_app::launch_metadata::CoveringAuthority {
+            principal: "fp:seed".to_owned(),
+            grant_digest: None,
+        };
+        let metadata = with_root_covering_authority(
+            ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+                .with_covering_authority(seeded.clone()),
+            "fp:grantee",
+            Some(&grant_backed_context(&"cd".repeat(32))),
+        );
+        assert_eq!(metadata.covering_authority, Some(seeded));
+    }
 
     #[test]
     fn retained_launch_error_keeps_only_typed_bounded_stage_diagnostics() {

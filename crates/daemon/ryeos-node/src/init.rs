@@ -407,6 +407,18 @@ fn publish_substrate_identity(
     Ok(None)
 }
 
+/// Remove the substrate identity record a first-time init wrote, when that
+/// init's definition admission fails. Does nothing unless `created_here`, so
+/// a record that predates the invocation is never touched.
+fn retire_first_init_identity(app_root: &Path, created_here: bool) -> Result<()> {
+    if !created_here {
+        return Ok(());
+    }
+    let path = substrate_identity_path(app_root);
+    lillux::remove_file_durable(&path)
+        .map_err(|error| anyhow!("remove substrate identity {}: {error}", path.display()))
+}
+
 /// Replace the recorded substrate identity with the authorized offered one.
 fn replace_substrate_identity_record(app_root: &Path, identity: &SubstrateIdentity) -> Result<()> {
     identity.validate()?;
@@ -789,6 +801,10 @@ fn run_init_under_lock_on_storage(
     // ── 1. Layout ──
     create_layout(&opts.app_root)?;
     let mut pending_substrate_replacement: Option<(SubstrateIdentity, SubstrateIdentity)> = None;
+    // True only when this invocation is about to write the identity record.
+    // An app root that already holds one is never rolled back.
+    let identity_created_here =
+        opts.substrate_identity.is_some() && !substrate_identity_path(&opts.app_root).exists();
     match &opts.substrate_identity {
         Some(identity) => {
             identity.validate()?;
@@ -1198,6 +1214,11 @@ fn run_init_under_lock_on_storage(
         prospective_policy.generation_digest(),
     )
     .map_err(|error| {
+        // Admission needs the node key and trust registry, which exist only
+        // after the identity record, so it cannot run first. A first-time init
+        // that fails it retires the record it wrote: the app root stays
+        // uninitialized and a retry may choose another host class.
+        let retired = retire_first_init_identity(&opts.app_root, identity_created_here);
         let declared = opts
             .node_profile
             .as_deref()
@@ -1206,7 +1227,25 @@ fn run_init_under_lock_on_storage(
             })
             .and_then(|profile| profile.host_classes().ok())
             .unwrap_or_default();
-        enforced_admission_refusal(isolation_policy, &declared, error)
+        let recorded_host_class = if identity_created_here {
+            None
+        } else {
+            load_substrate_identity_record(&opts.app_root)
+                .ok()
+                .and_then(|identity| identity.host_class)
+        };
+        let refusal = enforced_admission_refusal(
+            isolation_policy,
+            &declared,
+            recorded_host_class.as_deref(),
+            error,
+        );
+        match retired {
+            Ok(()) => refusal,
+            Err(retire_error) => refusal.context(format!(
+                "also failed to retire the substrate identity this init wrote: {retire_error:#}"
+            )),
+        }
     })?;
 
     // Re-init inherits the existing immutable node policy, but resolves its
@@ -2375,9 +2414,14 @@ const UNCONFINED_HOST_CLASS: &str = "local_unconfined";
 /// Under an enforced lane the cause is usually the host's sandbox probe: the
 /// message says so and, when the profile declares the explicit unconfined
 /// class, names it as the opt-out. Initialization never falls back to it.
+/// `recorded_host_class` is the host class the app root's substrate identity
+/// already records, if any. A recorded class never changes, so when it differs
+/// from the unconfined class the opt-out is a different, empty app root, not a
+/// re-run against this one.
 fn enforced_admission_refusal(
     policy: &ryeos_engine::isolation::IsolationPolicy,
     declared_host_classes: &[String],
+    recorded_host_class: Option<&str>,
     cause: anyhow::Error,
 ) -> anyhow::Error {
     if policy.mode != ryeos_engine::isolation::IsolationMode::Enforce {
@@ -2389,10 +2433,19 @@ fn enforced_admission_refusal(
             .iter()
             .any(|declared| declared == UNCONFINED_HOST_CLASS)
     {
-        format!(
-            " To run jobs unconfined as the daemon user, re-run with `--host-class \
-             {UNCONFINED_HOST_CLASS}`; initialization does not select it for you."
-        )
+        match recorded_host_class {
+            Some(recorded) if recorded != UNCONFINED_HOST_CLASS => format!(
+                " This app root is already initialized with host class `{recorded}`, and a \
+                 node's host class does not change, so `--host-class {UNCONFINED_HOST_CLASS}` \
+                 is refused here. To run jobs unconfined as the daemon user, initialize a new, \
+                 empty app root with `--host-class {UNCONFINED_HOST_CLASS}`; initialization \
+                 does not select it for you."
+            ),
+            _ => format!(
+                " To run jobs unconfined as the daemon user, re-run with `--host-class \
+                 {UNCONFINED_HOST_CLASS}`; initialization does not select it for you."
+            ),
+        }
     } else {
         String::new()
     };
@@ -2707,11 +2760,6 @@ fn create_layout(app_root: &Path) -> Result<()> {
         ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf())
             .operator_dir()
             .join("signing"),
-        app_root
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("trusted"),
     ];
     for d in &dirs {
         fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
@@ -3198,13 +3246,13 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),
@@ -3341,7 +3389,7 @@ mod tests {
             .expect_err("an ephemeral root must refuse a durable-storage profile");
         let text = format!("{error:#}");
         assert!(
-            text.contains("profile full requires storage:durable_root"),
+            text.contains("profile standard requires storage:durable_root"),
             "{text}"
         );
         assert!(
@@ -3383,7 +3431,7 @@ mod tests {
         let declared = ["local".to_owned(), "local_unconfined".to_owned()];
         let text = format!(
             "{:#}",
-            enforced_admission_refusal(&policy, &declared, anyhow!("no user namespace"))
+            enforced_admission_refusal(&policy, &declared, None, anyhow!("no user namespace"))
         );
         assert!(
             text.starts_with("enforced_lane_admission_refused:"),
@@ -3391,20 +3439,78 @@ mod tests {
         );
         assert!(text.contains("no user namespace"), "{text}");
         assert!(text.contains("--host-class local_unconfined"), "{text}");
+        // An app root already initialized with another class cannot take the
+        // unconfined class; the refusal names a new app root instead.
+        let text = format!(
+            "{:#}",
+            enforced_admission_refusal(
+                &policy,
+                &declared,
+                Some("local"),
+                anyhow!("no user namespace")
+            )
+        );
+        assert!(
+            text.starts_with("enforced_lane_admission_refused:"),
+            "{text}"
+        );
+        assert!(
+            text.contains("already initialized with host class `local`"),
+            "{text}"
+        );
+        assert!(text.contains("new, empty app root"), "{text}");
+        assert!(!text.contains("re-run with"), "{text}");
         // A profile that declares no unconfined class offers none.
         let text = format!(
             "{:#}",
-            enforced_admission_refusal(&policy, &["local".to_owned()], anyhow!("probe failed"))
+            enforced_admission_refusal(
+                &policy,
+                &["local".to_owned()],
+                Some("local"),
+                anyhow!("probe failed")
+            )
         );
         assert!(!text.contains("local_unconfined"), "{text}");
         // A disabled lane keeps the plain admission failure.
         policy.mode = ryeos_engine::isolation::IsolationMode::Disabled;
         let text = format!(
             "{:#}",
-            enforced_admission_refusal(&policy, &declared, anyhow!("bad bundle"))
+            enforced_admission_refusal(&policy, &declared, None, anyhow!("bad bundle"))
         );
         assert!(!text.contains("local_unconfined"), "{text}");
         assert!(text.contains("bad bundle"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_first_init_retires_its_identity_and_never_an_existing_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = SubstrateIdentity::new(
+            format!("sha256:{}", "a".repeat(64)),
+            1,
+            Some("core".to_owned()),
+            Some("local".to_owned()),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join(ryeos_engine::AI_DIR)).unwrap();
+        publish_substrate_identity(dir.path(), &identity, false).unwrap();
+        let path = substrate_identity_path(dir.path());
+        assert!(path.exists());
+        // A record that predates the invocation stays.
+        retire_first_init_identity(dir.path(), false).unwrap();
+        assert!(path.exists());
+        // The record this invocation wrote is removed, so a retry may name
+        // another host class.
+        retire_first_init_identity(dir.path(), true).unwrap();
+        assert!(!path.exists());
+        let retry = SubstrateIdentity {
+            host_class: Some(UNCONFINED_HOST_CLASS.to_owned()),
+            ..identity
+        };
+        assert!(
+            publish_substrate_identity(dir.path(), &retry, false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3432,10 +3538,10 @@ mod tests {
             "{undeclared}"
         );
         // A profile without a hosted variant does not run hosted.
-        let full = authored_profile("full");
+        let development = authored_profile("development");
         let refused = format!(
             "{:#}",
-            select_profile_host_class("full", &full, Some("hosted")).unwrap_err()
+            select_profile_host_class("development", &development, Some("hosted")).unwrap_err()
         );
         assert!(refused.contains("it declares local"), "{refused}");
         let noncanonical = format!(
@@ -3522,22 +3628,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let mut opts = make_opts(&state, tmp.path());
-        opts.host_class = Some("hosted".to_owned());
+        opts.host_class = Some("local_direct".to_owned());
         opts.substrate_identity = Some(
             SubstrateIdentity::new(
                 format!("sha256:{}", "1".repeat(64)),
                 1,
-                Some("full".to_owned()),
-                Some("hosted".to_owned()),
+                Some("standard".to_owned()),
+                Some("local_direct".to_owned()),
             )
             .unwrap(),
         );
         let error = format!(
             "{:#}",
-            run_init(&opts).expect_err("full declares no hosted class")
+            run_init(&opts).expect_err("standard declares no local_direct class")
         );
         assert!(
-            error.contains("does not declare host class `hosted`"),
+            error.contains("does not declare host class `local_direct`"),
             "{error}"
         );
         assert!(
@@ -4064,7 +4170,7 @@ mod tests {
         let first = load_verified_substrate_identity(&state).expect("offline verified load");
         assert_eq!(first.image_digest, format!("sha256:{}", "1".repeat(64)));
         assert_eq!(first.protocol, 1);
-        assert_eq!(first.node_profile.as_deref(), Some("full"));
+        assert_eq!(first.node_profile.as_deref(), Some("standard"));
         assert!(
             verify_init_completion(&state)
                 .unwrap()
@@ -4307,12 +4413,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        run_init(&make_opts(&state, &user)).expect("initial standard generation");
         let source = workspace_root().join("bundles");
         let pinned = prospective_replacement_policy_digest(
             &state,
             &source,
-            "standard",
+            "standard-central-auth",
             "local",
             &[dev_trust_file()],
             &Default::default(),
@@ -4324,7 +4430,7 @@ mod tests {
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("standard".to_owned()),
+            node_profile: Some("standard-central-auth".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
@@ -4503,7 +4609,7 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
@@ -4755,7 +4861,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
-        run_init(&make_opts(&state, &user)).expect("initial full generation");
+        run_init(&make_opts(&state, &user)).expect("initial standard generation");
         let node_key = fs::read(state.join(".ai/node/identity/private_key.pem")).unwrap();
         let operator_key =
             fs::read(state.join(".ai/node/operator/signing/private_key.pem")).unwrap();
@@ -4767,7 +4873,7 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("standard".to_owned()),
+            node_profile: Some("standard-central-auth".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: None,
             replace_node_policy_generation: true,
@@ -4779,9 +4885,12 @@ mod tests {
         run_init(&replacement).expect("replace policy and exact bundle inventory");
 
         let trust = TrustStore::load_node_registry(&state).unwrap();
-        let profile =
-            load_trusted_init_node_profile(&workspace_root().join("bundles"), "standard", &trust)
-                .unwrap();
+        let profile = load_trusted_init_node_profile(
+            &workspace_root().join("bundles"),
+            "standard-central-auth",
+            &trust,
+        )
+        .unwrap();
         assert_eq!(
             installed_bundle_names(&state).unwrap(),
             profile.exact_bundles().iter().cloned().collect()
@@ -4851,7 +4960,7 @@ mod tests {
         SubstrateIdentity::new(
             format!("sha256:{}", digest_nibble.repeat(64)),
             protocol,
-            Some("full".to_owned()),
+            Some("standard".to_owned()),
             Some(host_class.to_owned()),
         )
         .unwrap()
@@ -5027,7 +5136,7 @@ mod tests {
         copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
             .expect("copy core bundle");
         copy_source_seed(&source);
-        fs::remove_file(source.join(".ai/node/init/profiles/full.yaml"))
+        fs::remove_file(source.join(".ai/node/init/profiles/standard.yaml"))
             .expect("remove selected node profile");
 
         let state = tmp.path().join("state");
@@ -5037,13 +5146,13 @@ mod tests {
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),
@@ -5058,7 +5167,7 @@ mod tests {
         let err = run_init(&opts).expect_err("missing seed must fail closed");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("full.yaml") || msg.contains("node init profile"),
+            msg.contains("standard.yaml") || msg.contains("node init profile"),
             "got: {msg}"
         );
     }
@@ -5073,13 +5182,13 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),
@@ -5501,13 +5610,13 @@ typo_field: oops
             uds_path: None,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),

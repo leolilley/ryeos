@@ -189,6 +189,7 @@ pub async fn handle(
                     state.isolation.inspection(),
                 ),
                 ctx.scopes.clone(),
+                Some(&ctx.fingerprint),
             )
             .map_err(|e| HandlerError::Internal(format!("derive environment authority: {e:#}")))?
     };

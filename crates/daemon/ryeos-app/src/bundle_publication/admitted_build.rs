@@ -852,7 +852,7 @@ mod input_contract_tests {
             binary: "rye-parser-yaml-document".into(),
             cargo_package: "ryeos-parser-bins".into(),
             build_class: "release".into(),
-            bundle_sets: vec!["full".into()],
+            bundle_sets: vec!["standard".into()],
             required_features: Vec::new(),
         };
         let full = OwnedPayload {

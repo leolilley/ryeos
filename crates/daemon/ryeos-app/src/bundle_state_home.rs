@@ -187,6 +187,40 @@ pub fn authorize_caller(
     })
 }
 
+/// Open the one bundle state namespace a launch's sealed capabilities name, or
+/// `None` when they name none. The access cap is minted only after the signed
+/// manifest backed it and the caller's grant carried the `use` cap, and the
+/// sealed set is what a recovered launch reads, so this is the single place a
+/// launch turns that authority into a directory. Two distinct namespaces on
+/// one launch are refused.
+pub fn open_for_sealed_caps(
+    app_root: &Path,
+    identity: &NodeIdentity,
+    generation: &str,
+    effective_caps: &[String],
+) -> Result<Option<ryeos_engine::isolation::IsolationBundleStateHome>, StateHomeRefusal> {
+    use ryeos_bundle::runtime_authority::{StateHomeAccess, parse_bundle_state_access_cap};
+
+    let grants = effective_caps
+        .iter()
+        .filter_map(|cap| parse_bundle_state_access_cap(cap))
+        .collect::<BTreeSet<_>>();
+    let mut grants = grants.into_iter();
+    let Some((bundle_id, namespace, access)) = grants.next() else {
+        return Ok(None);
+    };
+    if grants.next().is_some() {
+        return Err(unavailable(
+            "a launch carries more than one bundle state access capability",
+        ));
+    }
+    let opened = open_or_create(app_root, &bundle_id, &namespace, identity, generation)?;
+    Ok(Some(ryeos_engine::isolation::IsolationBundleStateHome {
+        namespace_dir: opened.path,
+        writable: access == StateHomeAccess::ReadWrite,
+    }))
+}
+
 fn unavailable(detail: impl std::fmt::Display) -> StateHomeRefusal {
     StateHomeRefusal::Unavailable {
         detail: detail.to_string(),
@@ -571,6 +605,45 @@ mod tests {
         ];
         assert!(authorize_caller(&other, "central-auth", "realm-b", "fp:caller").is_err());
         assert!(authorize_caller(&[], "central-auth", "realm-b", "fp:caller").is_err());
+    }
+
+    #[test]
+    fn sealed_caps_open_exactly_the_namespace_they_name() {
+        let app = app_root();
+        let keys = tempfile::tempdir().unwrap();
+        let id = identity(keys.path());
+        let open = |caps: &[&str]| {
+            let caps: Vec<String> = caps.iter().map(|cap| (*cap).to_owned()).collect();
+            open_for_sealed_caps(app.path(), &id, "gen-1", &caps)
+        };
+
+        assert!(open(&[]).unwrap().is_none());
+        assert!(
+            open(&["ryeos.execute.tool.central-auth/login"])
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root_path(app.path()).exists());
+
+        let rw = open(&["ryeos.write.bundle-state.central-auth/realm-a"])
+            .unwrap()
+            .expect("a write cap opens its namespace");
+        assert!(rw.writable);
+        assert_eq!(
+            rw.namespace_dir,
+            namespace_path(app.path(), "central-auth", "realm-a")
+        );
+        let ro = open(&["ryeos.read.bundle-state.central-auth/realm-a"])
+            .unwrap()
+            .expect("a read cap opens its namespace");
+        assert!(!ro.writable);
+
+        let two = open(&[
+            "ryeos.write.bundle-state.central-auth/realm-a",
+            "ryeos.write.bundle-state.central-auth/realm-b",
+        ])
+        .unwrap_err();
+        assert_eq!(two.code(), "bundle_state_home_unavailable");
     }
 
     #[test]

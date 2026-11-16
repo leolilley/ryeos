@@ -49,7 +49,7 @@ done
 if [[ "$online" -eq 1 ]]; then
     [[ -z "$archive_root" ]] || usage
     [[ "$minimum_free_bytes" == "2147483648" ]] || {
-        echo "online qualification uses the full profile's exact 2147483648-byte free-space floor" >&2
+        echo "online qualification uses the standard profile's exact 2147483648-byte free-space floor" >&2
         exit 2
     }
 else
@@ -122,7 +122,7 @@ mkdir -p "$policy_root" "$home_root" "$project_root"
 # `ryeos init --source` deliberately admits every immediate bundle directory.
 # Pointing init at the checkout could therefore make unrelated source-only
 # authoring bundles part of this qualification. Build the same closed
-# `full` source layout that packaging and local installation derive from the
+# `standard` source layout that packaging and local installation derive from the
 # shared bundle-set authority. This is a disposable source view, not a second
 # bundle selection contract or a lasting node/workload root.
 qualification_source="$qualification_root/source"
@@ -132,7 +132,7 @@ cp -a "$bundle_source/.ai" "$qualification_source/.ai"
 source "$repository_root/scripts/pkg/bundle-sets.sh"
 while IFS= read -r bundle_name; do
     [[ -d "$bundle_source/$bundle_name/.ai" ]] || {
-        echo "full qualification source is missing $bundle_name/.ai" >&2
+        echo "standard qualification source is missing $bundle_name/.ai" >&2
         exit 2
     }
     mkdir -p "$qualification_source/$bundle_name"
@@ -142,7 +142,7 @@ while IFS= read -r bundle_name; do
         cp -a "$bundle_source/$bundle_name/PUBLISHER_TRUST.toml" \
             "$qualification_source/$bundle_name/PUBLISHER_TRUST.toml"
     fi
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_bundle_set_names standard)
 
 node_started=0
 cleanup() {
@@ -493,7 +493,7 @@ PY
 
 init_args=(
     init --non-interactive --app-root "$node_root" --source "$qualification_source"
-    --node-profile full --host-class local --bind 127.0.0.1:0 --uds-path "$uds_path"
+    --node-profile standard --host-class local --bind 127.0.0.1:0 --uds-path "$uds_path"
 )
 if [[ -n "$trust_file" ]]; then
     init_args+=(--trust-file "$trust_file")

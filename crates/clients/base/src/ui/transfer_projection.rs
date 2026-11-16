@@ -224,7 +224,7 @@ mod tests {
             "binding_request_bounds": {"max_request_bytes":4096,"max_input_bytes":1024,"max_seat_append_bytes":65536}
         })).unwrap();
         let reservation = UiTransferReservation {
-            schema: 2,
+            schema: 3,
             presentation_id: destination_presentation.clone(),
             expected_revision: 4,
             allocation_start: 20,

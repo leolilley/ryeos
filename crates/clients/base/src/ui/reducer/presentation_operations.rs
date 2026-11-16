@@ -53,7 +53,6 @@ impl RyeOsCore {
                     .source_instance
                     .mount_owner()
                     .is_some_and(|owner| owns_surface(&owner)),
-                crate::ui::transfer_export::UiTransferExportContent::SharedDock { .. } => false,
             }
         }) {
             return false;
@@ -1757,7 +1756,10 @@ mod tests {
             .unwrap()
             .binding_attachments
             .len();
-        let bottom = core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom);
+        let launcher = core.presentation.as_ref().unwrap().dialogs()["launcher"]
+            .view()
+            .instance_key()
+            .clone();
         assert!(core.request_surface_close(&id).is_empty());
         let length = core.seat.events().len();
         core.request_surface_close(&id);
@@ -1788,8 +1790,10 @@ mod tests {
             attachments
         );
         assert_eq!(
-            core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom),
-            bottom
+            core.presentation.as_ref().unwrap().dialogs()["launcher"]
+                .view()
+                .instance_key(),
+            &launcher
         );
     }
 

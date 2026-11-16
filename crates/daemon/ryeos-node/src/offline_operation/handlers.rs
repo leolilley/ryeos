@@ -2058,13 +2058,13 @@ mod tests {
             uds_path: None,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![workspace_root().join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
-            node_profile: Some("full".to_owned()),
+            node_profile: Some("standard".to_owned()),
             host_class: Some("local".to_owned()),
             substrate_identity: Some(
                 crate::SubstrateIdentity::new(
                     format!("sha256:{}", "1".repeat(64)),
                     1,
-                    Some("full".to_owned()),
+                    Some("standard".to_owned()),
                     Some("local".to_owned()),
                 )
                 .unwrap(),

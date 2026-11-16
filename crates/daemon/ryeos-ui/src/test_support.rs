@@ -59,7 +59,7 @@ async fn live_presentation_in_project(
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let mut body = String::from(
-        "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
+        "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
     );
     if let Some(surface) = initial_surface {
         // JSON scalars are valid YAML scalars; no unescaped authored ref is

@@ -554,8 +554,15 @@ async fn revoke_cancels_live_threads_of_principal() {
     let sleeper_caps = [
         "ryeos.execute.tool.sleeper/sleeper",
         "ryeos.read.project.live",
+        "ryeos.write.project.live",
         "ryeos.execute.service.threads/get",
     ];
+    // A granter can only issue authority it holds, so it holds the grantee's
+    // caps as well; it needs them to authorize the grantee again below.
+    let granter_caps: Vec<&str> = [AUTHORIZE_KEY_CAP, REVOKE_KEY_CAP, LIST_CAP]
+        .into_iter()
+        .chain(sleeper_caps)
+        .collect();
     let project = tempfile::tempdir().expect("project tempdir");
     let (harness, fixture) = DaemonHarness::start_fast_with(
         |state_path, _user, fixture| {
@@ -564,7 +571,7 @@ async fn revoke_cancels_live_threads_of_principal() {
                 state_path,
                 fixture,
                 &granter,
-                &[AUTHORIZE_KEY_CAP, REVOKE_KEY_CAP, LIST_CAP],
+                &granter_caps,
                 &fixture.user,
                 GrantExpiry::At(4_102_444_800),
             )?;
@@ -585,20 +592,26 @@ async fn revoke_cancels_live_threads_of_principal() {
     plant_sleeper_tool(project.path(), &fixture.publisher).expect("plant the sleeper tool");
     let project_path = project.path().canonicalize().unwrap();
 
-    // The grantee starts the sleeper without waiting for it.
+    // The grantee starts the sleeper without waiting for it. Its launch is a
+    // live project launch, which needs live write access (read-only access is
+    // not enforceable on a host without confinement), and it holds no
+    // operator-vault capability, so the launch does not overlay the vault.
+    let sleeper_policy = ryeos_app::execution_policy::ExecutionPolicy::local_live(
+        ryeos_app::execution_policy::ExecutionResponse::Accepted,
+    )
+    .exclude_operator_vault();
     let (status, json) = call(
         &harness,
         &fixture,
         &grantee,
-        "/execute",
+        "/execute/launch",
         serde_json::json!({
             "item_ref": "tool:sleeper/sleeper",
+            "launch_id": "L-0123456789abcdef0123456789abcdef",
             "ref_bindings": {},
             "project_path": project_path.display().to_string(),
             "parameters": {},
-            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
-                ryeos_app::execution_policy::ExecutionResponse::Accepted,
-            ),
+            "execution_policy": sleeper_policy,
         }),
     )
     .await;

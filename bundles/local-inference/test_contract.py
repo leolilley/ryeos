@@ -63,7 +63,7 @@ RELEASE_VERIFIER_PATH = (
 ACTIVATION_KNOWLEDGE_PATH = (
     BUNDLE / ".ai/knowledge/local-inference/activation.md"
 )
-FULL_PROFILE_PATH = REPOSITORY / "bundles/.ai/node/init/profiles/full.yaml"
+STANDARD_PROFILE_PATH = REPOSITORY / "bundles/.ai/node/init/profiles/standard.yaml"
 WORKER_KIND_PATH = (
     REPOSITORY / "bundles/core/.ai/node/engine/kinds/worker/worker.kind-schema.yaml"
 )
@@ -292,10 +292,10 @@ class LocalInferenceContractTests(unittest.TestCase):
         )
         self.assertEqual(managed["max_concurrent_activations"], 1)
 
-    def test_full_init_profile_admits_the_exact_release(self) -> None:
+    def test_standard_init_profile_admits_the_exact_release(self) -> None:
         realizations = self.release["realizations"]
         bounds = [item["bounds"] for item in realizations]
-        for path in (FULL_PROFILE_PATH,):
+        for path in (STANDARD_PROFILE_PATH,):
             profile = yaml.safe_load(path.read_text(encoding="utf-8"))
             external = profile["policies"]["external_content"]
             self.assertEqual(
@@ -439,7 +439,7 @@ class LocalInferenceContractTests(unittest.TestCase):
             "tests/e2e/local-inference-node/qualify.sh",
             source_qualifier,
         )
-        self.assertIn("--bundle-set full", source_qualifier)
+        self.assertIn("--bundle-set standard", source_qualifier)
 
         qualifier = NODE_QUALIFIER_PATH.read_text(encoding="utf-8")
         self.assertIn("activation_args+=(online)", qualifier)
@@ -458,13 +458,13 @@ class LocalInferenceContractTests(unittest.TestCase):
         self.assertIn("--archive-root", qualifier)
         self.assertIn("minimum_free_bytes = int(sys.argv[4])", qualifier)
         self.assertIn('source "$repository_root/scripts/pkg/bundle-sets.sh"', qualifier)
-        self.assertIn("ryeos_bundle_set_names full", qualifier)
+        self.assertIn("ryeos_bundle_set_names standard", qualifier)
         self.assertIn('--source "$qualification_source"', qualifier)
         init_block = re.search(r"^init_args=\(\n(.*?)^\)$", qualifier, re.M | re.S)
         self.assertIsNotNone(init_block)
         init_args = shlex.split(init_block.group(1))
         self.assertEqual(init_args[:2], ["init", "--non-interactive"])
-        for flag, value in (("--node-profile", "full"), ("--host-class", "local")):
+        for flag, value in (("--node-profile", "standard"), ("--host-class", "local")):
             self.assertEqual(init_args.count(flag), 1, flag)
             self.assertEqual(init_args[init_args.index(flag) + 1], value, flag)
         self.assertIn('minimum_free_bytes="2147483648"', qualifier)

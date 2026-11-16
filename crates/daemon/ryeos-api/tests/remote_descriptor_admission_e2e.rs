@@ -381,53 +381,6 @@ async fn remote_admit_refuses_to_send_token_on_live_vault_mismatch() {
 }
 
 #[tokio::test]
-async fn remote_admit_refuses_while_the_unsigned_config_file_exists() {
-    let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
-    let operator_state = remote_identity();
-    let operator_public_key = public_key_response(&operator_state);
-    let (operator_url, operator_contacts) = start_mock_remote(operator_public_key.clone())
-        .await
-        .unwrap();
-    install_remote(
-        &local_state,
-        &remote_config("prod", &operator_url, &operator_public_key),
-    );
-
-    // An unsigned remotes file naming another key for the same remote.
-    let attacker_state = remote_identity();
-    let attacker_public_key = public_key_response(&attacker_state);
-    let stale = config::unsupported_config_file_path(&local_state.config.app_root);
-    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
-    std::fs::write(
-        &stale,
-        serde_yaml::to_string(&json!({
-            "remotes": { "prod": remote_config_json("prod", &operator_url, &attacker_public_key) }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let error = remote_admit::handle(
-        remote_admit::Request {
-            remote: "prod".to_string(),
-            token: "secret-token".to_string(),
-            label: Some("dev-machine".to_string()),
-            scopes: vec!["ryeos.execute.service.objects/has".to_string()],
-        },
-        Arc::new(local_state),
-    )
-    .await
-    .unwrap_err();
-
-    let typed = error
-        .downcast_ref::<config::RemotePinError>()
-        .expect("typed refusal");
-    assert_eq!(typed.code(), "remote_config_file_unsupported");
-    assert!(typed.to_string().contains("ryeos remote configure"));
-    assert_eq!(operator_contacts.claim_count.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn remote_admit_refuses_an_edited_pin_before_releasing_token() {
     let (_local_tmp, _local_state_owner, local_state) = test_state::build_test_state();
     let operator_state = remote_identity();
@@ -807,10 +760,6 @@ fn write_descriptor(
     public_key: &Value,
 ) -> std::path::PathBuf {
     write_descriptor_signed_by(state, remote, name, url, public_key)
-}
-
-fn remote_config_json(name: &str, url: &str, public_key: &Value) -> Value {
-    serde_json::to_value(remote_config(name, url, public_key)).unwrap()
 }
 
 fn remote_config(name: &str, url: &str, public_key: &Value) -> RemoteConfig {

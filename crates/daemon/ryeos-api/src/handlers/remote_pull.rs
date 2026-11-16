@@ -10,8 +10,8 @@ use std::{ffi::OsStr, ffi::OsString};
 use anyhow::{Result, bail};
 use serde_json::Value;
 
+use crate::handlers::remote_push::named_remote_client;
 use crate::registry::ServiceDescriptor;
-use crate::remote::client::RemoteClient;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -44,12 +44,16 @@ pub struct Request {
     pub output_dir: String,
 }
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: crate::handler_context::HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
     if req.object_hashes.is_empty() && req.blob_hashes.is_empty() {
         anyhow::bail!("object_hashes and blob_hashes must not both be empty");
     }
 
-    let client = RemoteClient::from_named_remote(&state, &req.remote)?;
+    let client = named_remote_client(&state, &req.remote, &ctx)?;
     let presence = client
         .objects_has(&req.root, &req.object_hashes, &req.blob_hashes)
         .await?;
@@ -226,10 +230,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "remote.pull",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.remote/pull"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

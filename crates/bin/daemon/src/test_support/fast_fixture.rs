@@ -110,13 +110,11 @@ pub struct FastFixture {
     pub vault: lillux::vault::VaultSecretKey,
 }
 
-const FULL_BUNDLE_INVENTORY: &[&str] = &[
+const STANDARD_BUNDLE_INVENTORY: &[&str] = &[
     "browser",
-    "central-auth",
     "codex",
     "core",
     "directive",
-    "environment-qualification",
     "graph",
     "knowledge",
     "opencode",
@@ -129,7 +127,8 @@ const FULL_BUNDLE_INVENTORY: &[&str] = &[
 /// The workflow bundles layered over Core by the Standard composition.
 const WORKFLOW_BUNDLES: &[&str] = &["knowledge", "directive", "graph", "ryeos-docs"];
 
-const STANDARD_BUNDLE_INVENTORY: &[&str] = &[
+const STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY: &[&str] = &[
+    "central-auth",
     "core",
     "directive",
     "graph",
@@ -143,7 +142,7 @@ pub enum FastFixtureProfile {
     Core,
     CoreScheduling,
     Standard,
-    Full,
+    StandardCentralAuth,
 }
 
 impl FastFixtureProfile {
@@ -152,7 +151,7 @@ impl FastFixtureProfile {
             Self::Core => "core",
             Self::CoreScheduling => "core-scheduling",
             Self::Standard => "standard",
-            Self::Full => "full",
+            Self::StandardCentralAuth => "standard-central-auth",
         }
     }
 
@@ -161,7 +160,7 @@ impl FastFixtureProfile {
             Self::Core => Some(&["core"]),
             Self::CoreScheduling => Some(&["core", "scheduling"]),
             Self::Standard => Some(STANDARD_BUNDLE_INVENTORY),
-            Self::Full => Some(FULL_BUNDLE_INVENTORY),
+            Self::StandardCentralAuth => Some(STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY),
         }
     }
 }
@@ -827,20 +826,29 @@ pub fn register_workflow_bundles(state_path: &Path, fixture: &FastFixture) -> Re
     Ok(())
 }
 
-/// Register the exact authored Standard composition: Core, Scheduling, and
-/// the workflow bundles. Its policy retains Standard's maintenance
-/// obligations while its physical bundle set matches `standard.yaml`.
+/// Register every bundle selected by the authored Standard profile. The
+/// caller's prepared-artifact gate and the profile inventory share the same
+/// source list.
 pub fn register_standard_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
-    super::require_bundles_prepared(STANDARD_BUNDLE_INVENTORY)?;
-    register_scheduling_bundle(state_path, fixture)?;
-    register_workflow_bundles(state_path, fixture)
+    register_composition(state_path, fixture, STANDARD_BUNDLE_INVENTORY)
 }
 
-/// Register every bundle selected by the authored Full profile. The caller's
-/// prepared-artifact gate and the profile inventory share the same source list.
-pub fn register_full_composition(state_path: &Path, fixture: &FastFixture) -> Result<()> {
-    super::require_bundles_prepared(FULL_BUNDLE_INVENTORY)?;
-    for bundle_name in FULL_BUNDLE_INVENTORY {
+/// Register every bundle selected by the authored Standard-central-auth
+/// profile: Core, Scheduling, the workflow bundles and central-auth.
+pub fn register_standard_central_auth_composition(
+    state_path: &Path,
+    fixture: &FastFixture,
+) -> Result<()> {
+    register_composition(state_path, fixture, STANDARD_CENTRAL_AUTH_BUNDLE_INVENTORY)
+}
+
+fn register_composition(
+    state_path: &Path,
+    fixture: &FastFixture,
+    inventory: &[&str],
+) -> Result<()> {
+    super::require_bundles_prepared(inventory)?;
+    for bundle_name in inventory {
         // Core was already registered against the copied state-root bundle
         // by the base fixture. Preserve that exact root rather than replacing
         // it with the workspace source tree.

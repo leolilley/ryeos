@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-12T13:52:53Z:23fe26e974ef79cb8d198c68e3563444f32689bd26452fa451439e8114bd690f:EdTbH/tq4rCzIN8htf+DExOHLON4ClDu2bkfh+p4zyoY8Vzc8794z79pru1tTi4dBilqTa1jZNeZvrItD8LTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T13:05:39Z:113253a54af6c287f7c9057712e5d7ae1a8d4d6d5de95f0f145cbb71efb477cc:Evg5obicviSIPYvdHcuKcblw2uh5NrnSTj59yD7IMFnCCY1NsngWFM8n6zG5aSTesdZ8BniaG5cm1PKbelS7Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 mode="${1:---check}"
@@ -17,15 +17,17 @@ trap 'rm -rf -- "$stage"' EXIT
 
 # The Rune renderer's closed set: built with remapped paths and the exact
 # wasm-bindgen CLI the lock names (the build refuses any other version).
-"$root/scripts/build-rune-web.sh" --out "$stage/final"
+"$root/.ai/tools/ryeos/development/browser-assets-production/lib/build-rune-web.sh" --out "$stage/final"
 
 expected=(
   index.html
   rune_bridge.js
   rune_platform.js
+  ryeos-cjk.ttf.gz
+  ryeos-emoji.ttf.gz
   ryeos_boot.js
   ryeos_rune.js
-  ryeos_rune_bg.wasm
+  ryeos_rune_bg.wasm.gz
 )
 mapfile -t actual < <(find "$stage/final" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
 if [[ "${actual[*]}" != "${expected[*]}" ]]; then

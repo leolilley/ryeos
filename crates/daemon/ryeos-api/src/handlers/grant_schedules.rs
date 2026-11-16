@@ -60,7 +60,9 @@ pub(crate) async fn pause_for_revocation(
     Ok(ScheduleAuthorityChanges::default())
 }
 
-/// The renewal a re-seal follows.
+/// The renewal a re-seal follows. Only the scheduler reads it; a build
+/// without the scheduler re-seals nothing.
+#[cfg_attr(not(feature = "scheduling"), allow(dead_code))]
 pub(crate) struct Renewal<'a> {
     /// Fingerprint of the renewed key.
     pub fingerprint: &'a str,
@@ -490,6 +492,7 @@ mod enabled {
                         source_node_fingerprint: source.clone(),
                         source_node_grant_hash: old.clone(),
                         delegation_digest: None,
+                        delegation_not_after: None,
                     },
                 );
             }

@@ -1,5 +1,5 @@
 //! Dialog framing only. Content and input use the same ordinary View widgets
-//! and exact addresses as dock/tile mounts; there is no terminal catalogue.
+//! and exact addresses as tile mounts; there is no terminal catalogue.
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};

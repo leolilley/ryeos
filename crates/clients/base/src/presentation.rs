@@ -5,13 +5,11 @@
 //! checked generation, then use the ordinary binding compiler. Surface seeds
 //! require their own admission. No renderer fallback supplies missing content.
 
-use crate::surface::{
-    SlotContentSpec, SlotsSpec, SurfaceCapabilitySpec, SurfaceSpec, ViewKindSpec,
-};
+use crate::surface::{SurfaceCapabilitySpec, SurfaceSpec, ViewKindSpec};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const SHARED_PRESENTATION_SCHEMA: u32 = 1;
+pub const SHARED_PRESENTATION_SCHEMA: u32 = 2;
 
 /// Body of `ui.launch.mint`, shared by every launcher. `root_ref` is one
 /// canonical ref; the daemon selects the composition by its kind, a shared
@@ -140,9 +138,6 @@ pub struct SharedPresentationSpec {
     pub launcher: String,
     /// Ordered entries. Equal View refs may have distinct mounted identities.
     pub dialogs: Vec<PresentationDialogSpec>,
-    /// Four optional shared regions, outside every Surface's tab composition.
-    #[serde(default)]
-    pub docks: SlotsSpec,
     /// Ordered opening selections. Their closures are not admitted by merely
     /// including them here; opening each reuses Surface admission.
     #[serde(default)]
@@ -248,21 +243,6 @@ impl SharedPresentationSpec {
             return Err("shared launcher does not name a declared dialog mount".into());
         }
 
-        for dock in [
-            &self.docks.top,
-            &self.docks.left,
-            &self.docks.right,
-            &self.docks.bottom,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if dock.size == 0 {
-                return Err("shared dock size must be nonzero".into());
-            }
-            let SlotContentSpec::View(view_ref) = &dock.content;
-            validate_reference(PresentationReferenceKind::View, view_ref)?;
-        }
         let mut surface_ids = BTreeSet::new();
         for seed in &self.initial_surfaces {
             validate_mount_id(&seed.id, limits.max_mount_id_bytes)?;
@@ -281,20 +261,6 @@ impl SharedPresentationSpec {
         self.dialogs
             .iter()
             .map(|dialog| dialog.view.0.as_str())
-            .chain(
-                [
-                    &self.docks.top,
-                    &self.docks.left,
-                    &self.docks.right,
-                    &self.docks.bottom,
-                ]
-                .into_iter()
-                .flatten()
-                .map(|dock| {
-                    let SlotContentSpec::View(view_ref) = &dock.content;
-                    view_ref.as_str()
-                }),
-            )
             .collect()
     }
 }
@@ -327,7 +293,7 @@ mod tests {
 
     fn declaration() -> SharedPresentationSpec {
         serde_json::from_value(json!({
-            "schema": 1,
+            "schema": 2,
             "title": "RyeOS",
             "launcher": "launch",
             "dialogs": [{"id": "launch", "title": "Launch", "view": "view:ryeos/launcher"}],
@@ -360,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_controls_require_neither_surface_nor_dock() {
+    fn shared_controls_require_no_surface() {
         let spec = declaration();
         assert!(spec.validate(limits(), reference).is_ok());
         assert!(spec.initial_surfaces.is_empty());
@@ -416,24 +382,14 @@ mod tests {
     }
 
     #[test]
-    fn owner_limits_and_ordinary_dock_refs_are_enforced() {
-        let mut spec = declaration();
+    fn owner_limits_are_enforced() {
+        let spec = declaration();
         let mut bounded = limits();
         bounded.max_dialogs = 0;
         assert!(spec.validate(bounded, reference).is_err());
         bounded = limits();
         bounded.max_declaration_bytes = 1;
         assert!(spec.validate(bounded, reference).is_err());
-        spec.docks.left = Some(
-            serde_json::from_value(json!({
-                "content": "view:ryeos/terminal", "open": false, "size": 8
-            }))
-            .unwrap(),
-        );
-        assert!(spec.validate(limits(), reference).is_ok());
-        assert!(spec.referenced_views().contains("view:ryeos/terminal"));
-        spec.docks.left.as_mut().unwrap().size = 0;
-        assert!(spec.validate(limits(), reference).is_err());
     }
 
     #[test]

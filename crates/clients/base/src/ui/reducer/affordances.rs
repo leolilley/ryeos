@@ -618,7 +618,7 @@ impl RyeOsCore {
         effects
     }
 
-    /// Facet write arrived: refetch every bound tile or visible dock whose binding
+    /// Facet write arrived: refetch every bound tile or open dialog whose binding
     /// declares `refresh.on_facet: <key>` or whose source params
     /// reference the facet explicitly.
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<RyeOsEffect> {
@@ -1855,8 +1855,7 @@ mod tests {
             prefix_before.as_slice(),
             "old route write cannot append behind completion"
         );
-        if let Some(shared) = core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Bottom)
-        {
+        if let Some(shared) = crate::ui::reducer::test_support::fixture_input(&mut core) {
             assert!(
                 !core.route_write_fenced_by_composition(&shared),
                 "unrelated shared mount is not globally frozen"
@@ -2115,17 +2114,16 @@ mod tests {
     }
 
     #[test]
-    fn directive_threads_dock_renders_bound_view_rows() {
+    fn directive_threads_dialog_renders_bound_view_rows() {
         let mut core = test_support_core(writable_session());
         core.presentation
             .as_mut()
             .unwrap()
-            .dock_mut("left")
-            .unwrap()
-            .visible = true;
+            .open_dialog("launcher", None)
+            .unwrap();
         seed_view_value(
             &mut core,
-            "view:ryeos/threads/list",
+            "view:ryeos/launcher",
             serde_json::json!({
                 "widget": "rows",
                 "sources": { "default": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" } },
@@ -2134,8 +2132,10 @@ mod tests {
         );
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::named(
-                core.shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Left)
-                    .unwrap(),
+                core.presentation.as_ref().unwrap().dialogs()["launcher"]
+                    .view()
+                    .instance_key()
+                    .clone(),
                 "default",
             )
             .encode(),
@@ -2149,15 +2149,15 @@ mod tests {
         );
 
         let vm = build_view_model(&core);
-        let dock = vm.docks.left.expect("left dock");
-        assert!(dock.input.is_none(), "a rows view declares no input");
-        match dock.view {
+        let dialog = vm.dialogs.into_iter().next().expect("open dialog");
+        assert!(dialog.input.is_none(), "a rows view declares no input");
+        match dialog.view {
             crate::ui::view_model::RyeOsViewVm::Rows { rows, .. } => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].primary, "T-running");
                 assert_eq!(rows[0].meta.as_deref(), Some("directive:demo/chat"));
             }
-            other => panic!("expected bound rows dock view, got {other:?}"),
+            other => panic!("expected bound rows dialog view, got {other:?}"),
         }
     }
 
@@ -2224,12 +2224,11 @@ mod tests {
         core.presentation
             .as_mut()
             .unwrap()
-            .dock_mut("left")
-            .unwrap()
-            .visible = true;
+            .open_dialog("launcher", None)
+            .unwrap();
         seed_view_value(
             &mut core,
-            "view:ryeos/threads/list",
+            "view:ryeos/launcher",
             serde_json::json!({
                 "widget": "sections",
                 "sources": {
@@ -2253,9 +2252,10 @@ mod tests {
             }),
         );
         // Each section's response lands under its own per-section key.
-        let instance_key = core
-            .shared_dock_instance_key(crate::ui::model::RyeOsDockEdge::Left)
-            .unwrap();
+        let instance_key = core.presentation.as_ref().unwrap().dialogs()["launcher"]
+            .view()
+            .instance_key()
+            .clone();
         core.data.sources.insert(
             crate::ui::source_key::RyeOsSourceInstanceKey::named(instance_key.clone(), "threads")
                 .encode(),
@@ -2270,8 +2270,8 @@ mod tests {
         );
 
         let vm = build_view_model(&core);
-        let dock = vm.docks.left.expect("left dock");
-        match dock.view {
+        let dialog = vm.dialogs.into_iter().next().expect("open dialog");
+        match dialog.view {
             crate::ui::view_model::RyeOsViewVm::Sections { sections, .. } => {
                 assert_eq!(sections.len(), 2);
                 assert_eq!(sections[0].title, "Threads");
@@ -2283,7 +2283,7 @@ mod tests {
                 assert_eq!(sections[1].rows[0].primary, "ryeos");
                 assert_eq!(sections[1].rows[0].meta.as_deref(), Some("v1.0.0"));
             }
-            other => panic!("expected bound sections dock view, got {other:?}"),
+            other => panic!("expected bound sections dialog view, got {other:?}"),
         }
     }
 
@@ -2293,12 +2293,11 @@ mod tests {
         core.presentation
             .as_mut()
             .unwrap()
-            .dock_mut("left")
-            .unwrap()
-            .visible = true;
+            .open_dialog("launcher", None)
+            .unwrap();
         seed_view_value(
             &mut core,
-            "view:ryeos/threads/list",
+            "view:ryeos/launcher",
             serde_json::json!({
                 "widget": "sections",
                 "sources": {
@@ -2318,13 +2317,13 @@ mod tests {
         // No source seeded → the section is present but empty (count 0), not a
         // placeholder: the surface is up, the data just hasn't arrived.
         let vm = build_view_model(&core);
-        match vm.docks.left.expect("left dock").view {
+        match vm.dialogs.into_iter().next().expect("open dialog").view {
             crate::ui::view_model::RyeOsViewVm::Sections { sections, .. } => {
                 assert_eq!(sections.len(), 1);
                 assert_eq!(sections[0].count, 0);
                 assert!(sections[0].rows.is_empty());
             }
-            other => panic!("expected sections dock view, got {other:?}"),
+            other => panic!("expected sections dialog view, got {other:?}"),
         }
     }
 }
