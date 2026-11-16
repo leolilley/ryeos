@@ -83,7 +83,10 @@ fn install_qualification(node: &StoppedNode, consumer: Option<char>) {
             )]))
             .unwrap()
         }),
-        launch_shape: None,
+        launch_shape: serde_json::to_value(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        )
+        .unwrap(),
         limits: QualificationLimits::default(),
     })
     .unwrap();

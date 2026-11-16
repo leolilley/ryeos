@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T14:13:43Z:05278ed91e946635d2c67f4d47e0cbc4327e2e55526b8b618d18e0e3b7ef0673:ILf9d+2b3UKkZZRmzNC+BV9XtrCwOba8jL44Nxpi8pCzb7SPyVcIRPdMJ003Q2qNhCXzRVLelW4hZ9AAtDMrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T13:46:05Z:24d56fd8f6dbb5119fab1ea31eb72acdd8f709c57bd649d67dfa01a3f17fd793:naZU02OQcr2CiMAS2tQErTcLKvVfrctURx8nzmg/PkjShOc/pXLWYJdn5vjvfebx4JnpdN/h86QQgYWh/o9sCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, external-execution, runtime-snapshot, qualification, recompose, operator]
@@ -18,7 +18,7 @@ bindings, each composed on a stopped node (see the
 | Binding | Section | Composed by | Pins |
 |---|---|---|---|
 | `render-snapshot` | `runtime_snapshot_production` | `snapshot-compose` | lifecycle adapter generation, snapshot production spec, provider scope, credential generation |
-| `render-snapshot-qualification` | `runtime_snapshot_qualification` | `snapshot-qualification-compose` | the production binding's id and digest, provider spec, restoration verifier, consumer verifier selections |
+| `render-snapshot-qualification` | `runtime_snapshot_qualification` | `snapshot-qualification-compose` | the production binding's id and digest, provider spec, restoration verifier, launch shape, consumer verifier selections |
 | `codex-qualification-session` | `external_execution` | `qualification-session-compose` | lifecycle and provider executables, the snapshot id, the qualified runtime, credential generation |
 
 The ids are the operator's; the names above are the convention these docs use.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T02:06:03Z:1da82249fb547136273e590c42615efde0b6ca5cded13de1357ce3f9f977fab2:Ts9+Mvuaa6Jj7B2ygx5+8lz3FA7k197WD0RHr9BlufKz/2aPeJFm0YF7ypCYOZaZVEajIrEH1p10bQP78+2hCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T13:46:05Z:4fd3ca0d68c820370110dcefcfbec9159129ddc70eec06a6ce3640cba261e03d:xg36NFq5H4D1+VD97QHSmRAhBUBuMSKAdpR8MBeDgYVV/SCRVb5FuxbTEOF5+vydyHS4utMwRv83LrSIj6TeAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -603,15 +603,22 @@ a fresh credential generation: provision it with `provision-credential
 ```bash
 ryeos node external-execution snapshot-qualification-compose --id <binding-id> \
   --snapshot-binding <production-id> --provider-spec <provider-spec.json> \
-  --verifier <restoration-verifier-hash> [--consumer-verifiers <file>] \
-  [--contact-timeout-seconds <s>] [--delivery-timeout-seconds <s>] \
-  [--maximum-lifetime-seconds <s>] [--app-root <dir>] [--json]
+  --verifier <restoration-verifier-hash> --launch-shape <file> \
+  [--consumer-verifiers <file>] [--contact-timeout-seconds <s>] \
+  [--delivery-timeout-seconds <s>] [--maximum-lifetime-seconds <s>] [--app-root <dir>] [--json]
 ```
 
 Composes one `runtime_snapshot_qualification` binding anchored to an installed
 production binding: it pins that binding's id and digest and reuses its
-provider settings. `--consumer-verifiers` is a JSON object mapping scenario id
-to a consumer verifier selection (`scenario_source_digest`,
+provider settings. `--launch-shape` is required: a JSON object stating the
+shape every occurrence under the binding is created with, for example
+`{"controller_transport": "https", "sandbox_network_policy": {"kind":
+"allow_list", "hosts": ["controller.example"]}}` or `{"controller_transport":
+"relay", "sandbox_network_policy": {"kind": "deny_all"}}`. There is no default
+shape; a composition without the file is refused naming the input. The
+provider sandbox is created under that network policy, and a launch whose
+shape differs is refused. `--consumer-verifiers` is a JSON object mapping
+scenario id to a consumer verifier selection (`scenario_source_digest`,
 `verifier_artifact_hash`, `archive_budget`), the output of the running node's
 consumer qualification context derive. It uses the producer's credential.
 
