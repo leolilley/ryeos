@@ -1440,6 +1440,17 @@ where
 pub(crate) fn classify_quarantined_large_object(
     error: &anyhow::Error,
 ) -> Option<crate::dispatch_error::DispatchError> {
+    if let Some(live) = error.chain().find_map(|cause| {
+        cause.downcast_ref::<super::runner::LiveProjectUnavailableToSourcedRuntime>()
+    }) {
+        return Some(
+            crate::dispatch_error::DispatchError::LaunchPolicyForbidden {
+                code: super::runner::LIVE_PROJECT_UNAVAILABLE_CODE.to_owned(),
+                message: live.message.clone(),
+                binding: None,
+            },
+        );
+    }
     let quarantined = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectQuarantined>())?;

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:27:19Z:73b5fadc32bb8ded8012d4ed33c66498c72ce7d1870261b76b287c2e3da18141:mO4uscuv6v9AJ/dagJHJNXpcmWvRiseG4ZIXwag/puWzEw5RGuQ3tpNSiEydHD/tZc1P1mUqTnJSHbyj2/ZjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T03:56:03Z:1c623ef57c29b39aa292ed286c23e77406bd7ef83e5b1bed10c6d16239eb8bad:ultF/+B/PJrHp3PkC0A9WLaU4+qOg1G2lZLtBeZiFUu1HA5V8BadczuBvTu8dDQqWAzfzhI7+Ev/lAWZGItUBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, tool, subprocess]
@@ -30,13 +30,32 @@ ceiling that names the loader roots but cannot add files or widen ownership.
 
 RyeOS captures and verifies this source before minting runtime authority,
 retains its content manifest and authority binding, and shadows the matching
-logical `.ai/tools/` path during execution. Enforced nodes receive the shadow
-as a descriptor-pinned read-only mount. Disabled nodes receive the same exact
-retained bytes in a daemon-private per-process input root, without changing the
-tool's execution identity or requiring a full project pin. The protected
+logical `.ai/tools/` path during execution. A pinned or projectless launch on
+an enforced node receives the shadow as a descriptor-pinned read-only mount.
+A disabled node, and every launch with live project authority, receives the same
+exact retained bytes in a daemon-private per-process input root, without
+changing the tool's execution identity or requiring a full project pin. That
+root holds only the verified source, never the live project. The protected
 `RYEOS_ADMITTED_SOURCE` value carries only canonical source identity. Tool code
 does not declare its own files through `external_content` and must not hash or
 reopen live source to establish execution identity.
+
+Tools on a runtime that declares `source_scope` (the python script and function
+runtimes and the bash script runtime) never see the live project, whatever the
+launch's project authority says. Their working directory and `${project_path}`
+are the private input root, which holds only the verified source, and any file
+they write there is discarded when the process ends. A schedule fire whose
+`execution_policy` grants live project authority (`live_direct`, read-only or
+read-write) is refused before the tool starts with
+`live_project_unavailable_to_sourced_runtime`, so it cannot exit 0 with its
+project writes silently lost. Other live launches (a project-backed
+`ryeos execute`, handler routes, children of those) resolve to live authority by
+default and are not refused; they run from the private root and the same rule
+applies. To give a tool the live project, write it as an `@subprocess` tool
+without `source_scope` (`executor_id: "@subprocess"` with its own `command`).
+To run a python or bash runtime tool on a project, launch it pinned
+(`--pin-project` or a pinned project policy), which gives a copy-on-write
+generation, or return structured results.
 
 The protocol treats stdin and terminal stdout as opaque while explicitly
 declaring callback socket, callback token, thread-auth, thread, and project env

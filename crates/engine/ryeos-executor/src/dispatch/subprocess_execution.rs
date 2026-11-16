@@ -1406,6 +1406,26 @@ fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
             }
         };
     }
+    // A live project authority the tool could never see keeps its stable
+    // typed refusal instead of the generic subprocess failure.
+    if let Some((code, message)) =
+        error
+            .chain()
+            .find_map(|cause| match cause.downcast_ref::<DispatchError>() {
+                Some(DispatchError::LaunchPolicyForbidden { code, message, .. })
+                    if code == crate::execution::runner::LIVE_PROJECT_UNAVAILABLE_CODE =>
+                {
+                    Some((code.clone(), message.clone()))
+                }
+                _ => None,
+            })
+    {
+        return DispatchError::LaunchPolicyForbidden {
+            code,
+            message,
+            binding: None,
+        };
+    }
     if let Some(eligibility) = error.chain().find_map(|cause| {
         cause.downcast_ref::<crate::execution::runner::ExecutionNotRestartEligible>()
     }) {

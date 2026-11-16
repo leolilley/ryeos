@@ -523,6 +523,31 @@ fn standard_hosted_lane_unchanged() {
     assert!(!has_backend);
 }
 
+/// Whether a profile's host class admits trusted process-group sessions, the
+/// setting Codex and opencode exclusive sessions need before they report ready.
+fn trusts_process_group_sessions(profile: &str, class: &str) -> bool {
+    host_classes(&load_profile(profile))
+        .get(class)
+        .unwrap_or_else(|| panic!("{profile} does not declare host class {class}"))
+        ["trusted_process_group_sessions"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("{profile}/{class} states no trusted session setting"))
+}
+
+#[test]
+fn standard_admits_trusted_process_group_sessions_on_the_hosted_class_only() {
+    // The hosted class is a hosting provider's container, where Codex and
+    // opencode exclusive sessions settle by trusted process group. The local
+    // classes keep their own isolation and do not admit it.
+    assert!(trusts_process_group_sessions("standard", "hosted"));
+    assert!(!trusts_process_group_sessions("standard", "local"));
+    assert!(!trusts_process_group_sessions(
+        "standard",
+        "local_unconfined"
+    ));
+    assert!(trusts_process_group_sessions("hosted-workflow", "hosted"));
+}
+
 #[test]
 fn standard_follows_the_host_class_matrix() {
     let cases: Vec<(&str, Host, Expect)> = vec![

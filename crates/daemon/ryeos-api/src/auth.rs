@@ -1206,6 +1206,17 @@ mod tests {
             authorized_keys_dir: tmpdir.path().join("auth"),
         };
         let identity = ryeos_node_runtime::identity::NodeIdentity::create(&key_path).unwrap();
+        // The daemon learns the configured operator from public records only:
+        // a node public identity, the operator genesis and the signer record.
+        identity
+            .write_public_identity(&ryeos_engine::trust::node_public_identity_path(
+                tmpdir.path(),
+            ))
+            .unwrap();
+        ryeos_node_runtime::operator_identity::test_support::install_operator(
+            tmpdir.path(),
+            &identity,
+        );
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));

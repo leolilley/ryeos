@@ -807,6 +807,12 @@ enum FastBundleSelection {
 }
 
 impl DaemonHarness {
+    /// The daemon's stderr log so far, for tests that must see a refusal the
+    /// retained thread record deliberately reduces to a closed code.
+    pub fn stderr_so_far(&self) -> String {
+        std::fs::read_to_string(&self.stderr_log_path).unwrap_or_default()
+    }
+
     /// Retain the disposable node and its exact bundle/user inputs for diagnosis
     /// if an accepted operation fails or observation times out. The daemon is
     /// still killed on drop; this grants no permission to relaunch that work.

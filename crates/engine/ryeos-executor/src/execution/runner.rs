@@ -3963,6 +3963,108 @@ mod process_input_selection_tests {
         );
     }
 
+    fn sourced_python_tool_resolution(
+        with_source: bool,
+    ) -> ryeos_engine::resolution::ResolutionOutput {
+        use ryeos_engine::contracts::{ItemSourceRoot, ItemSpace};
+        use ryeos_engine::resolution::{
+            KindComposedView, ResolutionOutput, ResolutionStepName, ResolvedAncestor, TrustClass,
+        };
+        let mut derived = std::collections::HashMap::new();
+        if with_source {
+            derived.insert(
+                ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY.to_owned(),
+                json!({}),
+            );
+        }
+        ResolutionOutput {
+            root: ResolvedAncestor {
+                requested_id: "tool:acme/sweep".to_owned(),
+                resolved_ref: "tool:acme/sweep".to_owned(),
+                source_path: "/fixture/sweep.yaml".into(),
+                source_space: ItemSpace::Project,
+                source_root: ItemSourceRoot::Project,
+                trust_class: TrustClass::TrustedProject,
+                signer_fingerprint: Some("e".repeat(64)),
+                alias_resolution: None,
+                added_by: ResolutionStepName::PipelineInit,
+                raw_content: "executor_id: tool:ryeos/core/runtimes/python/script\n".to_owned(),
+                source_content_digest: "f".repeat(64),
+                raw_content_digest: "1".repeat(64),
+            },
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: Default::default(),
+            effective_trust_class: TrustClass::TrustedProject,
+            composed: KindComposedView {
+                composed: Value::Null,
+                derived: derived.into_iter().collect(),
+                policy_facts: Default::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn live_project_refusal_is_typed_and_names_tool_runtime_and_ways_out() {
+        let resolution = sourced_python_tool_resolution(true);
+        // The refusal applies exactly where the selection is SparsePrivate.
+        assert_eq!(
+            select_process_input_root(ProcessProjectClass::Live, true, false, false, false),
+            ProcessInputRootSelection::SparsePrivate
+        );
+        for access in [
+            ryeos_state::objects::LiveProjectAccess::ReadWrite,
+            ryeos_state::objects::LiveProjectAccess::ReadOnly,
+        ] {
+            let error = anyhow::Error::new(live_project_unavailable_error(&resolution, access));
+            let classified =
+                super::super::external_content::classify_quarantined_large_object(&error)
+                    .expect("typed refusal classifies");
+            assert_eq!(
+                classified.code(),
+                "live_project_unavailable_to_sourced_runtime"
+            );
+            let text = classified.to_string();
+            assert!(text.contains("tool:acme/sweep"), "{text}");
+            assert!(
+                text.contains("tool:ryeos/core/runtimes/python/script"),
+                "{text}"
+            );
+            assert!(text.contains("source_scope"), "{text}");
+            assert!(text.contains("@subprocess"), "{text}");
+            assert!(text.contains("--pin-project"), "{text}");
+        }
+        // Only a scheduled fire is refused; every other launch keeps its
+        // sparse private root.
+        assert!(live_project_refusal_applies(
+            ProcessInputRootSelection::SparsePrivate,
+            true
+        ));
+        assert!(!live_project_refusal_applies(
+            ProcessInputRootSelection::SparsePrivate,
+            false
+        ));
+        assert!(!live_project_refusal_applies(
+            ProcessInputRootSelection::Existing,
+            true
+        ));
+        // Not live, or no bindings: selection never reaches the refusal.
+        for project in [
+            ProcessProjectClass::Projectless,
+            ProcessProjectClass::PinnedCow,
+        ] {
+            assert_ne!(
+                select_process_input_root(project, true, false, false, false),
+                ProcessInputRootSelection::SparsePrivate
+            );
+        }
+        assert_ne!(
+            select_process_input_root(ProcessProjectClass::Live, false, false, false, false),
+            ProcessInputRootSelection::SparsePrivate
+        );
+    }
+
     #[test]
     fn disabled_binding_delivery_copies_only_into_private_or_owned_roots() {
         assert!(!bindings_require_private_copy(
@@ -4071,6 +4173,69 @@ fn restore_process_workspace_output_generation(
     )
 }
 
+/// Stable refusal code: a live project authority was requested for a tool
+/// whose retained filesystem bindings force a private admitted-input root.
+pub(crate) const LIVE_PROJECT_UNAVAILABLE_CODE: &str =
+    "live_project_unavailable_to_sourced_runtime";
+
+/// Typed refusal for a launch whose live project authority could never reach
+/// the process. Converted to `DispatchError::LaunchPolicyForbidden` by
+/// `external_content::classify_quarantined_large_object`.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct LiveProjectUnavailableToSourcedRuntime {
+    pub(crate) message: String,
+}
+
+/// The guard fires only where a live authority would be dropped on the floor
+/// by a sparse private root and the launch is a schedule's explicit policy.
+fn live_project_refusal_applies(root: ProcessInputRootSelection, scheduled_fire: bool) -> bool {
+    scheduled_fire && root == ProcessInputRootSelection::SparsePrivate
+}
+
+fn live_project_unavailable_error(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+    access: ryeos_state::objects::LiveProjectAccess,
+) -> LiveProjectUnavailableToSourcedRuntime {
+    let tool = resolution.root.resolved_ref.as_str();
+    // The tool header is YAML or a `# ryeos-tool:` comment block; either way
+    // the declared executor is the line `executor_id: <ref>`.
+    let runtime = resolution
+        .root
+        .raw_content
+        .lines()
+        .find_map(|line| {
+            line.trim_start_matches(['#', ' ', '\t'])
+                .strip_prefix("executor_id:")
+        })
+        .map(|value| value.trim().trim_matches(['"', '\'']).to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "its executor chain".to_owned());
+    let has_source = resolution
+        .composed
+        .derived
+        .contains_key(ryeos_state::objects::SOURCE_CLOSURE_DERIVED_KEY);
+    let reason = if has_source {
+        "the runtime declares source_scope, so the tool runs from a private admitted-input root holding only its verified source"
+    } else {
+        "the tool retains external content, so it runs from a private admitted-input root"
+    };
+    let access = match access {
+        ryeos_state::objects::LiveProjectAccess::ReadOnly => "read_only",
+        ryeos_state::objects::LiveProjectAccess::ReadWrite => "read_write",
+    };
+    LiveProjectUnavailableToSourcedRuntime {
+        message: format!(
+            "{LIVE_PROJECT_UNAVAILABLE_CODE}: `{tool}` (runtime `{runtime}`) was launched with \
+             live project authority ({access}), but {reason}; the live project is never mounted \
+             and project writes would be silently discarded. Use an `@subprocess` tool without \
+             source_scope for live project access, or run with `--pin-project` / a pinned project \
+             policy for a copy-on-write generation, or return structured results instead of writing \
+             to the project."
+        ),
+    }
+}
+
 /// A large object scrub quarantined surfaces here, at store redemption after
 /// thread birth. Keep it the typed operator-correctable refusal rather than an
 /// internal failure; the thread is still failed by the caller.
@@ -4090,6 +4255,7 @@ pub(crate) fn prepare_process_inputs(
     base_path: &Path,
     source_placement: super::source_closure::SourceMountPlacement,
     private_runtime_view_realizations: bool,
+    scheduled_fire: bool,
 ) -> Result<PreparedProcessInputs> {
     // `retained_resolution` is the execution being spawned. For a borrowed
     // child this already materializes/mounts the child's finalized source and
@@ -4160,6 +4326,20 @@ pub(crate) fn prepare_process_inputs(
         restore_outputs,
     );
     let live_private_root = root_selection == ProcessInputRootSelection::SparsePrivate;
+    // A scheduled fire (and every child that inherits it) that was granted
+    // live project authority, read_only included, can never reach it from a
+    // sparse private root: refuse rather than run with the project silently
+    // absent. Interactive and route launches also resolve to live authority by
+    // default (handler routes run sourced tools in their scratch root by
+    // design), so only a schedule's explicit `live_direct` policy is refused.
+    if live_project_refusal_applies(root_selection, scheduled_fire)
+        && let Some(live) = provenance.project_authority().live_access()
+    {
+        return Err(anyhow::Error::new(live_project_unavailable_error(
+            retained_resolution,
+            live.access,
+        )));
+    }
     let pinned_read_only_private_root =
         root_selection == ProcessInputRootSelection::PinnedReadOnlyPrivate;
     let candidate_integration_private_root =
@@ -5419,6 +5599,7 @@ pub async fn run_and_wait(
             &protocol.descriptor,
             wait_launch_isolation.as_ref(),
         ),
+        params.resolved.plan_context.scheduled_fire.is_some(),
     )
     .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     let wait_bound_external = wait_bound_external.map(Arc::new);
@@ -6486,6 +6667,7 @@ pub async fn run_detached(
             &protocol.descriptor,
             bg_launch_isolation.as_ref(),
         ),
+        params.resolved.plan_context.scheduled_fire.is_some(),
     )
     .map_err(|error| guard.fail_before_spawn(classify_prepared_input_error(error)))?;
     effective_path = process_path;
@@ -9239,6 +9421,7 @@ async fn run_existing_recovered_thread(
             state.isolation.is_enforced(),
         ),
         recovered_private_view_realizations,
+        params.resolved.plan_context.scheduled_fire.is_some(),
     )
     .map_err(|error| {
         guard.fail_before_spawn(

@@ -3159,6 +3159,127 @@ async fn retry_redispatches_until_success() {
 }
 
 #[tokio::test]
+async fn non_retryable_leaf_failure_with_retry_budget_states_the_refusal() {
+    // A tool that exits nonzero is not classified retryable: it dispatches
+    // once, emits no graph_node_retry, and the error says why no retry ran.
+    let graph = make_graph(RETRY_YAML);
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![subprocess_failure(), subprocess_success()],
+        None,
+    );
+    let result = walker.execute(json!({}), None).await;
+    assert_eq!(recorder.dispatch_count(), 1, "no second attempt");
+    assert!(
+        !recorder
+            .recorded_events()
+            .iter()
+            .any(|(_, event, _)| event == "graph_node_retry")
+    );
+    let errors = format!("{result:?}");
+    assert!(
+        errors.contains("retry not attempted: failure not classified retryable")
+            && errors.contains("retry.attempts=3"),
+        "refusal must be explicit: {errors}"
+    );
+}
+
+fn retry_on_tool_failure_yaml(retry_extra: &str, effects: &str) -> String {
+    format!(
+        r#"
+version: "1.0.0"
+category: test
+config:
+  start: flaky
+  nodes:
+    flaky:
+      action: {{item_id: "tool:test/flaky", ref_bindings: {{}}}}
+      {effects}
+      retry: {{attempts: 3, backoff_ms: 1, {retry_extra}}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#
+    )
+}
+
+#[tokio::test]
+async fn tool_failure_opt_in_retries_nonzero_exit_until_budget_is_exhausted() {
+    let graph = make_graph(&retry_on_tool_failure_yaml(
+        "on: [tool_failure], idempotent: true",
+        "",
+    ));
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![
+            subprocess_failure(),
+            subprocess_failure(),
+            subprocess_failure(),
+            subprocess_success(),
+        ],
+        None,
+    );
+    let result = walker.execute(json!({}), None).await;
+    assert_eq!(recorder.dispatch_count(), 3, "attempts: 3 stops after 3");
+    let retries = recorder
+        .recorded_events()
+        .iter()
+        .filter(|(_, event, _)| event == "graph_node_retry")
+        .count();
+    assert_eq!(retries, 2, "two retries between three attempts");
+    assert!(
+        !result.success,
+        "exhausted budget fails the node: {result:?}"
+    );
+    assert!(
+        !format!("{result:?}").contains("retry not attempted"),
+        "an opted-in node does not state a refusal"
+    );
+}
+
+#[tokio::test]
+async fn tool_failure_opt_in_recovers_when_a_later_attempt_succeeds() {
+    let graph = make_graph(&retry_on_tool_failure_yaml(
+        "on: [tool_failure]",
+        "effects: recorded",
+    ));
+    let (walker, recorder) = make_recording_walker(
+        graph,
+        vec![subprocess_failure(), subprocess_success()],
+        None,
+    );
+    let result = walker.execute(json!({}), None).await;
+    assert!(result.success, "{result:?}");
+    assert_eq!(recorder.dispatch_count(), 2);
+}
+
+#[test]
+fn live_tool_failure_retry_requires_idempotent() {
+    let err = GraphDefinition::from_yaml(
+        &retry_on_tool_failure_yaml("on: [tool_failure]", ""),
+        Some("test.yaml"),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("declare retry.idempotent: true if it is safe"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn unknown_retry_on_value_is_refused() {
+    assert!(
+        GraphDefinition::from_yaml(
+            &retry_on_tool_failure_yaml("on: [everything], idempotent: true", ""),
+            Some("test.yaml"),
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn unknown_unary_dispatch_outcome_exits_without_step_commit_or_authored_retry() {
     let graph = make_graph(RETRY_YAML);
     for (label, marker) in [

@@ -625,9 +625,9 @@ fn restart(
     let identity =
         ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
     let (store_owner, store, lifetime) = open_store(root, &identity);
-    // The app's own identity keys are minted afresh for the new app.
+    // The app's own identity keys, and the operator key its fixture plays the CLI
+    // with, are minted afresh for the new app.
     std::fs::remove_dir_all(root.join("identity")).unwrap();
-    // The operator key a composed app installs lives beside the node's.
     std::fs::remove_dir_all(root.join(".ai/node/operator")).unwrap();
     let mut state = crate::state::test_support::build_with_store(root, store, lifetime).unwrap();
     with_budget_and_counting_vault(&mut state, budget);

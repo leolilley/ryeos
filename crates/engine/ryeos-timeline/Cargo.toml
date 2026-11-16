@@ -1,0 +1,14 @@
+[package]
+name = "ryeos-timeline"
+version = "0.1.0"
+edition = "2024"
+description = "Pure projection of a thread log into timeline entries, driven by a declarative definition"
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+[lints]
+workspace = true

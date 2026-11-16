@@ -928,6 +928,53 @@ fn parse_event_typed(
     }
 }
 
+/// State key holding the slot of the tool call most recently opened in a
+/// delta-merge stream.
+const DELTA_MERGE_LAST_SLOT: &str = "tool_last_slot";
+
+/// The accumulation slot for one streamed tool-call delta.
+///
+/// A provider that numbers its calls sends `index`, and that is the slot.
+/// Some providers send none. Then a delta that carries an `id` belongs to
+/// the call already holding that id, or opens the next free slot; a delta
+/// with neither continues the call most recently opened. Treating a missing
+/// index as slot 0 would merge parallel calls into one.
+fn delta_merge_tool_slot(tc: &Value, tool_call_state: &mut HashMap<String, String>) -> String {
+    let slot = if let Some(index) = tc.get("index").and_then(|v| v.as_u64()) {
+        index.to_string()
+    } else if let Some(id) = tc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+    {
+        let held = tool_call_state.iter().find_map(|(key, value)| {
+            key.strip_prefix("tool_id_")
+                .filter(|_| value == id)
+                .map(str::to_string)
+        });
+        held.unwrap_or_else(|| {
+            let next = tool_call_state
+                .keys()
+                .filter_map(|key| {
+                    ["tool_id_", "tool_name_", "tool_args_"]
+                        .iter()
+                        .find_map(|prefix| key.strip_prefix(prefix))
+                        .and_then(|slot| slot.parse::<u64>().ok())
+                })
+                .max()
+                .map_or(0, |highest| highest + 1);
+            next.to_string()
+        })
+    } else {
+        tool_call_state
+            .get(DELTA_MERGE_LAST_SLOT)
+            .cloned()
+            .unwrap_or_else(|| "0".to_string())
+    };
+    tool_call_state.insert(DELTA_MERGE_LAST_SLOT.to_string(), slot.clone());
+    slot
+}
+
 fn parse_delta_merge(
     parsed: &Value,
     events: &mut Vec<StreamEvent>,
@@ -962,11 +1009,7 @@ fn parse_delta_merge(
             .and_then(|tc| tc.as_array())
         {
             for tc in tool_calls {
-                let index = tc
-                    .get("index")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-                    .to_string();
+                let index = delta_merge_tool_slot(tc, tool_call_state);
 
                 if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                     tool_call_state.insert(format!("tool_id_{}", index), id.to_string());
@@ -1048,6 +1091,7 @@ fn parse_delta_merge(
                 tool_call_state.remove(&format!("tool_name_{}", idx_s));
                 tool_call_state.remove(&format!("tool_args_{}", idx_s));
             }
+            tool_call_state.remove(DELTA_MERGE_LAST_SLOT);
             events.push(StreamEvent::Finish {
                 reason: normalize_finish_reason(finish_reason),
                 raw: finish_reason.map(|s| s.to_string()),
@@ -4151,6 +4195,95 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             assert_eq!(name, "bash");
             assert_eq!(arguments, &json!({"cmd": "ls"}));
         }
+    }
+
+    fn delta_merge_tool_uses(data: &str) -> Vec<(Option<String>, String, Value)> {
+        parse_sse_events(data, Some("delta_merge"))
+            .into_iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolUse {
+                    id,
+                    name,
+                    arguments,
+                    ..
+                } => Some((id, name, arguments)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn delta_merge_keeps_parallel_tool_calls_apart_without_an_index() {
+        // Two calls streamed with no `index`, their fragments interleaved and
+        // each carrying its call id.
+        let data = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"bash","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"arguments":"{\"path\":\"a.txt\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_b","function":{"arguments":"{\"cmd\":\"ls\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+"#;
+        assert_eq!(
+            delta_merge_tool_uses(data),
+            vec![
+                (
+                    Some("call_a".to_string()),
+                    "read_file".to_string(),
+                    json!({"path": "a.txt"})
+                ),
+                (
+                    Some("call_b".to_string()),
+                    "bash".to_string(),
+                    json!({"cmd": "ls"})
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn delta_merge_bare_fragments_continue_the_call_most_recently_opened() {
+        // No `index` anywhere; only the opening delta of each call has an id.
+        let data = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"path\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"a.txt\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"bash","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"cmd\":\"ls\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+"#;
+        assert_eq!(
+            delta_merge_tool_uses(data),
+            vec![
+                (
+                    Some("call_a".to_string()),
+                    "read_file".to_string(),
+                    json!({"path": "a.txt"})
+                ),
+                (
+                    Some("call_b".to_string()),
+                    "bash".to_string(),
+                    json!({"cmd": "ls"})
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn delta_merge_slot_state_does_not_leak_into_the_next_response() {
+        let mut state: HashMap<String, String> = HashMap::new();
+        let first = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+"#;
+        parse_sse_events_with_state(first, Some("delta_merge"), None, &mut state);
+        assert!(state.is_empty(), "leftover parser state: {state:?}");
     }
 
     #[test]

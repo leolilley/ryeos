@@ -19,7 +19,9 @@ use super::outcome::{
     IntegrityFailedOutcome, LeafSoftErrorOutcome, RetryScheduledOutcome, RunNodeBodyContext,
     StepOutcome, TerminalOrigin, TerminalOutcome, add_runtime_cost,
 };
-use super::transitions::{resolve_next_on_error, retry_attempts_remaining};
+use super::transitions::{
+    resolve_next_on_error, retries_tool_failure, retry_attempts_remaining, retry_refused_note,
+};
 use super::{Walker, compute_cache_key, merge_into};
 
 impl Walker {
@@ -459,9 +461,16 @@ impl Walker {
                         dispatch: None,
                     });
                 }
+                let mut diagnostic = dispatch_error.diagnostic;
+                if !dispatch_error.retryable
+                    && retry_attempts_remaining(node, retry_attempt).is_some()
+                {
+                    let rc = node.retry.as_ref().expect("retry present");
+                    diagnostic.push_str(&retry_refused_note(rc.attempts));
+                }
                 StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: Some(dispatched_item_id),
-                    error: dispatch_error.diagnostic,
+                    error: diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // Transport/dispatch failed before the child returned — no cost.
@@ -486,7 +495,8 @@ impl Walker {
                 }
                 // Authored retry is an attempt budget, not blanket permission.
                 // Only a failure explicitly classified retryable may consume it.
-                if failure.retryable
+                let retryable = failure.retryable || retries_tool_failure(node);
+                if retryable
                     && let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt)
                 {
                     let rc = node.retry.as_ref().expect("retry present when scheduling");
@@ -501,6 +511,11 @@ impl Walker {
                         dispatch: failure.dispatch,
                     });
                 }
+                let mut diagnostic = failure.diagnostic;
+                if !retryable && retry_attempts_remaining(node, retry_attempt).is_some() {
+                    let rc = node.retry.as_ref().expect("retry present");
+                    diagnostic.push_str(&retry_refused_note(rc.attempts));
+                }
                 let observation = DispatchObservation::from_failure(
                     dispatched_item_id.clone(),
                     failure.child_thread_id,
@@ -508,7 +523,7 @@ impl Walker {
                 );
                 StepOutcome::LeafSoftError(LeafSoftErrorOutcome {
                     item_id: dispatched_item_id,
-                    error: failure.diagnostic,
+                    error: diagnostic,
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: elapsed,
                     // A failed native child may have spent tokens — preserve it.

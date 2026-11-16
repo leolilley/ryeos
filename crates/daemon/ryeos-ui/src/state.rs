@@ -18,6 +18,7 @@ use ryeos_ui_presentation_contract::seat_control::{UiSeatControlPredecessor, UiS
 
 const FIELD_PROJECTION_CACHE_MAX_ENTRIES: usize = 128;
 const COMPOSITION_CHECKPOINT_CACHE_MAX_ENTRIES: usize = 32;
+const TIMELINE_CACHE_MAX_ENTRIES: usize = 64;
 
 /// Identity of one original presentation history, not a grant of authority.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -112,13 +113,13 @@ struct BoundedLruState<K, V> {
 }
 
 #[derive(Default)]
-struct BoundedLru<K, V> {
+pub(crate) struct BoundedLru<K, V> {
     state: Mutex<BoundedLruState<K, V>>,
     max_entries: usize,
 }
 
 impl<K: Clone + Eq + Hash, V: Clone> BoundedLru<K, V> {
-    fn with_capacity(max_entries: usize) -> Self {
+    pub(crate) fn with_capacity(max_entries: usize) -> Self {
         Self {
             state: Mutex::new(BoundedLruState {
                 entries: HashMap::new(),
@@ -128,7 +129,7 @@ impl<K: Clone + Eq + Hash, V: Clone> BoundedLru<K, V> {
         }
     }
 
-    fn get(&self, key: &K) -> Option<V> {
+    pub(crate) fn get(&self, key: &K) -> Option<V> {
         let mut state = self.state.lock().ok()?;
         let value = state.entries.get(key)?.clone();
         if let Some(position) = state.order.iter().position(|entry| entry == key) {
@@ -138,7 +139,7 @@ impl<K: Clone + Eq + Hash, V: Clone> BoundedLru<K, V> {
         Some(value)
     }
 
-    fn insert(&self, key: K, value: V) {
+    pub(crate) fn insert(&self, key: K, value: V) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
@@ -166,6 +167,12 @@ impl<K: Clone + Eq + Hash, V: Clone> BoundedLru<K, V> {
         }
     }
 }
+
+/// `(chain_root_id, definition_digest)`.
+pub(crate) type TimelineCacheKey = (String, String);
+
+/// Folded chain timelines with the highest `chain_seq` each covers.
+pub(crate) type TimelineCache = BoundedLru<TimelineCacheKey, (i64, Arc<ryeos_timeline::Timeline>)>;
 
 struct FieldProjectionCache {
     lru: BoundedLru<String, EffectiveProgramProjection>,
@@ -197,6 +204,7 @@ pub struct UiState {
     field_token_key: Arc<[u8; 32]>,
     field_projection_cache: Arc<FieldProjectionCache>,
     composition_checkpoints: Arc<CompositionCheckpointCache>,
+    timeline_cache: Arc<TimelineCache>,
 }
 
 impl Default for UiState {
@@ -214,6 +222,7 @@ impl UiState {
             field_token_key: Arc::new(rand::random()),
             field_projection_cache: Arc::new(FieldProjectionCache::default()),
             composition_checkpoints: Arc::new(CompositionCheckpointCache::default()),
+            timeline_cache: Arc::new(TimelineCache::with_capacity(TIMELINE_CACHE_MAX_ENTRIES)),
         }
     }
 
@@ -244,6 +253,10 @@ impl UiState {
 
     pub(crate) fn field_projection_cache(&self) -> &dyn EffectiveProgramProjectionCache {
         self.field_projection_cache.as_ref()
+    }
+
+    pub(crate) fn timeline_cache(&self) -> &TimelineCache {
+        self.timeline_cache.as_ref()
     }
 
     pub(crate) fn composition_checkpoint_get(
