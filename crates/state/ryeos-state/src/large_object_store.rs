@@ -16,6 +16,18 @@
 //! and the damaged copy stays as evidence (counted against the budget, never
 //! evicted) until an operator purges it with the node stopped.
 //!
+//! An object is content; the execute bit is a manifest fact. For an object
+//! some manifest marks executable the store keeps a second published inode
+//! under `executables/` at mode 0555, made once from the verified primary
+//! (reflink where the filesystem offers it, else one copy), re-verified
+//! against the same sidecar and chunk trail, and published atomically. A
+//! generation hard-links whichever inode its manifest's mode calls for, so
+//! an executable costs at most one extra inode per object rather than one
+//! copy per generation. Leases are keyed by hash and cover both inodes;
+//! scrub verifies both and quarantines both on damage; sweep and eviction
+//! remove both and count both inodes' bytes in full (a reflink-shared inode
+//! cannot be told from a real copy by length, so accounting is conservative).
+//!
 //! This store is policy-blind: it does not know what a manifest is. Callers
 //! hand it the reachable root set; the manifest objects that define
 //! reachability live in [`crate::objects::external_large_content_manifest`].
@@ -41,6 +53,7 @@ pub const DEFAULT_LARGE_OBJECT_STORE_BUDGET_BYTES: u64 = 512 * 1024 * 1024 * 102
 
 const OBJECTS_DIR: &str = "objects";
 const SIDECARS_DIR: &str = "sidecars";
+const EXECUTABLES_DIR: &str = "executables";
 const STAGING_DIR: &str = ".staging";
 const LOCKS_DIR: &str = ".locks";
 const LEASES_DIR: &str = ".leases";
@@ -205,6 +218,11 @@ pub enum LargeObjectIntegrityFinding {
         file_sha256: String,
         error: String,
     },
+    /// The object's executable inode no longer hashes to the object's name.
+    ExecutableInodeDamaged {
+        file_sha256: String,
+        computed: String,
+    },
     /// An entry in the object namespace that the store did not write: not a
     /// regular file, or not named by a 64-hex digest. Scrub reports it and
     /// leaves it alone; sweep still refuses until an operator removes it.
@@ -221,7 +239,10 @@ impl LargeObjectIntegrityFinding {
     /// beside a matching whole-file hash means the sidecar is what is wrong,
     /// and an unreadable object may be a transient I/O fault.
     pub fn is_byte_damage(&self) -> bool {
-        matches!(self, Self::FileHashMismatch { .. })
+        matches!(
+            self,
+            Self::FileHashMismatch { .. } | Self::ExecutableInodeDamaged { .. }
+        )
     }
 }
 
@@ -271,6 +292,7 @@ pub struct LargeObjectStore {
     root: lillux::PinnedDirectory,
     objects: lillux::PinnedDirectory,
     sidecars: lillux::PinnedDirectory,
+    executables: lillux::PinnedDirectory,
     staging: lillux::PinnedDirectory,
     locks: lillux::PinnedDirectory,
     leases: lillux::PinnedDirectory,
@@ -292,6 +314,7 @@ impl LargeObjectStore {
         Ok(Some(Self {
             objects: open(OBJECTS_DIR)?,
             sidecars: open(SIDECARS_DIR)?,
+            executables: open(EXECUTABLES_DIR)?,
             staging: open(STAGING_DIR)?,
             locks: open(LOCKS_DIR)?,
             leases: open(LEASES_DIR)?,
@@ -322,6 +345,7 @@ impl LargeObjectStore {
         Ok(Self {
             objects: root.open_or_create_child(OsStr::new(OBJECTS_DIR), 0o700)?,
             sidecars: root.open_or_create_child(OsStr::new(SIDECARS_DIR), 0o700)?,
+            executables: root.open_or_create_child(OsStr::new(EXECUTABLES_DIR), 0o700)?,
             staging: root.open_or_create_child(OsStr::new(STAGING_DIR), 0o700)?,
             locks: root.open_or_create_child(OsStr::new(LOCKS_DIR), 0o700)?,
             leases: root.open_or_create_child(OsStr::new(LEASES_DIR), 0o700)?,
@@ -340,17 +364,18 @@ impl LargeObjectStore {
 
     pub fn total_stored_bytes(&self) -> anyhow::Result<u64> {
         let mut total = 0_u64;
-        for entry in self.objects.entries_no_follow()? {
-            if entry.entry_type != lillux::PinnedEntryType::Regular {
-                anyhow::bail!("large-object namespace contains a non-regular entry");
+        for directory in [&self.objects, &self.executables] {
+            for entry in directory.entries_no_follow()? {
+                if entry.entry_type != lillux::PinnedEntryType::Regular {
+                    anyhow::bail!("large-object namespace contains a non-regular entry");
+                }
+                let file = directory
+                    .open_regular(&entry.name, false)?
+                    .ok_or_else(|| anyhow::anyhow!("large object disappeared during accounting"))?;
+                total = total
+                    .checked_add(file.metadata()?.len())
+                    .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))?;
             }
-            let file = self
-                .objects
-                .open_regular(&entry.name, false)?
-                .ok_or_else(|| anyhow::anyhow!("large object disappeared during accounting"))?;
-            total = total
-                .checked_add(file.metadata()?.len())
-                .ok_or_else(|| anyhow::anyhow!("large-object store byte count overflow"))?;
         }
         total
             .checked_add(self.quarantined_bytes()?)
@@ -360,20 +385,22 @@ impl LargeObjectStore {
     /// Bytes held as quarantined evidence. They are part of
     /// `total_stored_bytes` and of a sweep's total, but never a candidate.
     pub fn quarantined_bytes(&self) -> anyhow::Result<u64> {
-        let Some(quarantine) = self.quarantine_child(OBJECTS_DIR)? else {
-            return Ok(0);
-        };
         let mut total = 0_u64;
-        for entry in quarantine.entries_no_follow()? {
-            if entry.entry_type != lillux::PinnedEntryType::Regular {
-                bail!("large-object quarantine contains a non-regular entry");
-            }
-            let Some(file) = quarantine.open_regular(&entry.name, false)? else {
+        for child in [OBJECTS_DIR, EXECUTABLES_DIR] {
+            let Some(quarantine) = self.quarantine_child(child)? else {
                 continue;
             };
-            total = total
-                .checked_add(file.metadata()?.len())
-                .ok_or_else(|| anyhow::anyhow!("large-object quarantine byte count overflow"))?;
+            for entry in quarantine.entries_no_follow()? {
+                if entry.entry_type != lillux::PinnedEntryType::Regular {
+                    bail!("large-object quarantine contains a non-regular entry");
+                }
+                let Some(file) = quarantine.open_regular(&entry.name, false)? else {
+                    continue;
+                };
+                total = total.checked_add(file.metadata()?.len()).ok_or_else(|| {
+                    anyhow::anyhow!("large-object quarantine byte count overflow")
+                })?;
+            }
         }
         Ok(total)
     }
@@ -1053,6 +1080,137 @@ impl LargeObjectStore {
         }))
     }
 
+    /// Like `lease_object`, but the returned handle is the object's
+    /// executable inode (mode 0555), made on first use. The lease is the same
+    /// hash-keyed lease, so it covers both inodes.
+    pub fn lease_executable_object(
+        &self,
+        file_sha256: &str,
+        expected_size: u64,
+    ) -> anyhow::Result<LeasedLargeObject> {
+        let (_, primary, lease) = self.lease_object(file_sha256, expected_size)?.into_parts();
+        self.ensure_executable_inode(file_sha256, expected_size, &primary)?;
+        let name = OsStr::new(file_sha256);
+        let executable = self
+            .executables
+            .open_regular(name, false)?
+            .ok_or_else(|| anyhow::anyhow!("executable inode of {file_sha256} is absent"))?;
+        let size = executable.metadata()?.len();
+        if size != expected_size {
+            bail!(
+                "executable inode of {file_sha256} is {size} bytes; the manifest sealed {expected_size}"
+            );
+        }
+        Ok(LeasedLargeObject {
+            path: self.executables.descriptor_child_path(name)?,
+            file: executable,
+            _lease: lease,
+        })
+    }
+
+    /// Whether the object has a published executable inode. Inspection only.
+    pub fn has_executable_inode(&self, file_sha256: &str) -> anyhow::Result<bool> {
+        require_store_hash(file_sha256)?;
+        Ok(self
+            .executables
+            .open_regular(OsStr::new(file_sha256), false)?
+            .is_some())
+    }
+
+    /// Make the executable inode once. The caller holds the object's shared
+    /// lease, so eviction cannot remove the primary meanwhile. The inode is
+    /// built in staging from the primary (reflink or one copy), verified
+    /// against the sidecar's chunk trail, then published atomically.
+    fn ensure_executable_inode(
+        &self,
+        file_sha256: &str,
+        expected_size: u64,
+        primary: &fs::File,
+    ) -> anyhow::Result<()> {
+        let name = OsStr::new(file_sha256);
+        if self.executables.open_regular(name, false)?.is_some() {
+            return Ok(());
+        }
+        let staging_name = OsString::from(format!("exec-{file_sha256}"));
+        let lock = open_registered_lock(|| {
+            self.locks
+                .open_regular_create(&staging_name, true, false, 0o600)
+        })?;
+        flock_exclusive_blocking(&lock)?;
+        if self.executables.open_regular(name, false)?.is_some() {
+            return Ok(());
+        }
+        let sidecar = self
+            .sidecar(file_sha256)?
+            .ok_or_else(|| anyhow::anyhow!("large object {file_sha256} has no sidecar"))?;
+        if let Some(stale) = self.staging.open_regular(&staging_name, false)? {
+            self.staging.remove_if_same(&staging_name, &stale)?;
+        }
+        let mut copy_allowance = expected_size;
+        self.staging.materialize_private_regular_child(
+            &staging_name,
+            primary,
+            expected_size,
+            0o555,
+            &mut copy_allowance,
+        )?;
+        let published = (|| -> anyhow::Result<()> {
+            let mut staged = self
+                .staging
+                .open_regular(&staging_name, false)?
+                .ok_or_else(|| anyhow::anyhow!("executable staging disappeared"))?;
+            let findings = self.derive_byte_findings(&mut staged, file_sha256, Some(&sidecar))?;
+            if !findings.is_empty() {
+                bail!(
+                    "executable inode of large object {file_sha256} failed verification: {findings:?}"
+                );
+            }
+            match self.executables.rename_regular_from_atomic(
+                name,
+                &self.staging,
+                &staging_name,
+                &staged,
+            ) {
+                Ok(()) => {}
+                Err(error) => {
+                    if self.executables.open_regular(name, false)?.is_some() {
+                        let _ = self.staging.remove_if_same(&staging_name, &staged);
+                        return Ok(());
+                    }
+                    return Err(anyhow::Error::from(error)
+                        .context(format!("publishing executable inode of {file_sha256}")));
+                }
+            }
+            self.executables.sync()?;
+            Ok(())
+        })();
+        if published.is_err()
+            && let Some(staged) = self.staging.open_regular(&staging_name, false)?
+        {
+            let _ = self.staging.remove_if_same(&staging_name, &staged);
+        }
+        published
+    }
+
+    /// Hard-link a stored object's executable inode into a caller-owned
+    /// directory. `expected` must be the handle from `lease_executable_object`.
+    pub fn link_executable_object_into(
+        &self,
+        file_sha256: &str,
+        target_directory: &lillux::PinnedDirectory,
+        target_name: &std::ffi::OsStr,
+        expected: &fs::File,
+    ) -> anyhow::Result<()> {
+        require_store_hash(file_sha256)?;
+        target_directory.link_regular_from(
+            target_name,
+            &self.executables,
+            OsStr::new(file_sha256),
+            expected,
+        )?;
+        Ok(())
+    }
+
     /// Hard-link a stored object into a caller-owned directory (same
     /// filesystem, zero copy). `expected` must be the leased handle for the
     /// object — the link is made from that exact inode, so a concurrent
@@ -1111,7 +1269,10 @@ impl LargeObjectStore {
                 continue;
             };
             report.inspected_objects = report.inspected_objects.saturating_add(1);
-            let bytes = file.metadata()?.len();
+            let mut bytes = file.metadata()?.len();
+            if let Some(executable) = self.executables.open_regular(OsStr::new(&name), false)? {
+                bytes = bytes.saturating_add(executable.metadata()?.len());
+            }
             report.total_bytes_before = report.total_bytes_before.saturating_add(bytes);
             if roots.contains(&name) {
                 report.retained_roots += 1;
@@ -1163,6 +1324,10 @@ impl LargeObjectStore {
             let Some(object) = self.objects.open_regular(OsStr::new(&name), false)? else {
                 continue;
             };
+            if let Some(executable) = self.executables.open_regular(OsStr::new(&name), false)? {
+                self.executables
+                    .remove_if_same(OsStr::new(&name), &executable)?;
+            }
             self.objects.remove_if_same(OsStr::new(&name), &object)?;
             if let Some(sidecar) = self.sidecars.open_regular(OsStr::new(&name), false)? {
                 let _ = self.sidecars.remove_if_same(OsStr::new(&name), &sidecar);
@@ -1287,6 +1452,82 @@ impl LargeObjectStore {
         Ok(self.scrub_leased(file_sha256, false)?.findings)
     }
 
+    /// Re-derive one inode's size, chunk trail and whole-file hash and report
+    /// every disagreement with the sidecar and the object's name. Reads one
+    /// chunk at a time; never moves anything.
+    fn derive_byte_findings(
+        &self,
+        object: &mut fs::File,
+        file_sha256: &str,
+        sidecar: Option<&LargeObjectSidecar>,
+    ) -> anyhow::Result<Vec<LargeObjectIntegrityFinding>> {
+        let mut findings = Vec::new();
+        let actual = object.metadata()?.len();
+        if let Some(sidecar) = sidecar
+            && sidecar.size != actual
+        {
+            findings.push(LargeObjectIntegrityFinding::SizeMismatch {
+                file_sha256: file_sha256.to_string(),
+                sidecar: sidecar.size,
+                actual,
+            });
+        }
+
+        let chunk_size = sidecar
+            .map(|sidecar| sidecar.chunk_size)
+            .filter(|size| *size > 0)
+            .unwrap_or(self.chunk_bytes);
+        let mut hasher = ChunkedHasher::new(chunk_size);
+        let mut buffer = vec![0u8; INGEST_IO_BUFFER_BYTES.min(chunk_size.max(4096) as usize)];
+        object.seek(SeekFrom::Start(0))?;
+        loop {
+            let read = match object.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) => {
+                    findings.push(LargeObjectIntegrityFinding::UnreadableObject {
+                        file_sha256: file_sha256.to_string(),
+                        error: error.to_string(),
+                    });
+                    return Ok(findings);
+                }
+            };
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let (computed, chunk_hashes) = hasher.finish();
+        if computed != file_sha256 {
+            findings.push(LargeObjectIntegrityFinding::FileHashMismatch {
+                file_sha256: file_sha256.to_string(),
+                computed,
+            });
+        }
+        if let Some(sidecar) = sidecar {
+            for (index, (stored, derived)) in sidecar
+                .chunk_hashes
+                .iter()
+                .zip(chunk_hashes.iter())
+                .enumerate()
+            {
+                if stored != derived {
+                    findings.push(LargeObjectIntegrityFinding::ChunkMismatch {
+                        file_sha256: file_sha256.to_string(),
+                        chunk_index: index as u64,
+                    });
+                }
+            }
+            if sidecar.chunk_hashes.len() != chunk_hashes.len() {
+                findings.push(LargeObjectIntegrityFinding::SizeMismatch {
+                    file_sha256: file_sha256.to_string(),
+                    sidecar: sidecar.size,
+                    actual,
+                });
+            }
+        }
+        Ok(findings)
+    }
+
     fn scrub_leased(&self, file_sha256: &str, quarantine: bool) -> anyhow::Result<ScrubbedObject> {
         require_store_hash(file_sha256)?;
         let mut findings = Vec::new();
@@ -1320,70 +1561,35 @@ impl LargeObjectStore {
                 None
             }
         };
-        let actual = object.metadata()?.len();
-        if let Some(sidecar) = &sidecar
-            && sidecar.size != actual
+        findings.extend(self.derive_byte_findings(&mut object, file_sha256, sidecar.as_ref())?);
+        if findings.iter().any(|finding| {
+            matches!(
+                finding,
+                LargeObjectIntegrityFinding::UnreadableObject { .. }
+            )
+        }) {
+            return Ok(ScrubbedObject {
+                findings,
+                quarantined: false,
+            });
+        }
+        if let Some(executable) = self
+            .executables
+            .open_regular(OsStr::new(file_sha256), false)?
         {
-            findings.push(LargeObjectIntegrityFinding::SizeMismatch {
-                file_sha256: file_sha256.to_string(),
-                sidecar: sidecar.size,
-                actual,
-            });
-        }
-
-        let chunk_size = sidecar
-            .as_ref()
-            .map(|sidecar| sidecar.chunk_size)
-            .filter(|size| *size > 0)
-            .unwrap_or(self.chunk_bytes);
-        let mut hasher = ChunkedHasher::new(chunk_size);
-        let mut buffer = vec![0u8; INGEST_IO_BUFFER_BYTES.min(chunk_size.max(4096) as usize)];
-        object.seek(SeekFrom::Start(0))?;
-        loop {
-            let read = match object.read(&mut buffer) {
-                Ok(read) => read,
-                Err(error) => {
-                    findings.push(LargeObjectIntegrityFinding::UnreadableObject {
-                        file_sha256: file_sha256.to_string(),
-                        error: error.to_string(),
-                    });
-                    return Ok(ScrubbedObject {
-                        findings,
-                        quarantined: false,
-                    });
-                }
-            };
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let (computed, chunk_hashes) = hasher.finish();
-        if computed != file_sha256 {
-            findings.push(LargeObjectIntegrityFinding::FileHashMismatch {
-                file_sha256: file_sha256.to_string(),
-                computed,
-            });
-        }
-        if let Some(sidecar) = &sidecar {
-            for (index, (stored, derived)) in sidecar
-                .chunk_hashes
-                .iter()
-                .zip(chunk_hashes.iter())
-                .enumerate()
+            let mut executable = executable;
+            for finding in
+                self.derive_byte_findings(&mut executable, file_sha256, sidecar.as_ref())?
             {
-                if stored != derived {
-                    findings.push(LargeObjectIntegrityFinding::ChunkMismatch {
-                        file_sha256: file_sha256.to_string(),
-                        chunk_index: index as u64,
-                    });
-                }
-            }
-            if sidecar.chunk_hashes.len() != chunk_hashes.len() {
-                findings.push(LargeObjectIntegrityFinding::SizeMismatch {
-                    file_sha256: file_sha256.to_string(),
-                    sidecar: sidecar.size,
-                    actual,
+                findings.push(match finding {
+                    LargeObjectIntegrityFinding::FileHashMismatch {
+                        file_sha256,
+                        computed,
+                    } => LargeObjectIntegrityFinding::ExecutableInodeDamaged {
+                        file_sha256,
+                        computed,
+                    },
+                    other => other,
                 });
             }
         }
@@ -1399,9 +1605,10 @@ impl LargeObjectStore {
         })
     }
 
-    /// Move a byte-damaged object, then its sidecar, out of the served
-    /// namespaces into quarantine under the first free copy name. The object
-    /// moves first: from that instant no lease can bind it. Returns false
+    /// Move a byte-damaged object's executable inode (when it has one), then
+    /// the object, then its sidecar, out of the served namespaces into
+    /// quarantine under the first free copy name. Once the object has moved
+    /// no lease can bind it. Returns false
     /// when the name no longer holds the scrubbed inode.
     fn quarantine_object(&self, file_sha256: &str, object: &fs::File) -> anyhow::Result<bool> {
         let name = OsStr::new(file_sha256);
@@ -1417,6 +1624,21 @@ impl LargeObjectStore {
         let quarantined_sidecars =
             quarantine.open_or_create_child(OsStr::new(SIDECARS_DIR), 0o700)?;
         let copy = free_quarantine_name(&quarantined_objects, file_sha256)?;
+        // The executable inode moves first: a crash between the two moves
+        // must never leave a stale executable inode beside a re-ingested
+        // clean primary.
+        if let Some(executable) = self.executables.open_regular(name, false)? {
+            let quarantined_executables =
+                quarantine.open_or_create_child(OsStr::new(EXECUTABLES_DIR), 0o700)?;
+            quarantined_executables
+                .rename_regular_from_atomic(OsStr::new(&copy), &self.executables, name, &executable)
+                .map_err(anyhow::Error::from)
+                .with_context(|| {
+                    format!("quarantining the executable inode of large object {file_sha256}")
+                })?;
+            self.executables.sync()?;
+            quarantined_executables.sync()?;
+        }
         quarantined_objects
             .rename_regular_from_atomic(OsStr::new(&copy), &self.objects, name, object)
             .map_err(anyhow::Error::from)
@@ -1449,7 +1671,11 @@ impl LargeObjectStore {
             dry_run,
             ..LargeObjectQuarantinePurgeReport::default()
         };
-        for (child, is_objects) in [(OBJECTS_DIR, true), (SIDECARS_DIR, false)] {
+        for (child, is_objects) in [
+            (OBJECTS_DIR, true),
+            (EXECUTABLES_DIR, true),
+            (SIDECARS_DIR, false),
+        ] {
             let Some(directory) = self.quarantine_child(child)? else {
                 continue;
             };
@@ -2299,6 +2525,105 @@ mod tests {
         let linked = fs::metadata(dir.path().join("mount/segment-0")).unwrap();
         assert_eq!(linked.ino(), leased.file().metadata().unwrap().ino());
         assert_eq!(linked.len(), 24);
+    }
+
+    #[test]
+    fn an_executable_object_links_one_shared_inode_with_its_own_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let (dir, store) = store(8);
+        let ingested = ingest(&store, &write_source(&dir, "tool.bin", &[7u8; 24]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        let plain = store.lease_object(&hash, 24).unwrap();
+        let executable = store.lease_executable_object(&hash, 24).unwrap();
+        let again = store.lease_executable_object(&hash, 24).unwrap();
+        let plain_meta = plain.file().metadata().unwrap();
+        let exec_meta = executable.file().metadata().unwrap();
+        assert_ne!(plain_meta.ino(), exec_meta.ino());
+        assert_eq!(exec_meta.ino(), again.file().metadata().unwrap().ino());
+        assert_eq!(exec_meta.permissions().mode() & 0o777, 0o555);
+        assert_eq!(plain_meta.permissions().mode() & 0o777, 0o444);
+
+        let first = lillux::PinnedDirectory::open_or_create(&dir.path().join("gen-a")).unwrap();
+        let second = lillux::PinnedDirectory::open_or_create(&dir.path().join("gen-b")).unwrap();
+        for target in [&first, &second] {
+            store
+                .link_executable_object_into(
+                    &hash,
+                    target,
+                    std::ffi::OsStr::new("tool"),
+                    executable.file(),
+                )
+                .unwrap();
+        }
+        let a = fs::metadata(dir.path().join("gen-a/tool")).unwrap();
+        let b = fs::metadata(dir.path().join("gen-b/tool")).unwrap();
+        assert_eq!(a.ino(), b.ino());
+        assert_eq!(a.ino(), exec_meta.ino());
+        assert_eq!(a.permissions().mode() & 0o777, 0o555);
+        assert_eq!(
+            fs::read(dir.path().join("gen-a/tool")).unwrap(),
+            vec![7u8; 24]
+        );
+        // The extra inode is counted in full beside the primary.
+        assert_eq!(store.total_stored_bytes().unwrap(), 48);
+    }
+
+    #[test]
+    fn scrub_detects_and_quarantines_a_damaged_executable_inode() {
+        use std::io::{Seek as _, Write as _};
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, store) = store(8);
+        let ingested = ingest(&store, &write_source(&dir, "tool.bin", &[9u8; 24]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        drop(store.lease_executable_object(&hash, 24).unwrap());
+        assert!(store.scrub_all().unwrap().findings.is_empty());
+
+        let path = dir.path().join("large-objects/executables").join(&hash);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(3)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.sync_all().unwrap();
+
+        let report = store.scrub_all().unwrap();
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            LargeObjectIntegrityFinding::ExecutableInodeDamaged { .. }
+        )));
+        assert_eq!(report.quarantined, vec![hash.clone()]);
+        assert_eq!(store.object_size(&hash).unwrap(), None);
+        assert!(!store.has_executable_inode(&hash).unwrap());
+        assert!(
+            dir.path()
+                .join("large-objects/quarantine/executables")
+                .join(&hash)
+                .exists()
+        );
+        assert!(
+            dir.path()
+                .join("large-objects/quarantine/objects")
+                .join(&hash)
+                .exists()
+        );
+        assert_eq!(store.quarantined_bytes().unwrap(), 48);
+        let purged = store.purge_quarantine(false).unwrap();
+        assert_eq!(purged.bytes, 48);
+        assert_eq!(store.quarantined_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn sweep_removes_the_executable_inode_with_the_object() {
+        let (dir, store) = store(8);
+        let ingested = ingest(&store, &write_source(&dir, "tool.bin", &[5u8; 32]), None).unwrap();
+        let hash = ingested.file_sha256.clone();
+        drop(store.lease_executable_object(&hash, 32).unwrap());
+        assert!(store.has_executable_inode(&hash).unwrap());
+        let report = store.sweep_to_budget(0, &BTreeSet::new()).unwrap();
+        assert_eq!(report.evicted, vec![(hash.clone(), 64)]);
+        assert_eq!(report.total_bytes_after, 0);
+        assert!(!store.has_executable_inode(&hash).unwrap());
+        assert_eq!(store.object_size(&hash).unwrap(), None);
+        assert_eq!(store.total_stored_bytes().unwrap(), 0);
     }
 
     #[test]

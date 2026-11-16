@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{Read as _, Seek as _};
+use std::io::Seek as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -726,16 +726,18 @@ impl ExternalMaterializationCache {
             let Some(file_sha256) = entry.file_sha256.as_deref() else {
                 continue;
             };
-            if large_sources.contains_key(file_sha256) {
+            let executable = large_entry_is_executable(entry);
+            let key = (file_sha256.to_owned(), executable);
+            if large_sources.contains_key(&key) {
                 continue;
             }
-            large_sources.insert(
-                file_sha256.to_owned(),
-                store.lease_object(
-                    file_sha256,
-                    entry.size.expect("validated large file has a size"),
-                )?,
-            );
+            let size = entry.size.expect("validated large file has a size");
+            let leased = if executable {
+                store.lease_executable_object(file_sha256, size)?
+            } else {
+                store.lease_object(file_sha256, size)?
+            };
+            large_sources.insert(key, leased);
         }
 
         let root = lillux::PinnedDirectory::open_or_create(&self.root)?;
@@ -837,7 +839,7 @@ impl ExternalMaterializationCache {
         root: &lillux::PinnedDirectory,
         manifest_hash: &str,
         manifest: &ryeos_state::objects::ExternalLargeContentManifestObject,
-        large_sources: &BTreeMap<String, ryeos_state::LeasedLargeObject>,
+        large_sources: &LargeSources,
     ) -> anyhow::Result<lillux::PinnedDirectory> {
         let (staging_name, staging) =
             root.create_unique_child(&format!(".{manifest_hash}.staging"), 0o700)?;
@@ -864,24 +866,27 @@ impl ExternalMaterializationCache {
                                 .file_sha256
                                 .as_deref()
                                 .expect("validated file has one storage tier");
-                            let leased = large_sources.get(file_sha256).ok_or_else(|| {
+                            let executable = large_entry_is_executable(entry);
+                            let leased = large_sources
+                                .get(&(file_sha256.to_owned(), executable))
+                                .ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "large-content object {file_sha256} lost its launch lease"
                                 )
                             })?;
-                            if mode == 0o644 {
-                                store.link_object_into(
+                            if executable {
+                                store.link_executable_object_into(
                                     file_sha256,
                                     &parent,
                                     &name,
                                     leased.file(),
                                 )?;
                             } else {
-                                materialize_executable_large_file(
-                                    leased.file(),
+                                store.link_object_into(
+                                    file_sha256,
                                     &parent,
                                     &name,
-                                    entry.size.expect("validated file has a size"),
+                                    leased.file(),
                                 )?;
                             }
                         }
@@ -2309,32 +2314,20 @@ fn large_symlink_target_bytes(
     Ok(target)
 }
 
-fn materialize_executable_large_file(
-    source: &fs::File,
-    parent: &lillux::PinnedDirectory,
-    name: &OsStr,
-    expected_size: u64,
-) -> anyhow::Result<()> {
-    let mut source = source.try_clone()?;
-    source.rewind()?;
-    let mut target = parent.open_regular_create(name, true, true, 0o600)?;
-    let copied = std::io::copy(
-        &mut source.take(expected_size.saturating_add(1)),
-        &mut target,
-    )?;
-    if copied != expected_size {
-        anyhow::bail!(
-            "large executable changed size during materialization: expected {expected_size}, copied {copied}"
-        );
-    }
-    target.sync_all()?;
-    lillux::secure_fs::set_open_regular_file_mode(&target, 0o755)?;
-    target.sync_all()?;
-    Ok(())
+/// Leased store inodes for one manifest, keyed by object hash and whether
+/// the manifest's mode calls for the executable inode.
+type LargeSources = BTreeMap<(String, bool), ryeos_state::LeasedLargeObject>;
+
+/// Manifest modes are normalised to `0644` or `0755`; anything but `0644`
+/// takes the store's executable inode.
+fn large_entry_is_executable(
+    entry: &ryeos_state::objects::ExternalLargeContentManifestEntry,
+) -> bool {
+    entry.mode != Some(0o644)
 }
 
 enum LargeMaterializationVerification<'a> {
-    SharedObjects(&'a BTreeMap<String, ryeos_state::LeasedLargeObject>),
+    SharedObjects(&'a LargeSources),
     PrivateDigest,
 }
 
@@ -2422,11 +2415,12 @@ fn verify_large_materialized_directory(
                         .expect("validated file has one storage tier");
                     if let LargeMaterializationVerification::SharedObjects(large_sources) =
                         verification
-                        && entry.mode == Some(0o644)
                     {
-                        let source = large_sources.get(file_sha256).ok_or_else(|| {
-                            anyhow::anyhow!("large-content file {path} lost its source lease")
-                        })?;
+                        let source = large_sources
+                            .get(&(file_sha256.to_owned(), large_entry_is_executable(entry)))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("large-content file {path} lost its source lease")
+                            })?;
                         if !lillux::same_open_file_identity(&file, source.file())? {
                             anyhow::bail!(
                                 "materialized large-content file {path} is not the leased object"
@@ -2840,6 +2834,94 @@ mod tests {
             !workspace_path.join("runtime/content/__pycache__").exists(),
             "excluded or runtime-created paths must not remain visible beside an exact realization"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn large_executable_generations_share_the_stores_executable_inode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let (dir, cas) = temp_cas();
+        let runtime_root = dir.path().join("state");
+        let runtime = lillux::PinnedDirectory::open_or_create(&runtime_root).unwrap();
+        let store = ryeos_state::LargeObjectStore::open_or_create_under(&runtime).unwrap();
+        let source_path = dir.path().join("tool.bin");
+        let tool_bytes = b"large-executable-payload-with-several-chunks";
+        std::fs::write(&source_path, tool_bytes).unwrap();
+        let source = std::fs::File::open(&source_path).unwrap();
+        let source_identity = ryeos_state::PinnedLargeObjectSourceIdentity {
+            file: lillux::pinned_regular_file_identity(&source).unwrap(),
+            size: source.metadata().unwrap().len(),
+        };
+        let ingested = store
+            .ingest_open_regular(source, source_identity, "bin/tool", None)
+            .unwrap();
+        let manifest_at = |directory: &str, mode: u32| {
+            let mut entries = vec![
+                ryeos_state::objects::ExternalLargeContentManifestEntry {
+                    path: directory.to_owned(),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::Dir,
+                    mode: None,
+                    blob_hash: None,
+                    file_sha256: None,
+                    size: None,
+                    chunk_size: None,
+                    chunk_hashes: Vec::new(),
+                    target: None,
+                },
+                ryeos_state::objects::ExternalLargeContentManifestEntry {
+                    path: format!("{directory}/tool"),
+                    kind: ryeos_state::objects::ExternalContentManifestEntryKind::File,
+                    mode: Some(mode),
+                    blob_hash: None,
+                    file_sha256: Some(ingested.file_sha256.clone()),
+                    size: Some(ingested.size),
+                    chunk_size: Some(ingested.chunk_size),
+                    chunk_hashes: ingested.chunk_hashes.clone(),
+                    target: None,
+                },
+            ];
+            entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+            let manifest = ryeos_state::objects::ExternalLargeContentManifestObject {
+                schema: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_SCHEMA.to_owned(),
+                kind: ryeos_state::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.to_owned(),
+                entry_count: entries.len(),
+                total_bytes: ingested.size,
+                entries,
+            };
+            manifest.validate().unwrap();
+            manifest
+        };
+        let cache = ExternalMaterializationCache::from_runtime_state_root(&runtime_root);
+        let mut materialized = Vec::new();
+        for (directory, mode) in [("bin", 0o755), ("tools", 0o755), ("data", 0o644)] {
+            let manifest = manifest_at(directory, mode);
+            let manifest_hash = cas.store_object(&manifest.to_value().unwrap()).unwrap();
+            let generation = cache
+                .materialize_large(
+                    &cas,
+                    &store,
+                    &manifest_hash,
+                    &manifest,
+                    ExternalContentKind::Tree,
+                )
+                .unwrap();
+            materialized.push(
+                std::fs::metadata(generation.source_path.join(directory).join("tool")).unwrap(),
+            );
+        }
+        let primary = store
+            .lease_object(&ingested.file_sha256, ingested.size)
+            .unwrap()
+            .file()
+            .metadata()
+            .unwrap();
+        // Two executable generations: one inode, no per-generation copy.
+        assert_eq!(materialized[0].ino(), materialized[1].ino());
+        assert_ne!(materialized[0].ino(), primary.ino());
+        assert_eq!(materialized[0].permissions().mode() & 0o777, 0o555);
+        // The 0644 path still links the primary inode.
+        assert_eq!(materialized[2].ino(), primary.ino());
+        assert_eq!(materialized[2].permissions().mode() & 0o777, 0o444);
     }
 
     #[test]
