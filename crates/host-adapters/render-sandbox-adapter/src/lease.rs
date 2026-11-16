@@ -190,7 +190,7 @@ mod tests {
         // `any_of` is met by its first accepted alternative.
         let alternatives = CapabilityRequirement::Spec(CapabilityRequirementSpec {
             name: None,
-            any_of: vec!["provider.unattested".into(), LEASE_CREATE_BOUND.into()],
+            any_of: vec!["export.frozen_candidate".into(), LEASE_CREATE_BOUND.into()],
             accept: vec!["provider_attested".into()],
             providers: Vec::new(),
         });
