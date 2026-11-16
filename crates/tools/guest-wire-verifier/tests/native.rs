@@ -55,6 +55,8 @@ fn main() {
         attempt_deadline: lillux::time::MonotonicDeadline::after(
             lillux::time::Duration::from_secs(300),
         ),
+        network_inputs:
+            ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
     })
     .unwrap();
     let expected = Expected {

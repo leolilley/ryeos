@@ -128,6 +128,8 @@ pub fn write_file(
         .with_context(|| format!("written file {name} vanished"))
 }
 
+use ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs;
+
 pub struct FixtureInputs<'a> {
     pub work: &'a lillux::PinnedDirectory,
     pub root_key: &'a SigningKey,
@@ -137,6 +139,8 @@ pub struct FixtureInputs<'a> {
     pub launcher: &'a [u8],
     pub tls_root_der: &'a [u8],
     pub port: u16,
+    /// The network-input sources the challenge's declared launch shape names.
+    pub network_inputs: &'a LaunchNetworkInputs,
 }
 
 pub struct Prepared {
@@ -328,10 +332,9 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
 
     // Sealed bootstrap naming the loopback controller and its ephemeral root.
     let roots = vec![STANDARD.encode(inputs.tls_root_der)];
-    // The shape a lease binding captures: the sandbox's own resolver and
-    // hosts files, named by the one contract definition. The verifier writes
-    // no substitute for them.
-    let network_sources = ryeos_external_execution_contract::operator_network_inputs();
+    // The shape the challenge declares: the sandbox's own resolver and hosts
+    // files at the declared sources. The verifier writes no substitute.
+    let network_sources = inputs.network_inputs;
     let attachment_deadline_ms = now + 180_000;
     let allocation_request_digest = digest_of("allocation");
     let admitted_capsule_hash = digest_of("capsule");
@@ -342,12 +345,12 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
             schema: 2,
             network_inputs: ExternalNetworkInputPolicy {
                 resolver: ExternalNetworkInputSelection {
-                    source: network_sources.resolver_source.into(),
-                    max_bytes: network_sources.resolver_max_bytes,
+                    source: network_sources.resolver.source.clone(),
+                    max_bytes: network_sources.resolver.max_bytes,
                 },
                 hosts: ExternalNetworkInputSelection {
-                    source: network_sources.hosts_source.into(),
-                    max_bytes: network_sources.hosts_max_bytes,
+                    source: network_sources.hosts.source.clone(),
+                    max_bytes: network_sources.hosts.max_bytes,
                 },
             },
             https_origin: format!("https://127.0.0.1:{}", inputs.port),

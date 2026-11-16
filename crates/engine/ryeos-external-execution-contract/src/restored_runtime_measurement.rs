@@ -1300,6 +1300,7 @@ mod tests {
                 controller_transport: crate::runtime_snapshot::LaunchControllerTransport::Https,
                 sandbox_network_policy:
                     crate::runtime_snapshot::LaunchSandboxNetworkPolicy::DenyAll,
+                network_inputs: Some(crate::runtime_snapshot::LaunchNetworkInputs::operator()),
             },
         };
         let consumer_identity = attempt.derived_operation_id().unwrap();

@@ -575,6 +575,7 @@ fn seed_auxiliary_qualification_in_context(
             },
             participants: vec![],
             subordinate_attempt: None,
+            launch_shape: None,
         },
         result,
     };

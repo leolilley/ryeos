@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T12:59:02Z:b31e6f0f884d112a40ab550c72e3842b9c9e3b703acc1f7191e5dd65be44b2b1:lyFEZnGtKUXNEbAS+ku6/AKorVT4fOlvxUCXb316+1IiG5ItIIxQGpy+9mXTwYcnLfYAWf2kUjVSl3T/Cv9TAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T21:12:47Z:4dbb20e634390c9591a8e6ded4ca4f126fc1c94fe0034de45facefbe21d91dbc:rZuL4fFPtDFWFOUd3yDJa6f7HLGUbORd7d63tCe66RSLpZowhJuWd9QNGQqVh1gWKHMJhTa5IHpi98NEHsg1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/development
 name: externally-fenced-worker-runtime
@@ -228,6 +228,17 @@ owner, supervisor and launcher executables performed the guest-inputs (schema
 5) and launcher (spec schema 4) exchange. It is proved under an ephemeral
 controller key and a test configuration. A live session remains the proof of
 operation under the real controller key, connection and credentials.
+
+The scenario declares the launch shape it qualifies: controller transport,
+sandbox network-policy kind, and the resolver and hosts sources a launch
+captures. The verifier builds its bootstrap from the declared sources and
+refuses unless the supervisor's Ready reports exactly those sources with the
+digests of the provider's real files. The proof retains the shape as
+`verified`. A qualification that built nothing under its shape (a local
+verifier) retains the shape its signed policy declares as `declared`. Launch
+does not branch on that basis: it compares the binding's transport, policy kind
+and network-input sources with the retained shape, and refuses a proof that
+retained none.
 
 ### A Worker-less remote lane
 

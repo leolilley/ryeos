@@ -3414,7 +3414,10 @@ mod tests {
     #[test]
     fn an_occurrence_shape_the_scenario_does_not_declare_is_refused_with_both_values() {
         use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
-        let https = LaunchShape::https_allow_list(["controller.invalid".to_owned()]);
+        let https = LaunchShape::https_allow_list(
+            ["controller.invalid".to_owned()],
+            ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
+        );
         require_occurrence_shape_matches_scenario(&https, &https).unwrap();
         let message = format!(
             "{:#}",

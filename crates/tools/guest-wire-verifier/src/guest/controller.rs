@@ -9,9 +9,8 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result, bail, ensure};
 use lillux::crypto::SigningKey;
 use ryeos_external_execution::launcher::ExternalCandidateLauncherSpec;
-use ryeos_external_execution_contract::{
-    EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA, operator_network_inputs,
-};
+use ryeos_external_execution_contract::EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA;
+use ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs;
 use ryeos_state::external_execution::transport::{
     EXTERNAL_CHANNEL_ATTACH_PATH, EXTERNAL_CHANNEL_EXCHANGE_PATH,
     EXTERNAL_CHANNEL_TRANSPORT_SCHEMA, ExternalChannelAttachRequest, ExternalChannelAttachResponse,
@@ -34,48 +33,49 @@ pub struct ProviderNetworkInput {
     pub sha256: String,
 }
 
-/// Read the provider sandbox's real files at the sources every lease binding
-/// captures (`operator_network_inputs()`), each within its byte bound. A file
-/// that cannot be read is an error; nothing stands in for it.
+/// Read the provider sandbox's real files at the declared sources, each
+/// within its byte bound. A file that cannot be read is an error; nothing
+/// stands in for it.
 pub fn read_provider_network_inputs(
-    sources: ryeos_external_execution_contract::OperatorNetworkInputSources,
+    declared: &LaunchNetworkInputs,
 ) -> Result<Vec<ProviderNetworkInput>> {
     use std::io::Read as _;
-    [
-        (sources.resolver_source, sources.resolver_max_bytes),
-        (sources.hosts_source, sources.hosts_max_bytes),
-    ]
-    .into_iter()
-    .map(|(source, max_bytes)| {
-        let mut bytes = Vec::new();
-        std::fs::File::open(source)
-            .and_then(|file| file.take(max_bytes + 1).read_to_end(&mut bytes))
-            .with_context(|| format!("provider network input {source} cannot be read"))?;
-        ensure!(
-            bytes.len() as u64 <= max_bytes,
-            "provider network input {source} exceeds its {max_bytes}-byte bound"
-        );
-        Ok(ProviderNetworkInput {
-            source: source.to_owned(),
-            sha256: lillux::sha256_hex(&bytes),
+    [&declared.resolver, &declared.hosts]
+        .into_iter()
+        .map(|input| {
+            let (source, max_bytes) = (input.source.as_str(), input.max_bytes);
+            let mut bytes = Vec::new();
+            std::fs::File::open(source)
+                .and_then(|file| file.take(max_bytes + 1).read_to_end(&mut bytes))
+                .with_context(|| format!("provider network input {source} cannot be read"))?;
+            ensure!(
+                bytes.len() as u64 <= max_bytes,
+                "provider network input {source} exceeds its {max_bytes}-byte bound"
+            );
+            Ok(ProviderNetworkInput {
+                source: source.to_owned(),
+                sha256: lillux::sha256_hex(&bytes),
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 /// Refuse unless the supervisor's observed network inputs are exactly the
-/// sources `operator_network_inputs()` names and each digest equals what the
+/// sources the declared launch shape names and each digest equals what the
 /// guest half read from the provider's real file at that source.
 fn check_ready_network_inputs(
+    declared: &LaunchNetworkInputs,
     observed: &[ObservedNetworkInput],
     provider: &[ProviderNetworkInput],
 ) -> Result<()> {
-    let sources = operator_network_inputs();
-    let expected = [sources.resolver_source, sources.hosts_source];
+    let expected = [
+        declared.resolver.source.as_str(),
+        declared.hosts.source.as_str(),
+    ];
     let observed_sources: Vec<&str> = observed.iter().map(|input| input.source.as_str()).collect();
     ensure!(
         observed_sources == expected,
-        "Ready network-input sources differ from the binding's: expected {expected:?}, observed {observed_sources:?}"
+        "Ready network-input sources differ from the declared launch shape's: expected {expected:?}, observed {observed_sources:?}"
     );
     for input in observed {
         let read = provider
@@ -117,6 +117,7 @@ pub struct Controller {
     bootstrap: ExternalSupervisorBootstrap,
     key: SigningKey,
     expected_ready_inputs: Vec<String>,
+    declared_network_inputs: LaunchNetworkInputs,
     provider_network_inputs: Vec<ProviderNetworkInput>,
     attach: Option<(String, ExecutionChannelBinding)>,
     transcript: Vec<serde_json::Value>,
@@ -149,6 +150,7 @@ impl Controller {
         bootstrap_bytes: &[u8],
         key: SigningKey,
         expected_ready_inputs: Vec<String>,
+        declared_network_inputs: LaunchNetworkInputs,
         provider_network_inputs: Vec<ProviderNetworkInput>,
     ) -> Result<Self> {
         let bootstrap: ExternalSupervisorBootstrap = serde_json::from_slice(bootstrap_bytes)?;
@@ -164,6 +166,7 @@ impl Controller {
             bootstrap,
             key,
             expected_ready_inputs,
+            declared_network_inputs,
             provider_network_inputs,
             attach: None,
             transcript: Vec::new(),
@@ -387,7 +390,11 @@ impl Controller {
                     boot.verified_input_digests == self.expected_ready_inputs,
                     "Ready names different verified inputs than the controller delivered"
                 );
-                check_ready_network_inputs(&boot.network_inputs, &self.provider_network_inputs)?;
+                check_ready_network_inputs(
+                    &self.declared_network_inputs,
+                    &boot.network_inputs,
+                    &self.provider_network_inputs,
+                )?;
                 self.saw_ready = true;
             }
             ExecutionChannelPayload::CapabilityReport { .. } => {
@@ -530,15 +537,19 @@ mod tests {
         ExternalSupervisorNativeEnvelope, external_tls_root_bundle_digest,
     };
 
+    fn declared() -> LaunchNetworkInputs {
+        LaunchNetworkInputs::operator()
+    }
+
     fn provider_inputs() -> Vec<ProviderNetworkInput> {
-        let sources = operator_network_inputs();
+        let sources = declared();
         vec![
             ProviderNetworkInput {
-                source: sources.resolver_source.into(),
+                source: sources.resolver.source,
                 sha256: lillux::sha256_hex(b"provider resolver"),
             },
             ProviderNetworkInput {
-                source: sources.hosts_source.into(),
+                source: sources.hosts.source,
                 sha256: lillux::sha256_hex(b"provider hosts"),
             },
         ]
@@ -557,9 +568,9 @@ mod tests {
 
     #[test]
     fn an_unreadable_provider_network_file_is_refused_naming_its_source() {
-        let mut sources = operator_network_inputs();
-        sources.hosts_source = "/nonexistent-provider-network-file";
-        let error = format!("{:#}", read_provider_network_inputs(sources).unwrap_err());
+        let mut sources = declared();
+        sources.hosts.source = "/nonexistent-provider-network-file".into();
+        let error = format!("{:#}", read_provider_network_inputs(&sources).unwrap_err());
         assert!(
             error.contains("/nonexistent-provider-network-file")
                 && error.contains("cannot be read"),
@@ -570,7 +581,7 @@ mod tests {
     #[test]
     fn ready_accepts_network_inputs_that_match_the_binding_and_the_provider_files() {
         let provider = provider_inputs();
-        check_ready_network_inputs(&observed_from(&provider), &provider).unwrap();
+        check_ready_network_inputs(&declared(), &observed_from(&provider), &provider).unwrap();
     }
 
     #[test]
@@ -578,7 +589,7 @@ mod tests {
         let provider = provider_inputs();
         let mut observed = observed_from(&provider);
         observed[0].source = "/ryeos/activation/network-resolver".into();
-        let error = check_ready_network_inputs(&observed, &provider)
+        let error = check_ready_network_inputs(&declared(), &observed, &provider)
             .unwrap_err()
             .to_string();
         assert!(
@@ -587,9 +598,10 @@ mod tests {
         );
         assert!(error.contains("/etc/resolv.conf"), "{error}");
         // A missing source is a different source list too.
-        let error = check_ready_network_inputs(&observed_from(&provider)[..1], &provider)
-            .unwrap_err()
-            .to_string();
+        let error =
+            check_ready_network_inputs(&declared(), &observed_from(&provider)[..1], &provider)
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("/etc/hosts"), "{error}");
     }
 
@@ -598,16 +610,17 @@ mod tests {
         let provider = provider_inputs();
         let mut observed = observed_from(&provider);
         observed[1].sha256 = lillux::sha256_hex(b"a substituted hosts file");
-        let error = check_ready_network_inputs(&observed, &provider)
+        let error = check_ready_network_inputs(&declared(), &observed, &provider)
             .unwrap_err()
             .to_string();
         assert!(error.contains("/etc/hosts"), "{error}");
         assert!(error.contains(&observed[1].sha256), "{error}");
         assert!(error.contains(&provider[1].sha256), "{error}");
         // A provider file the guest half never read cannot be matched.
-        let error = check_ready_network_inputs(&observed_from(&provider), &provider[..1])
-            .unwrap_err()
-            .to_string();
+        let error =
+            check_ready_network_inputs(&declared(), &observed_from(&provider), &provider[..1])
+                .unwrap_err()
+                .to_string();
         assert!(error.contains("/etc/hosts"), "{error}");
     }
 
@@ -764,7 +777,7 @@ mod tests {
         let inputs = vec!["1".repeat(64), "2".repeat(64), "3".repeat(64)];
         let provider = provider_inputs();
         let mut controller =
-            Controller::new(&bytes, owner, inputs.clone(), provider.clone()).unwrap();
+            Controller::new(&bytes, owner, inputs.clone(), declared(), provider.clone()).unwrap();
         let stop = std::sync::atomic::AtomicBool::new(false);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let captured = ExternalCapturedNetworkInputs::from_bytes(
@@ -882,9 +895,15 @@ mod tests {
         let bootstrap = bootstrap(1, pki.root_der(), &owner);
         let bytes = bootstrap.canonical_bytes().unwrap();
         let wrong_key = lillux::crypto::generate_signing_key();
-        assert!(Controller::new(&bytes, wrong_key, Vec::new(), Vec::new()).is_err());
-        let mut controller =
-            Controller::new(&bytes, owner, vec!["1".repeat(64)], provider_inputs()).unwrap();
+        assert!(Controller::new(&bytes, wrong_key, Vec::new(), declared(), Vec::new()).is_err());
+        let mut controller = Controller::new(
+            &bytes,
+            owner,
+            vec!["1".repeat(64)],
+            declared(),
+            provider_inputs(),
+        )
+        .unwrap();
         let get = crate::loopback_tls::HttpsRequest {
             method: "GET".into(),
             path: EXTERNAL_CHANNEL_ATTACH_PATH.into(),

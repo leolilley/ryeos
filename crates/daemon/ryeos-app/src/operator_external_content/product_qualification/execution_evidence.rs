@@ -889,6 +889,10 @@ pub(super) fn prove(
             protocol.descriptor.callback_channel,
         )?;
     }
+    let launch_shape = purpose
+        .policy_source()
+        .policy
+        .retained_launch_shape_for(subordinate_proof.as_ref())?;
     Ok((
         result,
         ProductQualificationExecutionProof {
@@ -897,6 +901,7 @@ pub(super) fn prove(
             projector: projector_identity(&projector.projector),
             participants,
             subordinate_attempt: subordinate_proof,
+            launch_shape,
         },
         root_settlement_digest,
     ))

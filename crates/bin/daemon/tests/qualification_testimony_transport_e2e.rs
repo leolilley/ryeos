@@ -464,6 +464,7 @@ fn qualification_policy() -> ProductQualificationPolicy {
         verifier_parameters: json!({"scope": "bounded_fixture"}),
         consumer_execution_context: None,
         producer_scenarios: BTreeMap::new(),
+        launch_shape: None,
     }
 }
 
@@ -538,6 +539,7 @@ fn execution_proof(
         },
         participants: Vec::new(),
         subordinate_attempt: None,
+        launch_shape: None,
     }
 }
 

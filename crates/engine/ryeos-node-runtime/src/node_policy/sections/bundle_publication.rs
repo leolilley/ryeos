@@ -398,6 +398,7 @@ mod tests {
                 verifier_parameters: serde_json::json!({}),
                 consumer_execution_context: None,
                 producer_scenarios: Default::default(),
+                launch_shape: None,
             },
         }
     }

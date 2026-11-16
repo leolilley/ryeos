@@ -22,7 +22,7 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
     MAX_RESTORED_OWNER_CHALLENGE_BYTES, RemoteVerificationPurpose,
 };
 use ryeos_external_execution_contract::runtime_snapshot::{
-    LaunchControllerTransport, LaunchSandboxNetworkPolicy,
+    LaunchControllerTransport, LaunchNetworkInputs, LaunchSandboxNetworkPolicy,
 };
 use ryeos_external_execution_contract::{
     EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA, EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
@@ -135,14 +135,17 @@ pub struct ProbeRequest {
     pub launcher: Vec<u8>,
     /// The challenge's attempt deadline; the owner run never outlives it.
     pub attempt_deadline: lillux::time::MonotonicDeadline,
+    /// The network-input sources the challenge's declared launch shape names.
+    pub network_inputs: LaunchNetworkInputs,
 }
 
 /// The launch shape the challenge declares. This verifier builds exactly one
 /// shape, https with a sandbox allow-list; any other declared shape is refused
 /// by name and nothing is built in its place.
-pub fn require_buildable_shape(challenge: &ConsumerRuntimeChallenge) -> Result<()> {
-    let RemoteVerificationPurpose::ConsumerRuntime { launch_shape, .. } =
-        &challenge.intent.purpose
+pub fn require_buildable_shape(
+    challenge: &ConsumerRuntimeChallenge,
+) -> Result<LaunchNetworkInputs> {
+    let RemoteVerificationPurpose::ConsumerRuntime { launch_shape, .. } = &challenge.intent.purpose
     else {
         bail!("challenge is not a consumer runtime challenge");
     };
@@ -154,7 +157,10 @@ pub fn require_buildable_shape(challenge: &ConsumerRuntimeChallenge) -> Result<(
             ),
         "this verifier builds only the https allow_list launch shape; the challenge declares {launch_shape:?}"
     );
-    Ok(())
+    launch_shape
+        .network_inputs
+        .clone()
+        .context("the declared https launch shape names no network inputs")
 }
 
 /// Read the delivered record and members, then execute.
@@ -163,7 +169,7 @@ pub fn run_probe(
     archive: &Path,
     attempt_deadline: lillux::time::MonotonicDeadline,
 ) -> Result<Vec<u8>> {
-    require_buildable_shape(challenge)?;
+    let network_inputs = require_buildable_shape(challenge)?;
     let record = read_record(archive, challenge)?;
     let (member_digests, supervisor, launcher) = read_members(archive, &record)?;
     execute(&ProbeRequest {
@@ -176,6 +182,7 @@ pub fn run_probe(
         supervisor,
         launcher,
         attempt_deadline,
+        network_inputs,
     })
 }
 
@@ -278,13 +285,13 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         launcher,
         tls_root_der: pki.root_der(),
         port: server.port(),
+        network_inputs: &request.network_inputs,
     })?;
     // 4a. The provider sandbox's real network files, read before the overlay
     // can hide or replace anything. The supervisor must report, in its Ready,
     // the same bytes it sees mounted.
-    let provider_network_inputs = controller::read_provider_network_inputs(
-        ryeos_external_execution_contract::operator_network_inputs(),
-    )?;
+    let provider_network_inputs =
+        controller::read_provider_network_inputs(&request.network_inputs)?;
     let package_bytes = prepared.package.bytes();
     std::fs::create_dir_all(ACTIVATION_ROOT)?;
     std::fs::create_dir_all(OCCURRENCES_ROOT)?;
@@ -343,6 +350,7 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         &prepared.bootstrap_bytes,
         controller_key,
         prepared.expected_ready_inputs.clone(),
+        request.network_inputs.clone(),
         provider_network_inputs,
     )?;
     let assignment = URL_SAFE_NO_PAD.encode(&prepared.signed_assignment);
@@ -505,7 +513,7 @@ mod tests {
         ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
         ConsumerRuntimeVerifierSelection, RestoredVerifierAttemptIntent,
     };
-    use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+    use ryeos_external_execution_contract::runtime_snapshot::{LaunchNetworkInputs, LaunchShape};
 
     fn challenge(shape: LaunchShape) -> ConsumerRuntimeChallenge {
         let hash = "a".repeat(64);
@@ -550,8 +558,15 @@ mod tests {
 
     #[test]
     fn the_https_allow_list_shape_is_built() {
-        let shape = LaunchShape::https_allow_list(["controller.invalid".to_owned()]);
-        require_buildable_shape(&challenge(shape)).unwrap();
+        let mut declared = LaunchNetworkInputs::operator();
+        declared.hosts.source = "/ryeos/test-owned/hosts".into();
+        let shape =
+            LaunchShape::https_allow_list(["controller.invalid".to_owned()], declared.clone());
+        // The bootstrap is built from the declared sources, not a constant.
+        assert_eq!(
+            require_buildable_shape(&challenge(shape)).unwrap(),
+            declared
+        );
     }
 
     #[test]
@@ -567,7 +582,12 @@ mod tests {
         let missing = Path::new("/nonexistent-guest-wire-archive");
         let deadline =
             lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(1000));
-        let error = run_probe(&relay, missing, deadline).unwrap_err().to_string();
-        assert!(error.contains("launch shape") && error.contains("Relay"), "{error}");
+        let error = run_probe(&relay, missing, deadline)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("launch shape") && error.contains("Relay"),
+            "{error}"
+        );
     }
 }

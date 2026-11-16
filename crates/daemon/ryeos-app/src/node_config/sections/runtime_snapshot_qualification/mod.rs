@@ -123,6 +123,9 @@ pub(crate) fn test_launch_shape() -> LaunchShape {
         sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
             hosts: ["controller.invalid".to_owned()].into(),
         },
+        network_inputs: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
+        ),
     }
 }
 

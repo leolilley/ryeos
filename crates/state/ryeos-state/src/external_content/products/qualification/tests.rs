@@ -54,7 +54,15 @@ fn policy() -> ProductQualificationPolicy {
         verifier_parameters: json!({"scope":"bounded_fixture"}),
         consumer_execution_context: None,
         producer_scenarios: BTreeMap::new(),
+        launch_shape: Some(declared_shape()),
     }
+}
+
+pub(crate) fn declared_shape() -> ryeos_external_execution_contract::runtime_snapshot::LaunchShape {
+    ryeos_external_execution_contract::runtime_snapshot::LaunchShape::https_allow_list(
+        ["controller.invalid".to_owned()],
+        ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs::operator(),
+    )
 }
 
 #[test]
@@ -1182,6 +1190,10 @@ pub(crate) fn execution_proof(
         },
         participants: Vec::new(),
         subordinate_attempt: None,
+        launch_shape: Some(ProductQualificationRetainedLaunchShape {
+            shape: declared_shape(),
+            basis: ProductQualificationLaunchShapeBasis::Declared,
+        }),
     }
 }
 
@@ -2755,6 +2767,10 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
         },
     });
     evidence.qualification_worker_transcript_manifest_hash = Some(hash);
+    evidence.execution_proof.launch_shape = Some(ProductQualificationRetainedLaunchShape {
+        shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        basis: ProductQualificationLaunchShapeBasis::Verified,
+    });
     evidence.execution_proof.subordinate_attempt =
         Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote });
     evidence.verifier.result_digest = evidence.result.digest().unwrap();
@@ -2811,6 +2827,10 @@ fn consumer_evidence_requires_exact_q_reference_and_signed_remote_request() {
     );
     let mut no_remote = valid.clone();
     no_remote.execution_proof.subordinate_attempt = None;
+    no_remote.execution_proof.launch_shape = Some(ProductQualificationRetainedLaunchShape {
+        shape: declared_shape(),
+        basis: ProductQualificationLaunchShapeBasis::Declared,
+    });
     assert!(
         no_remote
             .validate()
@@ -3144,6 +3164,10 @@ fn probe_execution_needs_no_q_transcript_without_a_consumer_context() {
             "terminal_observation_sha256": canonical_value_digest(&serde_json::to_value(&remote.terminal_observation).unwrap()).unwrap(),
         },
     });
+    evidence.execution_proof.launch_shape = Some(ProductQualificationRetainedLaunchShape {
+        shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        basis: ProductQualificationLaunchShapeBasis::Verified,
+    });
     evidence.execution_proof.subordinate_attempt =
         Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof: remote });
     evidence.verifier.result_digest = evidence.result.digest().unwrap();
@@ -3276,17 +3300,50 @@ fn remote_verifier_scenario_requires_its_launch_shape_and_commits_it() {
     let mut undeclared = scenario.clone();
     undeclared.launch_shape = None;
     assert!(undeclared.validate().is_err());
-    let mut orphan = scenario.clone();
-    orphan.remote_verifier = None;
-    orphan.remote_probe_input = None;
-    orphan.recipe_ref = Some("config:fixtures/recipe".into());
-    assert!(orphan.validate().is_err());
+    // A local recipe scenario may declare a shape too; its proof retains it
+    // as declared.
+    let mut local = scenario.clone();
+    local.remote_verifier = None;
+    local.remote_probe_input = None;
+    local.recipe_ref = Some("config:fixtures/recipe".into());
+    local.validate().unwrap();
     let mut changed = scenario.clone();
-    changed.launch_shape = Some(LaunchShape::https_allow_list([
-        "controller.invalid".to_owned()
-    ]));
+    changed.launch_shape = Some(declared_shape());
     assert_ne!(
         scenario.remote_verifier_source_digest(None).unwrap(),
         changed.remote_verifier_source_digest(None).unwrap()
     );
+}
+
+#[test]
+fn a_proof_retains_the_shape_its_policy_declares_with_its_basis() {
+    let valid = evidence();
+    valid.validate().unwrap();
+    assert_eq!(
+        valid.retained_launch_shape().unwrap().basis,
+        ProductQualificationLaunchShapeBasis::Declared
+    );
+    // A proof that retained nothing, a different shape, or the wrong basis
+    // contradicts the signed policy.
+    let mut dropped = valid.clone();
+    dropped.execution_proof.launch_shape = None;
+    assert!(dropped.validate().is_err());
+    let mut other = valid.clone();
+    other.execution_proof.launch_shape.as_mut().unwrap().shape =
+        ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all();
+    assert!(other.validate().is_err());
+    let mut verified = valid.clone();
+    verified
+        .execution_proof
+        .launch_shape
+        .as_mut()
+        .unwrap()
+        .basis = ProductQualificationLaunchShapeBasis::Verified;
+    assert!(verified.validate().is_err());
+    // A policy that declares none retains none, and says so.
+    let mut undeclared = valid;
+    undeclared.policy_source.policy.launch_shape = None;
+    undeclared.execution_proof.launch_shape = None;
+    undeclared.validate().unwrap();
+    assert!(undeclared.retained_launch_shape().is_none());
 }

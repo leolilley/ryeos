@@ -493,6 +493,7 @@ pub(crate) mod tests {
             verifier_parameters: json!({"scope":"bounded_fixture"}),
             consumer_execution_context: None,
             producer_scenarios: BTreeMap::new(),
+            launch_shape: None,
         }
     }
 

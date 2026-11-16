@@ -2313,63 +2313,93 @@ fn retain_admitted_runtime_qualification(
     Ok(Some(retained))
 }
 
-/// The shape a binding launches under, as kinds: an HTTPS controller is
-/// dialed by the guest, so its sandbox is created with an egress allow-list
-/// (the lease's, or the controller host); a file-relay controller needs no
-/// guest network, so its sandbox denies all. Hosts are not compared: a
-/// qualification names a host that never resolves and a lease names the real
-/// controller.
-fn binding_launch_shape_kinds(
-    contract: &ExternalPlacementBackendContract,
-) -> (
-    ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
-    ryeos_external_execution_contract::runtime_snapshot::LaunchSandboxNetworkPolicy,
-) {
+/// The shape a binding launches under: an HTTPS controller is dialed by the
+/// guest, so its sandbox is created with an egress allow-list (the lease's, or
+/// the controller host) and it captures the binding's network inputs; a
+/// file-relay controller needs no guest network, so its sandbox denies all.
+/// Hosts are not compared: a qualification names a host that never resolves
+/// and a lease names the real controller.
+struct BindingLaunchShape {
+    controller_transport:
+        ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
+    sandbox_network_policy_kind: &'static str,
+    network_inputs:
+        Option<ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs>,
+}
+
+fn binding_launch_shape(contract: &ExternalPlacementBackendContract) -> BindingLaunchShape {
     use ryeos_external_execution_contract::runtime_snapshot::{
-        LaunchControllerTransport, LaunchSandboxNetworkPolicy,
+        LaunchControllerTransport, LaunchNetworkInput, LaunchNetworkInputs,
+        LaunchSandboxNetworkPolicy,
     };
     match &contract.controller_transport {
-        ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_) => {
-            (
-                LaunchControllerTransport::Https,
-                LaunchSandboxNetworkPolicy::AllowList {
+        ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(http) => {
+            let input = |selection: &ryeos_state::external_execution::transport::ExternalNetworkInputSelection| {
+                LaunchNetworkInput {
+                    source: selection.source.clone(),
+                    max_bytes: selection.max_bytes,
+                }
+            };
+            BindingLaunchShape {
+                controller_transport: LaunchControllerTransport::Https,
+                sandbox_network_policy_kind: LaunchSandboxNetworkPolicy::AllowList {
                     hosts: Default::default(),
-                },
-            )
+                }
+                .kind(),
+                network_inputs: Some(LaunchNetworkInputs {
+                    resolver: input(&http.network_inputs.resolver),
+                    hosts: input(&http.network_inputs.hosts),
+                }),
+            }
         }
         ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => {
-            (
-                LaunchControllerTransport::Relay,
-                LaunchSandboxNetworkPolicy::DenyAll,
-            )
+            BindingLaunchShape {
+                controller_transport: LaunchControllerTransport::Relay,
+                sandbox_network_policy_kind: LaunchSandboxNetworkPolicy::DenyAll.kind(),
+                network_inputs: None,
+            }
         }
     }
 }
 
-/// Refuse a launch whose shape differs from the shape its qualification ran
-/// under, naming the differing field and both values. Only the policy kind is
-/// compared: the launch's hosts are not known here.
+/// Refuse a launch whose shape differs from the shape its qualification
+/// retained, naming the differing field and both values. The policy kind is
+/// compared, not hosts (the launch's hosts are not known here); transport and
+/// the network-input sources are compared exactly. The retained basis
+/// (declared or verified) is record only and never changes the comparison.
 fn compare_launch_shape(
     qualified: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
-    launch: (
-        ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
-        ryeos_external_execution_contract::runtime_snapshot::LaunchSandboxNetworkPolicy,
-    ),
+    launch: &BindingLaunchShape,
 ) -> Result<()> {
     ensure!(
-        qualified.controller_transport == launch.0,
+        qualified.controller_transport == launch.controller_transport,
         "launch shape differs from the qualified shape: launch_shape.controller_transport \
          qualified {:?}, launch {:?}",
         qualified.controller_transport,
-        launch.0
+        launch.controller_transport
     );
     ensure!(
-        qualified.sandbox_network_policy.kind() == launch.1.kind(),
+        qualified.sandbox_network_policy.kind() == launch.sandbox_network_policy_kind,
         "launch shape differs from the qualified shape: launch_shape.sandbox_network_policy \
          qualified {}, launch {}",
         qualified.sandbox_network_policy.kind(),
-        launch.1.kind()
+        launch.sandbox_network_policy_kind
     );
+    match (&qualified.network_inputs, &launch.network_inputs) {
+        (None, None) => {}
+        (Some(qualified), Some(launch)) => {
+            if let Some(difference) = qualified.first_difference(launch) {
+                bail!(
+                    "launch shape differs from the qualified shape: {difference} \
+                     (qualified versus launch)"
+                );
+            }
+        }
+        (qualified, launch) => bail!(
+            "launch shape differs from the qualified shape: launch_shape.network_inputs \
+             qualified {qualified:?}, launch {launch:?}"
+        ),
+    }
     Ok(())
 }
 
@@ -2377,46 +2407,10 @@ fn require_qualified_launch_shape(
     contract: &ExternalPlacementBackendContract,
     evidence: &ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
 ) -> Result<()> {
-    use ryeos_state::external_content::products::qualification::ProductQualificationSubordinateAttemptProof as Attempt;
-    let Some(qualified) = evidence.remote_consumer_launch_shape() else {
-        let kind = match evidence.execution_proof.subordinate_attempt.as_ref() {
-            None => "no subordinate attempt",
-            Some(Attempt::ScopedProducer { .. }) => "scoped producer attempt",
-            Some(Attempt::RemoteConsumer { .. }) => "remote owner measurement attempt",
-        };
-        bail!("the runtime qualification retained no launch shape (proof kind: {kind})");
+    let Some(retained) = evidence.retained_launch_shape() else {
+        bail!("the runtime qualification retained no launch shape");
     };
-    compare_launch_shape(qualified, binding_launch_shape_kinds(contract))?;
-    if let ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(http) =
-        &contract.controller_transport
-    {
-        compare_binding_network_input_sources(&http.network_inputs)?;
-    }
-    Ok(())
-}
-
-/// The qualification verified the supervisor's observed network inputs
-/// against the sources `operator_network_inputs()` names, so a binding that
-/// captures any other source was not what was qualified.
-fn compare_binding_network_input_sources(
-    retained: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
-) -> Result<()> {
-    let expected = ryeos_external_execution_contract::operator_network_inputs();
-    ensure!(
-        retained.resolver.source == expected.resolver_source,
-        "launch shape differs from the qualified shape: launch_shape.network_inputs.resolver \
-         qualified {}, launch {}",
-        expected.resolver_source,
-        retained.resolver.source
-    );
-    ensure!(
-        retained.hosts.source == expected.hosts_source,
-        "launch shape differs from the qualified shape: launch_shape.network_inputs.hosts \
-         qualified {}, launch {}",
-        expected.hosts_source,
-        retained.hosts.source
-    );
-    Ok(())
+    compare_launch_shape(&retained.shape, &binding_launch_shape(contract))
 }
 
 /// Rejoin the session's CAS-owned guest-runtime proof to the exact signed
@@ -11218,35 +11212,41 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    fn relay_launch() -> BindingLaunchShape {
+        use ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport;
+        BindingLaunchShape {
+            controller_transport: LaunchControllerTransport::Relay,
+            sandbox_network_policy_kind: "deny_all",
+            network_inputs: None,
+        }
+    }
+
+    fn https_launch(
+        inputs: ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs,
+    ) -> BindingLaunchShape {
+        use ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport;
+        BindingLaunchShape {
+            controller_transport: LaunchControllerTransport::Https,
+            sandbox_network_policy_kind: "allow_list",
+            network_inputs: Some(inputs),
+        }
+    }
+
     #[test]
     fn a_launch_shape_that_differs_from_the_qualified_one_is_refused_with_both_values() {
         use ryeos_external_execution_contract::runtime_snapshot::{
-            LaunchControllerTransport, LaunchSandboxNetworkPolicy, LaunchShape,
+            LaunchNetworkInputs, LaunchShape,
         };
-        let https = LaunchShape::https_allow_list(["controller.invalid".to_owned()]);
         // Hosts are not compared: the qualification's host never resolves.
-        let allow = || LaunchSandboxNetworkPolicy::AllowList {
-            hosts: Default::default(),
-        };
-        compare_launch_shape(&https, (LaunchControllerTransport::Https, allow())).unwrap();
-        compare_launch_shape(
-            &LaunchShape::relay_deny_all(),
-            (
-                LaunchControllerTransport::Relay,
-                LaunchSandboxNetworkPolicy::DenyAll,
-            ),
-        )
-        .unwrap();
+        let https = LaunchShape::https_allow_list(
+            ["controller.invalid".to_owned()],
+            LaunchNetworkInputs::operator(),
+        );
+        compare_launch_shape(&https, &https_launch(LaunchNetworkInputs::operator())).unwrap();
+        compare_launch_shape(&LaunchShape::relay_deny_all(), &relay_launch()).unwrap();
         let transport = format!(
             "{:#}",
-            compare_launch_shape(
-                &https,
-                (
-                    LaunchControllerTransport::Relay,
-                    LaunchSandboxNetworkPolicy::DenyAll,
-                ),
-            )
-            .unwrap_err()
+            compare_launch_shape(&https, &relay_launch()).unwrap_err()
         );
         assert!(
             transport.contains("launch_shape.controller_transport")
@@ -11254,23 +11254,57 @@ mod tests {
                 && transport.contains("Relay"),
             "{transport}"
         );
-        let policy = format!(
-            "{:#}",
-            compare_launch_shape(
-                &https,
-                (
-                    LaunchControllerTransport::Https,
-                    LaunchSandboxNetworkPolicy::DenyAll,
-                ),
-            )
-            .unwrap_err()
-        );
+        let mut deny = https_launch(LaunchNetworkInputs::operator());
+        deny.sandbox_network_policy_kind = "deny_all";
+        let policy = format!("{:#}", compare_launch_shape(&https, &deny).unwrap_err());
         assert!(
             policy.contains("launch_shape.sandbox_network_policy")
                 && policy.contains("allow_list")
                 && policy.contains("deny_all"),
             "{policy}"
         );
+    }
+
+    #[test]
+    fn a_binding_that_captures_other_network_sources_than_the_proof_retained_is_refused() {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInputs, LaunchShape,
+        };
+        let qualified = LaunchShape::https_allow_list(
+            ["controller.invalid".to_owned()],
+            LaunchNetworkInputs::operator(),
+        );
+        let mut resolver = LaunchNetworkInputs::operator();
+        resolver.resolver.source = "/ryeos/activation/network-resolver".into();
+        let message = format!(
+            "{:#}",
+            compare_launch_shape(&qualified, &https_launch(resolver)).unwrap_err()
+        );
+        assert!(
+            message.contains("launch_shape.network_inputs.resolver.source")
+                && message.contains("/ryeos/activation/network-resolver")
+                && message.contains("/etc/resolv.conf"),
+            "{message}"
+        );
+        let mut hosts = LaunchNetworkInputs::operator();
+        hosts.hosts.source = "/etc/other-hosts".into();
+        let message = format!(
+            "{:#}",
+            compare_launch_shape(&qualified, &https_launch(hosts)).unwrap_err()
+        );
+        assert!(
+            message.contains("launch_shape.network_inputs.hosts.source")
+                && message.contains("/etc/other-hosts")
+                && message.contains("/etc/hosts"),
+            "{message}"
+        );
+        // A proof qualified for other sources than the constant is the truth
+        // the launch compares with, not the constant.
+        let mut own = LaunchNetworkInputs::operator();
+        own.hosts.source = "/etc/other-hosts".into();
+        let own_shape =
+            LaunchShape::https_allow_list(["controller.invalid".to_owned()], own.clone());
+        compare_launch_shape(&own_shape, &https_launch(own)).unwrap();
     }
 
     fn qualified_evidence()
@@ -11288,184 +11322,85 @@ mod tests {
             .evidence
     }
 
-    /// The remote consumer proof a lease qualification retains, stating the
-    /// launch shape its occurrence was created under.
-    fn remote_consumer_proof(
-        launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
-    ) -> ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof
-    {
-        use ryeos_external_execution_contract::restored_runtime_measurement::{
-            ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
-            ConsumerRuntimeVerifierSelection, ConsumerVerifierAdapterObservation,
-            RemoteVerificationPurpose, RestoredVerifierAttemptIntent,
+    fn with_declared_shape(
+        mut evidence: ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
+        shape: Option<ryeos_external_execution_contract::runtime_snapshot::LaunchShape>,
+    ) -> ryeos_state::external_content::products::qualification::ProductQualificationEvidence {
+        use ryeos_state::external_content::products::qualification::{
+            ProductQualificationLaunchShapeBasis, ProductQualificationRetainedLaunchShape,
         };
-        use ryeos_external_execution_contract::runtime_snapshot::{
-            RuntimeSnapshotQualificationTerminalObservation,
-            RuntimeSnapshotQualificationTerminationIntent,
-        };
-        let hash = |c: char| c.to_string().repeat(64);
-        ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof {
-            launch_owner_digest: hash('b'),
-            consumer_input_blob_hash: hash('c'),
-            intent: RestoredVerifierAttemptIntent {
-                schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
-                operation_id: hash('1'),
-                qualification_operation_id: hash('1'),
-                restored_occurrence_id: "fixture-occurrence".into(),
-                verifier_artifact_hash: hash('2'),
-                upload_sha256: hash('3'),
-                upload_bytes: 1,
-                attempt_deadline_ms: 1000,
-                purpose: RemoteVerificationPurpose::ConsumerRuntime {
-                    coordinate: ConsumerRuntimeVerificationCoordinate {
-                        schema: 1,
-                        accepted_root_id: "root".into(),
-                        accepted_capsule_hash: hash('4'),
-                        qualification_purpose_digest: hash('4'),
-                        scenario_id: "guest_wire".into(),
-                        scenario_source_digest: hash('5'),
-                        subject_digest: hash('6'),
-                        use_digest: hash('7'),
-                        prerequisite_measurement_attempt_id: hash('8'),
-                        prerequisite_measurement_observation_digest: hash('9'),
-                    },
-                    nonce_hex: hash('a'),
-                    guest_runtime_manifest_hash: hash('b'),
-                    launch_shape,
-                },
-            },
-            selection: ConsumerRuntimeVerifierSelection {
-                scenario_source_digest: hash('5'),
-                verifier_artifact_hash: hash('2'),
-                archive_budget: ConsumerArchiveBudget::new(8, 1024, 4096).unwrap(),
-            },
-            observation: ConsumerVerifierAdapterObservation {
-                schema: 1,
-                operation_id: hash('1'),
-                occurrence_id: "fixture-occurrence".into(),
-                verifier_artifact_hash: hash('2'),
-                challenge_digest: hash('d'),
-                upload_token_execution_id: "exe-upload".into(),
-                run_token_execution_id: "exe-run".into(),
-                upload_response_sha256: hash('c'),
-                run_stream_sha256: hash('d'),
-                evidence_sha256: hash('e'),
-                evidence_bytes: 1,
-                contact_deadline_exceeded: false,
-            },
-            termination_intent: RuntimeSnapshotQualificationTerminationIntent {
-                schema: 1,
-                operation_id: hash('1'),
-                qualification_operation_id: hash('1'),
-                occurrence_id: "fixture-occurrence".into(),
-                owner_principal: "owner".into(),
-                provider_id: "provider".into(),
-                provider_spec_digest: hash('f'),
-                attempt_deadline_ms: 2000,
-            },
-            terminal_observation: RuntimeSnapshotQualificationTerminalObservation {
-                schema: 1,
-                operation_id: hash('1'),
-                occurrence_id: "fixture-occurrence".into(),
-                provider_response_sha256: hash('a'),
-                terminated_at: "2026-10-01T00:00:00Z".into(),
-                contact_deadline_exceeded: false,
-            },
-        }
+        evidence.policy_source.policy.launch_shape = shape.clone();
+        evidence.execution_proof.launch_shape =
+            shape.map(|shape| ProductQualificationRetainedLaunchShape {
+                shape,
+                basis: ProductQualificationLaunchShapeBasis::Declared,
+            });
+        evidence
     }
 
     #[test]
-    fn a_proof_that_retained_no_launch_shape_is_refused_naming_its_kind() {
+    fn a_proof_that_retained_no_launch_shape_is_refused() {
         let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
         let contract = binding.backend_contract();
-        let evidence = qualified_evidence();
+        let evidence = with_declared_shape(qualified_evidence(), None);
         assert!(evidence.execution_proof.subordinate_attempt.is_none());
         let error = require_qualified_launch_shape(&contract, &evidence).unwrap_err();
         let message = format!("{error:#}");
         assert!(
-            message.contains("the runtime qualification retained no launch shape")
-                && message.contains("no subordinate attempt"),
+            message.contains("the runtime qualification retained no launch shape"),
             "{message}"
         );
     }
 
     #[test]
     fn launch_admission_compares_the_shape_the_proof_retained_with_the_binding() {
-        use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
-        use ryeos_state::external_content::products::qualification::ProductQualificationSubordinateAttemptProof;
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInputs, LaunchShape,
+        };
         let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
         let contract = binding.backend_contract();
-        let root = tempfile::tempdir().unwrap();
-        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
-        let mut evidence = qualified_evidence();
+        // A declared shape that states the binding's own shape admits it; the
+        // basis never changes the comparison.
+        let declared = with_declared_shape(
+            qualified_evidence(),
+            Some(LaunchShape::https_allow_list(
+                ["controller.invalid".to_owned()],
+                LaunchNetworkInputs::operator(),
+            )),
+        );
+        require_qualified_launch_shape(&contract, &declared).unwrap();
         // The binding's controller is https with a guest network allow-list;
         // a proof qualified under the relay shape does not qualify it.
-        evidence.execution_proof.subordinate_attempt = Some(
-            ProductQualificationSubordinateAttemptProof::RemoteConsumer {
-                proof: remote_consumer_proof(LaunchShape::relay_deny_all()),
-            },
+        let relay = with_declared_shape(qualified_evidence(), Some(LaunchShape::relay_deny_all()));
+        let message = format!(
+            "{:#}",
+            require_qualified_launch_shape(&contract, &relay).unwrap_err()
         );
-        let error = retain_admitted_runtime_qualification(
-            &state,
-            &contract,
-            binding.digest(),
-            &format!("fp:{}", "7".repeat(64)),
-            "1".repeat(64),
-            evidence,
-            None,
-        )
-        .unwrap_err();
-        let message = format!("{error:#}");
         assert!(
             message.contains("launch_shape.controller_transport")
                 && message.contains("Relay")
                 && message.contains("Https"),
             "{message}"
         );
-    }
-
-    #[test]
-    fn a_binding_that_captures_other_network_sources_than_the_contract_names_is_refused() {
-        use ryeos_state::external_execution::transport::{
-            ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
-        };
-        let expected = ryeos_external_execution_contract::operator_network_inputs();
-        let selection = |source: &str| ExternalNetworkInputSelection {
-            source: source.to_owned(),
-            max_bytes: 4096,
-        };
-        compare_binding_network_input_sources(&ExternalNetworkInputPolicy {
-            resolver: selection(expected.resolver_source),
-            hosts: selection(expected.hosts_source),
-        })
-        .unwrap();
-        let resolver = format!(
+        // A proof qualified for other sources than the binding captures.
+        let mut other = LaunchNetworkInputs::operator();
+        other.resolver.source = "/etc/other-resolv.conf".into();
+        let sources = with_declared_shape(
+            qualified_evidence(),
+            Some(LaunchShape::https_allow_list(
+                ["controller.invalid".to_owned()],
+                other,
+            )),
+        );
+        let message = format!(
             "{:#}",
-            compare_binding_network_input_sources(&ExternalNetworkInputPolicy {
-                resolver: selection("/ryeos/activation/network-resolver"),
-                hosts: selection(expected.hosts_source),
-            })
-            .unwrap_err()
+            require_qualified_launch_shape(&contract, &sources).unwrap_err()
         );
         assert!(
-            resolver.contains("launch_shape.network_inputs.resolver")
-                && resolver.contains("/ryeos/activation/network-resolver")
-                && resolver.contains(expected.resolver_source),
-            "{resolver}"
-        );
-        let hosts = format!(
-            "{:#}",
-            compare_binding_network_input_sources(&ExternalNetworkInputPolicy {
-                resolver: selection(expected.resolver_source),
-                hosts: selection("/etc/other-hosts"),
-            })
-            .unwrap_err()
-        );
-        assert!(
-            hosts.contains("launch_shape.network_inputs.hosts")
-                && hosts.contains("/etc/other-hosts")
-                && hosts.contains(expected.hosts_source),
-            "{hosts}"
+            message.contains("launch_shape.network_inputs.resolver.source")
+                && message.contains("/etc/other-resolv.conf")
+                && message.contains("/etc/resolv.conf"),
+            "{message}"
         );
     }
 

@@ -591,6 +591,7 @@ mod tests {
                     .into_iter()
                     .map(|(name, scenario)| (name.to_owned(), scenario))
                     .collect(),
+                launch_shape: None,
             },
         }
     }

@@ -34,7 +34,7 @@ pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualificati
 // coordinate cannot be replaced by v15. Reissuance requires a fresh
 // coordinate or separately recovered node state; this decoder does not adopt
 // predecessor testimony.
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v15";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v16";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -104,6 +104,12 @@ pub struct ProductQualificationPolicy {
     /// to launch: the daemon must resolve and admit a typed Bundle recipe.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub producer_scenarios: BTreeMap<String, ProductQualificationProducerScenario>,
+    /// The launch shape a verifier with no remote consumer attempt declares
+    /// its runtime qualified for. The proof retains it as declared, never as
+    /// measured. A remote consumer qualification takes its shape from its
+    /// scenario instead, so a policy that has remote scenarios declares none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_shape: Option<ryeos_external_execution_contract::runtime_snapshot::LaunchShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -543,8 +549,9 @@ pub struct ProductQualificationProducerScenario {
     /// never interprets it. Exclusive with `consumer_worker_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_probe_input: Option<Value>,
-    /// The launch shape a remote verifier scenario requires of its qualified
-    /// occurrence. Present exactly when `remote_verifier` is.
+    /// The launch shape a scenario requires of its qualified occurrence.
+    /// Required with `remote_verifier`; a local recipe scenario may declare
+    /// one too, and its proof then retains it as declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_shape: Option<ryeos_external_execution_contract::runtime_snapshot::LaunchShape>,
 }
@@ -787,9 +794,7 @@ impl ProductQualificationProducerScenario {
             (Some(_), None) => {
                 bail!("qualification remote verifier scenario declares no launch shape")
             }
-            (None, Some(_)) => {
-                bail!("qualification scenario declares a launch shape without a remote verifier")
-            }
+            (None, Some(shape)) => shape.validate()?,
         }
         if let Some(verifier) = &self.remote_verifier {
             verifier.validate()?;
@@ -903,6 +908,9 @@ impl ProductQualificationPolicy {
                 )
             }
         }
+        if let Some(shape) = &self.launch_shape {
+            shape.validate()?;
+        }
         if self.producer_scenarios.len() > MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
             bail!("qualification producer scenario count exceeds bound");
         }
@@ -936,6 +944,55 @@ impl ProductQualificationPolicy {
             MAX_PRODUCT_QUALIFICATION_POLICY_BYTES,
             "qualification policy",
         )
+    }
+
+    /// The launch shape a qualification run under this policy retains. A
+    /// remote consumer attempt keeps the shape it ran under, which its signed
+    /// scenario must declare (`Verified`); any other run keeps the shape its
+    /// scoped scenario or the policy declares (`Declared`), or none.
+    pub fn retained_launch_shape_for(
+        &self,
+        subordinate: Option<&ProductQualificationSubordinateAttemptProof>,
+    ) -> anyhow::Result<Option<ProductQualificationRetainedLaunchShape>> {
+        use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
+        let declared = |shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape| {
+            ProductQualificationRetainedLaunchShape {
+                shape,
+                basis: ProductQualificationLaunchShapeBasis::Declared,
+            }
+        };
+        Ok(match subordinate {
+            Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof }) => {
+                let RemoteVerificationPurpose::ConsumerRuntime {
+                    coordinate,
+                    launch_shape,
+                    ..
+                } = &proof.intent.purpose
+                else {
+                    bail!("remote qualification proof has no consumer coordinate");
+                };
+                let scenario = self
+                    .producer_scenarios
+                    .get(&coordinate.scenario_id)
+                    .context("remote qualification proof has no signed producer scenario")?;
+                if scenario.launch_shape.as_ref() != Some(launch_shape) {
+                    bail!(
+                        "remote qualification attempt ran under a shape its signed scenario does not declare"
+                    );
+                }
+                Some(ProductQualificationRetainedLaunchShape {
+                    shape: launch_shape.clone(),
+                    basis: ProductQualificationLaunchShapeBasis::Verified,
+                })
+            }
+            Some(ProductQualificationSubordinateAttemptProof::ScopedProducer { proof }) => self
+                .producer_scenarios
+                .get(&proof.scenario_id)
+                .and_then(|scenario| scenario.launch_shape.clone())
+                .or_else(|| self.launch_shape.clone())
+                .map(declared),
+            None => self.launch_shape.clone().map(declared),
+        })
     }
 
     pub fn admitted_parameters_digest(&self) -> anyhow::Result<String> {
@@ -1454,6 +1511,25 @@ impl ProductQualificationSubordinateAttemptProof {
     }
 }
 
+/// How a retained launch shape came to be: stated by the signed policy
+/// (`Declared`, a local qualification that built nothing under it) or
+/// observed and verified equal by an attested remote verifier (`Verified`).
+/// Launch compares both the same way; the basis is record, never a claim a
+/// declared shape was measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductQualificationLaunchShapeBasis {
+    Declared,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationRetainedLaunchShape {
+    pub shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    pub basis: ProductQualificationLaunchShapeBasis,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationExecutionProof {
@@ -1465,6 +1541,11 @@ pub struct ProductQualificationExecutionProof {
     /// Required nullable and exclusive with managed child participants.
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub subordinate_attempt: Option<ProductQualificationSubordinateAttemptProof>,
+    /// The launch shape this qualification stands for. Required nullable:
+    /// absent only when neither the policy nor the scenario declared one, and
+    /// launch refuses such a proof.
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub launch_shape: Option<ProductQualificationRetainedLaunchShape>,
 }
 
 impl ProductQualificationExecutionProof {
@@ -1497,6 +1578,9 @@ impl ProductQualificationExecutionProof {
         }
         if self.participants.len() > MAX_PRODUCT_QUALIFICATION_PARTICIPANTS {
             bail!("qualification execution proof exceeds participant bound");
+        }
+        if let Some(retained) = &self.launch_shape {
+            retained.shape.validate()?;
         }
         if let Some(attempt) = &self.subordinate_attempt {
             match attempt {
@@ -1575,24 +1659,10 @@ impl ProductQualificationOriginHoldings {
 }
 
 impl ProductQualificationEvidence {
-    /// The launch shape the verifier's remote occurrence was created under,
-    /// as the daemon retained it in the verifier attempt intent. Absent when
-    /// the qualification ran no remote consumer attempt.
-    pub fn remote_consumer_launch_shape(
-        &self,
-    ) -> Option<&ryeos_external_execution_contract::runtime_snapshot::LaunchShape> {
-        use ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose;
-        match self.execution_proof.subordinate_attempt.as_ref()? {
-            ProductQualificationSubordinateAttemptProof::RemoteConsumer { proof } => {
-                match &proof.intent.purpose {
-                    RemoteVerificationPurpose::ConsumerRuntime { launch_shape, .. } => {
-                        Some(launch_shape)
-                    }
-                    RemoteVerificationPurpose::OwnerMeasurement { .. } => None,
-                }
-            }
-            ProductQualificationSubordinateAttemptProof::ScopedProducer { .. } => None,
-        }
+    /// The launch shape this qualification retained, with its basis. Absent
+    /// when the qualification declared none.
+    pub fn retained_launch_shape(&self) -> Option<&ProductQualificationRetainedLaunchShape> {
+        self.execution_proof.launch_shape.as_ref()
     }
 }
 
@@ -1988,6 +2058,7 @@ pub(crate) fn validate_qualification_execution(
     policy.validate()?;
     verifier.validate()?;
     proof.validate_for(verifier)?;
+    require_retained_launch_shape(&policy.policy, proof)?;
     if policy.policy.consumer_execution_context.is_some() {
         if !matches!(
             proof.subordinate_attempt,
@@ -2082,6 +2153,18 @@ pub(crate) fn validate_qualification_execution(
     {
         bail!(
             "qualification testimony contradicts its policy, admitted subject or terminal result"
+        );
+    }
+    Ok(())
+}
+
+fn require_retained_launch_shape(
+    policy: &ProductQualificationPolicy,
+    proof: &ProductQualificationExecutionProof,
+) -> anyhow::Result<()> {
+    if proof.launch_shape != policy.retained_launch_shape_for(proof.subordinate_attempt.as_ref())? {
+        bail!(
+            "qualification retained launch shape differs from the shape its signed policy declares"
         );
     }
     Ok(())

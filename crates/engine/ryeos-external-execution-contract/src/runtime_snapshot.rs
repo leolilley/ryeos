@@ -81,40 +81,142 @@ impl LaunchSandboxNetworkPolicy {
     }
 }
 
+/// One target-local network-input file a launch captures, and its byte bound.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchNetworkInput {
+    pub source: String,
+    pub max_bytes: u64,
+}
+
+impl LaunchNetworkInput {
+    pub const MAX_BYTES: u64 = 64 * 1024;
+
+    fn validate(&self, label: &str) -> Result<()> {
+        ensure!(
+            self.source.starts_with('/')
+                && self.source.len() <= 4096
+                && !self.source.contains('\0')
+                && self.source[1..]
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."),
+            "launch shape {label} source is not a lexical absolute file path"
+        );
+        ensure!(
+            (1..=Self::MAX_BYTES).contains(&self.max_bytes),
+            "launch shape {label} byte bound is invalid"
+        );
+        Ok(())
+    }
+}
+
+/// The resolver and hosts sources a launch captures. The same two files a
+/// binding's network-input policy names.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchNetworkInputs {
+    pub resolver: LaunchNetworkInput,
+    pub hosts: LaunchNetworkInput,
+}
+
+impl LaunchNetworkInputs {
+    /// The sources an operator binding captures, from the one definition both
+    /// binding composition and qualification declare.
+    pub fn operator() -> Self {
+        let sources = crate::operator_network_inputs();
+        Self {
+            resolver: LaunchNetworkInput {
+                source: sources.resolver_source.into(),
+                max_bytes: sources.resolver_max_bytes,
+            },
+            hosts: LaunchNetworkInput {
+                source: sources.hosts_source.into(),
+                max_bytes: sources.hosts_max_bytes,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.resolver.validate("network_inputs.resolver")?;
+        self.hosts.validate("network_inputs.hosts")
+    }
+
+    /// The first differing field with both values (`self` is the qualified
+    /// side), or none.
+    pub fn first_difference(&self, other: &Self) -> Option<String> {
+        for (label, qualified, launch) in [
+            ("resolver", &self.resolver, &other.resolver),
+            ("hosts", &self.hosts, &other.hosts),
+        ] {
+            if qualified.source != launch.source {
+                return Some(format!(
+                    "launch_shape.network_inputs.{label}.source: {} versus {}",
+                    qualified.source, launch.source
+                ));
+            }
+            if qualified.max_bytes != launch.max_bytes {
+                return Some(format!(
+                    "launch_shape.network_inputs.{label}.max_bytes: {} versus {}",
+                    qualified.max_bytes, launch.max_bytes
+                ));
+            }
+        }
+        None
+    }
+}
+
 /// The launch shape a qualification occurrence is created under and a
-/// verifier runs under: how the controller is reached and what the sandbox may
-/// reach. Declared as signed data, retained in typed intents, observed by the
-/// guest, and compared with the shape a lease will launch under.
+/// verifier runs under: how the controller is reached, what the sandbox may
+/// reach, and which network-input files are captured. Declared as signed
+/// data, retained in typed intents and proofs, and compared with the shape a
+/// lease will launch under. An https controller captures network inputs; a
+/// relay controller has none.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchShape {
     pub controller_transport: LaunchControllerTransport,
     pub sandbox_network_policy: LaunchSandboxNetworkPolicy,
+    pub network_inputs: Option<LaunchNetworkInputs>,
 }
 
 impl LaunchShape {
     /// The consumer-relay shape: controller reached through the relay, sandbox
-    /// network denied.
+    /// network denied, no network inputs.
     pub fn relay_deny_all() -> Self {
         Self {
             controller_transport: LaunchControllerTransport::Relay,
             sandbox_network_policy: LaunchSandboxNetworkPolicy::DenyAll,
+            network_inputs: None,
         }
     }
 
     /// The lease shape: controller reached over https, sandbox allowed to
-    /// reach exactly `hosts`.
-    pub fn https_allow_list(hosts: impl IntoIterator<Item = String>) -> Self {
+    /// reach exactly `hosts`, capturing `network_inputs`.
+    pub fn https_allow_list(
+        hosts: impl IntoIterator<Item = String>,
+        network_inputs: LaunchNetworkInputs,
+    ) -> Self {
         Self {
             controller_transport: LaunchControllerTransport::Https,
             sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
                 hosts: hosts.into_iter().collect(),
             },
+            network_inputs: Some(network_inputs),
         }
     }
 
     pub fn validate(&self) -> Result<()> {
-        self.sandbox_network_policy.validate()
+        self.sandbox_network_policy.validate()?;
+        match (self.controller_transport, &self.network_inputs) {
+            (LaunchControllerTransport::Https, Some(inputs)) => inputs.validate(),
+            (LaunchControllerTransport::Https, None) => {
+                anyhow::bail!("an https launch shape declares its network inputs")
+            }
+            (LaunchControllerTransport::Relay, None) => Ok(()),
+            (LaunchControllerTransport::Relay, Some(_)) => {
+                anyhow::bail!("a relay launch shape captures no network inputs")
+            }
+        }
     }
 
     /// The first field that differs from `other`, with both values, or none.
@@ -131,7 +233,13 @@ impl LaunchShape {
                 self.sandbox_network_policy, other.sandbox_network_policy
             ));
         }
-        None
+        match (&self.network_inputs, &other.network_inputs) {
+            (Some(left), Some(right)) => left.first_difference(right),
+            (None, None) => None,
+            (left, right) => Some(format!(
+                "launch_shape.network_inputs: {left:?} versus {right:?}"
+            )),
+        }
     }
 }
 
@@ -1241,6 +1349,7 @@ mod tests {
             sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
                 hosts: BTreeSet::from(["controller.invalid".to_owned()]),
             },
+            network_inputs: Some(LaunchNetworkInputs::operator()),
         }
     }
 
@@ -1252,6 +1361,7 @@ mod tests {
         let relay = LaunchShape {
             controller_transport: LaunchControllerTransport::Relay,
             sandbox_network_policy: LaunchSandboxNetworkPolicy::DenyAll,
+            network_inputs: None,
         };
         let text = shape.first_difference(&relay).unwrap();
         assert!(
@@ -1263,6 +1373,18 @@ mod tests {
         other.sandbox_network_policy = LaunchSandboxNetworkPolicy::DenyAll;
         let text = shape.first_difference(&other).unwrap();
         assert!(text.contains("sandbox_network_policy") && text.contains("DenyAll"));
+        let mut moved = shape.clone();
+        moved.network_inputs.as_mut().unwrap().hosts.source = "/etc/other-hosts".into();
+        let text = shape.first_difference(&moved).unwrap();
+        assert!(
+            text.contains("network_inputs.hosts.source")
+                && text.contains("/etc/hosts")
+                && text.contains("/etc/other-hosts"),
+            "{text}"
+        );
+        let mut shapeless = shape.clone();
+        shapeless.network_inputs = None;
+        assert!(shapeless.validate().is_err());
         for hosts in [
             BTreeSet::new(),
             BTreeSet::from(["Upper.example".to_owned()]),
