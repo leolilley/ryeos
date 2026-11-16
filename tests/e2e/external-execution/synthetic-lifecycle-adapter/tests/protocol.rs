@@ -3701,6 +3701,21 @@ fn production_tls_lease_shorter_than_the_session_deadline_is_refused() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::LeaseTooShort);
 }
 
+/// A lease guarantee name no provider spec of this adapter derives.
+const UNDERIVED_LEASE_GUARANTEE: &str = "lease.fenced_exclusive";
+
+/// A profile that requires a lease guarantee the synthetic spec does not
+/// derive is refused at launch, naming that entry, before any guest runs.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn production_tls_lease_guarantee_the_spec_does_not_derive_is_refused() {
+    run_production_tls_candidate_with_test_stack(
+        None,
+        false,
+        PublicationScenario::LeaseUnmetGuarantee,
+    );
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn production_tls_stale_base_refuses_candidate_publication() {
@@ -3735,7 +3750,9 @@ fn lease_lane_budget(
 ) -> Option<ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget> {
     matches!(
         publication,
-        PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+        PublicationScenario::Lease
+            | PublicationScenario::LeaseTooShort
+            | PublicationScenario::LeaseUnmetGuarantee
     )
     .then_some(
         ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
@@ -3770,7 +3787,10 @@ fn lease_lane_environment_names() -> Vec<String> {
 /// lease time after Ready (journal window 60+60+900+60+120 = 1200 s); every other
 /// scenario keeps the fixture's 60 s.
 fn lease_lane_binding_timeout_seconds(publication: PublicationScenario) -> u32 {
-    if publication == PublicationScenario::Lease {
+    if matches!(
+        publication,
+        PublicationScenario::Lease | PublicationScenario::LeaseUnmetGuarantee
+    ) {
         900
     } else {
         60
@@ -3791,7 +3811,9 @@ impl LeaseLaneController {
     fn new(publication: PublicationScenario) -> Self {
         let inputs = matches!(
             publication,
-            PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+            PublicationScenario::Lease
+                | PublicationScenario::LeaseTooShort
+                | PublicationScenario::LeaseUnmetGuarantee
         )
         .then(|| {
             // Not under `/tmp`: the guest owner hides its old `/tmp`, and the
@@ -3899,6 +3921,10 @@ enum PublicationScenario {
     /// Publish, with the session placed on a remote lease: the worker profile
     /// carries the real codex placement requirements.
     Lease,
+    /// The lease lane at the lease binding's lifetime, with the worker
+    /// profile also requiring a lease guarantee the synthetic spec does not
+    /// derive: launch refuses naming it, before any guest runs.
+    LeaseUnmetGuarantee,
     StaleBase,
     PublicDispatch,
 }
@@ -4208,7 +4234,9 @@ async fn run_production_tls_candidate(
     install_active_test_credential_profile(&state);
     let environment_names: Vec<String> = if matches!(
         publication,
-        PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+        PublicationScenario::Lease
+            | PublicationScenario::LeaseTooShort
+            | PublicationScenario::LeaseUnmetGuarantee
     ) {
         lease_lane_environment_names()
     } else {
@@ -4290,10 +4318,22 @@ async fn run_production_tls_candidate(
         command_tools_manifest_hash,
         matches!(
             publication,
-            PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+            PublicationScenario::Lease
+            | PublicationScenario::LeaseTooShort
+            | PublicationScenario::LeaseUnmetGuarantee
         )
         .then(|| {
-            candidate_authoring::real_codex_placement_requires(fixture_repository_source_root())
+            let mut requires =
+                candidate_authoring::real_codex_placement_requires(fixture_repository_source_root());
+            if publication == PublicationScenario::LeaseUnmetGuarantee {
+                let entries = requires["lease"].as_array_mut().unwrap();
+                entries.push(
+                    serde_json::json!({"name": UNDERIVED_LEASE_GUARANTEE, "accept": ["provider_attested"]}),
+                );
+                // `requires.lease` entries must be sorted by name.
+                entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            }
+            requires
         }),
     );
     let qualification_inputs = prepare_runtime_qualification_inputs(
@@ -5410,7 +5450,22 @@ async fn run_production_tls_candidate(
     })
     .await
     .unwrap();
-    let started = if publication == PublicationScenario::LeaseTooShort {
+    let started = if publication == PublicationScenario::LeaseUnmetGuarantee {
+        let refusal = format!(
+            "{:#}",
+            started.expect_err("a lease guarantee the spec does not derive must be refused")
+        );
+        assert!(
+            refusal.contains(UNDERIVED_LEASE_GUARANTEE),
+            "the refusal does not name the unmet entry: {refusal}"
+        );
+        stop.store(true, Ordering::Release);
+        controller.join().unwrap();
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
+        uds_server.abort();
+        let _ = uds_server.await;
+        return;
+    } else if publication == PublicationScenario::LeaseTooShort {
         let refusal = format!(
             "{:#}",
             started.expect_err("a 60 s lease cannot outlive the session deadline")
