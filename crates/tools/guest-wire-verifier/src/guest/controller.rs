@@ -37,9 +37,10 @@ pub struct ProviderNetworkInput {
 /// Read the provider sandbox's real files at the sources every lease binding
 /// captures (`operator_network_inputs()`), each within its byte bound. A file
 /// that cannot be read is an error; nothing stands in for it.
-pub fn read_provider_network_inputs() -> Result<Vec<ProviderNetworkInput>> {
+pub fn read_provider_network_inputs(
+    sources: ryeos_external_execution_contract::OperatorNetworkInputSources,
+) -> Result<Vec<ProviderNetworkInput>> {
     use std::io::Read as _;
-    let sources = operator_network_inputs();
     [
         (sources.resolver_source, sources.resolver_max_bytes),
         (sources.hosts_source, sources.hosts_max_bytes),
@@ -552,6 +553,18 @@ mod tests {
                 sha256: read.sha256.clone(),
             })
             .collect()
+    }
+
+    #[test]
+    fn an_unreadable_provider_network_file_is_refused_naming_its_source() {
+        let mut sources = operator_network_inputs();
+        sources.hosts_source = "/nonexistent-provider-network-file";
+        let error = format!("{:#}", read_provider_network_inputs(sources).unwrap_err());
+        assert!(
+            error.contains("/nonexistent-provider-network-file")
+                && error.contains("cannot be read"),
+            "{error}"
+        );
     }
 
     #[test]

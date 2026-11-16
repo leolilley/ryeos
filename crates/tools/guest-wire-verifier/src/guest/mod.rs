@@ -258,7 +258,9 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     // 4a. The provider sandbox's real network files, read before the overlay
     // can hide or replace anything. The supervisor must report, in its Ready,
     // the same bytes it sees mounted.
-    let provider_network_inputs = controller::read_provider_network_inputs()?;
+    let provider_network_inputs = controller::read_provider_network_inputs(
+        ryeos_external_execution_contract::operator_network_inputs(),
+    )?;
     let package_bytes = prepared.package.bytes();
     std::fs::create_dir_all(ACTIVATION_ROOT)?;
     std::fs::create_dir_all(OCCURRENCES_ROOT)?;
