@@ -502,6 +502,9 @@ fn base_snapshot(
     Ok((base, measurement))
 }
 
+/// The rehearsal's own readiness budget; it takes no lease, so no lease reads it.
+const REHEARSAL_READY_TIMEOUT_MS: u64 = 60_000;
+
 /// A structured-session program over the rehearsal's product. The relay
 /// carrier is admitted only for session programs; the program's own
 /// qualification identities are rehearsal-only.
@@ -571,7 +574,7 @@ fn rehearsal_program(
             workload_class: "guest-start-rehearsal".into(),
             lease: Vec::new(),
             guest: Vec::new(),
-            ready_timeout_ms: 60_000,
+            ready_timeout_ms: REHEARSAL_READY_TIMEOUT_MS,
         },
     };
     program.validate()?;
