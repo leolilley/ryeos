@@ -2233,6 +2233,76 @@ pub(crate) mod tests {
         assert!(error.contains("no observation timeout fits"), "{error}");
     }
 
+    /// The recorded P17 refusal: a node window of 4860 s against a binding
+    /// whose lifetime is contact 60 + 2 x observation 480 + execution 3600 +
+    /// cleanup 300 = 4920 s. Compose refuses it, naming both numbers and the
+    /// 450 s observation timeout the window funds.
+    #[test]
+    fn compose_refuses_the_recorded_journal_window_of_4860000_against_4920000() {
+        let mut node = stopped_node();
+        node.policy = node_policy(4_860_000, Some(lease_budget()));
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = leased_program();
+        request.limits = ComposeLimits {
+            timeout_seconds: 3_600,
+            contact_timeout_seconds: 60,
+            observation_timeout_seconds: 480,
+            cleanup_timeout_seconds: 300,
+            ..ComposeLimits::default()
+        };
+        let (result, published) =
+            compose_over(&node, request, backend_with(full_capabilities(), true));
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains("operation window of 4860000 ms is shorter than the occurrence lifetime of 4920000 ms")
+                && error.contains(
+                    "the largest observation timeout this window funds is 450 s, the binding names 480 s"
+                ),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
+    /// The recorded lease refusal for the `codex.authoring.remote` workload
+    /// class: a guarantee its adapter's spec does not derive refuses compose,
+    /// naming the workload class and the missing guarantee. The class is a
+    /// fixture value here, so the name is asserted as the program carries it.
+    #[test]
+    fn compose_refusal_of_an_unmet_lease_requirement_names_the_workload_and_the_guarantee() {
+        const UNDERIVED: &str = "lease.fenced_exclusive";
+        let spec = installed::DerivedLeaseSpec::new(vec![
+            installed::SpecOperation::CreateOnceBoundToReservation,
+            installed::SpecOperation::ObserveExactOccurrence,
+        ]);
+        let backend = installed::CoordinateOnlyBackend::shared_with_lease_spec(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            full_capabilities(),
+            spec,
+        );
+        let mut program = leased_program();
+        program.placement.workload_class = "codex.authoring.remote".into();
+        program.placement.lease = vec![
+            serde_json::from_value(serde_json::json!({
+                "name": UNDERIVED, "accept": ["provider_attested"]
+            }))
+            .unwrap(),
+        ];
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = program;
+        let (result, published) = compose_over(&node, request, backend);
+        let error = format!("{:#}", refusal(result));
+        assert!(
+            error.contains(UNDERIVED) && error.contains("codex.authoring.remote"),
+            "{error}"
+        );
+        assert!(!published);
+    }
+
     /// A binding's network inputs are the contract crate's one definition, and
     /// the transport compose selects carries exactly those values.
     #[test]
