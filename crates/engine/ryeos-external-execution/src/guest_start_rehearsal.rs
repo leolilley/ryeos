@@ -1575,7 +1575,7 @@ fn host(work_path: &Path) -> Result<GuestStartRehearsalOutcome> {
     let spec = enclosure_spec(uid, gid, plan.package.framed_bytes);
     let mut outcome = None;
     let entered = lillux::root_enclosure::run_in_root_enclosure(&spec, || {
-        let laid_out = lay_out(&plan, &runtime, &import, &package);
+        let laid_out = lay_out(&plan.runtime_manifest_hash, &runtime, &import, &package);
         match plan.mode {
             HostMode::AttachProbe => {
                 let result = laid_out.and_then(|()| observe_owner(&plan));
@@ -1605,7 +1605,7 @@ fn host(work_path: &Path) -> Result<GuestStartRehearsalOutcome> {
 
 /// Lay out `/ryeos` as a sandbox host would.
 fn lay_out(
-    plan: &HostPlan,
+    runtime_manifest_hash: &str,
     runtime: &lillux::PinnedDirectory,
     import: &lillux::PinnedRegularFile,
     package: &lillux::PinnedRegularFile,
@@ -1638,7 +1638,7 @@ fn lay_out(
     // A host delivers the namespace and runtime roots administrator-private.
     installed.set_mode(0o750)?;
     ensure!(
-        ObservedGuestRuntime::observe(&installed)?.manifest_hash() == plan.runtime_manifest_hash,
+        ObservedGuestRuntime::observe(&installed)?.manifest_hash() == runtime_manifest_hash,
         "installed rehearsal runtime differs from the prepared runtime"
     );
     let activation = ryeos.create_child(OsStr::new("activation"), 0o700)?;
@@ -1664,11 +1664,17 @@ fn elapsed_ms(start: std::time::Instant, at: std::time::Instant) -> u64 {
 pub(crate) fn spawn_owner(
     plan: &HostPlan,
 ) -> Result<lillux::subordinate_process::SubordinateProcess> {
+    spawn_owner_with_assignment(&plan.assignment_b64)
+}
+
+fn spawn_owner_with_assignment(
+    assignment_b64: &str,
+) -> Result<lillux::subordinate_process::SubordinateProcess> {
     lillux::subordinate_process::SubordinateProcess::spawn(
         lillux::subordinate_process::SubordinateProcessRequest {
             cmd: format!("/ryeos/guest-runtime/bin/{OWNER_NAME}"),
             argv0: None,
-            args: vec!["--assignment-b64".into(), plan.assignment_b64.clone()],
+            args: vec!["--assignment-b64".into(), assignment_b64.to_owned()],
             cwd: "/".into(),
             envs: Vec::new(),
             limits: None,
@@ -1949,6 +1955,159 @@ pub(crate) fn settle_owner(
         Ok(None) => "owner survived a kill; the enclosure ends it".into(),
         Err(error) => format!("owner kill failed: {error}"),
     }
+}
+
+/// Documents and files a lifecycle adapter hands to the installed guest owner.
+pub struct GuestOwnerEnclosureRequest<'a> {
+    /// The preinstalled guest runtime tree (owner executable and profile).
+    pub runtime: &'a lillux::PinnedDirectory,
+    /// The manifest the signed import names for that runtime.
+    pub runtime_manifest_hash: &'a str,
+    /// Canonical bytes of the controller's signed import, as delivered.
+    pub signed_import: &'a lillux::PinnedRegularFile,
+    /// The controller's exact guest package, as delivered.
+    pub package: &'a lillux::PinnedRegularFile,
+    /// Canonical bytes of the node-signed assignment, base64url without
+    /// padding, as the owner's one argument.
+    pub assignment_b64: &'a str,
+    /// Longest the owner may run.
+    pub owner_deadline: lillux::time::Duration,
+    /// Files the sandbox host makes visible at their absolute paths
+    /// (parents are created `0755`, files `0644`).
+    pub host_files: &'a [(&'a Path, &'a lillux::PinnedRegularFile)],
+}
+
+/// Why a guest owner enclosure could not be used on this host, if it cannot.
+pub fn guest_owner_enclosure_refusal(
+    runtime: &lillux::PinnedDirectory,
+    work_parent: &Path,
+) -> Result<Option<String>> {
+    let observed = ObservedGuestRuntime::observe(runtime)?;
+    Ok(host_refusal(observed.profile(), work_parent))
+}
+
+/// Run the installed guest owner exactly as the rehearsal host does: lay out
+/// `/ryeos` as a sandbox host would inside a root enclosure, start the owner
+/// with the signed assignment, hand every stdout chunk to `on_stdout` as it
+/// arrives, and return the owner's exit code. The calling process must be a
+/// single-threaded process dedicated to this call; it changes namespaces, and
+/// `on_stdout` runs inside the enclosure. Returns the owner's exit code (1
+/// when it was signalled, 2 when the enclosure's own setup failed). After the owner exits (or `deadline` passes) the owner is cancelled.
+pub fn run_guest_owner_in_enclosure(
+    request: &GuestOwnerEnclosureRequest<'_>,
+    on_stdout: &mut dyn FnMut(&str),
+) -> Result<i32> {
+    let observed = ObservedGuestRuntime::observe(request.runtime)?;
+    ensure!(
+        observed.manifest_hash() == request.runtime_manifest_hash,
+        "preinstalled guest runtime differs from the signed import's manifest"
+    );
+    let lillux::GuestRuntimeAccount::Unix { uid, gid } = observed.profile().account;
+    let package_bytes = request.package.observation()?.size();
+    let spec = enclosure_spec(uid, gid, package_bytes);
+    let ran = lillux::root_enclosure::run_in_root_enclosure(&spec, || {
+        let outcome = (|| -> Result<i32> {
+            lay_out(
+                request.runtime_manifest_hash,
+                request.runtime,
+                request.signed_import,
+                request.package,
+            )?;
+            let root = lillux::PinnedDirectory::open(Path::new("/"))?
+                .context("enclosure root is absent")?;
+            for (path, file) in request.host_files {
+                ensure!(
+                    path.is_absolute(),
+                    "enclosure host file path is not absolute"
+                );
+                let mut directory = root.try_clone()?;
+                let parent = path.parent().context("enclosure host file has no parent")?;
+                for component in parent.components().skip(1) {
+                    directory = directory.open_or_create_child(component.as_os_str(), 0o755)?;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .context("enclosure host file has no name")?;
+                copy_file(&directory, name, file, 0o644)?;
+            }
+            let mut owner = spawn_owner_with_assignment(request.assignment_b64)?;
+            let mut stdout = owner.take_output().map_err(anyhow::Error::msg)?;
+            let mut stderr = owner.take_error().map_err(anyhow::Error::msg)?;
+            let (sender, receiver) = std::sync::mpsc::channel::<Option<String>>();
+            std::thread::Builder::new()
+                .name("guest-owner-stdout".into())
+                .spawn(move || {
+                    use std::io::Read as _;
+                    let mut buffer = [0_u8; 4096];
+                    while let Ok(read) = stdout.read(&mut buffer) {
+                        if read == 0 {
+                            break;
+                        }
+                        let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                        if sender.send(Some(text)).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = sender.send(None);
+                })?;
+            let deadline = lillux::time::MonotonicDeadline::after(request.owner_deadline);
+            let mut captured = Vec::new();
+            let mut drain = |captured: &mut Vec<u8>, slice: lillux::time::Duration| {
+                if let Ok(diagnostics) = stderr.drain_until(
+                    MAX_STDERR_BYTES.saturating_sub(captured.len()),
+                    lillux::time::MonotonicDeadline::after(slice),
+                ) {
+                    captured.extend_from_slice(&diagnostics.bytes);
+                }
+            };
+            let mut closed = false;
+            let mut exit = None;
+            loop {
+                match receiver.recv_timeout(std::time::Duration::from_millis(5)) {
+                    Ok(Some(text)) => on_stdout(&text),
+                    Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        closed = true;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                drain(&mut captured, POLL_INTERVAL);
+                if exit.is_none()
+                    && let Some(seen) = owner.try_exit().map_err(anyhow::Error::msg)?
+                {
+                    drain(&mut captured, lillux::time::Duration::from_millis(200));
+                    exit = Some(seen.code);
+                }
+                if exit.is_some() && closed {
+                    break;
+                }
+                if deadline.has_elapsed() {
+                    break;
+                }
+            }
+            while let Ok(Some(text)) = receiver.try_recv() {
+                on_stdout(&text);
+            }
+            if exit.is_none() {
+                settle_owner(&mut owner, &mut |slice| drain(&mut captured, slice));
+            }
+            if !captured.is_empty() {
+                eprintln!("{}", String::from_utf8_lossy(&captured));
+            }
+            // A signalled owner has no exit code; the enclosure reports it
+            // as a failure status of its own.
+            Ok(exit.flatten().unwrap_or(1))
+        })();
+        match outcome {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("guest owner enclosure failed: {error:#}");
+                2
+            }
+        }
+    })
+    .map_err(anyhow::Error::msg)?;
+    Ok(ran)
 }
 
 #[cfg(test)]
