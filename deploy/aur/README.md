@@ -10,7 +10,8 @@ The `ryeos` package has two immutable inputs:
 - the signed-tag source archive, used to build the host binaries; and
 - `ryeos-bundles-<version>-x86_64.tar.gz`, produced by the release workflow
   after populating and signing the release bundle sets with the official
-  publisher key. The archive carries the standard and hosted-controller sets.
+  publisher key. The archive carries every bundle of every installable set, so any set's
+  init profile can be selected from an installed archive.
 
 The AUR build copies the second artifact verbatim into `/usr/share/ryeos`. It
 does not regenerate CAS data, re-sign bundle content, or import packaged trust

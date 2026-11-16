@@ -153,10 +153,23 @@ mapfile -t core_scheduling_bins < <(ryeos_bundle_set_bin_managed_names core-sche
 for forbidden in central-auth knowledge directive graph ryeos-docs local-inference codex render-sandbox; do
   assert_rejected contains "$forbidden" "${core_scheduling[@]}"
 done
-# The release archive carries the sorted unique union of `standard` and the
-# controller distribution; `standard` itself does not gain render-sandbox.
+# The release archive carries the sorted unique union of the bundles of every
+# installable set (every set with a node init profile); `standard` itself does
+# not gain render-sandbox. Only modal-sandbox, which no installable set names,
+# is published by the release build but absent from the archive.
 mapfile -t release_archive < <(ryeos_release_archive_bundle_names)
-[[ "${release_archive[*]}" == "browser codex core directive graph knowledge opencode render-sandbox ryeos-docs ryeos-ui scheduling web" ]]
+[[ "${release_archive[*]}" == "browser bundle-release bundle-source central-auth codex core directive environment-qualification graph knowledge local-inference opencode render-sandbox ryeos-docs ryeos-ui scheduling web" ]]
+for installable_set in "${bundle_set_ids[@]}"; do
+  mapfile -t installable_members < <(ryeos_bundle_set_names "$installable_set")
+  for member in "${installable_members[@]}"; do
+    contains "$member" "${release_archive[@]}"
+  done
+done
+assert_rejected contains modal-sandbox "${release_archive[@]}"
+mapfile -t release_artifacts < <(ryeos_bundle_set_names release-artifacts)
+for member in "${release_archive[@]}"; do
+  contains "$member" "${release_artifacts[@]}"
+done
 assert_rejected contains render-sandbox "${standard[@]}"
 # Development is standard plus central-auth, environment-qualification and
 # render-sandbox, in that published order.
@@ -309,15 +322,17 @@ for profile_name in "${node_init_profiles[@]}"; do
   esac
   # Trusted process-group settlement is admitted per host class: the hosted
   # workflow profiles and the composition controller admit it on every class,
-  # the development profile only on its administrator-associated `local`
-  # class, every other profile on none.
+  # the standard profile only on its `hosted` class (so Codex and opencode
+  # exclusive sessions report ready in a hosting provider's container), the
+  # development profile only on its administrator-associated `local` class,
+  # every other profile on none.
   for host_class in $declared_host_classes; do
     declared_trust="$(
       sed -n "/^        ${host_class}:\$/,/^        [a-z_]*:\$/p" "$node_init_profile" \
         | sed -nE 's/^          trusted_process_group_sessions: (true|false)$/\1/p'
     )"
     case "$profile_name:$host_class" in
-      hosted-workflow:*|hosted-controller:*|development:local)
+      hosted-workflow:*|hosted-controller:*|standard:hosted|development:local)
         [[ "$declared_trust" == true ]] ;;
       *)
         [[ "$declared_trust" == false ]] ;;

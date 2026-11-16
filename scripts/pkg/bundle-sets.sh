@@ -64,14 +64,18 @@ ryeos_bundle_set_names() {
   esac
 }
 
-# Bundles carried by the released bundle archive: the sorted unique union of
-# the `standard` distribution and the `hosted-controller` distribution. The
-# archive must hold every exact bundle each of those distributions' init
-# profiles names. Sets that need bundles outside it (central-auth,
-# environment-qualification, bundle-release, ...) are published by their own
-# population or by the release-artifacts union, not by this archive.
+# Bundles carried by the released bundle archive: the sorted unique union of the
+# bundles of every installable distribution, i.e. every set in
+# `ryeos_bundle_set_ids` (each has a node init profile). The internal
+# `release-artifacts` publication superset is deliberately not iterated: it has
+# no profile and is not installable. The archive therefore lets archive and AUR
+# installs select any installable set. `modal-sandbox` belongs to no installable
+# set, so it is published by the release build but not carried here.
 ryeos_release_archive_bundle_names() {
-  { ryeos_bundle_set_names standard; ryeos_bundle_set_names hosted-controller; } | LC_ALL=C sort -u
+  local set_name
+  while IFS= read -r set_name; do
+    ryeos_bundle_set_names "$set_name"
+  done < <(ryeos_bundle_set_ids) | LC_ALL=C sort -u
 }
 
 # Select native capabilities from the same explicit distribution
