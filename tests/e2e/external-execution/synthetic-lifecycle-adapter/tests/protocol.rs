@@ -3833,6 +3833,9 @@ impl LeaseLaneController {
             // Not under `/tmp`: the guest owner hides its old `/tmp`, and the
             // inputs must exist at the same path on the controller and in
             // the guest.
+            // A test archive unpacked on another machine does not carry this
+            // directory, only its compiled path.
+            std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).unwrap();
             let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
             std::fs::write(
                 dir.path().join("hosts"),
