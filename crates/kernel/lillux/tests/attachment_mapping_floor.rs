@@ -5,6 +5,10 @@
 
 use lillux::{SubprocessRequest, spawn_awaiting_attachment};
 
+/// Both tests choose descriptor numbers from what is free in this process, so
+/// they must not run concurrently with each other.
+static DESCRIPTOR_NUMBERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn shell(script: String) -> SubprocessRequest {
     SubprocessRequest {
         cmd: "/bin/sh".to_string(),
@@ -22,6 +26,7 @@ fn shell(script: String) -> SubprocessRequest {
 }
 #[test]
 fn mapped_targets_at_the_lowest_free_descriptors_leave_attachment_control_intact() {
+    let _serial = DESCRIPTOR_NUMBERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::os::fd::AsRawFd as _;
 
     // The attachment gate's own pipes and cwd used to take the lowest free
@@ -62,6 +67,7 @@ fn mapped_targets_at_the_lowest_free_descriptors_leave_attachment_control_intact
 
 #[test]
 fn a_second_launch_may_map_onto_an_earlier_held_childs_control_descriptors() {
+    let _serial = DESCRIPTOR_NUMBERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::os::fd::AsRawFd as _;
 
     // A held supervisor keeps an earlier pending child while it starts the
