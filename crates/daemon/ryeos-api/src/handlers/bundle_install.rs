@@ -337,6 +337,9 @@ pub fn replace_from_archive(
                 source_path: extraction.join(name),
                 replace: true,
                 preserve_runtime_artifacts,
+                // An archive install names no binding overrides: a
+                // replacement that would strand a pinned binding refuses.
+                invalidate_bindings: Vec::new(),
             },
             authority,
         )
