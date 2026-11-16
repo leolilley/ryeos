@@ -728,6 +728,7 @@ pub fn compile(
                 "observations",
                 "ceremony_clear",
                 "result",
+                "result_cost",
             ],
             &["upstream_session_pointer"],
         )?;
@@ -753,6 +754,7 @@ pub fn compile(
             }
             validate_result_notification(item)?;
         }
+        validate_result_cost(item)?;
         validate_template(item.get("payload"), 0, &mut 0)?;
         if let Some(pointer) = item.get("upstream_session_pointer") {
             validate_pointer(
@@ -1953,6 +1955,39 @@ fn validate_result_notification(item: &serde_json::Map<String, Value>) -> Result
     Ok(())
 }
 
+/// `result_cost` is required on every notification and nullable. It declares
+/// where the result payload reports its usage: three JSON pointers (each
+/// nullable) applied to the notification's evaluated durable payload. Only the
+/// result-marked notification may declare it.
+fn validate_result_cost(item: &serde_json::Map<String, Value>) -> Result<()> {
+    let declared = &item["result_cost"];
+    if declared.is_null() {
+        return Ok(());
+    }
+    if item["result"] != true {
+        bail!("structured-session result_cost is only valid on the result notification");
+    }
+    let declared = declared
+        .as_object()
+        .ok_or_else(|| anyhow!("structured-session result_cost must be an object or null"))?;
+    require_keys(
+        declared,
+        &["input_tokens", "output_tokens", "cost_micro_usd"],
+        &[],
+    )?;
+    for pointer in declared.values() {
+        if pointer.is_null() {
+            continue;
+        }
+        validate_pointer(
+            pointer
+                .as_str()
+                .ok_or_else(|| anyhow!("structured-session result_cost pointer is invalid"))?,
+        )?;
+    }
+    Ok(())
+}
+
 fn template_pointers_are_bounded(template: &Value) -> bool {
     match template.get("op").and_then(Value::as_str) {
         Some("pointer") => template.get("max_string_bytes").is_some(),
@@ -2631,6 +2666,55 @@ mod tests {
     }
 
     #[test]
+    fn result_cost_is_required_nullable_and_only_on_the_result_notification() {
+        claude_code_profile_with(|_| {}).unwrap();
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("result_cost");
+        })
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        let error = claude_code_profile_with(|profile| {
+            profile["notifications"][1]["result_cost"] = json!({
+                "input_tokens": "/a", "output_tokens": null, "cost_micro_usd": null
+            });
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("only valid on the result"));
+        for bad in [
+            json!("/a"),
+            json!({"input_tokens": "/a"}),
+            json!({"input_tokens": "a", "output_tokens": null, "cost_micro_usd": null}),
+            json!({"input_tokens": 1, "output_tokens": null, "cost_micro_usd": null}),
+            json!({"input_tokens": null, "output_tokens": null, "cost_micro_usd": null,
+                   "extra": null}),
+        ] {
+            claude_code_profile_with(|profile| {
+                let index = profile["notifications"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .position(|n| n["result"] == true)
+                    .unwrap();
+                profile["notifications"][index]["result_cost"] = bad.clone();
+            })
+            .unwrap_err();
+        }
+        claude_code_profile_with(|profile| {
+            let index = profile["notifications"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|n| n["result"] == true)
+                .unwrap();
+            profile["notifications"][index]["result_cost"] = json!(null);
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn at_most_one_notification_carries_the_result_marker() {
         let error = claude_code_profile_with(|profile| {
             profile["notifications"][1]["result"] = json!(true);
@@ -2644,6 +2728,7 @@ mod tests {
         // No result notification at all is a valid profile.
         claude_code_profile_with(|profile| {
             profile["notifications"][0]["result"] = json!(false);
+            profile["notifications"][0]["result_cost"] = json!(null);
         })
         .unwrap();
     }
@@ -2654,6 +2739,7 @@ mod tests {
         // not the completion edge.
         let error = claude_code_profile_with(|profile| {
             profile["notifications"][0]["result"] = json!(false);
+            profile["notifications"][0]["result_cost"] = json!(null);
             profile["notifications"][1]["result"] = json!(true);
         })
         .unwrap_err();
@@ -2903,7 +2989,8 @@ mod tests {
                         "payload":{"op":"literal","value":null},
                         "observations":[],
                         "ceremony_clear":false,
-                        "result":false
+                        "result":false,
+                        "result_cost":null
                     })
                 })
                 .collect(),

@@ -5606,6 +5606,24 @@ fn completion_worker_result(state: &AppState, session: &DedicatedSessionRecord) 
         .unwrap_or(Value::Null))
 }
 
+/// Where the admitted profile says the result payload reports its usage: the
+/// `result_cost` pointers of the result-marked notification, or `Null` when the
+/// profile marks no result or declares none. Runtime cost mapping applies them
+/// to the result payload and assumes no payload shape of its own.
+fn result_cost_declaration(state: &AppState, capsule_hash: &str) -> Result<Value> {
+    let profile = admitted_structured_protocol(state, capsule_hash)?;
+    Ok(profile
+        .contract
+        .get("notifications")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|rule| rule.get("result").and_then(Value::as_bool) == Some(true))
+        .and_then(|rule| rule.get("result_cost"))
+        .cloned()
+        .unwrap_or(Value::Null))
+}
+
 /// Pick the result payload for `turn_id` from one canonical batch. One
 /// result-marked event is that turn's result; when a batch carries several,
 /// the payload's own `turn_id` must name the fence's turn.
@@ -5648,6 +5666,7 @@ pub fn canonical_terminal_session_projection(
     // testimony digests only the bounded execution, so these presentation
     // fields cannot disturb it.
     let worker_result = completion_worker_result(state, &session)?;
+    let worker_result_cost = result_cost_declaration(state, &session.admitted_capsule_hash)?;
     let outcome_kind = terminal_outcome_kind(
         session.terminal_reason.as_deref(),
         session.bounded_outcome.as_ref(),
@@ -5657,6 +5676,7 @@ pub fn canonical_terminal_session_projection(
             .as_object_mut()
             .ok_or_else(|| anyhow!("dedicated session projection is not an object"))?;
         object.insert("worker_result".to_owned(), worker_result);
+        object.insert("worker_result_cost".to_owned(), worker_result_cost);
         object.insert(
             "outcome_kind".to_owned(),
             Value::String(outcome_kind.to_owned()),

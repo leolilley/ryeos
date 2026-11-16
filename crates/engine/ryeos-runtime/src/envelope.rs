@@ -54,18 +54,21 @@ pub fn dedicated_session_terminal_result(
 
 /// The cost a worker's result reports, in the shared runtime cost shape.
 ///
-/// A worker result that carries `result.usage` with `input_tokens`,
-/// `output_tokens` and `cost_micro_usd` (all non-negative integers) is the
-/// turn's own spend: micro-dollars are exact multiples of the fixed-point
-/// nano-dollar unit. A result with no such usage, or one that does not satisfy
-/// the shared cost contract, reports no cost.
+/// The session projection carries `worker_result_cost`: the three JSON
+/// pointers the admitted profile declares for the result-marked notification,
+/// each applied to the projection's `worker_result` payload. Each pointer must
+/// select a non-negative integer; micro-dollars are exact multiples of the
+/// fixed-point nano-dollar unit. A projection with no declared pointers, a
+/// pointer that is absent or selects anything else, or a value that does not
+/// satisfy the shared cost contract reports no cost.
 pub fn worker_result_cost(session: &serde_json::Value) -> Option<RuntimeCost> {
-    let usage = session.pointer("/worker_result/result/usage")?;
-    let input_tokens = usage.get("input_tokens")?.as_u64()?;
-    let output_tokens = usage.get("output_tokens")?.as_u64()?;
-    let nanos = usage
-        .get("cost_micro_usd")?
-        .as_u64()?
+    let declared = session.get("worker_result_cost")?.as_object()?;
+    let payload = session.get("worker_result")?;
+    let select =
+        |field: &str| -> Option<u64> { payload.pointer(declared.get(field)?.as_str()?)?.as_u64() };
+    let input_tokens = select("input_tokens")?;
+    let output_tokens = select("output_tokens")?;
+    let nanos = select("cost_micro_usd")?
         .checked_mul(1_000)
         .and_then(|nanos| i64::try_from(nanos).ok())?;
     let cost = RuntimeCost {
@@ -800,10 +803,19 @@ mod tests {
         }
     }
 
+    fn declared_cost() -> serde_json::Value {
+        json!({
+            "input_tokens": "/result/usage/input_tokens",
+            "output_tokens": "/result/usage/output_tokens",
+            "cost_micro_usd": "/result/usage/cost_micro_usd",
+        })
+    }
+
     #[test]
     fn worker_result_usage_maps_to_the_shared_runtime_cost() {
         let session = json!({
             "state":"terminal", "terminal_reason":"completed",
+            "worker_result_cost": declared_cost(),
             "worker_result":{"turn_id":"t1","result":{"text":"hi","usage":{
                 "input_tokens":120,"output_tokens":34,"cost_micro_usd":2500}}},
         });
@@ -816,14 +828,35 @@ mod tests {
     }
 
     #[test]
-    fn worker_result_without_usable_usage_reports_no_cost() {
+    fn worker_result_cost_follows_the_declared_pointers() {
+        let session = json!({
+            "worker_result_cost": {
+                "input_tokens": "/u/in", "output_tokens": "/u/out",
+                "cost_micro_usd": "/u/micro"},
+            "worker_result": {"u": {"in": 7, "out": 8, "micro": 3}},
+        });
+        let cost = worker_result_cost(&session).expect("declared pointers map");
+        assert_eq!((cost.input_tokens, cost.output_tokens), (7, 8));
+        assert_eq!(cost.total_usd.to_canonical_string(), "0.000003");
+    }
+
+    #[test]
+    fn worker_result_without_declared_or_usable_usage_reports_no_cost() {
+        let usage = json!({"usage":{"input_tokens":1,"output_tokens":1,"cost_micro_usd":1}});
         for session in [
             json!({"terminal_reason":"completed"}),
             json!({"terminal_reason":"completed","worker_result":null}),
-            json!({"worker_result":{"result":{"text":"x"}}}),
-            json!({"worker_result":{"result":{"usage":{"input_tokens":1,"output_tokens":1}}}}),
-            json!({"worker_result":{"result":{"usage":{
+            // No declared pointers: usage at the conventional path is ignored.
+            json!({"worker_result":{"result":usage.clone()}}),
+            json!({"worker_result_cost":null,"worker_result":{"result":usage.clone()}}),
+            json!({"worker_result_cost":declared_cost(),"worker_result":{"result":{"text":"x"}}}),
+            json!({"worker_result_cost":declared_cost(),
+                "worker_result":{"result":{"usage":{"input_tokens":1,"output_tokens":1}}}}),
+            json!({"worker_result_cost":declared_cost(),"worker_result":{"result":{"usage":{
                 "input_tokens":-1,"output_tokens":1,"cost_micro_usd":1}}}}),
+            json!({"worker_result_cost":{"input_tokens":"/result/usage/input_tokens",
+                "output_tokens":null,"cost_micro_usd":"/result/usage/cost_micro_usd"},
+                "worker_result":{"result":usage.clone()}}),
         ] {
             assert!(worker_result_cost(&session).is_none(), "{session}");
         }

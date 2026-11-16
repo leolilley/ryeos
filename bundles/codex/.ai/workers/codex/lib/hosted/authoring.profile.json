@@ -950,7 +950,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "account/login/completed",
@@ -997,7 +998,8 @@
         }
       ],
       "ceremony_clear": true,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "account/rateLimits/updated",
@@ -1015,7 +1017,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "account/updated",
@@ -1033,7 +1036,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "turn/completed",
@@ -1089,7 +1093,8 @@
         }
       ],
       "ceremony_clear": false,
-      "result": true
+      "result": true,
+      "result_cost": null
     },
     {
       "method": "item/agentMessage/delta",
@@ -1123,7 +1128,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "item/commandExecution/outputDelta",
@@ -1156,7 +1162,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "item/fileChange/outputDelta",
@@ -1189,7 +1196,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "item/fileChange/patchUpdated",
@@ -1222,7 +1230,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "thread/started",
@@ -1241,7 +1250,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "thread/status/changed",
@@ -1265,7 +1275,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "turn/started",
@@ -1316,7 +1327,8 @@
         }
       ],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "configWarning",
@@ -1334,7 +1346,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "deprecationNotice",
@@ -1352,7 +1365,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "error",
@@ -1370,7 +1384,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "warning",
@@ -1388,7 +1403,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "item/reasoning/summaryPartAdded",
@@ -1401,7 +1417,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "item/reasoning/summaryTextDelta",
@@ -1414,7 +1431,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "item/reasoning/textDelta",
@@ -1427,7 +1445,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "thread/environment/connected",
@@ -1445,7 +1464,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "thread/environment/disconnected",
@@ -1463,7 +1483,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "thread/compacted",
@@ -1481,7 +1502,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "guardianWarning",
@@ -1499,7 +1521,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     }
   ],
   "ignored_notifications": {

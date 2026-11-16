@@ -357,7 +357,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "session.idle",
@@ -398,7 +399,8 @@
         }
       ],
       "ceremony_clear": false,
-      "result": true
+      "result": true,
+      "result_cost": null
     },
     {
       "method": "session.next.prompted",
@@ -442,7 +444,8 @@
         }
       ],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "session.next.text.delta",
@@ -465,7 +468,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "session.next.tool.called",
@@ -490,7 +494,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "session.error",
@@ -508,7 +513,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     },
     {
       "method": "installation.update-available",
@@ -526,7 +532,8 @@
       },
       "observations": [],
       "ceremony_clear": false,
-      "result": false
+      "result": false,
+      "result_cost": null
     }
   ],
   "ignored_notifications": {

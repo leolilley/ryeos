@@ -537,6 +537,11 @@ struct NotificationRule {
     /// result back from the retained observation batch.
     #[serde(default)]
     result: bool,
+    /// Where the result payload reports usage. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_cost: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
