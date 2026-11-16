@@ -29,6 +29,7 @@ mod execution;
 mod history;
 mod outcome;
 mod transitions;
+pub(crate) use transitions::retry_refused_note;
 
 use events::node_ref;
 

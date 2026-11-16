@@ -287,7 +287,7 @@ async fn dispatch_item_with_retry(
             item_index,
             attempt,
         );
-        let outcome = crate::dispatch::dispatch_action(
+        let mut outcome = crate::dispatch::dispatch_action(
             client,
             &attempt_action,
             thread_id,
@@ -301,6 +301,16 @@ async fn dispatch_item_with_retry(
             Ok(crate::dispatch::ActionOutcome::Failure(failure)) => failure.retryable,
             Ok(crate::dispatch::ActionOutcome::Success(_)) => false,
         };
+        if !retryable && attempt < total {
+            let note = crate::walker::retry_refused_note(total);
+            match &mut outcome {
+                Err(error) => error.diagnostic.push_str(&note),
+                Ok(crate::dispatch::ActionOutcome::Failure(failure)) => {
+                    failure.diagnostic.push_str(&note)
+                }
+                Ok(crate::dispatch::ActionOutcome::Success(_)) => {}
+            }
+        }
         if !retryable || attempt >= total {
             return RetriedDispatch {
                 outcome,
