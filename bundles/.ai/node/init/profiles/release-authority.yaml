@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-15T02:27:40Z:79ad9bb5b66fffa60fea164aabeb29a0c9e5cba0e3d37f3e280ee3b609bbbc00:A+sogC1E1DbO9rVirCFu6aIz63KDCED8uAxKBsINV9EvQoYZe10svqdddXX7jRF/FDHjksLCpbRRsDmnzgiIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T13:27:47Z:a85d0b71df6758e16463520cd8406339900c2cf3c51a6ca6febfcb3482d1f1c9:1A574ERH1x5c9l1Dwq0WN68mTVvvVKVZ0pVCa9cJwAUGBdi2YhH+jNByo15NweqcOiiB9nOBJ9p+t8d+9ZVuDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -419,7 +419,7 @@ policies:
       - "__pycache__/"
       - "node_modules/"
   external_content:
-    schema: 1
+    schema: 2
     roots: {}
     limits:
       max_depth: 11

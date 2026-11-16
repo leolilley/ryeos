@@ -1168,7 +1168,7 @@ fn run_node_external_content_reset_command(
 #[command(
     name = "ryeos node large-objects purge-quarantine",
     about = "Discard the damaged large objects scrub quarantined",
-    long_about = "Remove every large object, and its sidecar, that `external-content scrub` moved into quarantine because its bytes no longer matched their hash. The daemon must be stopped. Quarantined copies are kept as evidence and count against the large-object budget until this is run; nothing else removes them. Served objects, bindings and staging are untouched. --dry-run only counts.",
+    long_about = "Remove every large object, and its sidecar, that `external-content scrub` moved into quarantine because its bytes no longer matched their hash, and every quarantine marker of an object held in place by reference. A marker holds no bytes and moves nothing: the file in its import root is never touched. The daemon must be stopped. Quarantined copies are kept as evidence and count against the large-object budget until this is run; nothing else removes them. Served objects, bindings and staging are untouched. --dry-run only counts.",
     no_binary_name = true
 )]
 struct NodeLargeObjectQuarantinePurgeArgs {
@@ -1239,13 +1239,14 @@ fn run_node_large_object_quarantine_purge_command(
     }
     let objects = report["objects"].as_u64().unwrap_or_default();
     let bytes = report["bytes"].as_u64().unwrap_or_default();
+    let markers = report["reference_markers"].as_u64().unwrap_or_default();
     if args.dry_run {
         console.text(&format!(
-            "Large-object quarantine preview: {objects} damaged object(s), {bytes} byte(s) would be removed.\n"
+            "Large-object quarantine preview: {objects} damaged object(s), {bytes} byte(s), {markers} reference marker(s) would be removed.\n"
         ))?;
     } else {
         console.text(&format!(
-            "Large-object quarantine purged: removed {objects} damaged object(s), {bytes} byte(s).\n"
+            "Large-object quarantine purged: removed {objects} damaged object(s), {bytes} byte(s), {markers} reference marker(s).\n"
         ))?;
     }
     Ok(())
@@ -4224,6 +4225,7 @@ fn inspect_capability_report(
                 "exposure": signed.report.exposure,
                 "app_root_storage": app_root_storage_json(&signed.report),
                 "credential_home": signed.report.credential_home,
+                "in_place_roots": signed.report.in_place_roots,
                 "floor": signed.report.floor,
                 "provided": signed.report.provided,
                 "missing": signed.report.missing,
@@ -4311,6 +4313,30 @@ fn app_root_storage_line(
     }
 }
 
+/// One line for an import root declared for use in place: the grade and basis
+/// that prove this process cannot alter its bytes, or the reason it is
+/// refused.
+fn in_place_root_line(
+    root: &ryeos_node_runtime::in_place_roots::InPlaceRootReport,
+) -> (String, crate::tty::Tone) {
+    match (&root.refusal, &root.proof) {
+        (None, Some(evidence)) => (
+            format!(
+                "immutable ({} by {}): {}",
+                evidence.source.as_str(),
+                evidence.provider,
+                evidence.basis
+            ),
+            crate::tty::Tone::Secondary,
+        ),
+        (Some(refusal), _) => (
+            format!("not usable, objects held there are refused: {refusal}"),
+            crate::tty::Tone::Warning,
+        ),
+        (None, None) => ("not decided".to_owned(), crate::tty::Tone::Warning),
+    }
+}
+
 /// One line for a named report entry: the grade, provider and basis that
 /// prove it, or the reason nothing does.
 fn decision_line(
@@ -4384,6 +4410,12 @@ fn capability_section(
     section
         .rows
         .push(crate::tty::Row::key_value("app root storage", &storage).with_tone(storage_tone));
+    for (name, root) in &report.in_place_roots {
+        let (text, tone) = in_place_root_line(root);
+        section.rows.push(
+            crate::tty::Row::key_value(format!("in-place root {name}"), &text).with_tone(tone),
+        );
+    }
     for (key, name) in [
         (
             "durable state",
@@ -6183,6 +6215,7 @@ mod tests {
             durable_identity: ryeos_node::capability_report::DurableIdentityFacts {
                 app_root: lillux::IdentityStability::ReattachStable,
             },
+            in_place_roots: std::collections::BTreeMap::new(),
             provided: std::collections::BTreeMap::new(),
             missing,
             capacity: std::collections::BTreeMap::new(),

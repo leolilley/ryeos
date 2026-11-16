@@ -246,6 +246,7 @@ pub fn prepare(
         ExternalContentImportRoot {
             path: incoming,
             root_identity,
+            in_place: None,
         },
     );
     import_policy.managed_activation = ManagedExternalContentPolicy {

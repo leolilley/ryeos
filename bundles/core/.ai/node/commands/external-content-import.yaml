@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-06T00:22:17Z:74c6ca02dfe157ef4204d801d50819ff8867dc26873195beb9376706b5722814:cCQbv6/s4sGzhLQIYxy/5RSQt1LoTlns7MoAJU2rMqNXd2E3NdpXVd+VYnm/eDLIFsyYefWCSHFW6nCD9j8mBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T13:27:47Z:06dc0fc0fd2a74b62c97d0611301abcbec284dc07be689a1ed814eb46ff0c23d:Zpqj8eF9y+Onb9XUqcMDg4T8r1rOIxzqRE/rlzMQvCIdk4eoq9al5AeqNfLUdY7b/oqmqspNuLcmV6MdX37TCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens: [external-content, import]
 description: Import external bytes through a node-admitted named root
 defaults:
@@ -17,6 +17,13 @@ forms:
       - field: storage
       - field: maximum_bytes
       - field: expected_file_sha256
+arguments:
+  - name: hold
+    kind: string
+    positional: 7
+    required: false
+    arity: optional
+    description: "in_place or owned; absent, the root's own declaration decides. A file in a root declared for use in place is held by reference; a tree there is refused unless held as owned"
 dispatch:
   kind: execute_ref
   execute: service:external-content/import

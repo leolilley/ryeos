@@ -9701,6 +9701,7 @@ mod node_capability_report_reader_tests {
                 app_root,
             )
             .unwrap(),
+            in_place_roots: Default::default(),
             floor: match_floor(&[], &view),
             provided: view.provided,
             missing: view.missing,

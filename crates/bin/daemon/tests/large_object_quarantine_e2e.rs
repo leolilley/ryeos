@@ -80,6 +80,7 @@ fn admit_import_root(state: &Path, fixture: &FastFixture, input_root: &Path) -> 
         ExternalContentImportRoot {
             path: input_root.to_path_buf(),
             root_identity: root.identity()?,
+            in_place: None,
         },
     );
     policy.validate()?;

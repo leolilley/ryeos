@@ -57,7 +57,7 @@ fn fixture_on(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
-                schema: 1,
+                schema: 2,
                 declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
@@ -430,7 +430,7 @@ async fn bind_through_managed_activation_owner(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
-                schema: 1,
+                schema: 2,
                 declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {

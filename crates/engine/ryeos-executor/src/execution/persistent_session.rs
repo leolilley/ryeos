@@ -1825,11 +1825,18 @@ fn validate_environment_contribution(
                             "environment contribution `{name}` content dependency `{content_dependency}` names absent realization `{realization_id}`"
                         )
                     })?;
-                if entry.kind != ryeos_state::objects::ExternalContentKind::Tree
-                    || entry.mode != ryeos_state::objects::ExternalContentMode::Pinned
+                if entry.mode != ryeos_state::objects::ExternalContentMode::Pinned {
+                    bail!(
+                        "environment contribution `{name}` content dependency `{content_dependency}` names a realization that is not pinned: `{realization_id}`"
+                    );
+                }
+                if entry.kind == ryeos_state::objects::ExternalContentKind::File
+                    && (relative_path != "."
+                        || *path_kind
+                            != ryeos_handler_protocol::LaunchEnvironmentPathKindWire::File)
                 {
                     bail!(
-                        "environment contribution `{name}` content dependency `{content_dependency}` names a realization that is not a pinned tree: `{realization_id}`"
+                        "environment contribution `{name}` names file realization `{realization_id}` and must address the file itself as path kind `file` with relative path `.`"
                     );
                 }
                 validate_realization_path_exists(
@@ -1869,8 +1876,23 @@ fn validate_realization_path_exists(
     use_kind: &str,
 ) -> Result<()> {
     if relative_path == "." {
-        if expected_kind != ryeos_handler_protocol::LaunchEnvironmentPathKindWire::Directory {
-            bail!("a realization root environment path must be a directory");
+        let expected = match realization.kind {
+            ryeos_state::objects::ExternalContentKind::File => {
+                ryeos_handler_protocol::LaunchEnvironmentPathKindWire::File
+            }
+            ryeos_state::objects::ExternalContentKind::Tree => {
+                ryeos_handler_protocol::LaunchEnvironmentPathKindWire::Directory
+            }
+        };
+        if expected_kind != expected {
+            bail!(
+                "a realization root environment path must be a {}",
+                if expected == ryeos_handler_protocol::LaunchEnvironmentPathKindWire::File {
+                    "file for a file realization"
+                } else {
+                    "directory"
+                }
+            );
         }
         return Ok(());
     }
@@ -3896,7 +3918,10 @@ fn spawn_capsule_process_held(
     let bound = if state.isolation.is_enforced() {
         super::external_content::bind_external_realizations(state, &resolution, workspace)?
     } else if supports_private_descriptor_realizations(session_protocol) {
-        super::external_content::bind_external_realizations_in_private_runtime_view_with_budget(
+        // The trusted bridge resolves realizations through descriptors, so a
+        // file the store holds by reference reaches it as its own descriptor
+        // rather than as a private copy in the view.
+        super::external_content::bind_external_realizations_in_private_runtime_view_retaining_references(
             state,
             &resolution,
             realization_workspace,
@@ -3921,6 +3946,11 @@ fn spawn_capsule_process_held(
         ),
         None => (Vec::new(), None),
     };
+    let external_descriptors_env = bound
+        .as_ref()
+        .map(|bound| bound.descriptor_delivery_env())
+        .transpose()?
+        .flatten();
     let mut leases = Vec::new();
     if realization_workspace != workspace && !exact.evidence_attachments.is_empty() {
         // The runtime view keeps executable dependencies out of the retained
@@ -4042,6 +4072,11 @@ fn spawn_capsule_process_held(
         state.isolation.is_enforced(),
     )?;
     let mut inherited_fds = Vec::new();
+    if let Some(bound) = bound.as_ref() {
+        // The descriptors named by the delivery document are inherited at the
+        // numbers the document records.
+        inherited_fds.extend(bound.retained_descriptors());
+    }
     let mut external_lifelines: Vec<Box<dyn Send + Sync>> = Vec::new();
     let mut relay_health = None;
     let mut relay_owner = None;
@@ -4221,6 +4256,9 @@ fn spawn_capsule_process_held(
             source_entry.as_deref(),
             executable_search_env.as_deref(),
         )?;
+        if let Some(descriptors) = external_descriptors_env.as_deref() {
+            plan.bind_persistent_session_external_descriptors(descriptors)?;
+        }
         let mut runtime_environment = runtime_environment.clone();
         if let Some(environment) = session_process_environment {
             let name = ryeos_state::objects::SESSION_PROCESS_ENVIRONMENT_ENV.to_owned();

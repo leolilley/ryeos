@@ -15,6 +15,10 @@ use crate::node_policy::{ErasedNodePolicy, NodePolicyContext, NodePolicySection,
 
 pub const SECTION_NAME: &str = "external_content";
 
+/// Schema of the section. Version 2 adds a root's in-place declaration; a
+/// version 1 body has no reader.
+pub const EXTERNAL_CONTENT_POLICY_SCHEMA: u32 = 2;
+
 /// Prefix a declared root path may start with to name a directory under the
 /// node's app root. It must be followed by `/` and a relative normalized path.
 pub const APP_ROOT_PLACEHOLDER: &str = "{app_root}";
@@ -37,6 +41,32 @@ pub struct ExternalContentImportPolicyRecord {
 #[serde(deny_unknown_fields)]
 pub struct ExternalContentImportRootDeclaration {
     pub path: String,
+    /// Declares that objects from this root may be held by reference, in
+    /// place, instead of copied into the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_place: Option<InPlaceRootPolicy>,
+}
+
+/// A root's declared intent to be used in place: the node proves it cannot
+/// alter the bytes under the root, and holds objects there by reference.
+/// `accept` lists the proof grades that satisfy the declaration, in the
+/// form a capability floor entry uses; absent, only a measured proof does.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InPlaceRootPolicy {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accept: Vec<String>,
+}
+
+impl InPlaceRootPolicy {
+    fn validate(&self, name: &str) -> anyhow::Result<()> {
+        match lillux::process_control::immutable_root_requirement(&self.accept).spec_refusal() {
+            Some(refusal) => {
+                bail!("external-content import root `{name}` in-place policy: {refusal}")
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +76,9 @@ pub struct ExternalContentImportRoot {
     /// The measured root directory, as the filesystem's own identity plus the
     /// inode, so it survives the filesystem being re-attached.
     pub root_identity: lillux::PinnedDirectoryIdentity,
+    /// Present when the root is declared for use in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_place: Option<InPlaceRootPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +165,7 @@ impl NodePolicySection for ExternalContentImportPolicySection {
 
 impl ExternalContentImportPolicyRecord {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.schema != 1 {
+        if self.schema != EXTERNAL_CONTENT_POLICY_SCHEMA {
             bail!("external-content import policy schema is not current");
         }
         for (name, root) in &self.roots {
@@ -150,6 +183,9 @@ impl ExternalContentImportPolicyRecord {
             if !root.root_identity.names_an_inode() || !root.root_identity.filesystem().is_named() {
                 bail!("external-content import root `{name}` has an invalid filesystem identity");
             }
+            if let Some(in_place) = &root.in_place {
+                in_place.validate(name)?;
+            }
         }
         for (name, declaration) in &self.declared_roots {
             validate_root_name(name)?;
@@ -163,6 +199,9 @@ impl ExternalContentImportPolicyRecord {
 
 impl ExternalContentImportRootDeclaration {
     fn validate(&self, name: &str) -> anyhow::Result<()> {
+        if let Some(in_place) = &self.in_place {
+            in_place.validate(name)?;
+        }
         match self.app_root_relative() {
             Some(relative) => {
                 if relative.is_empty()
@@ -238,6 +277,12 @@ pub fn admit_declared_roots(body: &Value, app_root: &Path) -> anyhow::Result<Val
                     resolved.display()
                 );
             }
+            if admitted.in_place != declaration.in_place {
+                bail!(
+                    "external-content import root `{name}` is admitted with a different in-place \
+                     declaration than the one declared; change it by re-admitting the root"
+                );
+            }
             continue;
         }
         let directory = match declaration.app_root_relative() {
@@ -279,6 +324,7 @@ pub fn admit_declared_roots(body: &Value, app_root: &Path) -> anyhow::Result<Val
             ExternalContentImportRoot {
                 path: resolved,
                 root_identity,
+                in_place: declaration.in_place.clone(),
             },
         );
     }
@@ -401,7 +447,7 @@ mod tests {
     #[test]
     fn policy_rejects_relative_roots_and_unbounded_limits() {
         let policy = ExternalContentImportPolicyRecord {
-            schema: 1,
+            schema: EXTERNAL_CONTENT_POLICY_SCHEMA,
             roots: BTreeMap::from([(
                 "source".to_owned(),
                 ExternalContentImportRoot {
@@ -410,6 +456,7 @@ mod tests {
                         serde_json::json!({"filesystem": {"device": 1}, "inode": 1}),
                     )
                     .unwrap(),
+                    in_place: None,
                 },
             )]),
             declared_roots: BTreeMap::new(),
@@ -432,7 +479,7 @@ mod tests {
     #[test]
     fn policy_requires_an_exact_root_filesystem_identity() {
         let value = serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "roots": {
                 "source": {"path": "/srv/source", "root_identity": {"filesystem": {"device": 7}}}
             },
@@ -476,7 +523,7 @@ mod tests {
 
     fn declared_body(declared: serde_json::Value) -> Value {
         serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "roots": {},
             "declared_roots": declared,
             "limits": {
@@ -578,5 +625,57 @@ mod tests {
             admit_declared_roots(&admitted, app_root.path()).unwrap_err()
         );
         assert!(error.contains("admitted at"), "{error}");
+    }
+
+    #[test]
+    fn in_place_declaration_is_admitted_with_its_accepted_grades() {
+        let app_root = tempfile::tempdir().unwrap();
+        let body = declared_body(serde_json::json!({
+            "image": {"path": "{app_root}/imports/image", "in_place": {"accept": ["measured", "provider_attested"]}},
+            "plain": {"path": "{app_root}/imports/plain"}
+        }));
+        let admitted = admit_declared_roots(&body, app_root.path()).unwrap();
+        assert_eq!(
+            admitted_root(&admitted, "image").in_place,
+            Some(InPlaceRootPolicy {
+                accept: vec!["measured".to_owned(), "provider_attested".to_owned()]
+            })
+        );
+        assert_eq!(admitted_root(&admitted, "plain").in_place, None);
+        // Admission again is idempotent; a changed declaration is refused.
+        admit_declared_roots(&admitted, app_root.path()).unwrap();
+        let mut changed = admitted.clone();
+        changed["declared_roots"]["image"]["in_place"] = serde_json::json!({});
+        let error = format!(
+            "{:#}",
+            admit_declared_roots(&changed, app_root.path()).unwrap_err()
+        );
+        assert!(error.contains("in-place declaration"), "{error}");
+    }
+
+    #[test]
+    fn in_place_declaration_refuses_grades_a_node_cannot_judge() {
+        let app_root = tempfile::tempdir().unwrap();
+        for accept in [
+            serde_json::json!(["peer_attested"]),
+            serde_json::json!(["unknown_grade"]),
+            serde_json::json!(["measured", "measured"]),
+        ] {
+            let body = declared_body(serde_json::json!({
+                "image": {"path": "{app_root}/imports/image", "in_place": {"accept": accept}}
+            }));
+            assert!(
+                admit_declared_roots(&body, app_root.path()).is_err(),
+                "{accept}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_one_policy_has_no_reader() {
+        let mut body = declared_body(serde_json::json!({}));
+        body["schema"] = serde_json::json!(1);
+        let record: ExternalContentImportPolicyRecord = serde_json::from_value(body).unwrap();
+        assert!(record.validate().is_err());
     }
 }

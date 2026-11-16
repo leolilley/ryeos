@@ -20,7 +20,7 @@ use lillux::process_control::{
 use ryeos_engine::isolation::add_pid_namespace_containment;
 use serde::{Deserialize, Serialize};
 
-pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v8";
+pub const CAPABILITY_REPORT_SCHEMA: &str = "ryeos.node.capability-report/v9";
 /// Provider-delivered environment values available for authorized delivery.
 pub const SECRETS_PROVIDER_ENV: &str = "secrets:provider_env";
 /// Provider id of the environment the hosting provider delivers to the node
@@ -176,6 +176,9 @@ pub struct NodeCapabilityReport {
     pub credential_home: PrivateDirectoryFacts,
     /// How durably persisted identities name the app root's filesystem.
     pub durable_identity: DurableIdentityFacts,
+    /// Each import root node policy declares for use in place, with what the
+    /// node measured about it at start and whether it is usable now.
+    pub in_place_roots: BTreeMap<String, ryeos_node_runtime::in_place_roots::InPlaceRootReport>,
     pub provided: BTreeMap<String, CapabilityEvidence>,
     pub missing: BTreeMap<String, String>,
     /// Budgets a placement could reserve against, by open name.
@@ -226,6 +229,8 @@ pub struct ReportInputs<'a> {
     /// Provider-delivered environment taken at startup. Only its names reach
     /// the report.
     pub provider_environment: &'a ryeos_app::vault::ProviderEnvironment,
+    /// What the node measured of its in-place import roots at start.
+    pub in_place_roots: BTreeMap<String, ryeos_node_runtime::in_place_roots::InPlaceRootReport>,
 }
 
 impl NodeCapabilityReport {
@@ -324,6 +329,7 @@ impl NodeCapabilityReport {
             host,
             credential_home,
             durable_identity: DurableIdentityFacts::observe(inputs.app_root)?,
+            in_place_roots: inputs.in_place_roots,
             provided: view.provided,
             missing: view.missing,
             capacity,
@@ -911,6 +917,7 @@ mod tests {
             durable_identity: DurableIdentityFacts {
                 app_root: lillux::IdentityStability::ReattachStable,
             },
+            in_place_roots: BTreeMap::new(),
             floor: match_floor(&requires, &provided),
             provided: provided.provided,
             missing: provided.missing,

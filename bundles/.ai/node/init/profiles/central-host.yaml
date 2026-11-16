@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T07:17:08Z:9ffd8b6d4eb037f714da449356424dfca7c4f7426bb85bc16d522550363af1c5:dIMkX0SR/z7hQaTfC1HboQ4pr0mHrI2MC1yiml6XWRjhbORnWQEe1TqCRuBiCNNvwBOzm/QG/cKZBcioRHRiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T13:27:46Z:d51e1d4d955537470154bd391be1aa82d7acdc0487c01bb74725f3135966581d:VgssK6+hI5vKTrxRPteyU/y948/K+TZYBv3J7Lrg/wqca1Rar5WFYS+EqpKxxxPBMAltKjGdn5VnskmdWXK4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - central-auth
@@ -392,7 +392,7 @@ policies:
       - "node_modules/"
       - "target/"
   external_content:
-    schema: 1
+    schema: 2
     roots: {}
     limits:
       max_depth: 8

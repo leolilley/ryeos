@@ -606,8 +606,32 @@ fn load_node_config_two_phase_with_socket(
         Some(_) => vec![config.bind.to_string()],
         None => Vec::new(),
     };
+    // Every import root node policy declares for use in place is measured
+    // again at every start, never trusted from an earlier boot: the store
+    // resolves reference objects through what this measurement found.
+    let (in_place_roots, in_place_reports) =
+        ryeos_node_runtime::in_place_roots::InPlaceRoots::measure(
+            node_policy
+                .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()?,
+        );
+    for (name, root) in &in_place_reports {
+        match &root.refusal {
+            Some(refusal) => tracing::warn!(
+                root = %name,
+                %refusal,
+                "in-place import root is not usable; objects held there are refused by name until they are imported again"
+            ),
+            None => tracing::info!(
+                root = %name,
+                basis = ?root.proof.as_ref().map(|proof| proof.basis.as_str()),
+                "in-place import root is proven immutable"
+            ),
+        }
+    }
+    ryeos_state::install_reference_roots(Arc::new(in_place_roots));
     let report = ryeos_node::capability_report::NodeCapabilityReport::assemble(
         ryeos_node::capability_report::ReportInputs {
+            in_place_roots: in_place_reports,
             app_root,
             node_fingerprint: node_identity.fingerprint(),
             daemon_digest: format!("sha256:{daemon_digest}"),
