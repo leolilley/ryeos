@@ -114,6 +114,10 @@ jobs:
           python3 -B scripts/release/test-check-composition-daemon-features.py
           python3 -B scripts/release/check-composition-daemon-features.py
 
+      - name: Run central-auth bundle Python tests
+        working-directory: bundles/central-auth
+        run: python3 -B -m unittest discover -s tests
+
       - name: Check image build cache boundaries
         run: ./scripts/ci/test-image-build-cache.sh
 
