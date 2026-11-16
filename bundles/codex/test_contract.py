@@ -723,7 +723,7 @@ class CodexContractTests(unittest.TestCase):
         self.assertEqual(manifest_digest, "f1f39917086d223da68135108afa401fe75d47e2b102ea3f81c699595256bfe5")
         self.assertIn(f"    digest: {manifest_digest}", environment)
         self.assertIn("    - realization_id: command-tools", environment)
-        self.assertIn("schema: ryeos.worker_environment.v6", environment)
+        self.assertIn("schema: ryeos.worker_environment.v7", environment)
         self.assertIn("external_product_slots: []", environment)
         self.assertIn("  process_environment: {}", environment)
         self.assertIn("      relative_directory: bin", environment)

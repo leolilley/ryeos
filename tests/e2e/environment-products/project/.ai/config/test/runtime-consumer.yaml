@@ -1,5 +1,5 @@
 category: test
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 external_product_slots:
   - id: distribution
     relationship_ref: config:test/two-products

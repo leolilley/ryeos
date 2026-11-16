@@ -64,7 +64,7 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
 
     def test_root_composes_authoring_product_and_protocol_ingress_not_child_compiler(self):
         baseline = load("bundles/codex/.ai/config/codex/environments/authoring.yaml")
-        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v6")
+        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v7")
         self.assertEqual(self.environment["schema"], baseline["schema"])
         self.assertEqual(self.environment["worker_ref"], baseline["worker_ref"])
         declarations = {entry["id"]: entry for entry in self.environment["external_content"]}

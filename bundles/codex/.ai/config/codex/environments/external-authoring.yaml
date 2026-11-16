@@ -1,6 +1,6 @@
 # ryeos:signed:2026-10-27T12:26:47Z:df9dd16c05f623654d31d3517d1c7ddce1e68321ff66ef39b1cbf4744ef67bfc:uyUaXriFZiWgqkS6pHOe/hQDAkgq3EzxOSTFWybznFHuMq3kmReZ9wCOkGEtsJh2+/o/t0gT/1528INldX6eBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/environments
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 external_product_slots: []
 worker_ref: worker:codex/external-hosted-authoring
 external_content:

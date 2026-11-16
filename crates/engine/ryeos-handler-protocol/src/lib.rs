@@ -752,6 +752,11 @@ pub enum LaunchEnvironmentValueWire {
     RuntimeViewDirectory {
         relative_path: String,
     },
+    /// A secret name the session owner's admitted environment authority
+    /// delivers at session start. Carries no value.
+    DeliveredSecret {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -920,6 +925,9 @@ pub struct LaunchEnvironmentContributionPolicyWire {
     pub max_contributions: u16,
     pub max_targets_per_contribution: u16,
     pub max_variables_per_contribution: u16,
+    /// Signed ceiling on distinct `delivered_secret` names across all
+    /// contributions. Zero refuses the kind.
+    pub max_delivered_secrets: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

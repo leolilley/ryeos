@@ -52,6 +52,7 @@ launch_contract:
     max_contributions: 1
     max_targets_per_contribution: 1
     max_variables_per_contribution: 32
+    max_delivered_secrets: 8
   financial_authority: {kind: none}
   external_effect_authority: {kind: external}
   secret_policy:

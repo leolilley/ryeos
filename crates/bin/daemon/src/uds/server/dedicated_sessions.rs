@@ -356,6 +356,80 @@ fn require_structured_session_route_effect_contract(
     )
 }
 
+/// Read the secrets the admitted session capsule names for delivery, under the
+/// root's sealed environment authority with the session owner as recipient.
+/// Only names cross into errors; values stay in the returned delivery.
+fn deliver_session_secrets(
+    state: &AppState,
+    capsule_hash: &str,
+    owner: &str,
+    cap: &ryeos_app::callback_token::CallbackCapability,
+    recovering: bool,
+) -> Result<ryeos_engine::contracts::DeliveredSecretEnv> {
+    let names = {
+        let authority = state.state_store.pinned_state_authority()?;
+        let guard = authority.acquire_shared_guard()?;
+        authority.ensure_guard(&guard)?;
+        let value = authority
+            .cas_store()?
+            .get_object_bounded(
+                capsule_hash,
+                ryeos_state::objects::MAX_PERSISTENT_SESSION_CAPSULE_BYTES as u64,
+            )?
+            .ok_or_else(|| anyhow!("admitted session capsule disappeared"))?;
+        let capsule =
+            ryeos_state::objects::AdmittedPersistentSessionCapsule::from_current_value(&value)?;
+        if capsule.content_hash()? != capsule_hash {
+            bail!("admitted session capsule content hash changed");
+        }
+        ryeos_state::objects::session_process_environment_delivered_secret_names(
+            &capsule.process_environment,
+        )
+    };
+    if names.is_empty() {
+        return Ok(ryeos_engine::contracts::DeliveredSecretEnv::empty());
+    }
+    let refused_code = if recovering {
+        "session_secret_revoked"
+    } else {
+        "session_secret_recipient_refused"
+    };
+    let delivered = ryeos_app::vault::authorize_secret_delivery(
+        &state.secret_sources(),
+        ryeos_app::vault::SecretRecipient { principal: owner },
+        &names,
+        cap.provenance.project_authority(),
+    )
+    .map_err(|error| match error {
+        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => anyhow!(
+            "session_secret_missing: the session's admitted environment authority does not \
+             provide [{}]",
+            names.join(", ")
+        ),
+        ryeos_app::vault::VaultReadError::AuthorityViolation(detail) => {
+            anyhow!("{refused_code}: {detail}")
+        }
+        ryeos_app::vault::VaultReadError::NameRefused(refusal) => {
+            anyhow!("{refused_code}: {} ({})", refusal, refusal.code())
+        }
+        ryeos_app::vault::VaultReadError::Internal(error) => {
+            error.context("session secret delivery failed")
+        }
+    })?;
+    for name in delivered.names() {
+        let value = delivered.get(name).unwrap_or_default();
+        if value.is_empty()
+            || value.len() > ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES
+            || value.chars().any(char::is_control)
+        {
+            bail!(
+                "session_secret_unbounded: delivered secret `{name}` is empty, oversize or holds control characters"
+            );
+        }
+    }
+    Ok(delivered)
+}
+
 fn validate_structured_session_route_effect_contract(
     contract: &Value,
     route_set: &str,
@@ -910,6 +984,10 @@ pub(super) async fn start(
         &request.allowed_effect_classes,
         request.recover_upstream_session,
     )?;
+    // Delivered before any lock, worker identity or contact, so a refusal
+    // leaves nothing to settle. Recovery re-authorises here too: a value is
+    // never replayed from a previous incarnation.
+    let delivered_secrets = deliver_session_secrets(state, &capsule_hash, owner, cap, recovering)?;
     if !recovering
         && let (Some(scope), Some(accounting)) =
             (cap.accounting_scope.as_ref(), state.accounting.as_ref())
@@ -1278,6 +1356,7 @@ pub(super) async fn start(
                 workspace_lifeline,
                 Some(&start_state_root),
                 &runtime_environment,
+                delivered_secrets,
                 extra_target_channels,
                 &start_identity,
                 observation_sink,

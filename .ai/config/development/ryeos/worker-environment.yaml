@@ -4,7 +4,7 @@
 # installed execution has been qualified; worker-to-child acceptance is a
 # separate gate. Compiler/dependency trees remain child-owned external content.
 category: development/ryeos
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 worker_ref: worker:codex/hosted-authoring
 external_product_slots:
   - id: authoring-tools

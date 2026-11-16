@@ -51,6 +51,9 @@ enum AuthoredWorkerEnvironmentValue {
     RuntimeViewDirectory {
         relative_path: String,
     },
+    DeliveredSecret {
+        name: String,
+    },
 }
 
 fn main() {
@@ -176,6 +179,9 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                                 } => LaunchEnvironmentValueWire::RuntimeViewDirectory {
                                     relative_path,
                                 },
+                                AuthoredWorkerEnvironmentValue::DeliveredSecret { name } => {
+                                    LaunchEnvironmentValueWire::DeliveredSecret { name }
+                                }
                             };
                             (name, value)
                         })
@@ -315,6 +321,8 @@ fn validate(request: ValidateLaunchPreparerConfigRequest) -> ValidateLaunchPrepa
             .environment_contributions
             .max_variables_per_contribution
             == 32
+        && usize::from(request.environment_contributions.max_delivered_secrets)
+            == ryeos_state::objects::MAX_SESSION_DELIVERED_SECRETS
         && matches!(
             request.financial_authority,
             FinancialAuthorityDeclWire::None
@@ -697,7 +705,7 @@ fn validate_worker_environment(
         ));
     }
     if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some("ryeos.worker_environment.v6")
+        != Some("ryeos.worker_environment.v7")
         || value
             .get("category")
             .and_then(serde_json::Value::as_str)
@@ -860,6 +868,9 @@ fn validate_worker_environment(
                     relative_path,
                 )
                 .is_ok()
+            }
+            AuthoredWorkerEnvironmentValue::DeliveredSecret { name } => {
+                ryeos_state::objects::validate_session_process_environment_name(name).is_ok()
             }
         };
         if !valid {
@@ -1055,6 +1066,7 @@ mod tests {
                     max_contributions: 1,
                     max_targets_per_contribution: 1,
                     max_variables_per_contribution: 32,
+                    max_delivered_secrets: 8,
                 },
             financial_authority: FinancialAuthorityDeclWire::None,
             external_effect_authority: ExternalEffectAuthorityDeclWire::External,
@@ -1083,7 +1095,7 @@ mod tests {
             effective_trust_class: TrustClassWire::TrustedProject,
             composed: ryeos_handler_protocol::LaunchComposedViewWire {
                 composed: serde_json::json!({
-                    "category":"fixture/environments", "schema":"ryeos.worker_environment.v6",
+                    "category":"fixture/environments", "schema":"ryeos.worker_environment.v7",
                     "worker_ref":"worker:fixture/hosted", "external_content":[],
                     "external_product_slots":[{
                         "id":"runtime", "relationship_ref":"config:fixture/recipe",
@@ -1261,7 +1273,7 @@ mod tests {
             composed: ryeos_handler_protocol::LaunchComposedViewWire {
                 composed: serde_json::json!({
                     "category":"fixture/environments",
-                    "schema":"ryeos.worker_environment.v6",
+                    "schema":"ryeos.worker_environment.v7",
                     "external_product_slots":[],
                     "worker_ref":"worker:fixture/hosted",
                     "external_content":[],
@@ -1325,7 +1337,7 @@ mod tests {
             composed: ryeos_handler_protocol::LaunchComposedViewWire {
                 composed: serde_json::json!({
                     "category":"fixture/environments",
-                    "schema":"ryeos.worker_environment.v6",
+                    "schema":"ryeos.worker_environment.v7",
                     "external_product_slots":[],
                     "worker_ref":"worker:fixture/hosted",
                     "external_content":[],
@@ -1375,6 +1387,82 @@ mod tests {
     }
 
     #[test]
+    fn worker_environment_accepts_delivered_secret_and_rejects_protected_secret_names() {
+        let mut environment = LaunchPreparedItemWire {
+            canonical_ref: "config:fixture/environments/default".to_string(),
+            source_space: ItemSpaceWire::Bundle,
+            effective_trust_class: TrustClassWire::TrustedBundle,
+            composed: ryeos_handler_protocol::LaunchComposedViewWire {
+                composed: serde_json::json!({
+                    "category":"fixture/environments",
+                    "schema":"ryeos.worker_environment.v7",
+                    "external_product_slots":[],
+                    "worker_ref":"worker:fixture/hosted",
+                    "external_content":[],
+                    "configuration":{
+                        "executable_search":[],
+                        "process_environment":{
+                            "FIXTURE_API_KEY":{"kind":"delivered_secret","name":"FIXTURE_API_KEY"}
+                        }
+                    },
+                    "credential_requirement":{
+                        "workload_family":"fixture",
+                        "required_state":"active",
+                        "subject_projection_contract":"fixture.account.v1"
+                    },
+                    "portable_state_contract":"ryeos.worker_session.restore.v1",
+                    "workload_client":null
+                }),
+                derived: BTreeMap::new(),
+                policy_facts: BTreeMap::new(),
+            },
+            resolution_digest: serde_json::json!({"digest":"retained"}),
+        };
+        let validated = validate_worker_environment(&environment).unwrap();
+        assert!(matches!(
+            validated.process_environment.get("FIXTURE_API_KEY"),
+            Some(AuthoredWorkerEnvironmentValue::DeliveredSecret { name })
+                if name == "FIXTURE_API_KEY"
+        ));
+        environment.composed.composed["configuration"]["process_environment"]["FIXTURE_API_KEY"]
+            ["name"] = serde_json::json!("RYEOS_WORKSPACE");
+        assert_eq!(
+            validate_worker_environment(&environment).unwrap_err().code,
+            "worker_environment_variables_invalid"
+        );
+    }
+
+    #[test]
+    fn worker_environment_rejects_the_previous_schema_version() {
+        let environment = LaunchPreparedItemWire {
+            canonical_ref: "config:fixture/environments/default".to_string(),
+            source_space: ItemSpaceWire::Bundle,
+            effective_trust_class: TrustClassWire::TrustedBundle,
+            composed: ryeos_handler_protocol::LaunchComposedViewWire {
+                composed: serde_json::json!({
+                    "category":"fixture/environments",
+                    "schema":"ryeos.worker_environment.v6",
+                    "external_product_slots":[],
+                    "worker_ref":"worker:fixture/hosted",
+                    "external_content":[],
+                    "configuration":{"executable_search":[],"process_environment":{}},
+                    "credential_requirement":{
+                        "workload_family":"fixture",
+                        "required_state":"active",
+                        "subject_projection_contract":"fixture.account.v1"
+                    },
+                    "portable_state_contract":"ryeos.worker_session.restore.v1",
+                    "workload_client":null
+                }),
+                derived: BTreeMap::new(),
+                policy_facts: BTreeMap::new(),
+            },
+            resolution_digest: serde_json::json!({"digest":"retained"}),
+        };
+        assert!(validate_worker_environment(&environment).is_err());
+    }
+
+    #[test]
     fn worker_environment_rejects_protected_names_and_absent_realizations() {
         let mut environment = LaunchPreparedItemWire {
             canonical_ref: "config:fixture/environments/default".to_string(),
@@ -1383,7 +1471,7 @@ mod tests {
             composed: ryeos_handler_protocol::LaunchComposedViewWire {
                 composed: serde_json::json!({
                     "category":"fixture/environments",
-                    "schema":"ryeos.worker_environment.v6",
+                    "schema":"ryeos.worker_environment.v7",
                     "external_product_slots":[],
                     "worker_ref":"worker:fixture/hosted",
                     "external_content":[],
@@ -1447,7 +1535,7 @@ mod tests {
             composed: ryeos_handler_protocol::LaunchComposedViewWire {
                 composed: serde_json::json!({
                     "category":"fixture/environments",
-                    "schema":"ryeos.worker_environment.v6",
+                    "schema":"ryeos.worker_environment.v7",
                     "external_product_slots":[],
                     "worker_ref":"worker:fixture/hosted",
                     "external_content":[{

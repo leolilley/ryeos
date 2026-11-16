@@ -64,7 +64,7 @@ class AuthoringEnvironmentTests(unittest.TestCase):
         self.assertEqual(self.default["worker_ref"], "worker:codex/hosted")
 
     def test_explicit_worker_uses_existing_environment_contract(self):
-        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v6")
+        self.assertEqual(self.environment["schema"], "ryeos.worker_environment.v7")
         self.assertEqual(self.environment["external_product_slots"], [])
         self.assertEqual(self.environment["worker_ref"], "worker:codex/hosted-authoring")
         for key in ("credential_requirement", "portable_state_contract", "workload_client"):

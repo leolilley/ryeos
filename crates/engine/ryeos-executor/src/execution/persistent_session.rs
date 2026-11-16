@@ -1803,6 +1803,7 @@ fn validate_environment_contribution(
             Wire::RuntimeViewDirectory { relative_path } => Retained::RuntimeViewDirectory {
                 relative_path: relative_path.clone(),
             },
+            Wire::DeliveredSecret { name } => Retained::DeliveredSecret { name: name.clone() },
             Wire::ContentPath {
                 content_dependency,
                 realization_id,
@@ -2929,6 +2930,7 @@ fn start_capsule_process(
         &session_protocol,
         None,
         &BTreeMap::new(),
+        &ryeos_engine::contracts::DeliveredSecretEnv::empty(),
         Vec::new(),
         accounting_scope,
         funding_owner,
@@ -3771,6 +3773,74 @@ pub(crate) fn prepare_structured_session_configurations(
     Ok(mounts)
 }
 
+/// Environment slot that carries the number of the sealed secret descriptor to
+/// the bridge. The slot holds a descriptor number only, never a value.
+const SESSION_SECRET_FD_ENV: &str = "RYEOS_SESSION_SECRET_FD";
+
+#[derive(serde::Serialize)]
+struct SessionSecretPayload<'a> {
+    schema: u32,
+    values: BTreeMap<&'a str, &'a str>,
+}
+
+/// Seal the delivered values of one session start into an immutable
+/// descriptor for the bridge. The delivered names must equal the names the
+/// capsule's process environment asks for; nothing is delivered that the
+/// retained environment did not name, and nothing named goes undelivered.
+/// Errors carry names and counts only, never values.
+fn seal_delivered_secrets(
+    process_environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
+    delivered: &ryeos_engine::contracts::DeliveredSecretEnv,
+    isolation_enforced: bool,
+) -> Result<Option<lillux::InheritedDescriptorAuthority>> {
+    let named = ryeos_state::objects::session_process_environment_delivered_secret_names(
+        process_environment,
+    );
+    if named.is_empty() {
+        ensure!(
+            delivered.is_empty(),
+            "delivered secrets were supplied to a session whose environment names none"
+        );
+        return Ok(None);
+    }
+    ensure!(
+        named.iter().map(String::as_str).eq(delivered.names()),
+        "delivered secret names differ from the names the session environment requires"
+    );
+    // The descriptor is inherited by the bridge as a caller-supplied
+    // descriptor, which an enforced isolation launch refuses by design.
+    ensure!(
+        !isolation_enforced,
+        "session secret delivery is not available under enforced isolation"
+    );
+    let mut values = BTreeMap::new();
+    let mut capacity = 64_usize;
+    for name in &named {
+        let value = delivered
+            .get(name)
+            .ok_or_else(|| anyhow!("delivered secret `{name}` has no value"))?;
+        ensure!(
+            value.len() <= ryeos_state::objects::MAX_SESSION_DELIVERED_SECRET_VALUE_BYTES,
+            "delivered secret `{name}` exceeds its byte bound"
+        );
+        ensure!(
+            !value.chars().any(char::is_control),
+            "delivered secret `{name}` holds control characters"
+        );
+        // Worst-case JSON escaping is six bytes per input byte; sizing the
+        // buffer up front keeps the encoder from reallocating and leaving
+        // unzeroed copies of a value behind.
+        capacity += (name.len() + value.len()) * 6 + 8;
+        values.insert(name.as_str(), value);
+    }
+    let mut payload = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
+    serde_json::to_writer(&mut *payload, &SessionSecretPayload { schema: 1, values })
+        .context("encode session secret payload")?;
+    lillux::sealed_secret_descriptor::seal_secret_payload(&payload)
+        .map(Some)
+        .map_err(anyhow::Error::msg)
+}
+
 fn spawn_capsule_process_held(
     state: &AppState,
     capsule_hash: &str,
@@ -3782,6 +3852,7 @@ fn spawn_capsule_process_held(
     session_protocol: &ryeos_engine::protocols::descriptor::PersistentSessionProtocol,
     state_root: Option<&Path>,
     runtime_environment: &BTreeMap<String, String>,
+    delivered_secrets: &ryeos_engine::contracts::DeliveredSecretEnv,
     mut extra_target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
     accounting_scope: Option<&ryeos_state::objects::AdmittedAccountingScope>,
     funding_owner: &str,
@@ -4161,6 +4232,22 @@ fn spawn_capsule_process_held(
                 bail!("session process environment collides with runtime authority");
             }
         }
+        if let Some(descriptor) = seal_delivered_secrets(
+            &capsule.process_environment,
+            delivered_secrets,
+            state.isolation.is_enforced(),
+        )? {
+            let number = descriptor
+                .inherited_descriptor()
+                .map_err(anyhow::Error::msg)?;
+            if runtime_environment
+                .insert(SESSION_SECRET_FD_ENV.to_owned(), number.to_string())
+                .is_some()
+            {
+                bail!("session secret descriptor collides with runtime authority");
+            }
+            descriptor.retain_for_child(&mut inherited_fds);
+        }
         let mut runtime_env_allowlist = session_protocol.runtime_env_allowlist.clone();
         if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
             runtime_env_allowlist.push(name.clone());
@@ -4234,6 +4321,7 @@ pub fn start_exclusive_capsule(
     workspace_lifeline: std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>,
     state_root: Option<&Path>,
     runtime_environment: &BTreeMap<String, String>,
+    delivered_secrets: ryeos_engine::contracts::DeliveredSecretEnv,
     extra_target_channels: Vec<ryeos_engine::isolation::IsolationTargetChannelAuthority>,
     identity: &ExclusivePersistentSessionIdentity,
     observation_sink: ryeos_app::persistent_session::PersistentSessionObservationSink,
@@ -4374,6 +4462,7 @@ pub fn start_exclusive_capsule(
         &session_protocol,
         state_root,
         &runtime_environment,
+        &delivered_secrets,
         extra_target_channels,
         identity.accounting_scope.as_ref(),
         &identity.boot_identity_hash,

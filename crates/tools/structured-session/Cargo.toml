@@ -30,6 +30,7 @@ ryeos-handler-protocol.workspace = true
 ryeos-runtime.workspace = true
 ryeos-state.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

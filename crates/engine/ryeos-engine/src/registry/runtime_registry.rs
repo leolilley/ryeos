@@ -53,6 +53,7 @@ const MAX_LAUNCH_EVIDENCE_ATTACHMENT_BYTES: u64 = ryeos_state::objects::MAX_BUND
 const MAX_LAUNCH_ENVIRONMENT_CONTRIBUTIONS: usize = 8;
 const MAX_LAUNCH_ENVIRONMENT_TARGETS: usize = 8;
 const MAX_LAUNCH_ENVIRONMENT_VARIABLES: usize = 32;
+const MAX_LAUNCH_ENVIRONMENT_DELIVERED_SECRETS: usize = 8;
 const MAX_LAUNCH_SECRET_NAMES: usize = 32;
 /// Maximum retained size of any one launch runtime fact. Fact producers must
 /// use this ceiling rather than declaring a larger, independently valid wire payload.
@@ -234,6 +235,9 @@ pub struct LaunchEnvironmentContributionPolicy {
     pub max_contributions: u16,
     pub max_targets_per_contribution: u16,
     pub max_variables_per_contribution: u16,
+    /// Distinct `delivered_secret` names the preparer may select across all
+    /// contributions. Zero refuses the kind.
+    pub max_delivered_secrets: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1411,6 +1415,8 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             > MAX_LAUNCH_ENVIRONMENT_TARGETS
         || usize::from(environment_policy.max_variables_per_contribution)
             > MAX_LAUNCH_ENVIRONMENT_VARIABLES
+        || usize::from(environment_policy.max_delivered_secrets)
+            > MAX_LAUNCH_ENVIRONMENT_DELIVERED_SECRETS
     {
         return runtime_yaml_error(
             yaml_path,
@@ -1420,7 +1426,8 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
     let environment_disabled = environment_policy.max_contributions == 0;
     if environment_disabled
         != (environment_policy.max_targets_per_contribution == 0
-            && environment_policy.max_variables_per_contribution == 0)
+            && environment_policy.max_variables_per_contribution == 0
+            && environment_policy.max_delivered_secrets == 0)
     {
         return runtime_yaml_error(
             yaml_path,
@@ -1698,6 +1705,7 @@ mod tests {
                     max_contributions: 0,
                     max_targets_per_contribution: 0,
                     max_variables_per_contribution: 0,
+                    max_delivered_secrets: 0,
                 },
                 financial_authority: FinancialAuthorityDecl::None,
                 external_effect_authority: ExternalEffectAuthorityDecl::None,
@@ -1754,6 +1762,7 @@ mod tests {
         "    max_contributions: 0\n",
         "    max_targets_per_contribution: 0\n",
         "    max_variables_per_contribution: 0\n",
+        "    max_delivered_secrets: 0\n",
         "  financial_authority:\n",
         "    kind: none\n",
         "  external_effect_authority:\n",

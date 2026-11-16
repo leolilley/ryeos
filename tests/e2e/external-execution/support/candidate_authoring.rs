@@ -619,7 +619,7 @@ config:
         std::fs::create_dir_all(environment_path.parent().unwrap()).unwrap();
         let environment = format!(
             r#"category: test
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 external_product_slots: []
 worker_ref: worker:test/external-candidate
 external_content:

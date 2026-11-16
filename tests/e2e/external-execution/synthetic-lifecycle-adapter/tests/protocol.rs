@@ -5008,6 +5008,7 @@ async fn run_production_tls_candidate(
             start_lifeline,
             Some(&start_state_root),
             &runtime_environment,
+            ryeos_engine::contracts::DeliveredSecretEnv::empty(),
             Vec::new(),
             &identity,
             observation_sink,

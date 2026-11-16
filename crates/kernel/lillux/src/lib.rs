@@ -29,6 +29,7 @@ pub mod process_control;
 pub mod progress;
 pub mod root_enclosure;
 pub mod sandbox;
+pub mod sealed_secret_descriptor;
 pub mod secure_fs;
 pub mod signature;
 pub mod stderr_tail;

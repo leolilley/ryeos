@@ -2,7 +2,7 @@
 # Trusted/disposable hosted lane. This differs from the hard-contained
 # authoring environment only in the exact worker protocol it selects.
 category: development/ryeos
-schema: ryeos.worker_environment.v6
+schema: ryeos.worker_environment.v7
 worker_ref: worker:codex/trusted-hosted-authoring
 external_product_slots:
   - id: authoring-tools

@@ -40,6 +40,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   financial_authority:
     kind: none
   external_effect_authority:

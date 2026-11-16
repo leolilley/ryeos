@@ -254,7 +254,7 @@ A project worker execution selects its signed portable environment through the
 runtime-declared `environment` ref binding. The selector is not an ordinary
 parameter and cannot be smuggled through the worker input envelope. The generic
 launch preparer accepts only a trusted bundle/project `config` with the closed
-`ryeos.worker_environment.v6` schema, derives the exact worker dependency from
+`ryeos.worker_environment.v7` schema, derives the exact worker dependency from
 it, and retains the engine-resolved path-free binding record in the outer
 admitted program. The environment may additionally declare locator-free pinned
 external content and an ordered executable-search list over those exact tree

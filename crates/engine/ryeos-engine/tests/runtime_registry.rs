@@ -57,7 +57,7 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
 
 fn with_empty_launch_contract(body: &str, serves: &str) -> String {
     format!(
-        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  content_dependencies:\n    max_dependencies: 0\n    allowed_bindings: []\n    max_targets_per_dependency: 0\n    max_executable_search_entries: 0\n    external_content: null\n  evidence_attachments:\n    max_attachments: 0\n    max_total_bytes: 0\n    target: null\n    destination_prefix: null\n    allowed_access: []\n  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
+        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  execution_dependencies:\n    max_dependencies: 0\n    allowed_kinds: []\n    allowed_spaces: []\n    allowed_trust: []\n  content_dependencies:\n    max_dependencies: 0\n    allowed_bindings: []\n    max_targets_per_dependency: 0\n    max_executable_search_entries: 0\n    external_content: null\n  evidence_attachments:\n    max_attachments: 0\n    max_total_bytes: 0\n    target: null\n    destination_prefix: null\n    allowed_access: []\n  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n    max_delivered_secrets: 0\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n  external_effect_authority:\n    kind: none\n"
     )
 }
 
@@ -150,6 +150,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
@@ -196,6 +197,7 @@ launch_contract:
     max_contributions: 0
     max_targets_per_contribution: 0
     max_variables_per_contribution: 0
+    max_delivered_secrets: 0
   secret_policy:
     max_requirements: 0
     allowed_names: []
@@ -315,7 +317,7 @@ fn ref_binding_project_result_requirement_is_explicit_and_closed() {
 #[test]
 fn runtime_environment_contribution_policy_is_required_and_closed() {
     let absent = FULL_RUNTIME_YAML.replace(
-        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n",
+        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n    max_delivered_secrets: 0\n",
         "",
     );
     assert!(matches!(
@@ -324,8 +326,8 @@ fn runtime_environment_contribution_policy_is_required_and_closed() {
     ));
 
     let inconsistent = FULL_RUNTIME_YAML.replace(
-        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n",
-        "  environment_contributions:\n    max_contributions: 1\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 1\n",
+        "  environment_contributions:\n    max_contributions: 0\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 0\n    max_delivered_secrets: 0\n",
+        "  environment_contributions:\n    max_contributions: 1\n    max_targets_per_contribution: 0\n    max_variables_per_contribution: 1\n    max_delivered_secrets: 0\n",
     );
     assert!(matches!(
         parse_via_registry(&inconsistent).unwrap_err(),

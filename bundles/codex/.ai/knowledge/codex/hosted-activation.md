@@ -170,7 +170,7 @@ configured-operator forwarding route to inspect profiles on a remote node.
    whose signed policy advertises trusted process-group readiness.
 
    `config:codex/environments/default` uses the closed
-   `ryeos.worker_environment.v6` contract. Its `executable_search` contributes
+   `ryeos.worker_environment.v7` contract. Its `executable_search` contributes
    only the exact activated command-tool tree to `PATH`. Its independent
    `process_environment` map may contribute bounded literals, paths inside an
    explicitly named activated realization, or directories below the
