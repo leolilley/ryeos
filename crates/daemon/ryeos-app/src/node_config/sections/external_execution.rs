@@ -981,6 +981,51 @@ impl RetainedExternalExecutionBinding {
         settings: Value,
         qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
+        Self::composed_test_fixture_with_settings_and_timeout(
+            program,
+            controller_transport,
+            controller_tls_root_certificates_der_base64,
+            backend,
+            backend_artifact_hash,
+            backend_artifact_bytes,
+            settings_schema_digest,
+            supervisor_artifact_hash,
+            supervisor_artifact_bytes,
+            launcher_artifact_hash,
+            launcher_artifact_bytes,
+            configuration_adapter_artifact_hash,
+            configuration_adapter_artifact_bytes,
+            connector_artifact_hash,
+            connector_artifact_bytes,
+            settings,
+            qualification,
+            60,
+        )
+    }
+
+    /// The same fixture with the binding's execution timeout (which is also
+    /// the lease lifetime of a leased session) stated.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn composed_test_fixture_with_settings_and_timeout(
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        controller_transport: impl Into<ComposedTestTransport>,
+        controller_tls_root_certificates_der_base64: Vec<String>,
+        backend: String,
+        backend_artifact_hash: String,
+        backend_artifact_bytes: u64,
+        settings_schema_digest: String,
+        supervisor_artifact_hash: String,
+        supervisor_artifact_bytes: u64,
+        launcher_artifact_hash: String,
+        launcher_artifact_bytes: u64,
+        configuration_adapter_artifact_hash: String,
+        configuration_adapter_artifact_bytes: u64,
+        connector_artifact_hash: String,
+        connector_artifact_bytes: u64,
+        settings: Value,
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
+    ) -> Result<Self> {
         let transport: ComposedTestTransport = controller_transport.into();
         let document = compose::compose_binding_document(compose::ComposeInputs {
             program,
@@ -1031,7 +1076,7 @@ impl RetainedExternalExecutionBinding {
             },
             limits: compose::ComposeLimits {
                 max_active: 1,
-                timeout_seconds: 60,
+                timeout_seconds,
                 // The composed native fixture transfers the exact guest
                 // runtime through descriptor authority during the one
                 // bounded activation contact. Use the contract's maximum
@@ -1195,6 +1240,7 @@ pub fn provision_installed_test_placement_credential(
 
 impl InstalledExternalExecutionBinding {
     #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     pub(crate) fn composed_test_fixture_with_settings(
         program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
         controller_transport: impl Into<ComposedTestTransport>,
@@ -1214,7 +1260,7 @@ impl InstalledExternalExecutionBinding {
         settings: Value,
         qualification: &PlacementQualificationSelection,
     ) -> Result<Self> {
-        let retained = RetainedExternalExecutionBinding::composed_test_fixture_with_settings(
+        Self::composed_test_fixture_with_settings_and_timeout(
             program,
             controller_transport,
             controller_tls_root_certificates_der_base64,
@@ -1232,6 +1278,50 @@ impl InstalledExternalExecutionBinding {
             connector_artifact_bytes,
             settings,
             qualification,
+            60,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn composed_test_fixture_with_settings_and_timeout(
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        controller_transport: impl Into<ComposedTestTransport>,
+        controller_tls_root_certificates_der_base64: Vec<String>,
+        backend: String,
+        backend_artifact_hash: String,
+        backend_artifact_bytes: u64,
+        settings_schema_digest: String,
+        supervisor_artifact_hash: String,
+        supervisor_artifact_bytes: u64,
+        launcher_artifact_hash: String,
+        launcher_artifact_bytes: u64,
+        configuration_adapter_artifact_hash: String,
+        configuration_adapter_artifact_bytes: u64,
+        connector_artifact_hash: String,
+        connector_artifact_bytes: u64,
+        settings: Value,
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
+    ) -> Result<Self> {
+        let retained = RetainedExternalExecutionBinding::composed_test_fixture_with_settings_and_timeout(
+            program,
+            controller_transport,
+            controller_tls_root_certificates_der_base64,
+            backend,
+            backend_artifact_hash,
+            backend_artifact_bytes,
+            settings_schema_digest,
+            supervisor_artifact_hash,
+            supervisor_artifact_bytes,
+            launcher_artifact_hash,
+            launcher_artifact_bytes,
+            configuration_adapter_artifact_hash,
+            configuration_adapter_artifact_bytes,
+            connector_artifact_hash,
+            connector_artifact_bytes,
+            settings,
+            qualification,
+            timeout_seconds,
         )?;
         Ok(Self {
             id: retained.id,

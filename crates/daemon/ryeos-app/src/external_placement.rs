@@ -9911,6 +9911,30 @@ pub mod test_support {
         credential: &[u8],
         qualification: &PlacementQualificationSelection,
     ) -> Result<()> {
+        install_precontact_binding_with_settings_and_timeout(
+            state,
+            program,
+            controller,
+            tls_root_certificates_der_base64,
+            settings,
+            credential,
+            qualification,
+            60,
+        )
+    }
+
+    /// The same binding with its execution timeout, which is also the lease
+    /// lifetime of a leased session, stated.
+    pub fn install_precontact_binding_with_settings_and_timeout(
+        state: &mut AppState,
+        program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
+        controller: impl Into<crate::node_config::sections::external_execution::ComposedTestTransport>,
+        tls_root_certificates_der_base64: Vec<String>,
+        settings: serde_json::Value,
+        credential: &[u8],
+        qualification: &PlacementQualificationSelection,
+        timeout_seconds: u32,
+    ) -> Result<()> {
         let (
             backend,
             backend_hash,
@@ -9925,7 +9949,7 @@ pub mod test_support {
             connector_hash,
             connector_bytes,
         ) = installed_artifact_coordinates(state, &program.requirement.provider_declaration_id)?;
-        let binding = crate::node_config::sections::external_execution::InstalledExternalExecutionBinding::composed_test_fixture_with_settings(
+        let binding = crate::node_config::sections::external_execution::InstalledExternalExecutionBinding::composed_test_fixture_with_settings_and_timeout(
             program,
             controller,
             tls_root_certificates_der_base64,
@@ -9943,6 +9967,7 @@ pub mod test_support {
             connector_bytes,
             settings,
             qualification,
+            timeout_seconds,
         )?;
         let credential_access = binding.credential_access()?;
         state.vault.provision_placement_credential(

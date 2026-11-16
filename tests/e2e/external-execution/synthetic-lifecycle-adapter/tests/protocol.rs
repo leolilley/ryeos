@@ -3577,9 +3577,17 @@ fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
 /// supervisor over https.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-#[ignore = "the fixture binding's 60 s lease cannot outlive the session deadline; see run.md W7"]
+#[ignore = "the guest's Ready and capability report are not yet relayed to await-lease-ready; see run.md W7"]
 fn production_tls_candidate_on_a_remote_lease() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Lease);
+}
+
+/// With the fixture's 60 s binding and the real codex requirements, launch
+/// refuses on the lease-fit rule.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn production_tls_lease_shorter_than_the_session_deadline_is_refused() {
+    run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::LeaseTooShort);
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -3614,7 +3622,11 @@ fn pinned_codex_turn_freezes_remote_candidate_and_evaluates_from_base() {
 fn lease_lane_budget(
     publication: PublicationScenario,
 ) -> Option<ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget> {
-    (publication == PublicationScenario::Lease).then_some(
+    matches!(
+        publication,
+        PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+    )
+    .then_some(
         ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget {
             max_concurrent_leases: 2,
             max_lease_lifetime_seconds: 4 * 60 * 60,
@@ -3641,9 +3653,23 @@ fn lease_lane_environment_names() -> Vec<String> {
         .collect()
 }
 
+/// The binding's execution timeout, which is the lease lifetime: the lease
+/// lane states 400 s (journal window 60+60+400+60+120 = 700 s); every other
+/// scenario keeps the fixture's 60 s.
+fn lease_lane_binding_timeout_seconds(publication: PublicationScenario) -> u32 {
+    if publication == PublicationScenario::Lease {
+        400
+    } else {
+        60
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PublicationScenario {
     Publish,
+    /// The lease lane with the fixture's 60 s binding: launch refuses, as the
+    /// lease cannot outlive the session deadline.
+    LeaseTooShort,
     /// Publish, with the session placed on a remote lease: the worker profile
     /// carries the real codex placement requirements.
     Lease,
@@ -3954,7 +3980,7 @@ async fn run_production_tls_candidate(
         .unwrap();
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
-    let environment_names: Vec<String> = if publication == PublicationScenario::Lease {
+    let environment_names: Vec<String> = if matches!(publication, PublicationScenario::Lease | PublicationScenario::LeaseTooShort) {
         lease_lane_environment_names()
     } else {
         vec!["time".into(), "credential:private_home".into()]
@@ -4026,7 +4052,7 @@ async fn run_production_tls_candidate(
         true,
         scripted_model_origin.as_deref(),
         command_tools_manifest_hash,
-        (publication == PublicationScenario::Lease)
+        matches!(publication, PublicationScenario::Lease | PublicationScenario::LeaseTooShort)
             .then(|| candidate_authoring::real_codex_placement_requires(fixture_repository_source_root())),
     );
     let qualification_inputs =
@@ -4872,7 +4898,7 @@ async fn run_production_tls_candidate(
     .unwrap();
     let placement = admitted_placement(&state);
     let admission =
-        ryeos_executor::test_support::admit_worker_session_with_selected_products_and_placement(
+        ryeos_executor::test_support::admit_worker_session_with_selected_products_and_placement_and_binding_timeout(
             &mut state,
             "worker_execution:test/external-candidate",
             &project,
@@ -4900,6 +4926,7 @@ async fn run_production_tls_candidate(
             settings,
             credential,
             &placement_qualification,
+            lease_lane_binding_timeout_seconds(publication),
         )
         .unwrap();
     let capsule_hash = admission.capsule_hash;
@@ -5107,7 +5134,7 @@ async fn run_production_tls_candidate(
     if scripted_turn || publication == PublicationScenario::StaleBase {
         eprintln!("external fixture: starting exclusive capsule");
     }
-    tokio::task::spawn_blocking(move || {
+    let started = tokio::task::spawn_blocking(move || {
         ryeos_executor::execution::persistent_session::start_exclusive_capsule(
             &start_state,
             &start_capsule,
@@ -5121,8 +5148,26 @@ async fn run_production_tls_candidate(
         )
     })
     .await
-    .unwrap()
-    .unwrap_or_else(|error| {
+    .unwrap();
+    let started = if publication == PublicationScenario::LeaseTooShort {
+        let refusal = format!(
+            "{:#}",
+            started.expect_err("a 60 s lease cannot outlive the session deadline")
+        );
+        assert!(
+            refusal.contains("the remote lease ends in 60s, and this session's deadline is "),
+            "unexpected lease-fit refusal: {refusal}"
+        );
+        stop.store(true, Ordering::Release);
+        controller.join().unwrap();
+        close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
+        uds_server.abort();
+        let _ = uds_server.await;
+        return;
+    } else {
+        started
+    };
+    started.unwrap_or_else(|error| {
         panic!(
             "exclusive capsule start failed: {error:#}; supervisor_terminal={}; \
              controller evidence: {:?}",

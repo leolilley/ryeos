@@ -200,6 +200,46 @@ pub mod test_support {
         placement_credential: &str,
         qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
     ) -> Result<AdmittedWorkerSessionFixture> {
+        admit_worker_session_with_selected_products_and_placement_and_binding_timeout(
+            state,
+            worker_execution_ref,
+            project_root,
+            project_snapshot_hash,
+            environment,
+            materialization,
+            selected_products,
+            external_candidate_requirement,
+            qualification_use,
+            placement,
+            controller,
+            tls_roots,
+            placement_settings,
+            placement_credential,
+            qualification,
+            60,
+        )
+    }
+
+    /// The same admission with the placement binding's execution timeout, the
+    /// lease lifetime of a leased session, stated.
+    pub fn admit_worker_session_with_selected_products_and_placement_and_binding_timeout(
+        state: &mut ryeos_app::state::AppState,
+        worker_execution_ref: &str,
+        project_root: &std::path::Path,
+        project_snapshot_hash: &str,
+        environment: Option<(&str, &str)>,
+        materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+        selected_products: ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
+        external_candidate_requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
+        qualification_use: ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+        placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
+        controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
+        tls_roots: Vec<String>,
+        placement_settings: serde_json::Value,
+        placement_credential: &str,
+        qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
+        binding_timeout_seconds: u32,
+    ) -> Result<AdmittedWorkerSessionFixture> {
         use ryeos_engine::contracts::{
             EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
             SubjectResolutionAuthority,
@@ -415,7 +455,7 @@ pub mod test_support {
         let selected_products = ryeos_state::external_content::products::composition::ResolvedExternalProductSelections::new(selection_map)?;
         let program = external_candidate_requirement
             .resolve_for_use(Some(&selected_products), &qualification_use, placement)?;
-        ryeos_app::external_placement::test_support::install_precontact_binding_with_settings(
+        ryeos_app::external_placement::test_support::install_precontact_binding_with_settings_and_timeout(
             state,
             &program,
             controller,
@@ -423,6 +463,7 @@ pub mod test_support {
             placement_settings,
             placement_credential.as_bytes(),
             qualification,
+            binding_timeout_seconds,
         )?;
         dependency.resolution.composed.derived.insert(
             EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY.to_owned(),
