@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T09:38:06Z:1a33aeda811d669cd94c424bcb9fc54adda320d3c0e837a9759f136cd9f65b76:5Jd//IikhAsSJejm9YY8S/uRgQmoFLa0q7/IrChL4VzvJ/KbSpkzPlN+J4pVnh2J/fwdY4XzTTIm6kE6ecEwBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T12:47:54Z:9a15ae3802a6d1f53f7ce94f600916ee71a71dade3cd2d4301f42b0f279e4aec:nm6aQs1CfkrVX/vRuVwstOcMI/5xtUIqpdhMWncRjfJsvmSSAtOf3DFuU63k5R53YFAyNlr/AWskFuiDhFaWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: claude-code
 tags: [claude-code, hosted-worker, activation, runbook]
@@ -58,10 +58,37 @@ optional `stub` object:
 its own end would hang the session, so each outcome still emits
 `turn/completed`. Without `stub` the turn completes at once.
 
+## The live driver
+
+Without a `stub` object the adapter runs Claude Code, one `claude -p` process
+per turn, in its own process group. It needs:
+
+- `CLAUDE_CODE_EXECUTABLE`, an absolute path to Claude Code's executable. The
+  environment templates carry the placeholder `/path/to/claude-code/bin/claude`;
+  set it to the real location (later, the `realization_path` of a pinned file
+  realization). The digest is not pinned yet: the executable's redistribution
+  terms and storage are separate decisions.
+- `CLAUDE_CONFIG_DIR`, the credential home the bridge provides. Claude Code's
+  sessions are kept under `projects/` there, and the adapter's own files under
+  `adapter/` (its session map and its MCP configuration).
+- `CLAUDE_CODE_MCP_CONFIG`, the signed MCP server list as
+  `{"mcpServers": {...}}`.
+
+`session/start` may carry `model`, `effort` and `tools` (a plain-name
+allow-list; `mcp__server__*` patterns allowed). The session keeps them for
+every turn, so route `fixed_params` plus `forbidden_fields` are what stop a
+goal widening them. A turn may add `deadline_seconds`, `max_budget_usd`,
+`output_schema` and `system_prompt`. Claude Code is started with only its own
+settings (`--setting-sources user`), only the adapter's MCP file
+(`--strict-mcp-config`), `--permission-mode dontAsk` with prompts denied, and
+`--bare` when a gateway base URL is delivered.
+
+An adapter built for shipping uses `--no-default-features`: that binary has no
+stub and refuses the `stub` knob. The default build keeps the stub for tests.
+
 ## Not in this slice
 
-The real adapter, the strict-configuration flags for Claude Code, Claude
-Code's executable, model and effort ceilings, tool allow-lists, approval
-handling and cost accounting arrive in later slices. Until then
+Claude Code's executable storage and pinning, and the profile `fixed_params`
+that fix model, effort and tools per item, arrive in later slices. Until then
 `configuration_absence` already refuses a workspace that carries Claude Code
 project settings, hooks or MCP definitions, and the profile is schema 12.

@@ -2,11 +2,18 @@
 //! for the claude-code bundle.
 //!
 //! It speaks the bridge's stdio wire (one JSON object per line) and nothing
-//! else. In this slice the only driver is the stub, which needs no model, no
-//! network and no Claude Code; a driver that runs the real executable later
-//! implements the same `Driver` trait and replaces the one constructed below.
+//! else. Sessions are served by the Claude Code driver, which runs the
+//! configured executable once per turn; a build with the `stub-driver`
+//! feature can also serve scripted stub sessions (see `select`).
 
+mod claude;
 mod driver;
+mod invocation;
+mod os;
+mod select;
+mod sessions;
+mod stream;
+#[cfg(feature = "stub-driver")]
 mod stub;
 mod wire;
 
@@ -14,15 +21,23 @@ use std::io::{self, Write as _};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use driver::Server;
-use stub::StubDriver;
+use driver::{Driver, Server};
+use select::Adapter;
 use wire::Emitter;
 
 fn main() -> ExitCode {
-    let mut server = Server::new(
-        Arc::new(StubDriver::from_environment()),
-        Emitter::new(io::stdout()),
-    );
+    let adapter = Arc::new(Adapter::from_environment());
+    // On SIGTERM, stop every Claude Code process group before exiting; on
+    // input EOF the server does the same through `shutdown`.
+    let on_signal = Arc::clone(&adapter);
+    if let Err(error) = os::exit_on_terminate(move || on_signal.shutdown()) {
+        let _ = writeln!(
+            io::stderr(),
+            "claude-code-adapter: install signal handler: {error}"
+        );
+        return ExitCode::FAILURE;
+    }
+    let mut server = Server::new(adapter, Emitter::new(io::stdout()));
     match server.run(io::stdin().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

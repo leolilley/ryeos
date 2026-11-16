@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-16T12:02:07Z:06dc70a29d9760f9d9253306e96f5139d4a31c7910c1688a07c6a3a754c9358e:wpOD5p3MG4EP7M+/595KJMBxHuG2mMvZO4+QhdhCqcEbR5ziUVkpnmi28XXnHhQAG1+0h2tKW4leOk3aM38CDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T12:48:09Z:abf49f26309154440805ce14abab31d541cd994db1ad02d20c68900c3a6ee0f7:1xzHbvBgLx3QJAvU+pkVllA3aNPhtZYdq6p5EjEfjs501SLDBAoxlvUswlqpu6/RT48bPt82woLEXXEeOgMVDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the claude-code provider data.
 
 These checks pin the authored shape the Rust validators judge: the profile
@@ -264,11 +264,20 @@ class ClaudeCodeContractTests(unittest.TestCase):
             self.assertEqual(environment["portable_state_contract"], "ryeos.worker_session.restore.v1")
             self.assertIsNone(environment["workload_client"])
             variables = environment["configuration"]["process_environment"]
+            delivered = {
+                variable: value
+                for variable, value in variables.items()
+                if value.get("kind") == "delivered_secret"
+            }
             self.assertEqual(
-                set(variables), set(self.profile["required_process_environment"]), name
+                set(delivered), set(self.profile["required_process_environment"]), name
             )
-            for variable, value in variables.items():
+            for variable, value in delivered.items():
                 self.assertEqual(value, {"kind": "delivered_secret", "name": variable}, name)
+            # Everything else is a plain literal: no other kind may carry a value.
+            for variable, value in variables.items():
+                if variable not in delivered:
+                    self.assertEqual(value.get("kind"), "literal", f"{name}: {variable}")
 
     def test_executions_select_their_route_sets_without_durable_requirements(self) -> None:
         for name, path in EXECUTIONS.items():

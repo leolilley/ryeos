@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T09:38:06Z:959695d109012da6914c90aaf2af9927bb8cf6c1bcfb53b497e6bb4c653d5e57:IS/ck8MWx30xGm+MY8Z2FlyO8Sp1GAcCoOd3YRGStq+J5C/miC0cbJMUlvpbr3eQqlvJ3uAlIR1iiap231hgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T12:47:54Z:eb269677edd96ef290e34d19d8ccccd69b76e1ccd47f52c5ee3b84669541a89c:REtPTgYnT2xwEE4aExCztw7kdHPqIIKAaNGujdBHmn4eNOtOtKEVLyVwRqZT0KvyR9YlnxofCZJ+S2CtsOEuAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: claude-code/environments
 schema: ryeos.worker_environment.v7
 external_product_slots: []
@@ -15,6 +15,18 @@ configuration:
     ANTHROPIC_BASE_URL:
       kind: delivered_secret
       name: ANTHROPIC_BASE_URL
+    # Claude Code's own executable (not the workload executable, which is the
+    # adapter). This is a placeholder absolute path: replace it with the path
+    # the node's Claude Code install or realization is served at. The adapter
+    # refuses to start a session when the path does not name a file.
+    CLAUDE_CODE_EXECUTABLE:
+      kind: literal
+      value: /path/to/claude-code/bin/claude
+    # The signed MCP server list the adapter writes as Claude Code's only MCP
+    # configuration. Empty: no MCP server is reachable.
+    CLAUDE_CODE_MCP_CONFIG:
+      kind: literal
+      value: '{"mcpServers":{}}'
 credential_requirement:
   workload_family: claude-code
   required_state: active

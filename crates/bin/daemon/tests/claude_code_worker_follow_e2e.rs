@@ -195,7 +195,7 @@ fn follow_action(stub: &Value) -> String {
         params:
           credential_profile_id: "{CREDENTIAL_PROFILE_ID}"
           goal:
-            session_start_payload: {{}}
+            session_start_payload: {{stub: {{}}}}
             turn_start_payload:
               prompt: "{PROMPT}"
               stub: {stub}
@@ -827,7 +827,7 @@ async fn a_second_turn_continues_the_first_turns_upstream_conversation() -> Resu
         publisher,
         "first",
         TURN_ITEM,
-        Some(&json!({})),
+        Some(&json!({"stub": {}})),
         None,
         &completed_stub(),
     )?;
@@ -903,7 +903,7 @@ async fn a_predecessor_is_continued_at_most_once_and_must_exist() -> Result<()> 
         publisher,
         "first",
         TURN_ITEM,
-        Some(&json!({})),
+        Some(&json!({"stub": {}})),
         None,
         &completed_stub(),
     )?;

@@ -4433,7 +4433,10 @@ dependencies = [
 name = "ryeos-claude-code-adapter"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde_json",
+ "signal-hook",
+ "uuid",
 ]
 
 [[package]]
