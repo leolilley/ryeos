@@ -1,26 +1,64 @@
-//! Passes over folded entries: clusters, then recaps.
+//! Passes over folded entries: clusters (operations and notices), then the
+//! turn fold.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{Cluster, Definition, Entry, EntryKind, Item, Recap};
 
 pub(crate) fn run(entries: Vec<Entry>, definition: &Definition) -> Vec<Item> {
-    recap(cluster(entries, definition))
+    turn_fold(cluster(entries, definition), definition)
 }
 
-/// A finished entry that says what it counts as: an activity that is done or
-/// stopped, or a link (whose outcome may be unknown from this chain).
-fn candidate(entry: &Entry) -> bool {
-    entry.counts_as.is_some()
-        && match entry.kind {
-            EntryKind::Activity => matches!(entry.state.as_deref(), Some("done" | "stopped")),
-            EntryKind::Link => {
-                matches!(entry.state.as_deref(), Some("done" | "stopped" | "unknown"))
-            }
-            _ => false,
+/// A failed or alarming entry never hides inside a group: its state or tone is
+/// one the definition lists as escaping.
+fn escapes(entry: &Entry, definition: &Definition) -> bool {
+    let escape = &definition.folds.escape;
+    entry
+        .state
+        .as_ref()
+        .is_some_and(|s| escape.states.contains(s))
+        || entry
+            .tone
+            .as_ref()
+            .is_some_and(|t| escape.tones.contains(t))
+}
+
+/// What kind of run an entry can join.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Run {
+    /// Finished operations that say what they count as.
+    Work,
+    /// Markers, other than the one that opens an exchange.
+    Notice,
+}
+
+/// Prose, messages, thoughts, links, asks, outcomes, escaping entries and
+/// unfinished operations join no run and so break the one in progress.
+fn classify(entry: &Entry, definition: &Definition) -> Option<Run> {
+    if escapes(entry, definition) {
+        return None;
+    }
+    match entry.kind {
+        EntryKind::Activity
+            if entry.counts_as.is_some()
+                && entry
+                    .state
+                    .as_ref()
+                    .is_some_and(|s| definition.folds.group_states.contains(s)) =>
+        {
+            Some(Run::Work)
         }
+        EntryKind::Marker
+            if definition.folds.notice.is_some()
+                && entry.exchange.as_deref() != Some(entry.id.as_str()) =>
+        {
+            Some(Run::Notice)
+        }
+        _ => None,
+    }
 }
 
+/// A run stays within one exchange and one nesting parent.
 fn same_run(a: &Entry, b: &Entry) -> bool {
     a.exchange == b.exchange && a.parent == b.parent
 }
@@ -28,23 +66,30 @@ fn same_run(a: &Entry, b: &Entry) -> bool {
 fn cluster(entries: Vec<Entry>, definition: &Definition) -> Vec<Item> {
     let mut items = Vec::new();
     let mut run: Vec<Entry> = Vec::new();
+    let mut run_kind = None;
     for entry in entries {
-        if candidate(&entry) && run.last().is_none_or(|last| same_run(last, &entry)) {
-            run.push(entry);
-            continue;
+        let kind = classify(&entry, definition);
+        let continues = kind.is_some()
+            && kind == run_kind
+            && run.last().is_some_and(|last| same_run(last, &entry));
+        if !continues {
+            flush(&mut run, run_kind, &mut items, definition);
         }
-        flush(&mut run, &mut items, definition);
-        if candidate(&entry) {
-            run.push(entry);
-        } else {
-            items.push(Item::Entry(entry));
+        match kind {
+            Some(_) => {
+                run_kind = kind;
+                run.push(entry);
+            }
+            None => items.push(Item::Entry(entry)),
         }
     }
-    flush(&mut run, &mut items, definition);
+    flush(&mut run, run_kind, &mut items, definition);
     items
 }
 
-fn flush(run: &mut Vec<Entry>, items: &mut Vec<Item>, definition: &Definition) {
+/// A run of two or more becomes a cluster; a lone member stays a row. The
+/// cluster's identity comes from its first member.
+fn flush(run: &mut Vec<Entry>, kind: Option<Run>, items: &mut Vec<Item>, definition: &Definition) {
     let members = std::mem::take(run);
     if members.len() < 2 {
         items.extend(members.into_iter().map(Item::Entry));
@@ -52,17 +97,22 @@ fn flush(run: &mut Vec<Entry>, items: &mut Vec<Item>, definition: &Definition) {
     }
     items.push(Item::Cluster(Cluster {
         id: format!("cl:{}", members[0].id),
-        headline: headline(&members, definition),
+        headline: headline(&members, kind, definition),
         members,
     }));
 }
 
-/// Counted nouns joined by ` · `, in vocabulary order, then unknown nouns by key.
-fn headline(members: &[Entry], definition: &Definition) -> String {
+/// Counted nouns joined by ` · `, in vocabulary order, then unknown nouns by
+/// key. A notice run counts its members under the definition's notice noun.
+fn headline(members: &[Entry], kind: Option<Run>, definition: &Definition) -> String {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for member in members {
-        if let Some(noun) = &member.counts_as {
-            *counts.entry(noun.as_str()).or_insert(0) += 1;
+        let noun = match kind {
+            Some(Run::Notice) => definition.folds.notice.as_deref(),
+            _ => member.counts_as.as_deref(),
+        };
+        if let Some(noun) = noun {
+            *counts.entry(noun).or_insert(0) += 1;
         }
     }
     let mut parts = Vec::new();
@@ -82,77 +132,122 @@ fn exchange(item: &Item) -> Option<&str> {
     match item {
         Item::Entry(entry) => entry.exchange.as_deref(),
         Item::Cluster(cluster) => cluster.members.first().and_then(|m| m.exchange.as_deref()),
-        Item::Recap(_) => None,
+        Item::Recap(recap) => Some(recap.exchange.as_str()),
     }
 }
 
-fn entries_of(item: &Item) -> &[Entry] {
+fn entries_of(item: &Item) -> Vec<&Entry> {
     match item {
-        Item::Entry(entry) => std::slice::from_ref(entry),
-        Item::Cluster(cluster) => &cluster.members,
-        Item::Recap(_) => &[],
+        Item::Entry(entry) => vec![entry],
+        Item::Cluster(cluster) => cluster.members.iter().collect(),
+        Item::Recap(recap) => recap.members.iter().flat_map(entries_of).collect(),
     }
 }
 
-/// One recap per exchange in which work precedes a closing entry (an answer or
-/// an outcome) and that took measurable time, placed before the closing entry.
-fn recap(mut items: Vec<Item>) -> Vec<Item> {
-    let mut exchanges: Vec<String> = Vec::new();
-    for item in &items {
-        if let Some(id) = exchange(item)
-            && !exchanges.iter().any(|e| e == id)
-        {
-            exchanges.push(id.to_string());
-        }
-    }
-    let mut inserts: Vec<(usize, Recap)> = Vec::new();
-    for id in exchanges {
-        let members: Vec<usize> = (0..items.len())
-            .filter(|&i| exchange(&items[i]) == Some(id.as_str()))
-            .collect();
-        let first_work = members.iter().position(|&i| {
-            entries_of(&items[i])
-                .iter()
-                .any(|e| e.kind == EntryKind::Activity)
-        });
-        let last_prose = members.iter().rposition(|&i| {
-            matches!(&items[i], Item::Entry(e) if matches!(e.kind, EntryKind::Prose | EntryKind::Outcome))
-        });
-        let (Some(work_at), Some(prose_at)) = (first_work, last_prose) else {
+/// Where an exchange's answer and outcome sit among the items.
+#[derive(Default)]
+struct Exchange {
+    last_prose: Option<usize>,
+    last_outcome: Option<usize>,
+    /// The exchange is open until it has an answer and something ends it.
+    finished: bool,
+}
+
+/// The turn fold: a finished exchange's work folds under a recap.
+///
+/// An exchange is finished when it has an answer (a prose entry) and
+/// something ended it after that: a later exchange began, or its own outcome
+/// followed the answer. An exchange still receiving events, or one that never
+/// produced an answer (it failed or was cut off), stays open.
+///
+/// Work is an activity, link or thought, or a cluster of them, that does not
+/// escape. Prose, messages, notices, asks, outcomes and escaping entries stay
+/// visible. To keep the order of entries fixed, each unbroken stretch of work
+/// that precedes the exchange's last answer becomes one recap; the visible
+/// entries between stretches stay where they were. A stretch whose time range
+/// cannot be measured stays open.
+fn turn_fold(items: Vec<Item>, definition: &Definition) -> Vec<Item> {
+    let mut exchanges: HashMap<String, Exchange> = HashMap::new();
+    for (at, item) in items.iter().enumerate() {
+        let (Item::Entry(entry), Some(id)) = (item, exchange(item)) else {
             continue;
         };
-        if prose_at < work_at {
-            continue;
+        let info = exchanges.entry(id.to_string()).or_default();
+        match entry.kind {
+            EntryKind::Prose => info.last_prose = Some(at),
+            EntryKind::Outcome => info.last_outcome = Some(at),
+            _ => {}
         }
-        let all: Vec<&Entry> = members
-            .iter()
-            .flat_map(|&i| entries_of(&items[i]))
-            .collect();
-        let work = all.iter().filter(|e| e.kind == EntryKind::Activity).count();
-        let start = all.first().and_then(|e| epoch(&e.ts.0));
-        let end = all.last().and_then(|e| epoch(&e.ts.1));
-        let duration_s = match (start, end) {
-            (Some(s), Some(e)) if e > s => Some(e - s),
-            _ => None,
+    }
+    let last_exchange = items.iter().rev().find_map(exchange).map(str::to_string);
+    for (id, info) in &mut exchanges {
+        info.finished = info.last_prose.is_some_and(|answer| {
+            last_exchange.as_deref() != Some(id.as_str())
+                || info.last_outcome.is_some_and(|outcome| outcome > answer)
+        });
+    }
+    let folds_at = |at: usize, item: &Item| -> bool {
+        let Some(info) = exchange(item).and_then(|id| exchanges.get(id)) else {
+            return false;
         };
-        if duration_s.is_none() {
-            continue;
+        info.finished
+            && info.last_prose.is_some_and(|answer| at < answer)
+            && match item {
+                Item::Entry(entry) => {
+                    matches!(
+                        entry.kind,
+                        EntryKind::Activity | EntryKind::Link | EntryKind::Thought
+                    ) && !escapes(entry, definition)
+                }
+                // Operation clusters are work; notice clusters stay visible.
+                Item::Cluster(cluster) => cluster
+                    .members
+                    .iter()
+                    .all(|m| m.kind == EntryKind::Activity),
+                Item::Recap(_) => false,
+            }
+    };
+
+    let mut out = Vec::new();
+    let mut stretch: Vec<Item> = Vec::new();
+    for (at, item) in items.into_iter().enumerate() {
+        let joins = folds_at(at, &item)
+            && stretch
+                .last()
+                .is_none_or(|last| exchange(last) == exchange(&item));
+        if !joins {
+            close(&mut stretch, &mut out);
         }
-        inserts.push((
-            members[prose_at],
-            Recap {
-                id: format!("rc:{id}"),
-                exchange: id,
-                work,
-                duration_s,
-            },
-        ));
+        if folds_at(at, &item) {
+            stretch.push(item);
+        } else {
+            out.push(item);
+        }
     }
-    inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    for (at, recap) in inserts {
-        items.insert(at, Item::Recap(recap));
-    }
-    items
+    close(&mut stretch, &mut out);
+    out
+}
+
+/// Fold a finished stretch into a recap, or leave its items open when its
+/// duration cannot be measured.
+fn close(stretch: &mut Vec<Item>, out: &mut Vec<Item>) {
+    let members = std::mem::take(stretch);
+    let all: Vec<&Entry> = members.iter().flat_map(entries_of).collect();
+    let start = all.iter().filter_map(|e| epoch(&e.ts.0)).min();
+    let end = all.iter().filter_map(|e| epoch(&e.ts.1)).max();
+    let (Some(first), Some(start), Some(end)) = (all.first(), start, end) else {
+        out.extend(members);
+        return;
+    };
+    let work = all.iter().filter(|e| e.kind == EntryKind::Activity).count();
+    let exchange = first.exchange.clone().unwrap_or_default();
+    out.push(Item::Recap(Recap {
+        id: format!("rc:{}", first.id),
+        exchange,
+        work,
+        duration_s: end.checked_sub(start),
+        members,
+    }));
 }
 
 /// Seconds since the epoch for `YYYY-MM-DDTHH:MM:SSZ`.

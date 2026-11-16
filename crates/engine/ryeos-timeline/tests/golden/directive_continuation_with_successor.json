@@ -23,49 +23,58 @@
       ]
     },
     {
-      "item": "entry",
-      "id": "tho:11",
-      "type": "thought",
-      "state": null,
-      "tone": null,
-      "thread": "T-0001",
-      "parent": null,
+      "item": "recap",
+      "id": "rc:tho:11",
       "exchange": "msg:6",
-      "counts_as": null,
-      "slots": {
-        "body": "<scrubbed reasoning_content 641 chars>"
-      },
-      "seq": [
-        11,
-        11
-      ],
-      "ts": [
-        "2026-11-16T07:20:33Z",
-        "2026-11-16T07:20:33Z"
-      ]
-    },
-    {
-      "item": "entry",
-      "id": "act:0000000000000000000000000000000000000000000000000000000000000014",
-      "type": "activity",
-      "state": "done",
-      "tone": "good",
-      "thread": "T-0001",
-      "parent": null,
-      "exchange": "msg:6",
-      "counts_as": "other",
-      "slots": {
-        "badge": "291 B",
-        "detail": "{}",
-        "headline": "test_anchor_demo_anchor_demo"
-      },
-      "seq": [
-        14,
-        15
-      ],
-      "ts": [
-        "2026-11-16T07:20:33Z",
-        "2026-11-16T07:20:34Z"
+      "work": 1,
+      "duration_s": 1,
+      "members": [
+        {
+          "item": "entry",
+          "id": "tho:11",
+          "type": "thought",
+          "state": null,
+          "tone": null,
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:6",
+          "counts_as": null,
+          "slots": {
+            "body": "<scrubbed reasoning_content 641 chars>"
+          },
+          "seq": [
+            11,
+            11
+          ],
+          "ts": [
+            "2026-11-16T07:20:33Z",
+            "2026-11-16T07:20:33Z"
+          ]
+        },
+        {
+          "item": "entry",
+          "id": "act:0000000000000000000000000000000000000000000000000000000000000014",
+          "type": "activity",
+          "state": "done",
+          "tone": "good",
+          "thread": "T-0001",
+          "parent": null,
+          "exchange": "msg:6",
+          "counts_as": "other",
+          "slots": {
+            "badge": "291 B",
+            "detail": "{}",
+            "headline": "test_anchor_demo_anchor_demo"
+          },
+          "seq": [
+            14,
+            15
+          ],
+          "ts": [
+            "2026-11-16T07:20:33Z",
+            "2026-11-16T07:20:34Z"
+          ]
+        }
       ]
     },
     {
@@ -112,13 +121,6 @@
         "2026-11-16T07:20:36Z",
         "2026-11-16T07:20:36Z"
       ]
-    },
-    {
-      "item": "recap",
-      "id": "rc:msg:6",
-      "exchange": "msg:6",
-      "work": 1,
-      "duration_s": 5
     },
     {
       "item": "entry",

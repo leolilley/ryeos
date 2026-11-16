@@ -54,7 +54,7 @@
       "thread": "T-0001",
       "parent": "act:greet/0",
       "exchange": "mrk:6",
-      "counts_as": "child",
+      "counts_as": null,
       "slots": {
         "headline": "tool:test/anchor_demo/anchor_demo",
         "target": "T-0002"
@@ -92,54 +92,49 @@
       ]
     },
     {
-      "item": "cluster",
-      "id": "cl:lnk:T-0003",
-      "headline": "2 child runs",
-      "members": [
-        {
-          "id": "lnk:T-0003",
-          "type": "link",
-          "state": "unknown",
-          "tone": null,
-          "thread": "T-0001",
-          "parent": "act:each/1",
-          "exchange": "mrk:6",
-          "counts_as": "child",
-          "slots": {
-            "headline": "tool:test/anchor_demo/anchor_demo",
-            "target": "T-0003"
-          },
-          "seq": [
-            17,
-            17
-          ],
-          "ts": [
-            "2026-11-16T03:55:30Z",
-            "2026-11-16T03:55:30Z"
-          ]
-        },
-        {
-          "id": "lnk:T-0004",
-          "type": "link",
-          "state": "unknown",
-          "tone": null,
-          "thread": "T-0001",
-          "parent": "act:each/1",
-          "exchange": "mrk:6",
-          "counts_as": "child",
-          "slots": {
-            "headline": "tool:test/anchor_demo/anchor_demo",
-            "target": "T-0004"
-          },
-          "seq": [
-            18,
-            18
-          ],
-          "ts": [
-            "2026-11-16T03:55:30Z",
-            "2026-11-16T03:55:30Z"
-          ]
-        }
+      "item": "entry",
+      "id": "lnk:T-0003",
+      "type": "link",
+      "state": "unknown",
+      "tone": null,
+      "thread": "T-0001",
+      "parent": "act:each/1",
+      "exchange": "mrk:6",
+      "counts_as": null,
+      "slots": {
+        "headline": "tool:test/anchor_demo/anchor_demo",
+        "target": "T-0003"
+      },
+      "seq": [
+        17,
+        17
+      ],
+      "ts": [
+        "2026-11-16T03:55:30Z",
+        "2026-11-16T03:55:30Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "lnk:T-0004",
+      "type": "link",
+      "state": "unknown",
+      "tone": null,
+      "thread": "T-0001",
+      "parent": "act:each/1",
+      "exchange": "mrk:6",
+      "counts_as": null,
+      "slots": {
+        "headline": "tool:test/anchor_demo/anchor_demo",
+        "target": "T-0004"
+      },
+      "seq": [
+        18,
+        18
+      ],
+      "ts": [
+        "2026-11-16T03:55:30Z",
+        "2026-11-16T03:55:30Z"
       ]
     },
     {
@@ -174,7 +169,7 @@
       "thread": "T-0001",
       "parent": "act:flaky/2",
       "exchange": "mrk:6",
-      "counts_as": "child",
+      "counts_as": null,
       "slots": {
         "headline": "tool:test/fail_demo/fail_demo",
         "target": "T-0005"
@@ -220,7 +215,7 @@
       "thread": "T-0001",
       "parent": "act:recover/3",
       "exchange": "mrk:6",
-      "counts_as": "child",
+      "counts_as": null,
       "slots": {
         "headline": "tool:test/anchor_demo/anchor_demo",
         "target": "T-0006"
@@ -255,13 +250,6 @@
         "2026-11-16T03:55:34Z",
         "2026-11-16T03:55:34Z"
       ]
-    },
-    {
-      "item": "recap",
-      "id": "rc:mrk:6",
-      "exchange": "mrk:6",
-      "work": 5,
-      "duration_s": 9
     },
     {
       "item": "entry",

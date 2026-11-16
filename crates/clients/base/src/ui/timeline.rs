@@ -1,7 +1,7 @@
 //! The thread-timeline concern, in one place.
 //!
 //! The daemon folds a chain's events into timeline items (entries, clusters,
-//! recaps) by a signed definition; this module only maps those items onto the
+//! turn folds) by a signed definition; this module only maps those items onto the
 //! renderer contract and owns the client-side presentation state around them:
 //!
 //! - `RyeOsTimelineEntryVm` — the rendered entry shapes (clients render
@@ -339,6 +339,52 @@ impl LayoutBuilder {
         );
     }
 
+    /// A foldable group: a header line, then its members one level deeper. A
+    /// recap's members may themselves be clusters, which nest as sub-groups.
+    fn group(&mut self, item: &Value, parent: usize, indent: u8) {
+        let section = self.new_section(Some(parent), true);
+        let (primary, meta) = match item.get("item").and_then(Value::as_str) {
+            Some("recap") => {
+                let work = item.get("work").and_then(Value::as_u64).unwrap_or(0);
+                let primary = match item.get("duration_s").and_then(Value::as_i64) {
+                    Some(seconds) => format!("Worked for {}", duration_text(seconds)),
+                    None => "Worked".to_string(),
+                };
+                (primary, Some(format!("{work} steps")))
+            }
+            _ => (
+                item.get("headline")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                None,
+            ),
+        };
+        let key = item.get("id").and_then(Value::as_str).unwrap_or("");
+        self.push(
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                meta,
+                tone: RyeOsTone::Neutral,
+                intent: None,
+            },
+            indent,
+            Some(TimelineEntrySource {
+                key: format!("item:{key}"),
+                raw: item.clone(),
+            }),
+            section,
+            true,
+        );
+        for member in item_members(item) {
+            if member.get("item").and_then(Value::as_str) == Some("cluster") {
+                self.group(member, section, indent + 1);
+            } else {
+                self.push_entry(member, indent + 1, section, false);
+            }
+        }
+    }
+
     fn item(&mut self, item: &Value) {
         match item.get("item").and_then(Value::as_str) {
             Some("entry") => {
@@ -347,67 +393,28 @@ impl LayoutBuilder {
                 self.push_entry(item, 0, self.current, header);
             }
             Some("cluster") => {
-                let members = item
-                    .get("members")
-                    .and_then(Value::as_array)
-                    .map_or(&[][..], Vec::as_slice);
+                let members = item_members(item);
                 self.enter_exchange(
                     members
                         .first()
                         .and_then(|member| member.get("exchange"))
                         .and_then(Value::as_str),
                 );
-                let section = self.new_section(Some(self.current), true);
-                let headline = item.get("headline").and_then(Value::as_str).unwrap_or("");
-                let key = item.get("id").and_then(Value::as_str).unwrap_or("");
-                self.push(
-                    RyeOsTimelineEntryVm::Line {
-                        primary: headline.to_string(),
-                        meta: None,
-                        tone: RyeOsTone::Neutral,
-                        intent: None,
-                    },
-                    0,
-                    Some(TimelineEntrySource {
-                        key: format!("item:{key}"),
-                        raw: item.clone(),
-                    }),
-                    section,
-                    true,
-                );
-                for member in members {
-                    self.push_entry(member, 1, section, false);
-                }
+                self.group(item, self.current, 0);
             }
             Some("recap") => {
-                self.exchange = None;
-                self.current = self.new_section(None, false);
-                self.header_pending = false;
-                let work = item.get("work").and_then(Value::as_u64).unwrap_or(0);
-                let mut text = format!("{work} steps");
-                if let Some(seconds) = item.get("duration_s").and_then(Value::as_i64) {
-                    text.push_str(&format!(" · {}", duration_text(seconds)));
-                }
-                let key = item.get("id").and_then(Value::as_str).unwrap_or("");
-                self.push(
-                    RyeOsTimelineEntryVm::Line {
-                        primary: text,
-                        meta: None,
-                        tone: RyeOsTone::Neutral,
-                        intent: None,
-                    },
-                    0,
-                    Some(TimelineEntrySource {
-                        key: format!("item:{key}"),
-                        raw: item.clone(),
-                    }),
-                    self.current,
-                    false,
-                );
+                self.enter_exchange(item.get("exchange").and_then(Value::as_str));
+                self.group(item, self.current, 0);
             }
             _ => {}
         }
     }
+}
+
+fn item_members(item: &Value) -> &[Value] {
+    item.get("members")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
 }
 
 /// Map a service response's items onto the renderer contract. An `older`
@@ -993,27 +1000,42 @@ mod tests {
     }
 
     #[test]
-    fn a_recap_is_a_summary_line_that_ends_its_exchange() {
+    fn a_recap_is_a_foldable_group_with_a_duration_header() {
+        let recap = json!({
+            "item": "recap", "id": "r1", "exchange": "x1", "work": 3, "duration_s": 75,
+            "members": [
+                with(entry("a", "activity", json!({"headline": "one"})), "exchange", json!("x1")),
+                {"item": "cluster", "id": "c1", "headline": "2 operations", "members": [
+                    with(entry("b", "activity", json!({"headline": "two"})), "exchange", json!("x1")),
+                    with(entry("c", "activity", json!({"headline": "three"})), "exchange", json!("x1")),
+                ]},
+            ]
+        });
         let items = vec![
             with(
                 entry("m", "message", json!({"body": "go"})),
                 "exchange",
                 json!("x1"),
             ),
-            json!({"item": "recap", "id": "r1", "exchange": "x1", "work": 4, "duration_s": 75}),
-            json!({"item": "recap", "id": "r2", "exchange": "x2", "work": 1, "duration_s": null}),
+            recap,
+            with(
+                entry("p", "prose", json!({"body": "done"})),
+                "exchange",
+                json!("x1"),
+            ),
         ];
         let built = layout(items, 0);
         assert!(matches!(
             &built.entries[1],
-            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "4 steps · 1m15s"
+            RyeOsTimelineEntryVm::Line { primary, meta, .. }
+                if primary == "Worked for 1m15s" && meta.as_deref() == Some("3 steps")
         ));
-        assert!(matches!(
-            &built.entries[2],
-            RyeOsTimelineEntryVm::Line { primary, .. } if primary == "1 steps"
-        ));
-        // The recap stays visible when its exchange is folded.
-        let folded = fold_timeline_window(&built, None, &BTreeSet::from([1]), 0, 50).folded;
+        assert_eq!(built.indents, vec![0, 0, 1, 1, 2, 2, 0]);
+        assert_eq!(built.sections, vec![1, 2, 2, 3, 3, 3, 1]);
+        assert_eq!(built.section_parent[3], Some(2));
+        // Folding the recap hides its work, the cluster included, and keeps
+        // the message and the answer.
+        let folded = fold_timeline_window(&built, None, &BTreeSet::from([2]), 0, 50).folded;
         assert_eq!(folded.entries.len(), 3);
     }
 

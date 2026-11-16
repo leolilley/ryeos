@@ -32,11 +32,40 @@ pub struct Definition {
     /// Counting nouns for clusters, in display order.
     #[serde(default)]
     pub vocabulary: Vec<Noun>,
+    /// Policy for the cluster and turn-fold passes.
+    #[serde(default)]
+    pub folds: Folds,
     /// Which events link threads into the viewed thread's story.
     #[serde(default)]
     pub spine: Vec<SpineEdge>,
     /// Rules per event type. The first rule whose `when` holds applies.
     pub events: BTreeMap<String, Vec<Rule>>,
+}
+
+/// Policy for the passes over entries.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Folds {
+    /// Entries that never hide inside a group or a folded turn.
+    #[serde(default)]
+    pub escape: Escape,
+    /// States in which an operation is finished and may join a cluster.
+    #[serde(default)]
+    pub group_states: Vec<String>,
+    /// Vocabulary noun under which two or more consecutive markers fold.
+    /// Absent means notices never fold.
+    #[serde(default)]
+    pub notice: Option<String>,
+}
+
+/// An entry escapes when its state or tone is listed.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Escape {
+    #[serde(default)]
+    pub states: Vec<String>,
+    #[serde(default)]
+    pub tones: Vec<String>,
 }
 
 /// An event of `event` type links thread `from` to thread `to` (both paths into
@@ -278,8 +307,11 @@ pub struct Cluster {
 pub struct Recap {
     pub id: String,
     pub exchange: String,
+    /// Operations among the members, not events.
     pub work: usize,
     pub duration_s: Option<i64>,
+    /// The folded work: entries and clusters, in order.
+    pub members: Vec<Item>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

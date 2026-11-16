@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T09:49:01Z:ac261e115d4fa30116af2837f5d207bfa628fc820717ab8aef5d75376ed011d8:mRDoKubBztb69KRrRCXnSdf/A/+kaASiWI6RgmHcWjS9TF0gREbieW9m8yKSNE2BB1JTJFfrwB7UIq+7/+xJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T21:29:30Z:297f5681cdc5e0407db27218fd208b1c1b625a877ebfb5a237f447651503ebab:apCi8Ev78nlnZs+eIYGC41tuVkrpAMUZkaFhsXngjQ9tyieO7JTnxXXKOGBs/Rr+xq1whq1jFEJh+zHf6f+kCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
 category: ryeos/ui/timeline
@@ -7,7 +7,14 @@ description: How a chain's events fold into timeline items.
 
 vocabulary:
   - {key: other, one: operation, many: operations}
-  - {key: child, one: child run, many: child runs}
+  - {key: system_event, one: system event, many: system events}
+
+# Policy for grouping. Failed or alarming entries never hide inside a cluster or a
+# folded turn; consecutive markers fold under the notice noun.
+folds:
+  escape: {states: [failed], tones: [danger]}
+  group_states: [done, stopped]
+  notice: system_event
 
 # Threads linked into the viewed thread's story, in either direction.
 spine:
@@ -158,7 +165,6 @@ events:
         - type: link
           key: [payload.child_thread_id]
           state: unknown
-          counts_as: child
           parent: {type: activity, key: [payload.node, payload.step]}
           adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.node, payload.step]}}
           project: {headline: payload.item_id, target: payload.child_thread_id}
@@ -166,7 +172,6 @@ events:
         - type: link
           key: [payload.child_thread_id]
           state: unknown
-          counts_as: child
           parent: {type: activity, key: [payload.operation_id]}
           adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.operation_id]}}
           project: {headline: payload.item_id, target: payload.child_thread_id}
