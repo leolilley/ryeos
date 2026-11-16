@@ -506,6 +506,12 @@ pub enum RyeOsViewVm {
         /// of their semantic content.
         #[serde(default)]
         entry_ids: Vec<String>,
+        /// The role of each visible entry (parallel to `entries`): its entry
+        /// type, `cluster` or `recap`; `status` for presentation-only lines.
+        /// With `RyeOsTimelineEntryVm::label` it is what a screen reader
+        /// announces.
+        #[serde(default)]
+        entry_roles: Vec<String>,
         /// The exact list cursor coordinate for each visible entry. Timeline
         /// cursors count visible entries from the bottom, unlike rows/tables.
         #[serde(default)]
@@ -1352,6 +1358,30 @@ fn bound_view_vm_keyed(
         };
     }
     match (binding.widget.as_str(), response) {
+        // A timeline with no response yet is still a timeline: it carries the
+        // loading, unresolved or failed status, so every renderer shows that
+        // state in the feed's own place and the fetch can be retried.
+        ("timeline", None) => RyeOsViewVm::Timeline {
+            title,
+            source_status: Some(observation_status.unwrap_or_else(|| RyeOsSourceStatusVm {
+                state: "loading".into(),
+                message: "Waiting for source".into(),
+                stale: false,
+            })),
+            provenance: Some(view_ref.to_string()),
+            affordance_hints: affordance_hints(binding),
+            entries: Vec::new(),
+            entry_ids: Vec::new(),
+            entry_roles: Vec::new(),
+            entry_cursors: Vec::new(),
+            entry_arrived_at_ms: Vec::new(),
+            entry_indents: Vec::new(),
+            selected: None,
+            fold_section: None,
+            entry_expandable: Vec::new(),
+            entry_expanded: Vec::new(),
+            entry_details: Vec::new(),
+        },
         (_, None)
             if observation_status
                 .as_ref()
@@ -1551,13 +1581,33 @@ fn bound_view_vm_keyed(
                 } else {
                     Vec::new()
                 };
+            // A fetched chain with nothing in it is its own state, distinct
+            // from loading (no response yet) and failed (the fetch erred).
+            let source_status = observation_status.or_else(|| {
+                folded.entries.is_empty().then(|| RyeOsSourceStatusVm {
+                    state: "empty".into(),
+                    message: "No activity yet".into(),
+                    stale: false,
+                })
+            });
+            let entry_roles = folded
+                .sources
+                .iter()
+                .map(|source| {
+                    source.as_ref().map_or_else(
+                        || "status".to_string(),
+                        |source| super::timeline::item_role(&source.raw),
+                    )
+                })
+                .collect();
             RyeOsViewVm::Timeline {
                 title,
-                source_status: observation_status,
+                source_status,
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
                 entry_ids,
+                entry_roles,
                 entry_cursors,
                 entry_arrived_at_ms,
                 entry_indents: folded.indents,
@@ -3744,7 +3794,7 @@ mod tests {
     use super::*;
     use crate::ui::reducer::test_support::core as test_support_core;
     use crate::ui::reducer::test_support::*;
-    use crate::ui::{RyeOsEvent, RyeOsUiEvent};
+    use crate::ui::{RyeOsEffect, RyeOsEffectKind, RyeOsEvent, RyeOsUiEvent};
     use serde_json::json;
 
     #[test]
@@ -3918,24 +3968,30 @@ mod tests {
             "sources": {"default":{"ref":"service:events/node", "collection":"events"}}
         }));
         assert!(core.focused_input_route().chain_root.is_none());
-        let RyeOsViewVm::Placeholder { message, .. } =
-            bound_view_vm(&core, tile, "view:test/source-status")
+        let RyeOsViewVm::Timeline {
+            source_status,
+            entries,
+            ..
+        } = bound_view_vm(&core, tile, "view:test/source-status")
         else {
             panic!("waiting timeline")
         };
-        assert!(message.contains("loading service:events/node"));
-        assert!(!message.contains("conversation"));
+        let status = source_status.expect("a waiting timeline reports loading");
+        assert_eq!(status.state, "loading");
+        assert!(entries.is_empty());
+        assert!(!status.message.contains("conversation"));
         let key = tile_default_source_key(&core, tile);
         core.data
             .source_errors
             .insert(key, "Denied event source".into());
-        let RyeOsViewVm::Placeholder { message, .. } =
+        let RyeOsViewVm::Timeline { source_status, .. } =
             bound_view_vm(&core, tile, "view:test/source-status")
         else {
             panic!("failed timeline")
         };
-        assert!(message.contains("failed"));
-        assert!(message.contains("Denied event source"));
+        let status = source_status.expect("a failed timeline reports the failure");
+        assert_eq!(status.state, "failed");
+        assert!(status.message.contains("Denied event source"));
     }
 
     #[test]
@@ -4907,6 +4963,139 @@ mod tests {
             "tone": null, "thread": "T-1", "parent": null, "exchange": null,
             "counts_as": null, "slots": slots, "seq": [2, 2], "ts": ["t", "t"]
         })
+    }
+
+    fn activity(id: &str, seq: [i64; 2]) -> serde_json::Value {
+        json!({
+            "item": "entry", "id": id, "type": "activity", "state": "done",
+            "tone": null, "thread": "T-1", "parent": null, "exchange": "x1",
+            "counts_as": null, "slots": {"headline": id}, "seq": seq, "ts": ["t", "t"]
+        })
+    }
+
+    fn timeline_entries(core: &RyeOsCore) -> Vec<String> {
+        let instance = core.focused_view_instance_key().unwrap();
+        match view_vm_for_instance(core, &instance).unwrap() {
+            RyeOsViewVm::Timeline { entries, .. } => {
+                entries.iter().map(|entry| entry.label()).collect()
+            }
+            other => panic!("expected a timeline, got {other:?}"),
+        }
+    }
+
+    fn press(core: &mut RyeOsCore, ch: char, shift: bool) -> Vec<crate::ui::RyeOsEffect> {
+        let event = crate::ui::RyeOsKeyEvent {
+            key: crate::ui::RyeOsKey::Char(ch),
+            modifiers: crate::ui::RyeOsKeyModifiers {
+                shift,
+                ..Default::default()
+            },
+        };
+        let command = crate::ui::ryeos_key_command(event, core.key_context());
+        core.apply_key_command(command)
+    }
+
+    #[test]
+    fn y_copies_the_entry_under_the_point_as_plain_text() {
+        let mut core = feed_core(json!([activity("one", [1, 1]), activity("two", [2, 2])]));
+        let effects = press(&mut core, 'y', false);
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [RyeOsEffect { kind: RyeOsEffectKind::CopyToClipboard { text }, .. }]
+                    if text == "two"
+            ),
+            "got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn f_folds_the_cluster_under_the_point_and_again_unfolds_it() {
+        let cluster = json!({
+            "item": "cluster", "id": "c1", "headline": "2 operations",
+            "members": [activity("one", [1, 1]), activity("two", [2, 2])]
+        });
+        let mut core = feed_core(json!([cluster]));
+        // Point on the newest entry, a member; walk to the header.
+        let instance = core.focused_view_instance_key().unwrap();
+        let tile = core.active_view_set().unwrap().focused_tile.0.to_string();
+        core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::SetTileCursor {
+                tile_id: tile,
+                index: 2,
+            },
+        });
+        assert!(core.key_context().focused_timeline_foldable);
+        assert_eq!(timeline_entries(&core).len(), 3);
+        press(&mut core, 'f', false);
+        assert_eq!(timeline_entries(&core).len(), 1, "members are hidden");
+        press(&mut core, 'f', false);
+        assert_eq!(timeline_entries(&core).len(), 3, "members are back");
+        let _ = instance;
+    }
+
+    #[test]
+    fn raw_response_is_copied_or_inspected_by_the_action_that_asked() {
+        let mut core = feed_core(json!([activity("one", [1, 1])]));
+        let key = tile_default_source_key(&core, core.active_view_set().unwrap().focused_tile);
+        let response = json!({
+            "from_chain_seq": 1, "to_chain_seq": 1, "truncated": false,
+            "events": [{"chain_seq": 1, "event_type": "x"}]
+        });
+        core.data.pending_timeline_raw = Some(crate::ui::timeline::PendingTimelineRaw {
+            source_key: key.clone(),
+            action: crate::ui::timeline::RyeOsTimelineEntryAction::CopyRaw,
+        });
+        let effects = core.settle_timeline_raw(&key, &response);
+        assert!(matches!(
+            effects.as_slice(),
+            [RyeOsEffect { kind: RyeOsEffectKind::CopyToClipboard { text }, .. }]
+                if text.contains("\"chain_seq\": 1")
+        ));
+        assert!(core.data.pending_timeline_raw.is_none());
+        // A response nobody asked for does nothing.
+        assert!(core.settle_timeline_raw(&key, &response).is_empty());
+
+        core.data.pending_timeline_raw = Some(crate::ui::timeline::PendingTimelineRaw {
+            source_key: key.clone(),
+            action: crate::ui::timeline::RyeOsTimelineEntryAction::InspectRaw,
+        });
+        core.settle_timeline_raw(&key, &response);
+        assert_eq!(
+            active_selection(&core)["summary"]["title"],
+            "Raw events 1–1"
+        );
+    }
+
+    #[test]
+    fn a_timeline_with_no_response_still_shows_its_loading_state() {
+        let core = feed_core(json!([]));
+        let instance = core.focused_view_instance_key().unwrap();
+        // Empty response: the empty state.
+        let RyeOsViewVm::Timeline { source_status, .. } =
+            view_vm_for_instance(&core, &instance).unwrap()
+        else {
+            panic!("expected a timeline");
+        };
+        assert_eq!(source_status.unwrap().state, "empty");
+        // No response at all: loading, with the retry key unavailable.
+        let mut core = core;
+        let key = tile_default_source_key(&core, core.active_view_set().unwrap().focused_tile);
+        core.data.sources.remove(&key);
+        let RyeOsViewVm::Timeline { source_status, .. } =
+            view_vm_for_instance(&core, &instance).unwrap()
+        else {
+            panic!("expected a timeline");
+        };
+        assert_eq!(source_status.unwrap().state, "loading");
+        assert!(!core.key_context().focused_source_failed);
+        // A failed fetch can be retried with `r`.
+        core.data.source_errors.insert(
+            key,
+            crate::ui::effect::RyeOsUiError::definite("boom", "it broke"),
+        );
+        assert!(core.key_context().focused_source_failed);
+        press(&mut core, 'r', false);
     }
 
     #[test]

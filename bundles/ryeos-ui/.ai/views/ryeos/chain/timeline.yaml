@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T07:56:53Z:5531e0f9b41b5729f3aa4934fbb1a048a70ec417d5d5e5dec705cb8a95406bba:GKvsxujeEAKzs6tyci1PddRPhmmpSQJalvSX5hPnak0Vbjgb025csogeJdThS34utJ2TV2MnvkRsJs/psoAmAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T21:15:27Z:fc5fdd2e140817070194e2e3983daae98c304bd8c9311d69f4e09cdd0c8a3629:Whv6/X6qY8l7dmItLG6p3k80hWToFDf2E4qd9VAqp+m6HDWJ4TisKKqh4obhI2S7f0R/Y2ZtX03IcbyWCDJrCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: chain-timeline
 version: "1.0.0"
 description: Timeline of the input route's conversation chain, folded by the daemon's timeline service
@@ -11,6 +11,16 @@ sources:
       chain_root_id: "@facet:input.route.chain_root"
       limit: "200"
     collection: items
+  raw:
+    ref: service:ui/ryeos-ui/timeline/raw
+    role: timeline_raw
+    params:
+      chain_root_id: "@facet:input.route.chain_root"
+      from_chain_seq: ""
+      to_chain_seq: ""
+    dynamic_parameters: [from_chain_seq, to_chain_seq]
+    activation: on_demand
+    refresh: {}
 projections:
   expand:
     fields:

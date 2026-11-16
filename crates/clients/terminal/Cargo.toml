@@ -17,7 +17,7 @@ lillux = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "io-util", "net", "time", "sync"] }
 futures-util = { workspace = true }
-crossterm = { workspace = true }
+crossterm = { workspace = true, features = ["osc52"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

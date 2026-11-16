@@ -665,6 +665,8 @@ impl RyeOsCore {
             }
             RyeOsUiEvent::ActivateFocused => intent_for_focused_row(self)
                 .map_or_else(Vec::new, |intent| self.dispatch_intent(intent)),
+            RyeOsUiEvent::TimelineEntry { action } => self.timeline_entry_action(action),
+            RyeOsUiEvent::ToggleTimelineFold => self.toggle_timeline_fold(),
             RyeOsUiEvent::PopLens => self.pop_view(),
         }
     }
