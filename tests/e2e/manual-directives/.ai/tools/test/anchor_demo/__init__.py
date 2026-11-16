@@ -1,8 +1,8 @@
-# ryeos:signed:2026-06-07T05:42:18Z:fa2e54f13702de276dbfd904e3b3b4386b975d56cc3c5a7bc4c7d04a0c3c3e39:mvRw244iOR3MLVZbj1QaRZgwmxI4CnMd1w4w3Ttoy8smGW+HQU1AEE4Nr7jlV/M2CIGaZpux8OKJuZMK4cQ5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T03:24:11Z:4571249a66aaca456589ae25903ba1c8eb60e3bd76a944279f5aeaf78b2d0f59:0sT6dC9Kj7xmwM/LUjl0108vXG3QyShTrlngJzaipotM7gHCl/n9x9b5IOMsQolYaRkElO7BsjGVPav5sPHlAg==:ae0ca349cdef0b514a7589669b7b5ff12ac666d38374eb657abd94b53aeccbfb
 # ryeos-tool:
 #   category: test/anchor_demo
 #   version: "1.0.0"
-#   tool_type: python
-#   executor_id: ryeos/core/runtimes/python/function
-#   tool_description: "Anchor demo package init"
+#   executor_id: "tool:ryeos/core/runtimes/python/function"
+#   execution_protocol: "protocol:ryeos/core/tool_callback"
+#   description: "Anchor demo package init"
 """Anchor demo package."""

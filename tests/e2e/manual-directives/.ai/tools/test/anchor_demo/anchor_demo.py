@@ -1,10 +1,10 @@
-# ryeos:signed:2026-06-07T05:42:18Z:d5fd48d63dcac5bc4ff7cdb7feffb673cd7b5285ff9d102148238df2f367ab9d:Kew/7lOykavT7KyqdBBVupqKeJR4VR5056S9aNO53Ggy127153vZy+9UvnT5YrHRAz+1MpTn4Yg+hMT2vUZXDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T03:23:52Z:9a8f419a8dc1b1380c405d6a52d27cfb7cd5836f9cdce3af7555f580b84b14ee:9yS9jS2+QPfIPiYR4At1nSJu+V9mScqtApRkpX/SBVVXq6HACEs4cW3tpfTilnTFFtX2MwtCQkijWN4wbIMJCQ==:ae0ca349cdef0b514a7589669b7b5ff12ac666d38374eb657abd94b53aeccbfb
 # ryeos-tool:
 #   category: test/anchor_demo
 #   version: "1.0.0"
-#   tool_type: python
-#   executor_id: ryeos/core/runtimes/python/function
-#   tool_description: "Demo tool testing anchor system with sibling imports"
+#   executor_id: "tool:ryeos/core/runtimes/python/function"
+#   execution_protocol: "protocol:ryeos/core/tool_callback"
+#   description: "Demo tool testing anchor system with sibling imports"
 """Anchor demo tool - tests the anchor system with multi-file imports.
 
 Imports a sibling helper module via PYTHONPATH injection from the
