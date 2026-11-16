@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T04:40:51Z:cac53175c64d18c4071dc98de1300fe2f53bf1763d63ffda8c1e2984b0c1fab8:2TLreF+eX/8McOhPYOKSGeNVfKeyBzLd4f1JnTM1inR21ADyUhg6u7cYas4S/yPJwFhj1BlNKN/Xq7POcUP9Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T10:04:31Z:4f0c2223d4d585d068c1a44fcb0100550ccd154a2ebc43019272a178fc41e122:2+AZDnP408vcU0xCWTssV2H5VX46t2KqaEOiwnmW2ZFrL0MpLbbLZhE/M9VMOjDE/Mkqvwx6i9KmaE/2cOdYDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/execution
 tags: [execution, products, external-content, authority]
@@ -65,6 +65,14 @@ large-object sidecar transfer remains separate from ordinary CAS-blob receipt.
 
 For installed-bundle consumers, local literal provisioning is independent of
 product selections because the binding names the consumer and publisher.
+Selecting a product does not make a bundle consumer project-dependent: a
+bundle consumer whose selected relationships are bundle-owned keeps
+installed-bundle authority under a pinned launch and projectless alike, and a
+binding made projectless authorises the pinned launch. A consumer is
+project-dependent only when a project-space ancestor, referenced item, or
+selected relationship (judged by one predicate over its full resolution)
+contributes to it; a project overlaying the relationship Config makes the
+consumer a pinned-project consumer.
 A pinned-project consumer containing both literal inputs and product slots on
 that same item instead has a selection-sensitive binding identity. Its selected
 literal provisioning currently requires the same operator as its products;
