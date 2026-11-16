@@ -3377,6 +3377,22 @@ impl CheckpointResumeMode {
     }
 }
 
+/// A runtime that replays its chain events on continuation (directive) writes
+/// no native checkpoint, so its machine successor cold-starts: copying a
+/// checkpoint that was never written would fail the launch, and
+/// `RYEOS_RESUME=1` would make it replay its own empty thread as a crash
+/// recovery instead of its predecessor.
+fn effective_checkpoint_resume_mode(
+    mode: CheckpointResumeMode,
+    replay_continuation: bool,
+) -> CheckpointResumeMode {
+    if replay_continuation && mode == CheckpointResumeMode::MachineContinuation {
+        CheckpointResumeMode::ExternallyRestoredContinuation
+    } else {
+        mode
+    }
+}
+
 fn machine_continuation_checkpoint_resume_mode(
     metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     successor_thread_id: &str,
@@ -5654,12 +5670,12 @@ async fn prepare_managed_launch_authority(
     } else {
         (None, None)
     };
-    let is_resume = params.checkpoint_resume_mode.injects_resume_env() && native_resume.is_some();
-    if params
-        .checkpoint_resume_mode
-        .copies_predecessor_checkpoint()
-        && native_resume.is_some()
-    {
+    let checkpoint_resume_mode = effective_checkpoint_resume_mode(
+        params.checkpoint_resume_mode,
+        selected_runtime.yaml.replay_continuation,
+    );
+    let is_resume = checkpoint_resume_mode.injects_resume_env() && native_resume.is_some();
+    if checkpoint_resume_mode.copies_predecessor_checkpoint() && native_resume.is_some() {
         let previous = params.previous_thread_id.ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "machine continuation of `{}` has no predecessor thread",
@@ -12492,6 +12508,23 @@ mod tests {
         assert_eq!(
             Arc::try_unwrap(events).unwrap().into_inner().unwrap(),
             ["failure", "lifecycle"]
+        );
+    }
+
+    #[test]
+    fn replay_continuation_runtime_cold_starts_its_machine_successor() {
+        let replayed =
+            effective_checkpoint_resume_mode(CheckpointResumeMode::MachineContinuation, true);
+        assert!(!replayed.injects_resume_env());
+        assert!(!replayed.copies_predecessor_checkpoint());
+        let checkpointed =
+            effective_checkpoint_resume_mode(CheckpointResumeMode::MachineContinuation, false);
+        assert!(checkpointed.injects_resume_env());
+        assert!(checkpointed.copies_predecessor_checkpoint());
+        // Same-thread crash recovery is unaffected.
+        assert_eq!(
+            effective_checkpoint_resume_mode(CheckpointResumeMode::SameThread, true),
+            CheckpointResumeMode::SameThread
         );
     }
 
