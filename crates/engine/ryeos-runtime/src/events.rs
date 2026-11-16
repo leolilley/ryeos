@@ -537,11 +537,17 @@ pub enum RuntimeEventType {
     OrphanProcessKilled,
 
     // ── Cognition / replay transcript ───────────────────────────
-    SystemPrompt,
-    ContextInjected,
     CognitionIn,
     CognitionOut,
     CognitionReasoning,
+    /// What the model is given that is not a conversation message and is
+    /// stable across turns (system parts, tool inventory reference, request
+    /// options, provider configuration hash). Always indexed.
+    CognitionFrame,
+    /// Reserved record that a span of earlier turns is replaced by a summary.
+    /// Registered so the vocabulary is closed; nothing emits it yet. Always
+    /// indexed.
+    CognitionCompaction,
 
     // ── Tool dispatch ───────────────────────────────────────────
     ToolCallStart,
@@ -615,11 +621,11 @@ impl RuntimeEventType {
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
             Self::ThreadReconciled => wire::THREAD_RECONCILED,
             Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
-            Self::SystemPrompt => wire::SYSTEM_PROMPT,
-            Self::ContextInjected => wire::CONTEXT_INJECTED,
             Self::CognitionIn => wire::COGNITION_IN,
             Self::CognitionOut => wire::COGNITION_OUT,
             Self::CognitionReasoning => wire::COGNITION_REASONING,
+            Self::CognitionFrame => wire::COGNITION_FRAME,
+            Self::CognitionCompaction => wire::COGNITION_COMPACTION,
             Self::ToolCallStart => wire::TOOL_CALL_START,
             Self::ToolCallResult => wire::TOOL_CALL_RESULT,
             Self::GraphStarted => wire::GRAPH_STARTED,
@@ -675,11 +681,11 @@ impl RuntimeEventType {
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
             wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
             wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
-            wire::SYSTEM_PROMPT => Ok(Self::SystemPrompt),
-            wire::CONTEXT_INJECTED => Ok(Self::ContextInjected),
             wire::COGNITION_IN => Ok(Self::CognitionIn),
             wire::COGNITION_OUT => Ok(Self::CognitionOut),
             wire::COGNITION_REASONING => Ok(Self::CognitionReasoning),
+            wire::COGNITION_FRAME => Ok(Self::CognitionFrame),
+            wire::COGNITION_COMPACTION => Ok(Self::CognitionCompaction),
             wire::TOOL_CALL_START => Ok(Self::ToolCallStart),
             wire::TOOL_CALL_RESULT => Ok(Self::ToolCallResult),
             wire::GRAPH_STARTED => Ok(Self::GraphStarted),
@@ -711,7 +717,12 @@ impl RuntimeEventType {
     pub fn is_transcript(self) -> bool {
         matches!(
             self,
-            Self::CognitionIn | Self::CognitionOut | Self::ToolCallStart | Self::ToolCallResult
+            Self::CognitionIn
+                | Self::CognitionOut
+                | Self::CognitionFrame
+                | Self::CognitionCompaction
+                | Self::ToolCallStart
+                | Self::ToolCallResult
         )
     }
 
@@ -778,10 +789,10 @@ impl RuntimeEventType {
             | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
-            | Self::SystemPrompt
-            | Self::ContextInjected
             | Self::CognitionIn
             | Self::CognitionOut
+            | Self::CognitionFrame
+            | Self::CognitionCompaction
             | Self::ToolCallStart
             | Self::ToolCallResult
             | Self::GraphStarted
@@ -853,10 +864,10 @@ impl RuntimeEventType {
             | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
-            | Self::SystemPrompt
-            | Self::ContextInjected
             | Self::CognitionIn
             | Self::CognitionOut
+            | Self::CognitionFrame
+            | Self::CognitionCompaction
             | Self::ToolCallStart
             | Self::ToolCallResult
             | Self::GraphStarted
@@ -986,11 +997,11 @@ mod tests {
             RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::ThreadReconciled,
             RuntimeEventType::OrphanProcessKilled,
-            RuntimeEventType::SystemPrompt,
-            RuntimeEventType::ContextInjected,
             RuntimeEventType::CognitionIn,
             RuntimeEventType::CognitionOut,
             RuntimeEventType::CognitionReasoning,
+            RuntimeEventType::CognitionFrame,
+            RuntimeEventType::CognitionCompaction,
             RuntimeEventType::ToolCallStart,
             RuntimeEventType::ToolCallResult,
             RuntimeEventType::GraphStarted,
@@ -1107,11 +1118,11 @@ mod tests {
             wire::THREAD_FACET_SET,
             wire::THREAD_RECONCILED,
             wire::ORPHAN_PROCESS_KILLED,
-            wire::SYSTEM_PROMPT,
-            wire::CONTEXT_INJECTED,
             wire::COGNITION_IN,
             wire::COGNITION_OUT,
             wire::COGNITION_REASONING,
+            wire::COGNITION_FRAME,
+            wire::COGNITION_COMPACTION,
             wire::TOOL_CALL_START,
             wire::TOOL_CALL_RESULT,
             wire::GRAPH_STARTED,

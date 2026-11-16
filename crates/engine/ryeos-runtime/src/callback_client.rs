@@ -1934,11 +1934,11 @@ mod tests {
             "artifact_published",
             "thread_reconciled",
             "orphan_process_killed",
-            "system_prompt",
-            "context_injected",
             "cognition_in",
             "cognition_out",
             "cognition_reasoning",
+            "cognition_frame",
+            "cognition_compaction",
             "tool_call_start",
             "tool_call_result",
             // Graph lifecycle events
