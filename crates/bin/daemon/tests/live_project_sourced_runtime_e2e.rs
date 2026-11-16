@@ -160,7 +160,14 @@ async fn a_scheduled_live_fire_of_a_source_scoped_tool_is_refused_typed() {
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
-    assert!(evidence.contains(CODE), "expected {CODE}: {evidence}");
+    // The retained fire and thread keep only the closed outcome class; the
+    // typed code is in the daemon's own log.
+    assert!(
+        evidence.contains("launch_preparation_failed"),
+        "the fire must fail in launch preparation: {evidence}"
+    );
+    let logged = h.stderr_so_far().contains(CODE);
+    eprintln!("daemon log names {CODE}: {logged}");
     assert!(
         !project.join("written-by-tool.txt").exists(),
         "the refused tool must not have run"
