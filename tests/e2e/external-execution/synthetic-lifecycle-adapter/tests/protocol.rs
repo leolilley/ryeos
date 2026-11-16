@@ -3577,7 +3577,7 @@ fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
 /// supervisor over https.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-#[ignore = "the guest's Ready and capability report are not yet relayed to await-lease-ready; see run.md W7"]
+#[ignore = "the lease allow-list needs a two-label controller host and the only test server certificate names `localhost`; see run.md W7"]
 fn production_tls_candidate_on_a_remote_lease() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Lease);
 }
