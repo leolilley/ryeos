@@ -2112,10 +2112,9 @@ mod tests {
             format!("{error:#}").contains("input `launch_shape` is absent"),
             "{error:#}"
         );
-        let spec = super::super::table::lookup(
-            "node.external-execution.snapshot-qualification-compose",
-        )
-        .unwrap();
+        let spec =
+            super::super::table::lookup("node.external-execution.snapshot-qualification-compose")
+                .unwrap();
         assert!(spec.slot("launch_shape").is_some_and(|slot| slot.required));
     }
 

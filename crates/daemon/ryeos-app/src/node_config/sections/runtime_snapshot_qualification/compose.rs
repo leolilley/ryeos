@@ -383,9 +383,7 @@ mod tests {
         assert!(
             refused(&|r| r.launch_shape = serde_json::json!({"bogus": 1})).contains("launch shape")
         );
-        assert!(
-            refused(&|r| r.launch_shape = serde_json::Value::Null).contains("launch shape")
-        );
+        assert!(refused(&|r| r.launch_shape = serde_json::Value::Null).contains("launch shape"));
         assert!(refused(&|r| r.limits.maximum_lifetime_seconds = 3601).contains("budget"));
         assert!(refused(&|r| r.limits.delivery_timeout_seconds = 59).contains("budget"));
         assert!(refused(&|r| r.snapshot_binding_id = "../x".into()).contains("id is invalid"));

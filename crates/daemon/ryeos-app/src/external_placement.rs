@@ -11246,7 +11246,7 @@ mod tests {
                     LaunchSandboxNetworkPolicy::DenyAll,
                 ),
             )
-                .unwrap_err()
+            .unwrap_err()
         );
         assert!(
             transport.contains("launch_shape.controller_transport")
@@ -11263,7 +11263,7 @@ mod tests {
                     LaunchSandboxNetworkPolicy::DenyAll,
                 ),
             )
-                .unwrap_err()
+            .unwrap_err()
         );
         assert!(
             policy.contains("launch_shape.sandbox_network_policy")
@@ -11273,8 +11273,8 @@ mod tests {
         );
     }
 
-    fn qualified_evidence(
-    ) -> ryeos_state::external_content::products::qualification::ProductQualificationEvidence {
+    fn qualified_evidence()
+    -> ryeos_state::external_content::products::qualification::ProductQualificationEvidence {
         let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
             &"a".repeat(64),
         )
@@ -11400,10 +11400,11 @@ mod tests {
         let mut evidence = qualified_evidence();
         // The binding's controller is https with a guest network allow-list;
         // a proof qualified under the relay shape does not qualify it.
-        evidence.execution_proof.subordinate_attempt =
-            Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer {
+        evidence.execution_proof.subordinate_attempt = Some(
+            ProductQualificationSubordinateAttemptProof::RemoteConsumer {
                 proof: remote_consumer_proof(LaunchShape::relay_deny_all()),
-            });
+            },
+        );
         let error = retain_admitted_runtime_qualification(
             &state,
             &contract,
