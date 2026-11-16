@@ -251,30 +251,6 @@ impl RyeOsCore {
                         },
                     )
                 }
-                Intent::AcceptSharedDock { edge } => {
-                    let proof = lifecycle.as_ref().unwrap();
-                    let prepared = proof
-                        .prepared()
-                        .ok_or("accept has no authenticated preparation")?;
-                    let inbound = proof.inbound();
-                    if proof.accepted().is_some()
-                        || proof.aborted().is_some()
-                        || proof.committed().is_some()
-                        || proof.retained().is_some()
-                        || proof.released().is_some()
-                    {
-                        return Err("transfer acceptance already settled or closed".into());
-                    }
-                    (
-                        "accept_shared_dock",
-                        Request::AcceptSharedDock {
-                            transfer,
-                            inbound: inbound.evidence.clone(),
-                            preparation: prepared.evidence.clone(),
-                            edge,
-                        },
-                    )
-                }
                 Intent::Commit => {
                     let proof = lifecycle.as_ref().unwrap();
                     if proof.prepared().is_none()
@@ -383,9 +359,6 @@ impl RyeOsCore {
                         source_view_set_id,
                         ..
                     } => std::collections::BTreeSet::from([*source_view_set_id]),
-                    crate::ui::transfer_export::UiTransferExportContent::SharedDock { .. } => {
-                        std::collections::BTreeSet::new()
-                    }
                 }
                 .into_iter()
                 .collect();
@@ -1343,7 +1316,7 @@ mod tests {
             })
             .collect();
         let requested = UiTransferExport {
-            schema: 1,
+            schema: 2,
             mode: UiTransferExportMode::Move,
             content: UiTransferExportContent::ViewSets {
                 active_set: Some("frozen".into()),
@@ -1418,12 +1391,12 @@ mod tests {
     ) -> (RyeOsCore, UiMoveFreezeRequest, RyeOsViewInstanceKey) {
         let shared = serde_json::json!({"widget":"text","input":{"id":"line","submit":"route"},
             "sources":{"default":{"ref":"service:test/read","collection":"rows"}}});
-        let session = test_support::session_with_surface_and_docks(
+        let session = test_support::session_with_surface(
             serde_json::json!({"name":"freeze-input-source","tiles":["view:test/frozen"],
                 "views":{"view:test/frozen":view,"view:ryeos/input":shared}}),
-            serde_json::json!({"bottom":{"content":"view:ryeos/input","open":true,"size":7}}),
         );
         let (mut core, mut request) = fixture_with_session(session);
+        test_support::seed_view_value(&mut core, "view:ryeos/input", shared);
         let frozen = request.instances[0].clone();
         core.focused_input = Some(frozen);
         core.focused_input_buffer_mut()
@@ -1441,10 +1414,7 @@ mod tests {
             &serde_json::to_value(&request.export).unwrap(),
         )
         .unwrap();
-        let unaffected = core.presentation.as_ref().unwrap().docks()["bottom"]
-            .view()
-            .instance_key()
-            .clone();
+        let unaffected = test_support::fixture_input(&mut core).unwrap();
         (core, request, unaffected)
     }
 

@@ -192,7 +192,6 @@ impl ActivatedTransferReservationMembership {
                 surface_instance_id: target,
                 ..
             } => target.as_str() == surface_instance_id,
-            UiTransferDestinationPlacement::SharedDock { .. } => false,
         }
     }
 
@@ -1408,7 +1407,6 @@ fn validate_destination_membership_target(
             surface_instance_id,
             ..
         } => Some(surface_instance_id.as_str()),
-        UiTransferDestinationPlacement::SharedDock { .. } => None,
     };
     if target.is_some_and(|id| {
         presentation
@@ -1940,12 +1938,12 @@ mod tests {
             binding_generation: 9,
             binding_digest: "f".repeat(64),
         };
-        let mount_instance = ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dock(
+        let mount_instance = ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dialog(
             &PresentationId::try_new("22222222-2222-4222-8222-222222222222").unwrap(),
             "left",
         )
         .unwrap();
-        let sibling_mount_instance = ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dock(
+        let sibling_mount_instance = ryeos_client_base::ids::RyeOsViewInstanceKey::shared_dialog(
             &PresentationId::try_new("22222222-2222-4222-8222-222222222222").unwrap(),
             "right",
         )

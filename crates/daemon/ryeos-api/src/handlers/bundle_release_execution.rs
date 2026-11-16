@@ -1110,15 +1110,16 @@ mod tests {
     async fn cancelled_release_request_retains_snapshot_until_protected_refusal_settles() {
         use base64::Engine as _;
         use ryeos_app::handler_context::HandlerContext;
-        use ryeos_node_runtime::identity::{
-            AuthorizedKeyPrincipalClass, NodeIdentity, WildcardPolicy,
-        };
+        use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, WildcardPolicy};
         use ryeos_state::external_content::products::transfer::ProductWitnessSource;
         use std::{sync::Arc, time::Duration};
 
         let (directory, _state_owner, state) = crate::test_support::build_test_state();
         let state = Arc::new(state);
-        let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
+        )
+        .unwrap();
         let scopes =
             vec!["ryeos.execute.service.external-content/launch-product-qualification".to_owned()];
         ryeos_node_runtime::identity::reconcile_authorized_key_toml_scopes(

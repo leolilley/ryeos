@@ -10,22 +10,24 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set standard|development|central-host|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
 #
 # Bundle sets:
-#   full            core + central-auth + scheduling + knowledge + directive + graph +
-#                   ryeos-docs + environment-qualification + web + browser + ryeos-ui +
-#                   codex + opencode (default)
-#   development     full + render-sandbox — a developer's node whose local-class
+#   standard        core + scheduling + knowledge + directive + graph + ryeos-docs +
+#                   ryeos-ui + codex + opencode + web + browser — the default
+#                   local node (default)
+#   development     standard + central-auth + environment-qualification +
+#                   render-sandbox — a developer's node whose local-class
 #                   origin can author runtime snapshot bindings
 #   central-host    core + central-auth + scheduling + knowledge + directive + graph +
 #                   ryeos-docs + web — workflow node plus the rye/web/search tool and
 #                   app authentication
-#   standard        core + scheduling + knowledge + directive + graph + ryeos-docs —
-#                   scheduler/graph/directive node
-#   standard-central-auth standard + optional web-app authentication
-#   local-inference standard + local-inference — provider-neutral inference node
-#   hosted-workflow standard + codex + opencode — hosted
+#   standard-central-auth core + scheduling + knowledge + directive + graph +
+#                   ryeos-docs + optional web-app authentication
+#   local-inference core + scheduling + knowledge + directive + graph +
+#                   ryeos-docs + local-inference — provider-neutral inference node
+#   hosted-workflow core + scheduling + knowledge + directive + graph +
+#                   ryeos-docs + codex + opencode — hosted
 #                   node that also runs scheduler/graph/directive and hosted workloads
 #   bundle-source   core + bundle-source — catalog authority only
 #   core            core — scheduler-free selection
@@ -55,7 +57,7 @@ ryeos_term_init
 
 KEY=""
 OWNER=""
-BUNDLE_SET="full"
+BUNDLE_SET="standard"
 JOBS=""            # cargo -j N; empty = cargo default (all cores)
 CRATES_OVERRIDE="" # space-separated Cargo package list; empty = bundle-set default
 POPULATE_ALL=0     # explicit opt-in to rebuild the whole bundle set
@@ -105,7 +107,7 @@ if ! command -v openssl >/dev/null 2>&1; then ryeos_term_fail "openssl is requir
 if ! command -v sha256sum >/dev/null 2>&1; then ryeos_term_fail "sha256sum is required"; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then ryeos_term_fail "base64 is required"; exit 2; fi
 case "$BUNDLE_SET" in
-  full|development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts) ;;
+  development|central-host|standard|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts) ;;
   *) ryeos_term_fail "invalid --bundle-set: $BUNDLE_SET"; exit 2 ;;
 esac
 
@@ -379,7 +381,7 @@ prepare_bundle_trees() {
     rm -rf "$bundle_dir/.ai/refs"
     rm -f  "$bundle_dir/PUBLISHER_TRUST.toml"
   done
-  if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "development" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
+  if [[ "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "development" || "$BUNDLE_SET" == "release-authority" || "$BUNDLE_SET" == "release-artifacts" ]]; then
     rm -rf "$LOCAL_INFERENCE/.ai/bin"
     rm -rf "$LOCAL_INFERENCE/.ai/objects"
     rm -rf "$LOCAL_INFERENCE/.ai/refs"
@@ -399,7 +401,7 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
-  full)
+  standard)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-browser-tools \
           ryeos-client-terminal ryeos-client-web ryeos-structured-session ryeos-lillux-isolation-adapter \
@@ -443,7 +445,7 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-web-tools ryeos-structured-session \
           ryeos-lillux-isolation-adapter)
     ;;
-  standard|standard-central-auth|local-inference)
+  standard-central-auth|local-inference)
     pkgs=(lillux ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-parser-bins ryeos-cli ryeos-core-tools ryeos-session-exec ryeos-structured-session \
           ryeos-lillux-isolation-adapter)

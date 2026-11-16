@@ -78,7 +78,7 @@ done
 mkdir -p "$app_root"
 printf '%s\n' "${node_profile:-none}" >> "${FAKE_RYEOS_CALLS:?}"
 [[ -n "$node_profile" ]] || exit 2
-# The full profile is preflighted as an unconfined local host; the controller profile as
+# The standard profile is preflighted as an unconfined local host; the controller profile as
 # the hosting provider's container class.
 case "$node_profile" in
     hosted-controller) [[ "$host_class" == hosted ]] ;;
@@ -123,7 +123,7 @@ for run in one two; do
         --output "$tmp/$run/ryeos-bundles-1.2.3-x86_64.tar.gz" \
         --source-date-epoch 1700000000 \
         --ryeos-bin "$fake_ryeos" >/dev/null
-    printf '%s\n' none full hosted-controller > "$tmp/$run/expected-init-calls"
+    printf '%s\n' none standard hosted-controller > "$tmp/$run/expected-init-calls"
     cmp "$tmp/$run/expected-init-calls" "$tmp/$run/init-calls"
     (cd "$tmp/$run" && sha256sum -c ryeos-bundles-1.2.3-x86_64.tar.gz.sha256)
     "$root/scripts/release/verify-bundle-artifact.sh" \
@@ -138,7 +138,7 @@ tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/core/.ai/manifest.yaml'
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/.ai/node/init/profiles/hosted-workflow.yaml'
-# The controller distribution's bundle outside `full` is archived too.
+# The controller distribution's bundle outside `standard` is archived too.
 tar -tzf "$tmp/one/ryeos-bundles-1.2.3-x86_64.tar.gz" \
     | grep -qx 'ryeos-bundles-1.2.3-x86_64/render-sandbox/.ai/manifest.yaml'
 

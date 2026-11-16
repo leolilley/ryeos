@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:2f86329c177d0480e75d98160be6a88ff8bc36e004f308ac6d92e195a4679a6c:FmKGde3Hj8rno45PvXmrAdi8QAuhVRsNI+FOKwp1m3q1JlQ5J6DjrbG50LDzLDoH1RS0hqE98FQ5TDZEos9wCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:ce491cd6ae5a03df77e7a993927f782b1c4561c85ad0d59a2dec51842efbf61a:T93gY2A9I0gqi3U3w2X7Ha4Sgb9X03T6RNZbuLr491hvvO4nANRUfwPiQdTbCKQfTNnYNL9pO4ebefE8eL//DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: codex
 tags: [codex, hosted-execution, structured-session, credentials, acceptance]
@@ -123,7 +123,7 @@ configured-operator forwarding route to inspect profiles on a remote node.
      max_total_backlog_bytes: 67108864
    ```
 
-   A fresh `hosted-workflow` or `full` installation selects a
+   A fresh `hosted-workflow` or `standard` installation selects a
    publisher-signed init profile containing these values and publishes one
    complete node-signed generation under `<system>/.ai/node/policies/`.
    `external_content.yaml` and `persistent_sessions.yaml` are mandatory

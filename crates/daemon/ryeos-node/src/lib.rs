@@ -3,6 +3,7 @@
 /// Owner token carried by the secure temporaries this crate publishes.
 pub(crate) const NODE_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("node");
 
+pub mod apply_authority;
 pub mod bundle_set_apply;
 pub mod bundle_set_update;
 pub mod capability_report;
@@ -34,8 +35,8 @@ use serde::{Deserialize, Serialize};
 
 pub use bundle_set_update::load_current_consumer_publication_policy;
 pub use init::{
-    InitCompletionReport, InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase,
-    InitProgress, InitReport, OfflineInitCompletionSigner, ProspectiveInitCompletion,
+    InitAuthority, InitCompletionReport, InitOperatorCeremony, InitOperatorProfile, InitOptions,
+    InitPhase, InitProgress, InitReport, OfflineInitCompletionSigner, ProspectiveInitCompletion,
     ProspectiveInitCompletionInput, SubstrateIdentity, SubstrateImageReplacement,
     load_trusted_init_node_profile, load_verified_substrate_identity,
     preflight_existing_policy_generation, prepare_bundle_set_init_completion,

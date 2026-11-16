@@ -75,15 +75,35 @@ fn rotate_at(
     console: &crate::tty::Console,
 ) -> Result<()> {
     ryeos_node::trust_registry::refuse_while_running(app_root).map_err(anyhow::Error::new)?;
+    // A rotation the node applied before this command could install the new
+    // key (it stopped in between) is finished here: the node records the new
+    // operator, and the private key is installed in this process.
+    if key == RotatedKey::Operator
+        && ryeos_node::key_rotation::staged_key_is_the_applied_operator(app_root)?
+    {
+        ryeos_node::key_rotation::install_staged_key(app_root, key)?;
+        console.text("the operator rotation was already applied; the new key is installed\n")?;
+        return Ok(());
+    }
     let prepared = prepare_rotation(app_root, key)?;
     let host = crate::offline_apply::CliHost::new();
+    let mut inputs = BTreeMap::from([("succession".to_owned(), prepared.statement)]);
+    if let Some(genesis) = prepared.genesis {
+        inputs.insert("genesis".to_owned(), genesis);
+    }
     let applied = host.apply(
         app_root,
         key.operation(),
         json!({}),
-        BTreeMap::from([("succession".to_owned(), prepared.statement)]),
+        inputs,
         BTreeMap::new(),
     )?;
+    // The node never holds the operator's new private key; installing it, which
+    // destroys the old one, is this command's step once the node has applied
+    // the rotation.
+    if key == RotatedKey::Operator {
+        ryeos_node::key_rotation::install_staged_key(app_root, key)?;
+    }
     if json {
         return crate::tty::write_json(
             &json!({ "status": "applied", "key": key.name(), "result": applied.result }),

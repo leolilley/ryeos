@@ -7,8 +7,8 @@
     "bundle_name": "browser",
     "bundle_sets": [
      "development",
-     "full",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -24,10 +24,10 @@
     "bundle_name": "codex",
     "bundle_sets": [
      "development",
-     "full",
      "hosted-controller",
      "hosted-workflow",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -97,7 +97,6 @@
      "core-scheduling",
      "core-workflow",
      "development",
-     "full",
      "hosted-controller",
      "hosted-workflow",
      "local-inference",
@@ -201,7 +200,6 @@
     "bundle_sets": [
      "central-host",
      "development",
-     "full",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",
@@ -234,7 +232,6 @@
      "central-host",
      "core-workflow",
      "development",
-     "full",
      "hosted-controller",
      "hosted-workflow",
      "local-inference",
@@ -283,7 +280,6 @@
      "central-host",
      "core-knowledge",
      "development",
-     "full",
      "hosted-controller",
      "hosted-workflow",
      "local-inference",
@@ -349,8 +345,8 @@
     "bundle_name": "ryeos-ui",
     "bundle_sets": [
      "development",
-     "full",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -373,8 +369,8 @@
     "bundle_sets": [
      "central-host",
      "development",
-     "full",
-     "release-artifacts"
+     "release-artifacts",
+     "standard"
     ],
     "host_features": [],
     "payloads": [
@@ -415,7 +411,6 @@
      "central-host",
      "core-scheduling",
      "development",
-     "full",
      "hosted-workflow",
      "local-inference",
      "release-artifacts",

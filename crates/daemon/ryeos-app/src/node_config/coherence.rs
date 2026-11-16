@@ -633,6 +633,267 @@ fn inspect_placement(
     );
 }
 
+// ── Replacement that strands a binding ──────────────────────────────────
+
+/// A bundle replacement would leave installed bindings pinning artifacts it
+/// removes, and the operator did not name each one.
+pub const REPLACEMENT_STRANDS_BINDINGS: &str = "replacement_strands_bindings";
+/// The operator named a binding to invalidate that the replacement does not
+/// strand. Overrides are per binding and exact, never blanket.
+pub const INVALIDATED_BINDING_NOT_STRANDED: &str = "invalidated_binding_not_stranded";
+
+/// The sections whose bindings pin installed artifacts.
+const PINNING_SECTIONS: [&str; 3] = [
+    runtime_snapshot_production::SECTION_NAME,
+    runtime_snapshot_qualification::SECTION_NAME,
+    external_execution::SECTION_NAME,
+];
+
+/// One installed binding, named `<section>/<id>` by the operator.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct BindingRef {
+    pub section: String,
+    pub id: String,
+}
+
+impl BindingRef {
+    pub fn parse(value: &str) -> Result<Self> {
+        let (section, id) = value
+            .split_once('/')
+            .with_context(|| format!("binding `{value}` is not `<section>/<id>`"))?;
+        anyhow::ensure!(
+            PINNING_SECTIONS.contains(&section),
+            "binding `{value}` names section `{section}`; bindings that pin artifacts live in {}",
+            PINNING_SECTIONS.join(", ")
+        );
+        anyhow::ensure!(
+            !id.is_empty() && !id.contains('/'),
+            "binding `{value}` has no plain id"
+        );
+        Ok(Self {
+            section: section.to_owned(),
+            id: id.to_owned(),
+        })
+    }
+
+    fn of(identity: &BindingIdentity) -> Self {
+        Self {
+            section: identity.section.to_owned(),
+            id: identity.id.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for BindingRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.section, self.id)
+    }
+}
+
+impl TryFrom<String> for BindingRef {
+    type Error = anyhow::Error;
+    fn try_from(value: String) -> Result<Self> {
+        Self::parse(&value)
+    }
+}
+
+impl From<BindingRef> for String {
+    fn from(value: BindingRef) -> Self {
+        value.to_string()
+    }
+}
+
+/// A replacement leaves credentials untouched, so presence is not what it
+/// can change.
+struct CredentialUnchanged;
+
+impl PlacementCredentialPresence for CredentialUnchanged {
+    fn placement_credential_present(&self, _: &PlacementCredentialAccess) -> Result<bool> {
+        Ok(true)
+    }
+}
+
+/// The failing pins a change from `current` to `prospective` installed
+/// artifacts introduces: a pin that already failed before the replacement is
+/// not the replacement's doing and is left to doctor.
+pub fn stranded_by_replacement(
+    snapshot: &NodeConfigSnapshot,
+    current: &InstalledArtifactHashes,
+    prospective: &InstalledArtifactHashes,
+) -> Vec<BindingFinding> {
+    let key = |finding: &BindingFinding| {
+        (
+            finding.code,
+            finding.binding.section,
+            finding.binding.id.clone(),
+            finding.field.clone(),
+            finding.pinned.clone(),
+        )
+    };
+    let before: BTreeSet<_> = inspect_binding_coherence(snapshot, current, &CredentialUnchanged)
+        .iter()
+        .map(key)
+        .collect();
+    inspect_binding_coherence(snapshot, prospective, &CredentialUnchanged)
+        .into_iter()
+        .filter(|finding| finding.severity == FindingSeverity::Fail)
+        .filter(|finding| !before.contains(&key(finding)))
+        .collect()
+}
+
+/// A replacement refused because of the bindings it would strand, or because
+/// the operator named a binding it does not strand.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplacementBindingRefusal {
+    pub code: &'static str,
+    /// Every pin the replacement would leave failing.
+    pub stranded: Vec<BindingFinding>,
+    /// Stranded bindings the operator did not name.
+    pub unnamed: Vec<BindingRef>,
+    /// Bindings the operator named that the replacement does not strand.
+    pub not_stranded: Vec<BindingRef>,
+}
+
+impl ReplacementBindingRefusal {
+    pub fn fix(&self) -> String {
+        if self.code == REPLACEMENT_STRANDS_BINDINGS {
+            let flags = self
+                .unnamed
+                .iter()
+                .map(|binding| format!("--invalidate-binding {binding}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "rerun with {flags} to replace anyway (doctor then fails those bindings until                  they are recomposed against the installed bundles), or keep the installed bundle"
+            )
+        } else {
+            "name only bindings the replacement strands".to_owned()
+        }
+    }
+
+    /// The HTTP 409 a live install returns.
+    pub fn handler_error(&self) -> crate::handler_error::HandlerError {
+        crate::handler_error::HandlerError::Structured {
+            code: self.code.to_owned(),
+            status: 409,
+            body: serde_json::json!({
+                "error": self.code,
+                "message": self.to_string(),
+                "stranded": self.stranded,
+                "unnamed": self.unnamed,
+                "not_stranded": self.not_stranded,
+                "fix": self.fix(),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for ReplacementBindingRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: ", self.code)?;
+        if self.code == REPLACEMENT_STRANDS_BINDINGS {
+            write!(
+                f,
+                "the replacement would leave installed bindings pinning artifacts it removes; nothing was changed"
+            )?;
+            for finding in &self.stranded {
+                let installed = if finding.installed.is_empty() {
+                    "nothing".to_owned()
+                } else {
+                    finding.installed.join(", ")
+                };
+                write!(
+                    f,
+                    "\n  {}/{} (digest {}) {}: pinned {}, incoming {}",
+                    finding.binding.section,
+                    finding.binding.id,
+                    finding.binding.digest,
+                    finding.field,
+                    finding.pinned,
+                    installed
+                )?;
+            }
+        } else {
+            write!(f, "nothing was changed")?;
+        }
+        for binding in &self.not_stranded {
+            write!(f, "\n  named but not stranded: {binding}")?;
+        }
+        write!(f, "\n  fix: {}", self.fix())
+    }
+}
+
+impl std::error::Error for ReplacementBindingRefusal {}
+
+/// Admit a replacement whose stranded pins are `stranded` when the operator
+/// named exactly the bindings involved. Returns the bindings the replacement
+/// invalidates, which stay installed and fail doctor until recomposed.
+pub fn admit_stranded_bindings(
+    stranded: Vec<BindingFinding>,
+    invalidate: &[BindingRef],
+) -> std::result::Result<Vec<BindingRef>, ReplacementBindingRefusal> {
+    let stranded_refs: BTreeSet<BindingRef> = stranded
+        .iter()
+        .map(|finding| BindingRef::of(&finding.binding))
+        .collect();
+    let named: BTreeSet<BindingRef> = invalidate.iter().cloned().collect();
+    let unnamed: Vec<BindingRef> = stranded_refs.difference(&named).cloned().collect();
+    let not_stranded: Vec<BindingRef> = named.difference(&stranded_refs).cloned().collect();
+    if unnamed.is_empty() && not_stranded.is_empty() {
+        return Ok(stranded_refs.into_iter().collect());
+    }
+    Err(ReplacementBindingRefusal {
+        code: if unnamed.is_empty() {
+            INVALIDATED_BINDING_NOT_STRANDED
+        } else {
+            REPLACEMENT_STRANDS_BINDINGS
+        },
+        stranded,
+        unnamed,
+        not_stranded,
+    })
+}
+
+/// Whether `snapshot` holds any binding that pins installed artifacts.
+pub fn has_pinning_bindings(snapshot: &NodeConfigSnapshot) -> bool {
+    !snapshot.runtime_snapshot_production.is_empty()
+        || !snapshot.runtime_snapshot_qualification.is_empty()
+        || !snapshot.external_execution.is_empty()
+}
+
+/// Check a bundle replacement against the node's installed bindings before
+/// anything changes. `current` and `prospective` are the bundle sets before
+/// and after, by name and root. Refuses with a [`ReplacementBindingRefusal`]
+/// unless every binding the replacement strands is named in `invalidate`
+/// (and nothing else is); returns the invalidated bindings.
+pub fn check_bundle_replacement(
+    snapshot: &NodeConfigSnapshot,
+    current: &[(String, std::path::PathBuf)],
+    prospective: &[(String, std::path::PathBuf)],
+    node_trust_store: &ryeos_engine::trust::TrustStore,
+    invalidate: &[BindingRef],
+) -> Result<Vec<BindingRef>> {
+    if !has_pinning_bindings(snapshot) {
+        return admit_stranded_bindings(Vec::new(), invalidate).map_err(Into::into);
+    }
+    let prospective =
+        crate::external_artifacts::named_bundle_artifact_hashes(prospective, node_trust_store)
+            .context("read the artifacts the replacement would install")?;
+    // An installed generation that no longer verifies pins nothing usable:
+    // every failing pin is then the replacement's to answer for.
+    let current = crate::external_artifacts::named_bundle_artifact_hashes(current, node_trust_store)
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "installed bundle artifacts unreadable; every stranded pin is attributed to the replacement"
+            );
+            InstalledArtifactHashes::default()
+        });
+    let stranded = stranded_by_replacement(snapshot, &current, &prospective);
+    admit_stranded_bindings(stranded, invalidate).map_err(Into::into)
+}
+
 /// A binding file whose schema or protocol this node does not admit. The
 /// loader names the file; this names what was seen and what is admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1170,5 +1431,150 @@ mod tests {
             "ryeos.runtime-snapshot-qualification.v4",
         )
         .unwrap();
+    }
+
+    fn binding(value: &str) -> BindingRef {
+        BindingRef::parse(value).unwrap()
+    }
+
+    /// The fixture installation after a replacement that ships a new
+    /// `test-backend` adapter and restoration verifier.
+    fn replaced_adapter() -> InstalledArtifactHashes {
+        let mut replaced = installed();
+        let lifecycle = replaced.lifecycle_adapters.get_mut("test-backend").unwrap();
+        lifecycle.adapter = hash('9');
+        lifecycle.restoration_verifier = Some(hash('a'));
+        replaced
+    }
+
+    #[test]
+    fn replacement_names_each_stranded_pin_with_both_hashes() {
+        let stranded = stranded_by_replacement(&full_snapshot(), &installed(), &replaced_adapter());
+        assert_eq!(
+            named(&stranded),
+            vec![
+                (
+                    BINDING_ADAPTER_NOT_INSTALLED,
+                    runtime_snapshot_production::SECTION_NAME,
+                    "adapter_artifact_hash"
+                ),
+                (
+                    BINDING_RESTORATION_VERIFIER_NOT_INSTALLED,
+                    runtime_snapshot_qualification::SECTION_NAME,
+                    "verifier_artifact_hash"
+                ),
+            ]
+        );
+        assert_eq!(stranded[0].pinned, hash('b'));
+        assert_eq!(stranded[0].installed, vec![hash('9')]);
+
+        let refusal = admit_stranded_bindings(stranded, &[]).unwrap_err();
+        assert_eq!(refusal.code, REPLACEMENT_STRANDS_BINDINGS);
+        assert_eq!(
+            refusal.unnamed,
+            vec![
+                binding("runtime_snapshot_production/snapshot-producer"),
+                binding(&format!(
+                    "runtime_snapshot_qualification/{}",
+                    full_snapshot().runtime_snapshot_qualification[0].id()
+                )),
+            ]
+        );
+        let message = refusal.to_string();
+        assert!(message.contains(&hash('b')), "{message}");
+        assert!(message.contains(&hash('9')), "{message}");
+        assert!(
+            refusal
+                .fix()
+                .contains("--invalidate-binding runtime_snapshot_production/snapshot-producer")
+        );
+        let crate::handler_error::HandlerError::Structured { code, status, body } =
+            refusal.handler_error()
+        else {
+            panic!("typed refusal");
+        };
+        assert_eq!((code.as_str(), status), (REPLACEMENT_STRANDS_BINDINGS, 409));
+        assert_eq!(body["stranded"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn replacement_proceeds_when_each_stranded_binding_is_named() {
+        let snapshot = full_snapshot();
+        let qualification = format!(
+            "runtime_snapshot_qualification/{}",
+            snapshot.runtime_snapshot_qualification[0].id()
+        );
+        let stranded = stranded_by_replacement(&snapshot, &installed(), &replaced_adapter());
+        // Naming only one of the two still refuses, naming the other.
+        let refusal = admit_stranded_bindings(
+            stranded.clone(),
+            &[binding("runtime_snapshot_production/snapshot-producer")],
+        )
+        .unwrap_err();
+        assert_eq!(refusal.unnamed, vec![binding(&qualification)]);
+
+        let invalidated = admit_stranded_bindings(
+            stranded,
+            &[
+                binding(&qualification),
+                binding("runtime_snapshot_production/snapshot-producer"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(invalidated.len(), 2);
+    }
+
+    #[test]
+    fn naming_an_unaffected_binding_is_refused() {
+        let snapshot = full_snapshot();
+        let stranded = stranded_by_replacement(&snapshot, &installed(), &replaced_adapter());
+        let mut names = vec![
+            binding("runtime_snapshot_production/snapshot-producer"),
+            binding(&format!(
+                "runtime_snapshot_qualification/{}",
+                snapshot.runtime_snapshot_qualification[0].id()
+            )),
+        ];
+        let placement = format!("external_execution/{}", snapshot.external_execution[0].id());
+        names.push(binding(&placement));
+        let refusal = admit_stranded_bindings(stranded, &names).unwrap_err();
+        assert_eq!(refusal.code, INVALIDATED_BINDING_NOT_STRANDED);
+        assert_eq!(refusal.not_stranded, vec![binding(&placement)]);
+        assert!(refusal.unnamed.is_empty());
+    }
+
+    #[test]
+    fn replacement_with_identical_payloads_needs_no_override() {
+        let stranded = stranded_by_replacement(&full_snapshot(), &installed(), &installed());
+        assert!(stranded.is_empty(), "{stranded:?}");
+        assert_eq!(admit_stranded_bindings(stranded, &[]).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn a_pin_that_already_failed_is_not_the_replacements() {
+        // The installed adapter already differs from the pin; a replacement
+        // that leaves it as it is strands nothing new.
+        let stranded =
+            stranded_by_replacement(&full_snapshot(), &replaced_adapter(), &replaced_adapter());
+        assert!(stranded.is_empty(), "{stranded:?}");
+    }
+
+    #[test]
+    fn binding_refs_name_a_pinning_section_and_a_plain_id() {
+        let parsed = binding("external_execution/codex-session");
+        assert_eq!(parsed.section, "external_execution");
+        assert_eq!(parsed.id, "codex-session");
+        assert_eq!(parsed.to_string(), "external_execution/codex-session");
+        for bad in [
+            "bundles/core",
+            "external_execution",
+            "external_execution/",
+            "external_execution/a/b",
+        ] {
+            assert!(BindingRef::parse(bad).is_err(), "{bad}");
+        }
+        let decoded: BindingRef =
+            serde_json::from_value(serde_json::json!("runtime_snapshot_production/p")).unwrap();
+        assert_eq!(decoded, binding("runtime_snapshot_production/p"));
     }
 }

@@ -12,8 +12,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
-use lillux::crypto::{DecodePrivateKey as _, VerifyingKey};
+use lillux::crypto::VerifyingKey;
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::identity::{
     AuthorizedKeyPrincipalClass, NodeIdentity, VerifiedAuthorizedKeyGrant,
@@ -39,22 +38,19 @@ pub fn authorized_keys_dir(app_root: &Path) -> PathBuf {
     .unwrap_or_else(|_| RuntimeRoot::new(app_root.to_path_buf()).authorized_keys_dir())
 }
 
-/// The fingerprint and public key of the local operator: the key on this
-/// node's volume. `Ok(None)` when the node has no operator key yet; an error
-/// when the key is there and cannot be read.
+/// The fingerprint and public key of the local operator, read from the node's
+/// public operator records: the node never holds the operator's private key.
+/// `Ok(None)` when the node has no operator genesis yet; an error when the
+/// records are there and do not verify.
 pub fn local_operator(app_root: &Path) -> anyhow::Result<Option<(String, VerifyingKey)>> {
-    let path = RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
-    let Some(bytes) = lillux::read_optional_regular_file_bounded_no_follow(&path, 64 * 1024)?
-    else {
+    let genesis = RuntimeRoot::new(app_root.to_path_buf()).operator_genesis_path();
+    if lillux::inspect_optional_entry_no_follow(&genesis)?.is_none() {
         return Ok(None);
-    };
-    let pem = std::str::from_utf8(&bytes).context("the local operator key is not UTF-8")?;
-    let key = lillux::crypto::SigningKey::from_pkcs8_pem(pem)
-        .with_context(|| format!("decode the local operator key {}", path.display()))?;
-    let verifying = key.verifying_key();
+    }
+    let operator = ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)?;
     Ok(Some((
-        lillux::signature::compute_fingerprint(&verifying),
-        verifying,
+        operator.fingerprint().to_owned(),
+        *operator.verifying_key(),
     )))
 }
 
@@ -180,7 +176,7 @@ impl Envelope<'_> {
         let local = local_operator(self.app_root).map_err(|error| {
             Refusal::retryable(
                 RefusalReason::UnknownSigner,
-                format!("the local operator key cannot be read: {error:#}"),
+                format!("the local operator identity cannot be read: {error:#}"),
             )
         })?;
         if let Some((fingerprint, key)) = local
@@ -345,8 +341,14 @@ pub struct WildcardGrant {
 }
 
 /// Grants whose wildcard scopes would match offline operations. The node
-/// reports them at each startup; they carry no offline power.
+/// reports them at each startup; they carry no offline power. The local
+/// operator's own grant is left out: the operator signs offline operations by
+/// holding the key on this node's volume, not through any grant.
 pub fn wildcard_only_grants(app_root: &Path, node: &NodeIdentity) -> Vec<WildcardGrant> {
+    let operator = local_operator(app_root)
+        .ok()
+        .flatten()
+        .map(|(fingerprint, _)| fingerprint);
     let directory = authorized_keys_dir(app_root);
     let Ok(Some(pinned)) = lillux::PinnedDirectory::open(&directory) else {
         return Vec::new();
@@ -362,6 +364,9 @@ pub fn wildcard_only_grants(app_root: &Path, node: &NodeIdentity) -> Vec<Wildcar
         let Some(fingerprint) = name.strip_suffix(".toml") else {
             continue;
         };
+        if operator.as_deref() == Some(fingerprint) {
+            continue;
+        }
         let Ok(Some(grant)) = load_verified_authorized_key(fingerprint, &directory, node) else {
             continue;
         };

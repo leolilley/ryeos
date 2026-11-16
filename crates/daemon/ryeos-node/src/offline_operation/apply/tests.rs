@@ -32,6 +32,13 @@ fn fixture() -> Fixture {
     let node = NodeIdentity::create(&runtime.node_signing_key_path()).unwrap();
     let operator =
         lillux::crypto::create_signing_key(&runtime.operator_signing_key_path()).unwrap();
+    node.write_public_identity(&ryeos_engine::trust::node_public_identity_path(root.path()))
+        .unwrap();
+    ryeos_node_runtime::operator_identity::test_support::write_operator_records_for_key(
+        root.path(),
+        node.signing_key(),
+        &operator,
+    );
     std::fs::create_dir_all(runtime.state()).unwrap();
     let store = Store::for_app_root(root.path());
     store.create_layout().unwrap();
@@ -175,12 +182,15 @@ impl Fixture {
     }
 
     fn local_wildcard_grant(&self) {
-        let key = lillux::crypto::generate_signing_key();
+        self.local_wildcard_grant_for(&lillux::crypto::generate_signing_key());
+    }
+
+    fn local_wildcard_grant_for(&self, key: &SigningKey) {
         let encoded =
             base64::engine::general_purpose::STANDARD.encode(key.verifying_key().as_bytes());
         reconcile_authorized_key_toml_scopes(
             &authorized_keys_dir(self.path()),
-            &fingerprint(&key),
+            &fingerprint(key),
             &encoded,
             &["*".to_owned()],
             "local operator",
@@ -483,6 +493,18 @@ fn wildcard_grants_are_reported_at_startup() {
         report.wildcard_grants[0]
             .operations
             .contains(&"node.allow-restart")
+    );
+}
+
+#[test]
+fn the_local_operators_own_wildcard_grant_is_not_reported() {
+    let fx = fixture();
+    fx.local_wildcard_grant_for(&fx.operator);
+    let report = fx.run();
+    assert!(
+        report.wildcard_grants.is_empty(),
+        "{:?}",
+        report.wildcard_grants
     );
 }
 
@@ -1333,8 +1355,8 @@ fn restart_draft() -> LocalDraft {
 #[test]
 fn the_local_path_signs_applies_and_chains_receipts() {
     let fx = fixture();
-    let first = apply_local(fx.path(), &BareHost, restart_draft()).unwrap();
-    let second = apply_local(fx.path(), &BareHost, restart_draft()).unwrap();
+    let first = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap();
+    let second = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap();
     assert_eq!(first.receipt.body.sequence, 1);
     assert_eq!(second.receipt.body.sequence, 2);
     assert_eq!(
@@ -1350,7 +1372,7 @@ fn the_local_path_signs_applies_and_chains_receipts() {
 fn the_local_path_refuses_while_the_node_runs() {
     let fx = fixture();
     let _held = StateLock::acquire(&default_lock_path(fx.path())).unwrap();
-    let error = apply_local(fx.path(), &BareHost, restart_draft()).unwrap_err();
+    let error = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap_err();
     assert!(format!("{error:#}").contains("stopped node"), "{error:#}");
 }
 
@@ -1359,7 +1381,7 @@ fn the_local_path_refuses_an_unknown_operation() {
     let fx = fixture();
     let mut draft = restart_draft();
     draft.operation = "node.nothing".to_owned();
-    assert!(apply_local(fx.path(), &BareHost, draft).is_err());
+    assert!(apply_local(fx.path(), &BareHost, &fx.operator, draft).is_err());
 }
 
 #[test]
@@ -1367,7 +1389,7 @@ fn the_local_path_refuses_what_the_envelope_refuses() {
     let fx = fixture();
     let mut draft = restart_draft();
     draft.arguments = json!({ "force": true });
-    let error = apply_local(fx.path(), &BareHost, draft).unwrap_err();
+    let error = apply_local(fx.path(), &BareHost, &fx.operator, draft).unwrap_err();
     assert!(
         format!("{error:#}").contains("invalid_arguments"),
         "{error:#}"
@@ -1393,7 +1415,7 @@ fn the_local_path_hands_a_handler_only_verified_inputs() {
         .insert("policy_generation".to_owned(), "e".repeat(64));
     let error = format!(
         "{:#}",
-        apply_local(fx.path(), &BareHost, draft).unwrap_err()
+        apply_local(fx.path(), &BareHost, &fx.operator, draft).unwrap_err()
     );
     assert!(
         !error.contains("is not in the inbox") && !error.contains("does not hash"),
@@ -1526,7 +1548,7 @@ fn the_local_path_finishes_an_interrupted_operation_before_its_own() {
     let digest = interrupted.digest().unwrap();
     let pending = pending_for(&fx, interrupted, Phase::Committed);
     fx.store.save_pending(&pending).unwrap();
-    let applied = apply_local(fx.path(), &BareHost, restart_draft()).unwrap();
+    let applied = apply_local(fx.path(), &BareHost, &fx.operator, restart_draft()).unwrap();
     assert_eq!(applied.receipt.body.sequence, 2);
     assert!(fx.ledger().request_digests.contains(&digest));
     assert!(fx.store.pending_digests().unwrap().is_empty());

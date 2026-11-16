@@ -3,7 +3,7 @@
 Each composition image carries one exact bundle set and starts with the init
 profile of the same name. They exist so a deployment can run only the
 capabilities it needs: the substrate alone, substrate plus scheduling, graph
-workflows, knowledge, or the full standard set, plus the specialised
+workflows, knowledge, or the standard set, plus the specialised
 distributions named in the README table.
 
 ## How candidates are produced
@@ -24,8 +24,9 @@ live in `bundles/.ai/node/init/profiles/`.
 
 - `release-authority` and `standard-central-auth` are installable sets whose
   profiles are admitted, but no image has been decided for them yet.
-- `full` is the developer set for local builds and is not meant to be
-  deployed from an image. The `development` profile maps onto it.
+- `development` is the developer set for local builds (standard plus
+  central-auth, environment-qualification and render-sandbox) and is not meant
+  to be deployed from an image.
 
 CI checks that these three are the only sets without an image, so a new set
 must either gain an image or be named here.

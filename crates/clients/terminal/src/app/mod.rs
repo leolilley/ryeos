@@ -89,8 +89,8 @@ pub async fn run(
         core.notice(message, ryeos_client_base::ui::view_model::RyeOsTone::Warn);
     }
 
-    // First frame before any daemon round trip: chrome and docks
-    // paint immediately; bound views fill in as sources land.
+    // First frame before any daemon round trip: chrome
+    // paints immediately; bound views fill in as sources land.
     {
         let vm = core.envelope(Vec::new()).view_model;
         if let Err(error) = renderer.render(&mut stdout, &vm, width, height) {

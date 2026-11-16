@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T19:46:58Z:408adf57f5e63a37b779be87816165e8d85be5c80cabeebde5120ab2e1004192:boi673ZZ/YPjJmbsKXPekRBj5z1qzZanJjrWsP891Rmtcupi8kLgQw5N0zP+jCuDkGXID/Xd9vA6abrBOhDYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:44eee3853f0a305bdb17b6e3344a8f564e1365dedd962bb13cb6a36521e5ef03:wL7Ol5GFpkSOdb6/p62+VflsXYg4O1zpnFpnepslUXoIzoCUQxWmLOHy5Wq0Gyg2HFH1/r0SgNnNqdkDnZAxBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -111,7 +111,7 @@ Default user system space:
 ```bash
 target/release/ryeos init \
   --source bundles \
-  --node-profile full --host-class local \
+  --node-profile standard --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
@@ -121,7 +121,7 @@ Repo-local dev app root:
 target/release/ryeos init \
   --app-root .local/ryeos \
   --source bundles \
-  --node-profile full --host-class local \
+  --node-profile standard --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start --app-root .local/ryeos
 ```
@@ -134,7 +134,7 @@ Use a profile and class that match your node (`ryeos init --help`).
 
 ```bash
 target/release/ryeos stop --force || true
-target/release/ryeos init --source bundles --node-profile full --host-class local \
+target/release/ryeos init --source bundles --node-profile standard --host-class local \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 target/release/ryeos start
 ```
@@ -151,7 +151,7 @@ without running `makepkg`/`yay`:
 By default it uses already-built checkout artifacts: it stops a running daemon
 before replacing files, installs `ryeos`/`ryeosd` to `/usr/bin`, installs bundle sources under
 `/usr/share/ryeos/<bundle>` for every bundle in the selected set (the default is
-the full set defined by `scripts/pkg/bundle-sets.sh`), runs `ryeos init`,
+the standard set defined by `scripts/pkg/bundle-sets.sh`), runs `ryeos init`,
 verifies the initialized bundle state, and restarts the daemon if it was
 running before.
 
@@ -218,7 +218,7 @@ script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
 
 The isolation mode comes from the init profile passed as `--node-profile`.
-`install-local-direct.sh` passes its bundle set's profile (`full` by default)
+`install-local-direct.sh` passes its bundle set's profile (`standard` by default)
 and a host class; the `local` lane of every packaged profile selects enforce,
 and `--host-class local_unconfined` selects the explicit disabled opt-out.
 `--node-profile development` also selects enforce. `node doctor` uses the

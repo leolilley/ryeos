@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
 use super::LiveNativeCapacityInputs;
+use crate::apply_authority::Authority;
+use crate::offline_operation::contract::SignedRequest;
 use ryeos_node_runtime::state_lock::{StateLock, StateLockLease};
 use std::sync::Mutex;
 
@@ -409,11 +411,13 @@ impl std::error::Error for IssuancePreparationFailure {
 /// Initial issuance belongs to the actual stopped-node operator ceremony.
 /// `operator_created` is the result of that ceremony's create-once private-key
 /// operation, never an option supplied by a live caller. Existing operators
-/// can preserve a valid issuance but cannot recreate an absent one here.
+/// can preserve a valid issuance but cannot recreate an absent one here. The
+/// operator key signs a new issuance, so it is needed only where the ceremony
+/// runs in the operator's own process; preserving one needs no key.
 pub(crate) fn prepare_initial_capacity_binding(
     app_root: &Path,
     state_lock: &StateLock,
-    operator_key: &SigningKey,
+    operator_key: Option<&SigningKey>,
     operator_created: bool,
     node_fingerprint: &str,
     policy: &NodeNativeCapacityPolicy,
@@ -423,8 +427,6 @@ pub(crate) fn prepare_initial_capacity_binding(
     let original_deadline = lillux::time::MonotonicDeadline::after(
         std::time::Duration::from_millis(policy.recovery.maximum_duration_ms),
     );
-    let operator_fingerprint =
-        ryeos_engine::trust::compute_fingerprint(&operator_key.verifying_key());
     let onboarding = PinnedDirectory::open(&app_root.join(".ai/config/onboarding"))?
         .context("operator onboarding absent")?;
     if onboarding
@@ -441,6 +443,11 @@ pub(crate) fn prepare_initial_capacity_binding(
         operator_created,
         "capacity issuance absent for existing operator; explicit retained recovery required"
     );
+    let operator_key = operator_key.context(
+        "a new capacity issuance is signed by the operator key, in the operator's process",
+    )?;
+    let operator_fingerprint =
+        ryeos_engine::trust::compute_fingerprint(&operator_key.verifying_key());
     // Reserve both fixed records and the bounded signed issuance document,
     // in addition to the first native incarnation's storage envelope. Unused
     // document space is not refunded or turned into native allocation credit.
@@ -631,6 +638,9 @@ fn initialize_control_file(
 /// the chain at its link: it and every operator after it are refused.
 #[derive(Debug, Clone)]
 pub(crate) struct OperatorLineage {
+    /// The node key that signs apply-time documents, and the node whose
+    /// requests authorize them.
+    node_key: VerifyingKey,
     members: Vec<(String, VerifyingKey)>,
     /// Operators the walk reached but may not trust, with the revoked link
     /// that cut them off.
@@ -638,10 +648,18 @@ pub(crate) struct OperatorLineage {
 }
 
 impl OperatorLineage {
-    /// A lineage of one operator, the issuer, with no successors.
+    /// The node key the unit controls sign apply-time documents with.
+    #[cfg(test)]
+    pub(crate) fn test_node_key() -> SigningKey {
+        SigningKey::from_bytes(&[8; 32])
+    }
+
+    /// A lineage of one operator, the issuer, with no successors, on the
+    /// node whose key is [`Self::test_node_key`].
     #[cfg(test)]
     pub(crate) fn single(fingerprint: &str, key: &VerifyingKey) -> Self {
         Self {
+            node_key: Self::test_node_key().verifying_key(),
             members: vec![(fingerprint.to_owned(), *key)],
             broken: Vec::new(),
         }
@@ -659,10 +677,13 @@ impl OperatorLineage {
         )?;
         let document: IssuanceDocument = serde_json::from_slice(&input.bytes)?;
         let view = crate::trust_registry::load_view(app_root)?;
+        let node_key = ryeos_engine::trust::load_node_verifying_key(app_root)
+            .context("load the pinned node key for capacity document verification")?;
         Self::build(
             &document.body.operator_fingerprint,
             &view.records,
             &view.chain,
+            node_key,
         )
     }
 
@@ -671,6 +692,7 @@ impl OperatorLineage {
         issuing: &str,
         records: &[ryeos_engine::trust::SignerRecord],
         chain: &[ryeos_engine::trust::TrustEvent],
+        node_key: VerifyingKey,
     ) -> Result<Self> {
         use ryeos_engine::trust::{SignerRole, SignerStatus, TrustEventKind};
         let record = |fingerprint: &str| records.iter().find(|r| r.fingerprint == fingerprint);
@@ -725,7 +747,11 @@ impl OperatorLineage {
                 frontier.push((successor.fingerprint.clone(), cut));
             }
         }
-        Ok(Self { members, broken })
+        Ok(Self {
+            node_key,
+            members,
+            broken,
+        })
     }
 
     /// The issuing operator.
@@ -754,6 +780,42 @@ impl OperatorLineage {
              {issuing} by succession. Rotate operators only with `ryeos node operator rotate`, \
              which records the succession"
         )
+    }
+
+    /// Verify a capacity document's signature and the authority it names:
+    /// the operator's own signature, or the node's under an embedded
+    /// operator-signed request for one of `operations`. The operator that
+    /// consented must be a member of the lineage, and must be the one the
+    /// body names.
+    pub(crate) fn verify_document(
+        &self,
+        canonical: &[u8],
+        signature: &str,
+        authority: &Authority,
+        request: Option<&SignedRequest>,
+        operations: &[&str],
+        claimed_operator: &str,
+    ) -> Result<()> {
+        let lookup = |fingerprint: &str| self.resolve(fingerprint).copied();
+        let established = crate::apply_authority::verify(
+            canonical,
+            signature,
+            authority,
+            request,
+            &crate::apply_authority::Acceptance {
+                node_key: &self.node_key,
+                operator_key: &lookup,
+                operations,
+                allow_node_alone: false,
+                claimed_operator,
+            },
+        )?;
+        ensure!(
+            established.operator_fingerprint.as_deref() == Some(claimed_operator),
+            "capacity_document_operator: the document names operator {claimed_operator} but \
+             the consent it records is another operator's"
+        );
+        Ok(())
     }
 
     /// Refuse a capacity operation signed by an operator outside the lineage.
@@ -1173,8 +1235,11 @@ const PROCESS_OBSERVATION_WORK: u64 = 512;
 const BOOTSTRAP_WORK: u64 = 16 * anchor::PUBLICATION_WORK + 17 * anchor::READ_WORK;
 
 pub(crate) const REISSUANCE_DOCUMENT_NAME: &str = "native-capacity-reissuance.json";
-pub(crate) const REISSUANCE_DOCUMENT_BOUND: u64 = 16 * 1024;
-pub(crate) const REISSUANCE_SCHEMA: &str = "ryeos/native-capacity-reissuance/v1";
+/// The document embeds the signed request that authorized it.
+pub(crate) const REISSUANCE_DOCUMENT_BOUND: u64 = 96 * 1024;
+pub(crate) const REISSUANCE_SCHEMA: &str = "ryeos/native-capacity-reissuance/v2";
+/// Offline operations whose request may authorize a re-issuance document.
+pub(crate) const REISSUANCE_OPERATIONS: &[&str] = &["node.capacity.reissue"];
 
 /// What the operator signed to open one epoch on a stopped node. The anchor
 /// digest and the epoch pair bind it to exactly one redo transition.
@@ -1191,13 +1256,37 @@ pub(crate) struct ReissuanceBody {
     pub(crate) previous_reissuance_digest: Option<String>,
     pub(crate) reason: String,
     pub(crate) issued_at: String,
+    /// Which key signed the document and what vouches for the operator.
+    pub(crate) authority: Authority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReissuanceDocument {
     pub(crate) body: ReissuanceBody,
+    /// The operator-signed request the node applied, when the node signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request: Option<SignedRequest>,
     pub(crate) signature: String,
+}
+
+/// Refuse, by name and with its cure, a capacity document of a shape this
+/// build no longer reads.
+pub(crate) fn refuse_old_capacity_document(bytes: &[u8], current: &str, what: &str) -> Result<()> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .with_context(|| format!("capacity_document_unreadable: {what} is not JSON"))?;
+    let schema = value
+        .pointer("/body/schema")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    ensure!(
+        schema == current,
+        "capacity_document_old_shape: {what} has schema `{schema}`; this build reads `{current}`, \
+         documents the node signs under the operator's signed request. Capacity documents are \
+         issued data and the operator-key-signed shape is not read: stop the node and initialize \
+         a fresh app root with `ryeos init`"
+    );
+    Ok(())
 }
 
 /// Parse and verify a re-issuance document against the node it must name and
@@ -1213,13 +1302,13 @@ pub(crate) fn verify_reissuance_document(
         u64::try_from(bytes.len())? <= REISSUANCE_DOCUMENT_BOUND,
         "operator re-issuance document exceeds its bound"
     );
+    refuse_old_capacity_document(
+        bytes,
+        REISSUANCE_SCHEMA,
+        "the operator re-issuance document",
+    )?;
     let document: ReissuanceDocument = serde_json::from_slice(bytes)?;
     let body = document.body;
-    ensure!(
-        body.schema == REISSUANCE_SCHEMA,
-        "foreign operator re-issuance schema"
-    );
-    let operator = lineage.resolve(&body.operator_fingerprint)?;
     ensure!(
         body.node_fingerprint == node_fingerprint,
         "operator re-issuance belongs to another node"
@@ -1246,15 +1335,13 @@ pub(crate) fn verify_reissuance_document(
         body.reason.chars().count() <= 1024,
         "operator re-issuance reason exceeds its bound"
     );
-    let encoded = document
-        .signature
-        .strip_prefix("ed25519:")
-        .context("operator re-issuance signature encoding invalid")?;
-    let signature =
-        Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(encoded)?)?;
-    operator.verify(
+    lineage.verify_document(
         lillux::canonical_json(&serde_json::to_value(&body)?)?.as_bytes(),
-        &signature,
+        &document.signature,
+        &body.authority,
+        document.request.as_ref(),
+        REISSUANCE_OPERATIONS,
+        &body.operator_fingerprint,
     )?;
     Ok(body)
 }
@@ -2552,11 +2639,13 @@ mod issuance_digest_tests {
                 previous_reissuance_digest: None,
                 reason: "rotation".to_owned(),
                 issued_at: "2026-10-14T00:00:00Z".to_owned(),
+                authority: Authority::Operator,
             };
             let canonical = lillux::canonical_json(&serde_json::to_value(&body).unwrap()).unwrap();
             let signature = operator.sign(canonical.as_bytes());
             serde_json::to_vec(&ReissuanceDocument {
                 body,
+                request: None,
                 signature: format!(
                     "ed25519:{}",
                     base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
@@ -2576,8 +2665,13 @@ mod issuance_digest_tests {
                 record(&a, SignerStatus::Retired),
                 record(&b, SignerStatus::Active),
             ];
-            let lineage =
-                OperatorLineage::build(&fp(&a), &records, &[succession(1, &a, &b)]).unwrap();
+            let lineage = OperatorLineage::build(
+                &fp(&a),
+                &records,
+                &[succession(1, &a, &b)],
+                OperatorLineage::test_node_key().verifying_key(),
+            )
+            .unwrap();
             assert_eq!(lineage.issuing().0, fp(&a));
             lineage.require_member(&fp(&b)).unwrap();
             // The issuing operator's own documents and the successor's both verify.
@@ -2597,7 +2691,13 @@ mod issuance_digest_tests {
             ];
             // Out of order on purpose: the walk follows links, not sequence.
             let events = [succession(2, &b, &c), succession(1, &a, &b)];
-            let lineage = OperatorLineage::build(&fp(&a), &records, &events).unwrap();
+            let lineage = OperatorLineage::build(
+                &fp(&a),
+                &records,
+                &events,
+                OperatorLineage::test_node_key().verifying_key(),
+            )
+            .unwrap();
             for member in [&a, &b, &c] {
                 verify(&lineage, &sign_reissue(member, &fp(member))).unwrap();
             }
@@ -2611,14 +2711,25 @@ mod issuance_digest_tests {
                 record(&b, SignerStatus::Active),
                 record(&stranger, SignerStatus::Active),
             ];
-            let lineage =
-                OperatorLineage::build(&fp(&a), &records, &[succession(1, &a, &b)]).unwrap();
+            let lineage = OperatorLineage::build(
+                &fp(&a),
+                &records,
+                &[succession(1, &a, &b)],
+                OperatorLineage::test_node_key().verifying_key(),
+            )
+            .unwrap();
             let error = verify(&lineage, &sign_reissue(&stranger, &fp(&stranger))).unwrap_err();
             let text = format!("{error:#}");
             assert!(text.contains("capacity_operator_chain_broken"), "{text}");
             assert!(text.contains("ryeos node operator rotate"), "{text}");
             // A successor with no succession event is not linked by its role alone.
-            let unlinked = OperatorLineage::build(&fp(&a), &records, &[]).unwrap();
+            let unlinked = OperatorLineage::build(
+                &fp(&a),
+                &records,
+                &[],
+                OperatorLineage::test_node_key().verifying_key(),
+            )
+            .unwrap();
             assert!(unlinked.require_member(&fp(&b)).is_err());
         }
 
@@ -2631,7 +2742,13 @@ mod issuance_digest_tests {
                 record(&c, SignerStatus::Active),
             ];
             let events = [succession(1, &a, &b), succession(2, &b, &c)];
-            let lineage = OperatorLineage::build(&fp(&a), &records, &events).unwrap();
+            let lineage = OperatorLineage::build(
+                &fp(&a),
+                &records,
+                &events,
+                OperatorLineage::test_node_key().verifying_key(),
+            )
+            .unwrap();
             // Before the revoked link still verifies.
             verify(&lineage, &sign_reissue(&a, &fp(&a))).unwrap();
             // The revoked operator and the one after it do not, and the refusal
@@ -2650,7 +2767,13 @@ mod issuance_digest_tests {
         fn a_revoked_issuing_operator_breaks_the_whole_account() {
             let a = key(1);
             let records = [record(&a, SignerStatus::Revoked)];
-            let error = OperatorLineage::build(&fp(&a), &records, &[]).unwrap_err();
+            let error = OperatorLineage::build(
+                &fp(&a),
+                &records,
+                &[],
+                OperatorLineage::test_node_key().verifying_key(),
+            )
+            .unwrap_err();
             assert!(format!("{error:#}").contains("capacity_operator_chain_broken"));
         }
 
@@ -2664,7 +2787,13 @@ mod issuance_digest_tests {
                 SignerScope::publisher_default(),
                 SignerStatus::Active,
             );
-            let error = OperatorLineage::build(&fp(&a), &[publisher], &[]).unwrap_err();
+            let error = OperatorLineage::build(
+                &fp(&a),
+                &[publisher],
+                &[],
+                OperatorLineage::test_node_key().verifying_key(),
+            )
+            .unwrap_err();
             assert!(format!("{error:#}").contains("capacity_operator_chain_broken"));
         }
     }
@@ -2685,12 +2814,14 @@ mod issuance_digest_tests {
             previous_reissuance_digest: None,
             reason: "exhausted".to_owned(),
             issued_at: "2026-10-14T00:00:00Z".to_owned(),
+            authority: Authority::Operator,
         };
         let sign = |body: &ReissuanceBody, key: &SigningKey| {
             let canonical = lillux::canonical_json(&serde_json::to_value(body).unwrap()).unwrap();
             let signature = key.sign(canonical.as_bytes());
             serde_json::to_vec(&ReissuanceDocument {
                 body: body.clone(),
+                request: None,
                 signature: format!(
                     "ed25519:{}",
                     base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())

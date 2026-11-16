@@ -12,9 +12,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use base64::Engine as _;
 use lillux::PinnedDirectory;
-use lillux::crypto::{Signer, SigningKey};
 use lillux::time::MonotonicDeadline;
 use ryeos_node_runtime::node_policy::sections::native_capacity::NodeNativeCapacityPolicy;
 use ryeos_node_runtime::state_lock::StateLock;
@@ -29,6 +27,7 @@ use super::{
     REISSUANCE_DOCUMENT_NAME, REISSUANCE_SCHEMA, ReissuanceBody, ReissuanceDocument, RetainedStore,
     encode, genesis_consumed, hex_digest, verify_reissuance_document,
 };
+use crate::apply_authority::DocumentSigner;
 
 /// Evidence of every epoch an operator opened on this node, oldest first.
 pub const REISSUE_EVIDENCE_LOG: &str = "native-capacity-reissuances.jsonl";
@@ -41,8 +40,11 @@ pub struct ReissueRequest<'a> {
     /// Held by the command for the whole operation: a running daemon holds
     /// the same lock, so acquiring it is the proof that the node is stopped.
     pub state_lock: &'a StateLock,
-    /// The operator key that signed the issuance; any other key is foreign.
-    pub operator_key: &'a SigningKey,
+    /// What signs the re-issuance document and vouches for the operator: the
+    /// operator's own key in the operator's process, or the node key under
+    /// the operator-signed request being applied. The operator must be the
+    /// one that initialized this node, or a registered successor.
+    pub signer: DocumentSigner<'a>,
     pub reason: &'a str,
     /// The command name recorded in the evidence log.
     pub command: &'a str,
@@ -82,15 +84,17 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
     let ReissueRequest {
         app_root,
         state_lock,
-        operator_key,
+        signer,
         reason,
         command,
     } = request;
     state_lock.ensure_protects_app_root(app_root)?;
     let report = crate::init::verify_init_completion(app_root)?
         .context("re-issuance requires completed initialization")?;
-    let operator_fingerprint =
-        ryeos_engine::trust::compute_fingerprint(&operator_key.verifying_key());
+    let operator_fingerprint = signer.operator_fingerprint().context(
+        "operator re-issuance needs the operator's consent: sign it with the operator key or \
+         apply it under the operator's signed request",
+    )?;
     ensure!(
         operator_fingerprint == report.operator_fingerprint,
         "operator key differs from the one that initialized this node"
@@ -115,7 +119,7 @@ pub fn reissue_capacity(request: ReissueRequest<'_>) -> Result<ReissueReport> {
     let state =
         PinnedDirectory::open(&app_root.join(".ai/state"))?.context("capacity runtime absent")?;
     let identity = ReissueIdentity {
-        operator_key,
+        signer,
         operator_fingerprint,
         lineage,
         node_fingerprint: report.node_fingerprint,
@@ -149,7 +153,7 @@ pub fn read_capacity_reissuances(state_dir: &Path) -> Result<Vec<CapacityReissue
 
 /// The authenticated operator and node this command acts for.
 struct ReissueIdentity<'a> {
-    operator_key: &'a SigningKey,
+    signer: DocumentSigner<'a>,
     operator_fingerprint: String,
     /// The operators whose earlier documents the re-issuance may follow.
     lineage: OperatorLineage,
@@ -553,15 +557,13 @@ impl StoppedCapacityAccount {
                 .map(|(_, previous)| hex_digest(&sha2::Sha256::digest(previous).into())),
             reason: reason.to_owned(),
             issued_at: lillux::time::iso8601_now(),
+            authority: identity.signer.authority()?,
         };
         let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
-        let signature = identity.operator_key.sign(canonical.as_bytes());
         let document = ReissuanceDocument {
             body,
-            signature: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
-            ),
+            request: identity.signer.request(),
+            signature: identity.signer.sign(canonical.as_bytes()),
         };
         let document_bytes = serde_json::to_vec(&document)?;
         ensure!(
@@ -766,6 +768,9 @@ mod controls {
     use super::super::redo::AccountRedo;
     use super::super::{IncarnationDebit, RECORD_BYTES, decode, redo};
     use super::*;
+    use crate::apply_authority::Authority;
+    use base64::Engine as _;
+    use lillux::crypto::{Signer as _, SigningKey};
 
     struct Fixture {
         _temporary: tempfile::TempDir,
@@ -856,7 +861,7 @@ mod controls {
 
         fn identity(&self) -> ReissueIdentity<'_> {
             ReissueIdentity {
-                operator_key: &self.operator,
+                signer: DocumentSigner::Operator(&self.operator),
                 operator_fingerprint: ryeos_engine::trust::compute_fingerprint(
                     &self.operator.verifying_key(),
                 ),
@@ -1180,11 +1185,13 @@ mod controls {
             previous_reissuance_digest: None,
             reason: "foreign".to_owned(),
             issued_at: lillux::time::iso8601_now(),
+            authority: Authority::Operator,
         };
         let canonical = lillux::canonical_json(&serde_json::to_value(&body).unwrap()).unwrap();
         let signature = foreign.sign(canonical.as_bytes());
         let document = serde_json::to_vec(&ReissuanceDocument {
             body,
+            request: None,
             signature: format!(
                 "ed25519:{}",
                 base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
@@ -1229,6 +1236,136 @@ mod controls {
             "a foreign document repairs nothing"
         );
         assert!(f.evidence().is_empty());
+    }
+
+    /// Re-issuance as the daemon applies it: no operator key, the node key
+    /// signing under the operator's request.
+    fn run_under(
+        f: &Fixture,
+        request: &crate::offline_operation::contract::SignedRequest,
+    ) -> Result<ReissueReport> {
+        let node = OperatorLineage::test_node_key();
+        let mut identity = f.identity();
+        identity.signer = DocumentSigner::Request {
+            node: &node,
+            request,
+        };
+        let mut owner = f.owner();
+        owner.reissue(
+            &identity,
+            lillux::process_control::ControllerAccount::current(),
+            "controls",
+            "ryeos node capacity reissue",
+        )
+    }
+
+    #[test]
+    fn an_apply_time_document_is_node_signed_with_the_request_digest_and_verifies() {
+        let f = Fixture::new();
+        let node = OperatorLineage::test_node_key();
+        let request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reissue");
+        run_under(&f, &request).expect("re-issuance under the request");
+        let bytes = std::fs::read(f.document_path()).unwrap();
+        let document: ReissuanceDocument = serde_json::from_slice(&bytes).unwrap();
+        // Signed by the node, carrying the operator's request and its digest.
+        assert_eq!(
+            document.body.authority,
+            Authority::NodeUnderRequest {
+                request_digest: request.digest().unwrap()
+            }
+        );
+        assert_eq!(document.request.as_ref(), Some(&request));
+        let identity = f.identity();
+        let body = verify_reissuance_document(
+            &bytes,
+            &identity.lineage,
+            &identity.node_fingerprint,
+            &f.issuance,
+        )
+        .expect("the node-signed document verifies through the operator's request");
+        assert_eq!(body.operator_fingerprint, identity.operator_fingerprint);
+        // The operator key signed nothing here: the signature is the node's.
+        let canonical =
+            lillux::canonical_json(&serde_json::to_value(&document.body).unwrap()).unwrap();
+        let signature =
+            crate::offline_operation::contract::decode_signature(&document.signature).unwrap();
+        use lillux::crypto::Verifier as _;
+        assert!(
+            node.verifying_key()
+                .verify(canonical.as_bytes(), &signature)
+                .is_ok()
+        );
+        assert!(
+            f.operator
+                .verifying_key()
+                .verify(canonical.as_bytes(), &signature)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_document_whose_request_the_operator_did_not_sign_is_refused() {
+        let f = Fixture::new();
+        let node = OperatorLineage::test_node_key();
+        let stranger = SigningKey::from_bytes(&[9; 32]);
+        // The request names the real operator but carries a stranger's signature.
+        let mut request =
+            crate::apply_authority::test_request(&node, &f.operator, "node.capacity.reissue");
+        request.signature =
+            crate::apply_authority::test_request(&node, &stranger, "node.capacity.reissue")
+                .signature;
+        run_under(&f, &request).expect("the producer does not verify itself");
+        let bytes = std::fs::read(f.document_path()).unwrap();
+        let identity = f.identity();
+        let error = verify_reissuance_document(
+            &bytes,
+            &identity.lineage,
+            &identity.node_fingerprint,
+            &f.issuance,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("apply_authority_request_not_operator"),
+            "{error:#}"
+        );
+        // A request for another operation does not authorize a re-issuance.
+        let f = Fixture::new();
+        let wrong = crate::apply_authority::test_request(&node, &f.operator, "node.allow-restart");
+        run_under(&f, &wrong).unwrap();
+        let bytes = std::fs::read(f.document_path()).unwrap();
+        let identity = f.identity();
+        let error = verify_reissuance_document(
+            &bytes,
+            &identity.lineage,
+            &identity.node_fingerprint,
+            &f.issuance,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("apply_authority_request_operation"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_document_of_the_old_shape_is_refused_by_name_with_its_cure() {
+        let f = Fixture::new();
+        f.run(None).unwrap();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(f.document_path()).unwrap()).unwrap();
+        document["body"]["schema"] = "ryeos/native-capacity-reissuance/v1".into();
+        let identity = f.identity();
+        let error = verify_reissuance_document(
+            &serde_json::to_vec(&document).unwrap(),
+            &identity.lineage,
+            &identity.node_fingerprint,
+            &f.issuance,
+        )
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("capacity_document_old_shape"), "{text}");
+        assert!(text.contains("ryeos init"), "{text}");
     }
 
     #[test]

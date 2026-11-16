@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T11:18:27Z:5903dbd460255301d89a5935e126ffe461962ccbbd8a47d4b2a79dca475d87ce:Da4lljVAuRYtS89fK9zvBi8V0RgExN5bhBzlka37Q07lJlVhnmq2uYIzTga5Zyo5e3pcNfLTT87YTekCts1ECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T00:04:42Z:6f3428e98248dede9af09de8466402f1f20b630ab1bea448c9000dfc1689929f:SV7xtUgZfra0UzQ83zpNLauSgxUsG8ioGgbBKh8RfFxTgHhP1ojVBQ56iAz9TZiNWFmnIDspqoPfeQQEygc7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "central-auth"
 name: "gc"
@@ -16,8 +16,20 @@ requires:
             from_param: realm_id
           access: read_write
 
+env_config:
+  interpreter:
+    type: local_binary
+    binary: python
+    candidates: [python3]
+    search_paths: []
+    var: RYE_PYTHON
+    path_candidates: [python3]
+  env:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+
 config:
-  command: "python3"
+  command: "${interpreter}"
   args:
     - "${tool_dir}/lib/central_auth.py"
     - "gc"

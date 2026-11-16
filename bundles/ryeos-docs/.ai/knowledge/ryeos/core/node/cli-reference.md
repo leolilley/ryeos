@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-14T07:37:06Z:b08b11ef72d634973d8038c5466d2988d79781b60c22e1db67ea3a2966b07b1b:i5121BVidvMiLmnXZ8Hc9XG634Vn7dXMrORL2zW4qXnPZf4Q/Oz7DfgjwpRaWzjo7atxxMbAmw6vvDswyuGAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T02:06:03Z:1da82249fb547136273e590c42615efde0b6ca5cded13de1357ce3f9f977fab2:Ts9+Mvuaa6Jj7B2ygx5+8lz3FA7k197WD0RHr9BlufKz/2aPeJFm0YF7ypCYOZaZVEajIrEH1p10bQP78+2hCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -53,20 +53,20 @@ Signed command aliases still use their declared selector-to-service mappings.
 ### `ryeos init`
 
 ```bash
-ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]...
+ryeos init [--node-profile <name> --host-class <class>] [--source <dir>] [--app-root <dir>] [--trust-file <file>]... [--invalidate-binding <section>/<id>]...
 ```
 
-Packaged installs use `/usr/share/ryeos` by default. The full package selects
+Packaged installs use `/usr/share/ryeos` by default. The standard package selects
 its exact complete seed explicitly:
 
 ```bash
-ryeos init --node-profile full --host-class local
+ryeos init --node-profile standard --host-class local
 ```
 
 Fresh init refuses an absent selector; bundle presence never implies one.
 `--host-class` is given exactly when `--node-profile` is, and names one of the
-profile's declared host classes (`full` declares `local` and
-`local_unconfined`). `local` enforces the sandbox lane: init refuses when the
+profile's declared host classes (`standard` declares `hosted`, `local`
+and `local_unconfined`). `local` enforces the sandbox lane: init refuses when the
 host's sandbox probe cannot prove it, and the refusal names
 `--host-class local_unconfined`, the explicit opt-out that runs jobs as the
 daemon user. Init never selects the opt-out for you, and `ryeos node doctor`
@@ -74,7 +74,7 @@ warns while a node runs it.
 Development usage:
 
 ```bash
-ryeos init --source bundles --node-profile full --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+ryeos init --source bundles --node-profile standard --host-class local --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
 ### `ryeos start`
@@ -286,11 +286,9 @@ The `remote_pins` row verifies every node-signed remote pin record under
 `.ai/node/remotes/` and reports each remote's pin source. It fails, naming the
 cure, for a record that is unsigned (`remote_pin_unsigned`), signed by a key
 other than the node key (`remote_pin_wrong_signer`), edited after signing
-(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`), and for
-an unsigned remotes config file this node no longer reads
-(`remote_config_file_unsupported`): re-pin each remote with
-`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`,
-then delete the file.
+(`remote_pin_tampered`) or otherwise unusable (`remote_pin_invalid`): re-pin
+the remote with
+`ryeos remote configure <name> --url <url> --expect-fingerprint <fingerprint>`.
 
 The `external_bindings` row compares every pin of every installed
 `external_execution`, `runtime_snapshot_production` and
@@ -421,7 +419,7 @@ daemon to be stopped:
 ryeos node reset authorization --confirm
 ryeos node reset replay-indexes --confirm
 ryeos node reset external-content-bindings [--dry-run | --confirm]
-ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]... [--keep-section <section>]... [--reset-section <section>]...
+ryeos node reset policy-generation --node-profile <name> --host-class <class> --confirm [--source <dir>] [--trust-file <file>]... [--keep-section <section>]... [--reset-section <section>]... [--invalidate-binding <section>/<id>]...
 ```
 
 Each reset names one authority/schema epoch. None is a storage-reclamation
@@ -486,6 +484,34 @@ incarnation debit is outstanding, or the account's image does not fit the new
 policy, the cut refuses with nothing changed; settle the account with
 `ryeos node capacity reissue --reason "..."` and rerun it. A rerun after a
 crash converges on the same amendment.
+
+#### Bundle replacements that strand a binding
+
+`ryeos init` over an existing node, `ryeos node reset policy-generation` and
+`ryeos bundle install --replace` compare the installed `external_execution`,
+`runtime_snapshot_production` and `runtime_snapshot_qualification` bindings
+with the artifacts the replacement would install, before anything changes. A
+replacement that would leave a binding pinning an adapter, supervisor,
+launcher, restoration verifier, consumer verifier, connector or spec it
+removes is refused with `replacement_strands_bindings` (HTTP 409 for
+`bundle install`). The refusal lists each binding (section, id, digest), the
+field, the pinned hash and the incoming one, and nothing is installed. Only
+pins the replacement itself breaks count; a pin that already failed is left
+to `ryeos node doctor`.
+
+To replace anyway, name every stranded binding with
+`--invalidate-binding <section>/<id>` (repeatable; `invalidate_bindings` in the
+`bundle/install` request). Overrides are exact: naming a binding the
+replacement does not strand is refused with
+`invalidated_binding_not_stranded`. The named bindings stay installed, the
+report lists them under `invalidated_bindings`, and `ryeos node doctor` fails
+them until they are recomposed against the installed bundles.
+
+```bash
+ryeos init --source <dir> --node-profile <name> --host-class <class> \
+  --invalidate-binding runtime_snapshot_production/render-snapshot \
+  --invalidate-binding runtime_snapshot_qualification/render-snapshot-qualification
+```
 
 The same cut moves a node to a renamed profile. A node records the profile it
 was initialized under in its substrate identity; a release that renames a
@@ -735,7 +761,7 @@ Each change appends a node-signed, hash-chained key event under
 
 | Verb | Effect |
 |---|---|
-| `ryeos node operator rotate [--json]` | Stage a new operator key, record the succession from the old key, re-issue the operator grant, replace the genesis and reseal the init completion; the old key is retired |
+| `ryeos node operator rotate [--json]` | Stage a new operator key, record the succession from the old key, re-issue the operator grant, install the genesis signed by the new key and reseal the init completion; the command then installs the new private key and the old key is retired |
 | `ryeos node authoring rotate [--json]` | Stage a new authoring key and record the succession; the new key keeps the old key's scope |
 
 Both are signed offline operations (`node.operator.rotate`,
@@ -805,7 +831,10 @@ failure, and a streamed run, is reported at once.
 
 ## Bundle Management
 
-- `ryeos bundle install <name> <path>` — install bundle offline.
+- `ryeos bundle install <name> <path>` — install bundle offline. `--replace`
+  updates an installed bundle; a replacement that strands an installed binding
+  is refused unless each is named (see
+  [Bundle replacements that strand a binding](#bundle-replacements-that-strand-a-binding)).
 - `ryeos bundle list` — list installed bundles.
 - `ryeos bundle remove <name>` — remove installed bundle offline.
 

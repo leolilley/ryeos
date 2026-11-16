@@ -22,6 +22,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use lillux::crypto::SigningKey;
 use ryeos_engine::roots::RuntimeRoot;
 use ryeos_node_runtime::identity::NodeIdentity;
 use ryeos_node_runtime::state_lock::{StateLock, default_lock_path};
@@ -1051,6 +1052,7 @@ impl<'a> Applier<'a> {
             app_root: self.app_root,
             state_lock: self.lock,
             request: body,
+            signed: &candidate.request,
             request_digest: &candidate.digest,
             inputs: &inputs,
             host: self.host,
@@ -1324,20 +1326,25 @@ pub struct LocalApplied {
     pub result: Value,
 }
 
-/// Sign a request with the on-volume local operator key and apply it in
-/// process, under the node's state lock. The node must be stopped: a running
-/// daemon holds the same lock.
+/// Sign a request with the operator's key, which the caller holds because it
+/// is the operator's own process, and apply it in process, under the node's
+/// state lock. The node must be stopped: a running daemon holds the same
+/// lock. Handlers that record the operator's consent in a document carry this
+/// request and sign it with the node key; the operator key signs only the
+/// request.
 pub fn apply_local(
     app_root: &Path,
     host: &dyn OfflineHost,
+    operator: &SigningKey,
     draft: LocalDraft,
 ) -> Result<LocalApplied> {
-    apply_local_with_options(app_root, host, draft, &ApplyOptions::default())
+    apply_local_with_options(app_root, host, operator, draft, &ApplyOptions::default())
 }
 
 pub fn apply_local_with_options(
     app_root: &Path,
     host: &dyn OfflineHost,
+    operator: &SigningKey,
     draft: LocalDraft,
     options: &ApplyOptions,
 ) -> Result<LocalApplied> {
@@ -1390,9 +1397,6 @@ pub fn apply_local_with_options(
     let state = ledger
         .load()
         .context("verify the offline-operation ledger")?;
-    let operator_path = RuntimeRoot::new(app_root.to_path_buf()).operator_signing_key_path();
-    let operator = lillux::crypto::load_signing_key(&operator_path)
-        .with_context(|| format!("load the local operator key {}", operator_path.display()))?;
     let facts = measure(app_root, &state.head);
     let mut precondition = BTreeMap::new();
     for fact in MANDATORY_FACTS.iter().chain(spec.preconditions) {
@@ -1427,7 +1431,7 @@ pub fn apply_local_with_options(
             issued_at: lillux::time::iso8601_from_unix_secs(now),
             not_after: lillux::time::iso8601_from_unix_secs(now + DEFAULT_REQUEST_LIFETIME_SECS),
         },
-        &operator,
+        operator,
     )?;
     let digest = request.digest()?;
     let candidate = Candidate {

@@ -419,6 +419,42 @@ mod seat_delivery {
         assert_eq!(platform.transport.calls_to(SEAT_TOUCH_PATH).len(), 2);
     }
 
+    /// A 401 on a touch looks at the session once. If the session is refused
+    /// too, the seat stops as ended; if it still reads, presence retries.
+    #[test]
+    fn a_refused_credential_ends_the_seat_only_when_the_session_is_refused_too() {
+        for (session_reply, ends) in [(Reply::Status(401), true), (Reply::Network, false)] {
+            let platform = FakePlatform::new();
+            platform
+                .transport
+                .script(SEAT_TOUCH_PATH, vec![Reply::Status(401)]);
+            platform
+                .transport
+                .script(crate::api::SESSION_CURRENT_PATH, vec![session_reply]);
+            platform.clock.set_now(TOUCH_INTERVAL_MS + 1);
+            let who = producer('a');
+            let mut runtime = ready(&platform, &who);
+            runtime.maybe_touch();
+            platform.sim().run_for(10);
+
+            let mut core = core();
+            let drained = runtime.drain(&mut core);
+            assert_eq!(drained.stop.is_some(), ends, "{:?}", drained.stop);
+            assert_eq!(
+                platform
+                    .transport
+                    .calls_to(crate::api::SESSION_CURRENT_PATH)
+                    .len(),
+                1
+            );
+            if ends {
+                assert!(runtime.shared.current_producer().is_none());
+            } else {
+                assert_eq!(runtime.shared.current_producer(), Some(who));
+            }
+        }
+    }
+
     /// A definite refusal of presence fences the producer that was refused
     /// and reports `writer_refused` once. A late refusal that belongs to a
     /// predecessor neither reports nor fences its successor.
@@ -608,5 +644,83 @@ mod seat_delivery {
         let drained = runtime.drain(&mut core);
         assert!(drained.stop.is_none(), "{:?}", drained.stop);
         assert!(platform.transport.calls_to(SEAT_CLOSE_PATH).is_empty());
+    }
+}
+
+/// The relinquish a page sends as it goes away: only for the current producer
+/// with settled delivery and its own learned control predecessor, and then
+/// exactly that producer's relinquish of that predecessor.
+mod unload_relinquish {
+    use super::*;
+
+    fn ready(
+        platform: &Rc<FakePlatform>,
+        who: &UiPresentationProducer,
+    ) -> ClientRuntime<FakePlatform> {
+        let mut runtime = runtime(platform);
+        runtime.seat = Some(active_seat(who));
+        *runtime.shared.producer.borrow_mut() = Some(who.clone());
+        runtime.shared.delivery.borrow_mut().reset_for(
+            crate::history::SeatCoordinate {
+                presentation_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+                thread_id: "seat-thread".to_owned(),
+                chain_root_id: "chain-1".to_owned(),
+            },
+            "session",
+            ryeos_client_base::ui::UiBindingAttachmentCoordinate {
+                binding_attachment_id: "root".to_owned(),
+                binding_generation: 1,
+                binding_digest: "digest".to_owned(),
+            },
+            "key".to_owned(),
+            0,
+            1_000_000,
+        );
+        runtime
+    }
+
+    fn control() -> UiSeatControlPredecessor {
+        UiSeatControlPredecessor::Control {
+            event_hash: "e".repeat(64),
+        }
+    }
+
+    #[test]
+    fn nothing_is_sent_without_this_producers_own_settled_basis() {
+        let platform = FakePlatform::new();
+        let who = producer('a');
+        let runtime = ready(&platform, &who);
+        let hook = runtime.unload_relinquish();
+        assert_eq!(hook().unwrap_err(), "its own control was not learned");
+
+        *runtime.shared.relinquish_basis.borrow_mut() = Some((producer('b'), control()));
+        assert_eq!(
+            hook().unwrap_err(),
+            "the learned control names another producer"
+        );
+
+        *runtime.shared.relinquish_basis.borrow_mut() = Some((who.clone(), control()));
+        runtime.shared.delivery.borrow_mut().blocked = true;
+        assert_eq!(hook().unwrap_err(), "delivery is blocked");
+        runtime.shared.delivery.borrow_mut().blocked = false;
+
+        let (path, body) = hook().expect("a settled producer with its basis gives the seat back");
+        assert_eq!(path, crate::api::SEAT_CLOSE_PATH);
+        let request: UiSeatControlRequest = serde_json::from_str(&body).unwrap();
+        let UiSeatControlRequest::Relinquish {
+            predecessor,
+            producer_incarnation,
+            presentation_id,
+            ..
+        } = &request
+        else {
+            panic!("{request:?}");
+        };
+        assert_eq!(predecessor, &control());
+        assert_eq!(producer_incarnation, &who.producer_incarnation);
+        assert_eq!(presentation_id, &who.presentation_id);
+        request
+            .validate()
+            .expect("the relinquish is a valid control request");
     }
 }

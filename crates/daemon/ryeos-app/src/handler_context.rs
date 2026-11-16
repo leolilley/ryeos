@@ -757,8 +757,8 @@ pub mod budget_test_support {
     ) -> anyhow::Result<Fixture> {
         let (store_owner, mut state) = crate::state::test_support::build(root)?;
         let thread_id = "T-original-budget-fixture";
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
         )?;
         let principal = operator.principal_id();
         let site = state.threads.site_id().to_string();

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T00:34:16Z:0e3f263b3df41302574ef402adc975a6c54f4542854f64f34243c6848b5b58f5:V1Djq1jAKDmbOgu5U9ATrMmzdllCGfcFnplsm+HJB2uDNCOwVsyUyHen4rGHCv6z8Eh0kl3os5pmm9GLF/mKBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T02:27:40Z:11012e4b54b32e89d3f390d4c80f6082291767ba00d4dbd096d6a2985687f2f2:oUM1V9QRyr/8ScQknKoTAQKMCe0f8aSr5PFciox/XKG0cJApfmDYZvaeTDzyXuSGNfymuHhSSs2aOzG07ks/BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: local-inference
 tags: [execution, managed-activation, persistent-session, local-model, replay]
@@ -23,7 +23,7 @@ The ordinary full source installation includes the local-inference bundle:
 sudo scripts/pkg/install-local-direct.sh --populate --all --trust-source-publishers
 ~~~
 
-Installation does not acquire model/runtime bytes. A fresh explicit `full`
+Installation does not acquire model/runtime bytes. A fresh explicit `standard`
 initialization publishes a bounded publisher-authored acquisition and
 persistent-process baseline; reinstalling an existing node preserves that
 node's current policy generation.
@@ -76,7 +76,7 @@ filesystem/network isolation without changing the recorded provider contract.
 
 Apply a node-policy replacement only while the daemon is stopped. Online or
 cache-only managed activation needs no named filesystem root. The following is
-the current `full` installed-bundle union with a recommended
+the current `standard` installed-bundle union with a recommended
 higher residual reserve. When applying this change, start from the node's
 current complete `external_content` member and change only the two
 `minimum_free_bytes` values; do not remove capacity or hosts required by other
@@ -120,7 +120,7 @@ redirect ceiling, rechecks canonical HTTPS and the host allowlist on every hop,
 and still requires each exact signed archive digest.
 
 The 8 GiB residual free-space floor above is an operator recommendation, not
-workload identity. The publisher-authored `full` baseline
+workload identity. The publisher-authored `standard` baseline
 uses a reviewed 2 GiB floor so fresh source qualification can run on the
 storage-constrained hosted runner after deleting build targets. A higher local
 override changes admission testimony, never archive, manifest, program, or
@@ -148,7 +148,7 @@ limits:
   max_total_backlog_bytes: 16777216
 ~~~
 
-A fresh `full` installation selects a publisher-signed init
+A fresh `standard` installation selects a publisher-signed init
 profile whose capacities cover the exact acquisition and worker requirements
 above, with the reviewed 2 GiB residual free-space baseline, and publishes one
 complete node-signed generation under `.ai/node/policies/`. `external_content.yaml` and

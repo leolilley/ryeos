@@ -15,7 +15,7 @@ use ryeos_node_runtime::state_lock::StateLock;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::contract::RequestBody;
+use super::contract::{RequestBody, SignedRequest};
 use super::facts::{
     FACT_AUTHORIZED_KEYS, FACT_BUNDLE_REGISTRATIONS, FACT_CAPACITY_ACCOUNT,
     FACT_EXTERNAL_EXECUTION, FACT_POLICY_GENERATION, FACT_REMOTES, FACT_RESTART_INHIBITION,
@@ -64,6 +64,9 @@ pub struct HandlerContext<'a> {
     /// Held by the application for the whole call.
     pub state_lock: &'a StateLock,
     pub request: &'a RequestBody,
+    /// The request as signed: documents the node writes while applying it
+    /// carry it, so a verifier can see the operator's consent.
+    pub signed: &'a SignedRequest,
     pub request_digest: &'a str,
     pub inputs: &'a VerifiedInputs,
     pub host: &'a dyn OfflineHost,
@@ -77,6 +80,42 @@ impl HandlerContext<'_> {
 
     pub fn expected(&self, fact: &str) -> Option<&str> {
         self.request.expected_result.get(fact).map(String::as_str)
+    }
+
+    /// The signer of a document this handler writes as the operator's
+    /// authority: the node key under the operator-signed request being
+    /// applied. Refused unless the node's own operator signed the request,
+    /// because a delegated signer's grant is not the operator's consent.
+    pub fn operator_authorized(&self) -> Result<crate::apply_authority::DocumentSigner<'_>> {
+        let operator =
+            ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(self.app_root)?;
+        ensure!(
+            self.request.signer_fingerprint == operator.fingerprint()
+                && self.request.signer_grant_digest.is_none(),
+            "operation `{}` writes a document that records the operator's consent, so it must be \
+             signed by this node's own operator {}, not {}",
+            self.request.operation,
+            operator.fingerprint(),
+            self.request.signer_fingerprint
+        );
+        Ok(self.sealing_signer())
+    }
+
+    /// The signer for resealing the init completion after this operation: the
+    /// node key under the request when the node's operator signed it, and
+    /// the node key alone when a delegated signer did.
+    pub fn sealing_signer(&self) -> crate::apply_authority::DocumentSigner<'_> {
+        let local_operator = self.request.signer_grant_digest.is_none()
+            && ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(self.app_root)
+                .is_ok_and(|operator| operator.fingerprint() == self.request.signer_fingerprint);
+        if local_operator {
+            crate::apply_authority::DocumentSigner::Request {
+                node: self.node.signing_key(),
+                request: self.signed,
+            }
+        } else {
+            crate::apply_authority::DocumentSigner::Node(self.node.signing_key())
+        }
     }
 
     /// The label a handler writes into the evidence it keeps, so the request
@@ -388,8 +427,8 @@ static OPERATIONS: &[OperationSpec] = &[
     },
     OperationSpec {
         id: "node.capacity.reissue",
-        authority_bearing: false,
-        local_signer_only: false,
+        authority_bearing: true,
+        local_signer_only: true,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -405,8 +444,8 @@ static OPERATIONS: &[OperationSpec] = &[
     },
     OperationSpec {
         id: "node.capacity.reanchor",
-        authority_bearing: false,
-        local_signer_only: false,
+        authority_bearing: true,
+        local_signer_only: true,
         alone: false,
         inputs: NO_INPUTS,
         preconditions: &[FACT_CAPACITY_ACCOUNT],
@@ -821,11 +860,20 @@ static OPERATIONS: &[OperationSpec] = &[
         authority_bearing: true,
         local_signer_only: true,
         alone: true,
-        inputs: &[InputSlot {
-            name: "succession",
-            max_bytes: 16 * KIB,
-            required: true,
-        }],
+        inputs: &[
+            InputSlot {
+                name: "succession",
+                max_bytes: 16 * KIB,
+                required: true,
+            },
+            // The new operator's genesis, signed by the new key in the
+            // operator's process: the node records it and never holds the key.
+            InputSlot {
+                name: "genesis",
+                max_bytes: 64 * KIB,
+                required: true,
+            },
+        ],
         preconditions: &[FACT_TRUST_REGISTRY, FACT_AUTHORIZED_KEYS],
         expected_result: &[],
         required_expected_result: &[],
@@ -998,6 +1046,8 @@ mod tests {
                 "node.external-execution.snapshot-compose",
                 "node.external-execution.snapshot-qualification-compose",
                 "node.external-execution.recompose",
+                "node.capacity.reissue",
+                "node.capacity.reanchor",
                 "node.authorize-client",
                 "node.remote.pin",
                 "node.bundle.replace",
@@ -1053,7 +1103,7 @@ mod tests {
     fn the_authorization_reset_is_local_only_and_alone() {
         let spec = lookup("node.reset.authorization").unwrap();
         assert!(spec.local_signer_only && spec.alone && spec.authority_bearing);
-        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 12);
+        assert!(operations().iter().filter(|s| s.local_signer_only).count() == 14);
     }
 
     #[test]

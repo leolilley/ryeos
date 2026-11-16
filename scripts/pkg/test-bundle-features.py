@@ -68,7 +68,6 @@ HANDLERS_STANDARD = "directive-handlers,graph-handlers"
 HANDLERS_GRAPH = "graph-handlers"
 HANDLERS_CORE = "core-handlers,extends-composer"
 GOLDEN = {
-    "full": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "development": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "central-host": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),
     "standard": (HANDLERS_STANDARD, "model-provider-setup,scheduling"),

@@ -81,8 +81,6 @@ fn authored_shared_configs_offer_discovery_without_changing_their_surface_seeds(
                 .any(|cap| { cap == "ryeos.execute.service.ui/session/surfaces/open" }),
             "{file}"
         );
-        assert!(spec.docks.top.is_none() && spec.docks.bottom.is_none());
-        assert!(spec.docks.left.is_none() && spec.docks.right.is_none());
     }
     let view: ViewBinding =
         serde_json::from_value(authored("views/ryeos/surfaces/list.yaml")).unwrap();

@@ -220,9 +220,16 @@ async fn act(wake: WakeFn, mut recovery: Box<Recovery>, action: RecoveryAction) 
         RecoveryAction::Choose(choice) => {
             let mode = match &recovery.held {
                 Held::Live(running) => running.runtime.reconnect_mode(&choice, &running.core),
-                Held::Unstarted(unstarted) => {
-                    unstarted.runtime.reconnect_mode_without_core(&choice)
-                }
+                Held::Unstarted(unstarted) => match &unstarted.mode {
+                    // Refused before preparing anything: the choice applies
+                    // to the presentation the start asked for.
+                    ryeos_client_runtime::runtime::StartMode::Retained {
+                        presentation_id, ..
+                    } if !unstarted.runtime.has_prepared_presentation() => unstarted
+                        .runtime
+                        .reconnect_mode_for(&choice, presentation_id),
+                    _ => unstarted.runtime.reconnect_mode_without_core(&choice),
+                },
                 Held::Nothing => return Outcome::Recovery(recovery),
             };
             let mode = match mode {
@@ -286,7 +293,7 @@ async fn establish(
             match prepared_presentation_selection(&established.current, &selections) {
                 Ok(Some(prepared)) => StartMode::Retained {
                     presentation_id: prepared.presentation.presentation_id,
-                    claim: RetainedClaim::Fresh,
+                    claim: RetainedClaim::Reopen,
                 },
                 Ok(None) => StartMode::Fresh,
                 Err(error) => return Outcome::Failed(error.to_string()),
@@ -333,6 +340,23 @@ async fn begin(
         .await;
     let (core, effects) = match started {
         Ok(started) => started,
+        // Another writer holds the seat: show it and its replacement choices
+        // at once. Nothing was claimed, so retry rechecks it as before.
+        Err(ryeos_client_runtime::RuntimeError::WriterHeld(observation)) => {
+            let choices = ryeos_client_runtime::recovery::replacement_choices(&observation);
+            return Outcome::Recovery(Box::new(Recovery {
+                message: "This presentation is open somewhere else.".to_owned(),
+                exact_retry: true,
+                can_inspect: false,
+                observed: Some((writer_label(&observation), choices)),
+                held: Held::Unstarted(Box::new(Unstarted {
+                    platform,
+                    runtime,
+                    session,
+                    mode,
+                })),
+            }));
+        }
         Err(error) => {
             let can_inspect = runtime.has_prepared_presentation();
             return Outcome::Recovery(Box::new(Recovery {
@@ -400,6 +424,19 @@ fn install(
         queue: routes,
         _listener: listener,
     });
+    // Give the seat back as the page goes away, so a reload resumes it. The
+    // relinquish names this producer's own control, learned once now.
+    wasm_bindgen_futures::spawn_local(running.runtime.learn_relinquish_basis());
+    let relinquish = running.runtime.unload_relinquish();
+    running.unload = ryeos_client_runtime::platform::web::on_unload(move || match relinquish() {
+        Ok((path, body)) => {
+            ryeos_client_runtime::platform::web::send_outliving_page(path, &body);
+        }
+        Err(reason) => ryeos_client_runtime::platform::web::console_note(&format!(
+            "RyeOS: the seat was not given back as the page closed: {reason}"
+        )),
+    })
+    .ok();
     Ok(running)
 }
 
@@ -419,6 +456,9 @@ pub struct Running {
     documents_generation: u64,
     #[cfg(target_arch = "wasm32")]
     routes: Option<Routes>,
+    /// Gives the seat back when the page unloads.
+    #[cfg(target_arch = "wasm32")]
+    unload: Option<ryeos_client_runtime::platform::web::UnloadListener>,
 }
 
 impl Running {
@@ -439,6 +479,8 @@ impl Running {
             documents_generation: 0,
             #[cfg(target_arch = "wasm32")]
             routes: None,
+            #[cfg(target_arch = "wasm32")]
+            unload: None,
         }
     }
 

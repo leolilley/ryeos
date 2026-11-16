@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T06:49:01Z:812ead097354ece8e9de23efa05558ca97bae697a5d2cdc8af3b94e539bb19f8:tc97ZYLPdyiSlmEC3TGrZ+bgCJuXh3SLGLOTswBAAV4rCAGyFGwu0wHM50dfTY6Mj6ndT1rIH/kE2+lbzPG7Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-15T06:50:32Z:dcfa9a8eacd41003f45680e4dca8d6aed12dcbbb5756712a5e1d62eaaa54d2bf:Ew29WGzxpJfrv4A0vp/DFfYPJjGeVEliCmG2hPsU9LoQHYzQL5bGArmUvxYc9zIu/xnTf87I9NC0/2VoZEDCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, host-access, node-policy, operator]
@@ -31,9 +31,10 @@ process: it can read the vault directly.
    declaration is frozen into the plan as `execution_posture: host_direct`.
    Declaring it grants nothing.
 2. **The publisher's lane offers it.** Each isolation host class says
-   `host_direct: unavailable | operator_granted`. Only the `development`
-   profile's `local` and `local_direct` classes offer it; every other profile
-   and class, `standard` included, says `unavailable`. See
+   `host_direct: unavailable | operator_granted`. The `development`
+   profile's `local` and `local_direct` classes and the `standard` profile's
+   `local` and `local_unconfined` classes offer it; every other profile and
+   class, every hosted class included, says `unavailable`. See
    `ryeos/core/node/execution-isolation`.
 3. **The operator grants the exact item** in the operator-owned `host_access`
    node-policy section, changed only by the operator-signed

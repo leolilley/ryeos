@@ -150,7 +150,7 @@ pub fn preparation_commitment(
         .ok_or("freeze original engine sequence absent")?;
     let export = request.get("export").ok_or("freeze export absent")?;
     if !closed(export, &["schema", "mode", "content"])
-        || export.get("schema").and_then(Value::as_u64) != Some(1)
+        || export.get("schema").and_then(Value::as_u64) != Some(2)
         || serde_json::to_vec(export)
             .map_err(|error| error.to_string())?
             .len() as u64
@@ -241,16 +241,6 @@ pub fn preparation_commitment(
                     .ok_or("freeze set identity is not positive u64")?,
             );
             mount(content.get("mount").ok_or("freeze mount absent")?)?;
-        }
-        Some("shared_dock")
-            if closed(content, &["kind", "edge", "visible", "size", "mount"])
-                && content.get("visible").is_some_and(Value::is_boolean)
-                && content
-                    .get("size")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|size| size <= u64::from(u16::MAX)) =>
-        {
-            mount(content.get("mount").ok_or("freeze dock mount absent")?)?;
         }
         _ => return Err("freeze content envelope is not the current closed shape".into()),
     }
@@ -595,7 +585,7 @@ mod tests {
     #[test]
     fn shared_receipt_projection_commits_closed_preparation_and_completion() {
         let mut transfer = fixture().transfer;
-        let export = serde_json::json!({"schema":1,"mode":"move","content":{"kind":"view_sets","active_set":null,"sets":[{
+        let export = serde_json::json!({"schema":2,"mode":"move","content":{"kind":"view_sets","active_set":null,"sets":[{
             "handle":"empty","source_view_set_id":1,"source_owner":{"kind":"surface","presentation_id":transfer.source.presentation_id,"surface_instance_id":"surface"},
             "binding":{"binding_attachment_id":"root","binding_generation":1,"binding_digest":"ab".repeat(32)},
             "seed":{"schema":2,"id":"empty","title":"Empty","root":null},"focused_view":null,"mounts":[]
@@ -614,11 +604,11 @@ mod tests {
         let mut completion = serde_json::json!({"operation_id":id,"result":{"schema":1,"operation_id":id,"transfer_operation_id":commitment.transfer.operation_id,"export_digest":commitment.transfer.export_digest,"source_revision":commitment.transfer.source.revision}});
         validate_completion_commitment(&completion, &commitment).unwrap();
         // Full current mount envelope is committed, including an explicit
-        // absent lens label and the shared dock's local presentation state.
+        // absent lens label and the mount's local presentation state.
         let mut mounted = payload.clone();
-        let instance = "seat:source:shared:dock:left";
+        let instance = "seat:source:surface:s:tile:1";
         mounted["body"]["request"]["export"]["content"] = serde_json::json!({
-            "kind":"shared_dock", "edge":"left", "visible":true, "size":24,
+            "kind":"surface_mount", "source_view_set_id":1,
             "mount":{
                 "source_instance":instance, "view_ref":"view:test/list",
                 "binding":root, "local":null, "subject":{"mode":"unresolved"},
@@ -627,7 +617,7 @@ mod tests {
             }
         });
         mounted["body"]["request"]["instances"] = serde_json::json!([instance]);
-        mounted["body"]["request"]["view_sets"] = serde_json::json!([]);
+        mounted["body"]["request"]["view_sets"] = serde_json::json!([1]);
         mounted["body"]["request"]["transfer"]["export_digest"] = serde_json::json!(
             crate::payload_digest::seat_payload_digest(&mounted["body"]["request"]["export"])
                 .unwrap()
@@ -671,19 +661,6 @@ mod tests {
             value["operation_id"] = serde_json::json!(operation);
             value["body"]["request"]["operation_id"] = serde_json::json!(operation);
         };
-        for field in ["visible", "size"] {
-            let mut missing = mounted.clone();
-            missing["body"]["request"]["export"]["content"]
-                .as_object_mut()
-                .unwrap()
-                .remove(field);
-            recommit(&mut missing);
-            assert!(
-                preparation_commitment(&missing)
-                    .unwrap_err()
-                    .contains("content envelope")
-            );
-        }
         let mut missing = mounted.clone();
         missing["body"]["request"]["export"]["content"]["mount"]
             .as_object_mut()
@@ -703,21 +680,6 @@ mod tests {
                 preparation_commitment(&invalid)
                     .unwrap_err()
                     .contains("mount envelope")
-            );
-        }
-        for (field, malformed) in [
-            ("visible", serde_json::json!("true")),
-            ("visible", serde_json::Value::Null),
-            ("size", serde_json::json!(-1)),
-            ("size", serde_json::json!(65536)),
-        ] {
-            let mut invalid = mounted.clone();
-            invalid["body"]["request"]["export"]["content"][field] = malformed;
-            recommit(&mut invalid);
-            assert!(
-                preparation_commitment(&invalid)
-                    .unwrap_err()
-                    .contains("content envelope")
             );
         }
         completion["result"]["source_revision"] = serde_json::json!(10);

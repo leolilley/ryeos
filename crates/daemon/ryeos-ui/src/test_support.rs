@@ -59,7 +59,7 @@ async fn live_presentation_in_project(
     crate::browser_session::BindingAttachmentCoordinate,
 ) {
     let mut body = String::from(
-        "category: test\nversion: '1'\nshared_presentation:\n  schema: 1\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
+        "category: test\nversion: '1'\nshared_presentation:\n  schema: 2\n  title: Test presentation\n  launcher: launch\n  dialogs:\n    - id: launch\n      title: Launch\n      view: 'view:ryeos/ui/launcher'\n  capabilities:\n    sources: []\n    affordances: []\n",
     );
     if let Some(surface) = initial_surface {
         // JSON scalars are valid YAML scalars; no unescaped authored ref is
@@ -551,7 +551,7 @@ pub fn local_operator_context(
     scopes: Vec<String>,
 ) -> ryeos_app::handler_context::HandlerContext {
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
             .expect("load fixture operator");
     ryeos_app::handler_context::HandlerContext::new_with_authority(
         operator.principal_id(),

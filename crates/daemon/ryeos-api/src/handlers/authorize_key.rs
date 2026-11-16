@@ -73,10 +73,11 @@ pub async fn handle(
 
     // 2. Compute fingerprint from the public key bytes.
     let fingerprint = lillux::sha256_hex(&key_bytes);
-    let configured_operator = ryeos_node_runtime::identity::NodeIdentity::load(
-        &state.config.operator_signing_key_path,
-    )
-    .map_err(|error| HandlerError::Internal(format!("load configured operator: {error:#}")))?;
+    let configured_operator =
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
+            .map_err(|error| {
+                HandlerError::Internal(format!("load configured operator: {error:#}"))
+            })?;
     if fingerprint == configured_operator.fingerprint() {
         return Err(super::grant_terms::operator_grant_refusal());
     }
@@ -439,8 +440,8 @@ mod tests {
         let (_tmp, _owner, state) = crate::test_support::build_test_state();
         let state = Arc::new(state);
         let scope = "ryeos.execute.service.vault/list";
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
         )
         .unwrap();
         let request = Request {

@@ -3851,7 +3851,7 @@ pub(crate) mod tests {
         let config = serde_json::from_value(serde_json::json!({
             "category": "ryeos/test",
             "shared_presentation": {
-                "schema": 1, "title": "Test presentation", "launcher": "launch",
+                "schema": 2, "title": "Test presentation", "launcher": "launch",
                 "dialogs": [{"id": "launch", "title": "Launch", "view": "view:ryeos/test/launcher"}],
                 "capabilities": {"sources": [], "affordances": []}
             }

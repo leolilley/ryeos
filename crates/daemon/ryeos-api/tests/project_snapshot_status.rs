@@ -5,13 +5,15 @@ use std::sync::Arc;
 use ryeos_api::handlers::project_snapshot_status::{DESCRIPTOR, Request};
 use ryeos_api::registry::build_service_registry;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_node_runtime::identity::{AuthorizedKeyPrincipalClass, NodeIdentity};
+use ryeos_node_runtime::identity::AuthorizedKeyPrincipalClass;
 use serde_json::{Value, json};
 
 const CAP: &str = "ryeos.execute.service.project/snapshot-status";
 
 fn local_operator(state: &ryeos_app::state::AppState) -> HandlerContext {
-    let operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     HandlerContext::new_with_authority(
         operator.principal_id(),
         vec![CAP.to_owned()],

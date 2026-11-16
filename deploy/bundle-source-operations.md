@@ -89,11 +89,14 @@ A later publication replacing just one member is the independent-update proof.
 
 At first initialization the deployment must pass the resolved image digest and
 the substrate compatibility protocol explicitly, and name the host class whose
-signed capability floor the node holds (`bundle-source` declares only
-`local`); mutable tags and environment discovery are not authority:
+signed capability floor the node holds; mutable tags and environment discovery
+are not authority. `bundle-source` declares `hosted` for a hosting provider's
+container, where jobs run without a sandbox (its catalog services execute no
+captured source), and `local` (enforced sandbox) or `local_unconfined` on a
+host the operator runs:
 
 ```sh
-ryeos init --non-interactive --node-profile bundle-source --host-class local \
+ryeos init --non-interactive --node-profile bundle-source --host-class hosted \
   --substrate-image-digest sha256:<64-lowercase-hex> \
   --substrate-protocol 1
 ```
@@ -112,12 +115,13 @@ first boot for **every** image using it, not just the bundle-source image.
 Set these in the deployment's runtime environment; an image cannot embed its
 own eventual registry digest. `RYEOS_INIT_NODE_PROFILE` remains the image's
 explicit seed selector, and the deployment must also set
-`RYEOS_INIT_HOST_CLASS` (`local` for `bundle-source`) whenever the entrypoint
+`RYEOS_INIT_HOST_CLASS` (`hosted` for `bundle-source` in a provider container)
+whenever the entrypoint
 initializes from that profile; the image never sets it. A node keeps the host
 class it was initialized under. A restart preserves the installed generation rather
 than reconciling it against image contents.
 
-This release accepts only `ryeos/init-completion/v3`, including its signed
+This release accepts only `ryeos/init-completion/v5`, including its signed
 substrate-identity binding. Existing volumes with a different completion schema
 are not an in-place image-swap deployment target. Keep them stopped and backed
 up; do not delete the bundle directory, edit completion JSON, or use policy

@@ -65,9 +65,6 @@ pub enum UiTransferDestinationPlacement {
         allocation: UiCompositionMountAllocation,
         placement: CompositionPlacement,
     },
-    SharedDock {
-        edge: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,7 +169,7 @@ impl UiTransferReservation {
             }
         }
         let reservation = Self {
-            schema: 2,
+            schema: 3,
             presentation_id: destination.composition.id().clone(),
             expected_revision: destination.revision,
             allocation_start: manifest.allocation_start,
@@ -183,58 +180,6 @@ impl UiTransferReservation {
                 sets: allocated_sets,
             },
             mounts,
-            descriptors,
-        };
-        reservation.validate_export(transfer, export, max_bytes)?;
-        Ok(reservation)
-    }
-
-    /// Reserve an exported shared dock without allocating a Surface or tile.
-    /// Fresh bindings are supplied by the existing admission owner; an occupied
-    /// destination edge is never silently replaced.
-    pub fn reserve_shared_dock(
-        transfer: &TransferIdentity,
-        export: &super::transfer_export::UiTransferExport,
-        destination: &super::composition_replay::UiCompositionReplay,
-        edge: &str,
-        bindings: &BTreeMap<String, UiBindingAttachmentCoordinate>,
-        descriptors: Vec<UiBindingAttachment>,
-        max_bytes: u64,
-    ) -> Result<Self, String> {
-        export.validate_for(transfer, max_bytes)?;
-        let super::transfer_export::UiTransferExportContent::SharedDock { mount, .. } =
-            &export.content
-        else {
-            return Err("shared-dock reservation requires a shared-dock export".into());
-        };
-        if destination.composition.id().as_str() != transfer.destination.presentation_id
-            || destination.revision < transfer.destination.revision
-            || destination.composition.docks().contains_key(edge)
-        {
-            return Err("shared-dock destination identity, frontier or vacancy differs".into());
-        }
-        let destination_instance =
-            RyeOsViewInstanceKey::shared_dock(destination.composition.id(), edge)
-                .map_err(str::to_owned)?;
-        let reservation = Self {
-            schema: 2,
-            presentation_id: destination.composition.id().clone(),
-            expected_revision: destination.revision,
-            allocation_start: destination.next_mount_id,
-            next_mount_id: destination.next_mount_id,
-            placement: UiTransferDestinationPlacement::SharedDock {
-                edge: edge.to_owned(),
-            },
-            mounts: vec![UiTransferMountAllocation {
-                source_instance: mount.source_instance.clone(),
-                destination_instance,
-                binding: bindings
-                    .get(&mount.binding.binding_attachment_id)
-                    .ok_or("source dock has no fresh destination binding mapping")?
-                    .clone(),
-                destination_subject: mount.subject.clone(),
-                lens_frames: reserve_lens_frames(&mount.lens_frames, bindings)?,
-            }],
             descriptors,
         };
         reservation.validate_export(transfer, export, max_bytes)?;
@@ -285,7 +230,7 @@ impl UiTransferReservation {
             .clone();
         let lens_frames = reserve_lens_frames(&mount.lens_frames, bindings)?;
         let reservation = Self {
-            schema: 2,
+            schema: 3,
             presentation_id: destination.composition.id().clone(),
             expected_revision: destination.revision,
             allocation_start: allocation.allocation_start,
@@ -495,7 +440,7 @@ impl UiTransferReservation {
     /// closure, equality with the current destination replay revision, available
     /// placement and admission. Preparation's revision is only the lower bound.
     pub fn validate_for(&self, transfer: &TransferIdentity) -> Result<(), String> {
-        if self.schema != 2
+        if self.schema != 3
             || self.presentation_id.as_str() != transfer.destination.presentation_id
             || self.expected_revision < transfer.destination.revision
             || self.allocation_start == 0
@@ -672,19 +617,6 @@ impl UiTransferReservation {
                         )
                 {
                     return Err("single-view reservation differs from exact allocated mount".into());
-                }
-            }
-            UiTransferDestinationPlacement::SharedDock { edge } => {
-                let key = RyeOsViewInstanceKey::shared_dock(&self.presentation_id, edge)
-                    .map_err(str::to_string)?;
-                if self.mounts.len() != 1
-                    || self.mounts[0].destination_instance != key
-                    || !is_shared_dock(&self.mounts[0].source_instance)
-                    || self.allocation_start != self.next_mount_id
-                {
-                    return Err(
-                        "shared-dock reservation invents a Surface or allocated tile".into(),
-                    );
                 }
             }
         }
@@ -879,13 +811,6 @@ where
     Option::<ViewSetId>::deserialize(deserializer)
 }
 
-fn is_shared_dock(instance: &RyeOsViewInstanceKey) -> bool {
-    matches!(
-        instance.as_str().split(':').collect::<Vec<_>>().as_slice(),
-        ["seat", _, "dock", _]
-    )
-}
-
 fn placement_precedes_frontier(
     placement: &CompositionPlacement,
     frontier: u64,
@@ -1010,7 +935,7 @@ mod tests {
         let old = named_binding("source-empty-set");
         let fresh = named_binding("fresh-empty-set");
         let export = UiTransferExport {
-            schema: 1,
+            schema: 2,
             mode: UiTransferExportMode::Move,
             content: UiTransferExportContent::ViewSets {
                 active_set: Some("empty".into()),
@@ -1076,176 +1001,6 @@ mod tests {
             destination.next_mount_id, before,
             "builder never publishes its allocation"
         );
-    }
-
-    #[test]
-    fn dock_builder_preserves_frames_without_ids_and_refuses_occupied_edge() {
-        use super::super::transfer_export::{
-            UiTransferExport, UiTransferExportContent, UiTransferExportMode, UiTransferMountExport,
-        };
-        let (mut destination, _) = destination_replay();
-        let edge = ["top", "bottom", "left", "right"]
-            .into_iter()
-            .find(|edge| !destination.composition.docks().contains_key(*edge))
-            .unwrap();
-        let mut transfer = transfer();
-        let (_, source_id, _, _) = ids();
-        transfer.source.presentation_id = source_id.as_str().into();
-        transfer.destination.presentation_id = destination.composition.id().as_str().into();
-        transfer.destination.revision = destination.revision;
-        let old = named_binding("old-dock");
-        let old_frame = named_binding("old-frame");
-        let fresh = named_binding("fresh-dock");
-        let fresh_frame = named_binding("fresh-frame");
-        let export = UiTransferExport {
-            schema: 1,
-            mode: UiTransferExportMode::Copy,
-            content: UiTransferExportContent::SharedDock {
-                edge: crate::ui::model::RyeOsDockEdge::Left,
-                visible: true,
-                size: 20,
-                mount: UiTransferMountExport {
-                    source_instance: RyeOsViewInstanceKey::shared_dock(&source_id, "left").unwrap(),
-                    view_ref: "view:test/current".into(),
-                    binding: old.clone(),
-                    local: crate::view_set::ViewLocalState::None,
-                    subject: subject(),
-                    route:
-                        super::super::composition_operation::UiCompositionRouteAssignment::Authored,
-                    current_label: Some("Current".into()),
-                    drafts: vec![],
-                    lens_frames: vec![super::super::composition_lens::RetainedLensFrame {
-                        binding: old_frame.clone(),
-                        view_ref: "view:test/return".into(),
-                        attachment: subject(),
-                        input_route: None,
-                        label: Some("Return".into()),
-                    }],
-                },
-            },
-        };
-        transfer.export_digest =
-            crate::ui::seat_payload_digest(&serde_json::to_value(&export).unwrap()).unwrap();
-        let mappings = BTreeMap::from([
-            (old.binding_attachment_id.clone(), fresh.clone()),
-            (old_frame.binding_attachment_id.clone(), fresh_frame.clone()),
-        ]);
-        let descriptors = vec![descriptor(&fresh), descriptor(&fresh_frame)];
-        let before = destination.next_mount_id;
-        let reservation = UiTransferReservation::reserve_shared_dock(
-            &transfer,
-            &export,
-            &destination,
-            edge,
-            &mappings,
-            descriptors.clone(),
-            65536,
-        )
-        .unwrap();
-        assert_eq!(reservation.allocation_start, before);
-        assert_eq!(reservation.next_mount_id, before);
-        assert_eq!(reservation.mounts[0].binding, fresh);
-        assert_eq!(reservation.mounts[0].lens_frames[0].binding, fresh_frame);
-        assert_eq!(
-            reservation.mounts[0].lens_frames[0].destination_subject,
-            subject()
-        );
-        // MOVE drafts, including hidden return-frame drafts, must fit the
-        // exact fresh descriptor before the reservation can become Accepted.
-        for (view_ref, source_binding, descriptor_index) in [
-            ("view:test/current", &old, 0),
-            ("view:test/return", &old_frame, 1),
-        ] {
-            let mut moved = export.clone();
-            moved.mode = UiTransferExportMode::Move;
-            let UiTransferExportContent::SharedDock { mount, .. } = &mut moved.content else {
-                unreachable!()
-            };
-            mount
-                .drafts
-                .push(super::super::transfer_export::UiTransferDraftExport {
-                    key: super::super::model::InputBufferKey::from_binding_coordinate(
-                        mount.source_instance.clone(),
-                        view_ref,
-                        "line",
-                        source_binding,
-                    ),
-                    state: super::super::model::RyeOsInputState {
-                        text: "éλ".into(),
-                        cursor: 4,
-                        filter_field: 0,
-                    },
-                });
-            let mut moved_transfer = transfer.clone();
-            moved_transfer.export_digest =
-                crate::ui::seat_payload_digest(&serde_json::to_value(&moved).unwrap()).unwrap();
-            for (limit, declared) in [(3, true), (4, true), (4, false)] {
-                let mut admitted = descriptors.clone();
-                admitted[descriptor_index]
-                    .binding_request_bounds
-                    .max_input_bytes = limit;
-                if declared {
-                    admitted[descriptor_index].presentation.views.insert(
-                        view_ref.into(),
-                        json!({
-                            "widget":"text", "input":{"id":"line", "submit":"route"}
-                        }),
-                    );
-                }
-                let result = UiTransferReservation::reserve_shared_dock(
-                    &moved_transfer,
-                    &moved,
-                    &destination,
-                    edge,
-                    &mappings,
-                    admitted,
-                    65536,
-                );
-                assert_eq!(
-                    result.is_ok(),
-                    limit == 4 && declared,
-                    "{view_ref} {limit} {declared}: {result:?}"
-                );
-                assert_eq!(destination.next_mount_id, before);
-                assert!(!destination.composition.docks().contains_key(edge));
-            }
-        }
-        assert!(
-            UiTransferReservation::reserve_shared_dock(
-                &transfer,
-                &export,
-                &destination,
-                "invalid",
-                &mappings,
-                descriptors.clone(),
-                65536
-            )
-            .is_err()
-        );
-        destination
-            .composition
-            .install_shared_dock(
-                edge,
-                "view:test/occupied".into(),
-                named_binding("occupied"),
-                crate::view_set::ViewLocalState::None,
-                true,
-                20,
-            )
-            .unwrap();
-        assert!(
-            UiTransferReservation::reserve_shared_dock(
-                &transfer,
-                &export,
-                &destination,
-                edge,
-                &mappings,
-                descriptors,
-                65536
-            )
-            .is_err()
-        );
-        assert_eq!(destination.next_mount_id, before);
     }
 
     #[test]
@@ -1338,7 +1093,7 @@ mod tests {
         )
         .unwrap();
         let mut reservation = UiTransferReservation {
-            schema: 2,
+            schema: 3,
             presentation_id: destination,
             expected_revision: 4,
             allocation_start: 10,
@@ -1402,7 +1157,7 @@ mod tests {
         assert!(serde_json::from_value::<UiTransferMountAllocation>(missing_frames).is_err());
         let allocation = UiCompositionMountAllocation::allocate(20, 1, 0).unwrap();
         let reservation = |placement| UiTransferReservation {
-            schema: 2,
+            schema: 3,
             presentation_id: destination.clone(),
             expected_revision: 4,
             allocation_start: 20,
@@ -1433,49 +1188,35 @@ mod tests {
     }
 
     #[test]
-    fn shared_dock_refuses_a_dialog_disguised_as_a_dock_transfer() {
-        let (source, destination, _, _) = ids();
+    fn schema_three_requires_exact_public_destination_descriptor() {
+        let (source, destination, source_surface, destination_surface) = ids();
+        let allocation = UiCompositionMountAllocation::allocate(20, 1, 0).unwrap();
         let mut reservation = UiTransferReservation {
-            schema: 2,
+            schema: 3,
             presentation_id: destination.clone(),
             expected_revision: 4,
             allocation_start: 20,
-            next_mount_id: 20,
-            placement: UiTransferDestinationPlacement::SharedDock {
-                edge: "left".into(),
+            next_mount_id: allocation.next_mount_id,
+            placement: UiTransferDestinationPlacement::View {
+                surface_instance_id: destination_surface.clone(),
+                view_set_id: ViewSetId::new(3),
+                allocation: allocation.clone(),
+                placement: CompositionPlacement::GroupTab {
+                    group_id: ViewGroupId::new(4),
+                    before: None,
+                },
             },
             mounts: vec![UiTransferMountAllocation {
-                source_instance: RyeOsViewInstanceKey::shared_dock(&source, "right").unwrap(),
-                destination_instance: RyeOsViewInstanceKey::shared_dock(&destination, "left")
-                    .unwrap(),
-                binding: binding(),
-                destination_subject: subject(),
-                lens_frames: vec![],
-            }],
-            descriptors: vec![descriptor(&binding())],
-        };
-        reservation.validate_for(&transfer()).unwrap();
-        reservation.mounts[0].source_instance =
-            RyeOsViewInstanceKey::shared_dialog(&source, "launcher").unwrap();
-        assert!(reservation.validate_for(&transfer()).is_err());
-    }
-
-    #[test]
-    fn schema_two_requires_exact_public_destination_descriptor() {
-        let (source, destination, _, _) = ids();
-        let mut reservation = UiTransferReservation {
-            schema: 2,
-            presentation_id: destination.clone(),
-            expected_revision: 4,
-            allocation_start: 20,
-            next_mount_id: 20,
-            placement: UiTransferDestinationPlacement::SharedDock {
-                edge: "left".into(),
-            },
-            mounts: vec![UiTransferMountAllocation {
-                source_instance: RyeOsViewInstanceKey::shared_dock(&source, "right").unwrap(),
-                destination_instance: RyeOsViewInstanceKey::shared_dock(&destination, "left")
-                    .unwrap(),
+                source_instance: RyeOsViewInstanceKey::surface_tile(
+                    &source,
+                    &source_surface,
+                    TileId::new(2),
+                ),
+                destination_instance: RyeOsViewInstanceKey::surface_tile(
+                    &destination,
+                    &destination_surface,
+                    allocation.tile_ids[0],
+                ),
                 binding: binding(),
                 destination_subject: subject(),
                 lens_frames: vec![],
@@ -1522,9 +1263,9 @@ mod tests {
         reservation.mounts[0].lens_frames[0]
             .binding
             .binding_generation -= 1;
-        reservation.schema = 1;
-        assert!(reservation.validate_for(&transfer()).is_err());
         reservation.schema = 2;
+        assert!(reservation.validate_for(&transfer()).is_err());
+        reservation.schema = 3;
         descriptor.binding_generation += 1;
         reservation.descriptors[0] = descriptor.clone();
         assert!(reservation.validate_for(&transfer()).is_err());
@@ -1558,7 +1299,7 @@ mod tests {
             manifest.tabs[0].tile_ids[0],
         );
         let reservation = UiTransferReservation {
-            schema: 2,
+            schema: 3,
             presentation_id: destination,
             expected_revision: 4,
             allocation_start: 10,
@@ -1701,7 +1442,7 @@ mod tests {
             )
             .collect();
         let export = super::super::transfer_export::UiTransferExport {
-            schema: 1,
+            schema: 2,
             mode: super::super::transfer_export::UiTransferExportMode::Move,
             content: super::super::transfer_export::UiTransferExportContent::ViewSets {
                 active_set: Some("nested".into()),

@@ -10021,8 +10021,8 @@ pub mod test_support {
                 .checked_add(30_000)
                 .context("ordinary external fixture contact deadline overflow")?,
         };
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-            &state.config.operator_signing_key_path,
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &state.config.app_root,
         )?
         .principal_id();
         let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
@@ -10591,8 +10591,8 @@ pub mod test_support {
         let occurrence_id = format!("occ-{}", &reservation.request_digest[..48]);
         if let Some((project_root, lifeline)) = workspace {
             let session_owner = reservation.owner.dedicated_session()?;
-            let operator = ryeos_node_runtime::identity::NodeIdentity::load(
-                &state.config.operator_signing_key_path,
+            let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+                &state.config.app_root,
             )?
             .principal_id();
             let launch_metadata = composed_fixture_launch_metadata(

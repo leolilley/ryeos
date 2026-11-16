@@ -738,7 +738,7 @@ struct NodePolicyGenerationResetArgs {
     #[arg(long, default_value = "/usr/share/ryeos")]
     source: PathBuf,
 
-    /// Exact publisher-signed profile to install (for example `full`).
+    /// Exact publisher-signed profile to install (for example `standard`).
     #[arg(long)]
     node_profile: String,
 
@@ -773,6 +773,14 @@ struct NodePolicyGenerationResetArgs {
     /// (repeatable).
     #[arg(long = "reset-section", action = clap::ArgAction::Append)]
     reset_sections: Vec<String>,
+
+    /// Installed binding (`<section>/<id>`) the bundle replacement may leave
+    /// pinning an artifact it removes (repeatable). A replacement that
+    /// strands a binding is refused unless each one is named here, and naming
+    /// one it does not strand is refused too. The binding stays installed and
+    /// `ryeos node doctor` fails it until it is recomposed.
+    #[arg(long = "invalidate-binding", action = clap::ArgAction::Append, value_parser = parse_binding_ref)]
+    invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
 
     /// Required acknowledgement that the node's policy generation is
     /// replaced: profile sections are taken from the seed, operator-applied
@@ -844,6 +852,7 @@ fn run_node_policy_generation_reset_command(
             substrate_image_digest: substrate_image_digest.clone(),
             trust_documents,
             policy_carry: policy_carry.clone(),
+            invalidate_bindings: args.invalidate_bindings.clone(),
         },
     )?;
     // The request pins the generation the seed will install; the operation
@@ -875,6 +884,7 @@ fn run_node_policy_generation_reset_command(
             "app_root": app_root,
             "node_fingerprint": applied.result["node_fingerprint"],
             "bundles": applied.result["bundles"],
+            "invalidated_bindings": applied.result["invalidated_bindings"],
             "receipt": applied.receipt.digest()?,
         }))?;
     } else {
@@ -1972,6 +1982,14 @@ struct InitArgs {
     #[arg(long, requires = "replace_substrate_identity")]
     confirm_substrate_identity_replacement: bool,
 
+    /// Installed binding (`<section>/<id>`) the bundle replacement may leave
+    /// pinning an artifact it removes (repeatable). A replacement that
+    /// strands a binding is refused unless each one is named here, and naming
+    /// one it does not strand is refused too. The binding stays installed and
+    /// `ryeos node doctor` fails it until it is recomposed.
+    #[arg(long = "invalidate-binding", action = clap::ArgAction::Append, value_parser = parse_binding_ref)]
+    invalidate_bindings: Vec<ryeos_app::node_config::coherence::BindingRef>,
+
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
@@ -2012,6 +2030,7 @@ async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Res
         policy_carry: policy_carry_choices(&args.keep_sections, &args.reset_sections),
         replace_substrate_identity: args.replace_substrate_identity,
         confirm_substrate_identity_replacement: args.confirm_substrate_identity_replacement,
+        invalidate_bindings: args.invalidate_bindings,
         skip_preflight: false,
     };
 
@@ -3227,7 +3246,6 @@ async fn run_node_doctor_command(argv: &[String], console: &crate::tty::Console)
                         runtime.mode() == ryeos_engine::isolation::IsolationMode::Enforce
                     }),
                 ));
-                checks.extend(central_auth_state_relocated_check(&config.app_root));
                 if !args.no_bundles {
                     for record in &snapshot.bundles {
                         // Skip import dry-runs, but parser-backed verification
@@ -4955,52 +4973,6 @@ fn bundle_state_checks(
     checks
 }
 
-/// Realm state an earlier central-auth kept directly under the app root is
-/// not read any more: the bundle's code opens only its bundle state home. Name
-/// each leftover realm with the move that puts it where the code looks.
-fn central_auth_state_relocated_check(
-    app_root: &std::path::Path,
-) -> Option<ryeos_core_tools::actions::doctor::CheckResult> {
-    let old_realms = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("central-auth")
-        .join("realms");
-    let mut realms: Vec<String> = std::fs::read_dir(&old_realms)
-        .ok()?
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .collect();
-    realms.sort();
-    let new_root = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state")
-        .join("bundle-state")
-        .join("central-auth");
-    let moves: Vec<String> = realms
-        .iter()
-        .map(|realm| {
-            format!(
-                "mv {}/* {}/",
-                old_realms.join(realm).display(),
-                new_root.join(realm).display()
-            )
-        })
-        .collect();
-    Some(check(
-        "central_auth_state_relocated",
-        ryeos_core_tools::actions::doctor::WARN,
-        serde_json::json!({
-            "realms": realms,
-            "note": "central-auth now keeps each realm in its bundle state home and no longer reads this directory",
-            "fix": format!(
-                "grant the realm's caller `ryeos.use.bundle-state.central-auth/<realm>` and run one central-auth tool for the realm (for example list-principals) so the node creates its state home, stop the node, then move the old contents in under {}: {}; finally remove the old realm directory",
-                new_root.display(),
-                moves.join("; ")
-            ),
-        }),
-    ))
-}
-
 fn check(
     name: &str,
     status: &str,
@@ -5655,6 +5627,10 @@ fn default_app_root() -> PathBuf {
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
         .expect("could not determine XDG data directory")
+}
+
+fn parse_binding_ref(value: &str) -> Result<ryeos_app::node_config::coherence::BindingRef> {
+    ryeos_app::node_config::coherence::BindingRef::parse(value)
 }
 
 fn policy_carry_choices(
@@ -6321,13 +6297,14 @@ mod tests {
     fn policy_generation_reset_args(confirm: bool) -> NodePolicyGenerationResetArgs {
         NodePolicyGenerationResetArgs {
             source: PathBuf::from("/usr/share/ryeos"),
-            node_profile: "full".to_string(),
+            node_profile: "standard".to_string(),
             host_class: "local".to_string(),
             trust_files: Vec::new(),
             substrate_image_digest: None,
             app_root: None,
             keep_sections: Vec::new(),
             reset_sections: Vec::new(),
+            invalidate_bindings: Vec::new(),
             confirm,
             json: false,
         }
@@ -6339,7 +6316,7 @@ mod tests {
         assert!(policy_generation_reset_args(true).validate().is_ok());
 
         let mut invalid = policy_generation_reset_args(true);
-        invalid.node_profile = "../full".to_string();
+        invalid.node_profile = "../standard".to_string();
         assert!(invalid.validate().is_err());
 
         let mut noncanonical = policy_generation_reset_args(true);

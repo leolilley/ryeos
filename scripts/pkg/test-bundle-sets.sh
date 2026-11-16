@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# ryeos:signed:2026-11-12T23:39:06Z:c6c1fb68dcbe208622aab39989b4928e13d7977167f5dd954192fe4b85a90013:85hnIhR5Q7xxLTQdv4jHX94/a48dkPxeFnFGwwxCEUNap/C2T4LqGKt86e2H0Ot+F6ceQifzRvBTh2axBYEtAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-15T07:11:12Z:07b33090cbf21073cee1036ac05954fc9c0cc847f94055621c5abcd647f1cb00:p70+LswAcDtUlVzH7P4i1pk6u3DCFjuEaBmvTVPUVruEOZ67HLD7iUnXoa723yXZrWpz5UZhkYXBwshb+iDTDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck source=scripts/pkg/bundle-sets.sh
 source "$ROOT/scripts/pkg/bundle-sets.sh"
 
-mapfile -t full < <(ryeos_bundle_set_names full)
+mapfile -t standard < <(ryeos_bundle_set_names standard)
+mapfile -t development < <(ryeos_bundle_set_names development)
 mapfile -t hosted_workflow < <(ryeos_bundle_set_names hosted-workflow)
 mapfile -t local_inference < <(ryeos_bundle_set_names local-inference)
 mapfile -t release_artifacts < <(ryeos_bundle_set_names release-artifacts)
 mapfile -t release_authority < <(ryeos_bundle_set_names release-authority)
-mapfile -t full_bin_managed < <(ryeos_bundle_set_bin_managed_names full)
+mapfile -t standard_bin_managed < <(ryeos_bundle_set_bin_managed_names standard)
 mapfile -t release_authority_host_support < <(ryeos_bundle_set_host_support_bins release-authority)
 
 contains() {
@@ -70,13 +71,13 @@ verify_dev_signed_profile() (
 )
 
 mapfile -t bundle_set_ids < <(ryeos_bundle_set_ids)
-[[ "${bundle_set_ids[*]}" == "full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller release-authority development" ]]
+[[ "${bundle_set_ids[*]}" == "central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller release-authority development" ]]
 # Native node/caller authentication does not require application sessions.
 for set_name in core core-scheduling core-workflow core-knowledge hosted-controller standard local-inference hosted-workflow bundle-source; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   assert_rejected contains central-auth "${members[@]}"
 done
-for set_name in full central-host standard-central-auth release-artifacts; do
+for set_name in development central-host standard-central-auth release-artifacts; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   contains central-auth "${members[@]}"
   for workflow_member in knowledge directive graph ryeos-docs; do
@@ -84,12 +85,12 @@ for set_name in full central-host standard-central-auth release-artifacts; do
   done
 done
 mapfile -t standard_baseline < <(ryeos_bundle_set_names standard)
-[[ "${standard_baseline[*]}" == "core scheduling knowledge directive graph ryeos-docs" ]]
+[[ "${standard_baseline[*]}" == "core scheduling knowledge directive graph ryeos-docs ryeos-ui codex opencode web browser" ]]
 mapfile -t standard_auth < <(ryeos_bundle_set_names standard-central-auth)
 [[ "${standard_auth[*]}" == "core scheduling knowledge directive graph ryeos-docs central-auth" ]]
 
 # Host features derive in canonical sorted order from the bundles present.
-for set_name in full central-host standard standard-central-auth local-inference hosted-workflow release-artifacts; do
+for set_name in development central-host standard standard-central-auth local-inference hosted-workflow release-artifacts; do
   for package in ryeosd ryeos-cli ryeos-api; do
     [[ "$(ryeos_bundle_set_cargo_features "$set_name" "$package")" == "$package/model-provider-setup,$package/scheduling" ]]
   done
@@ -105,7 +106,7 @@ for set_name in bundle-source core; do
     [[ -z "$(ryeos_bundle_set_cargo_features "$set_name" "$package")" ]]
   done
 done
-for set_name in full central-host standard standard-central-auth local-inference hosted-workflow release-artifacts; do
+for set_name in development central-host standard standard-central-auth local-inference hosted-workflow release-artifacts; do
   [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/directive-handlers,ryeos-handler-bins/graph-handlers" ]]
 done
 for set_name in hosted-controller release-authority; do
@@ -115,7 +116,7 @@ for set_name in core core-scheduling bundle-source; do
   [[ "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-handler-bins)" == "ryeos-handler-bins/core-handlers,ryeos-handler-bins/extends-composer" ]]
 done
 # The parser package has no compositions: every set builds it with its defaults.
-for set_name in full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller release-authority release-artifacts; do
+for set_name in development central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller release-authority release-artifacts; do
   [[ -z "$(ryeos_bundle_set_cargo_features "$set_name" ryeos-parser-bins)" ]]
 done
 mapfile -t core < <(ryeos_bundle_set_names core)
@@ -152,11 +153,14 @@ mapfile -t core_scheduling_bins < <(ryeos_bundle_set_bin_managed_names core-sche
 for forbidden in central-auth knowledge directive graph ryeos-docs local-inference codex render-sandbox; do
   assert_rejected contains "$forbidden" "${core_scheduling[@]}"
 done
-# The release archive carries the sorted unique union of `full` and the
-# controller distribution; `full` itself does not gain render-sandbox.
+# The release archive carries the sorted unique union of `standard` and the
+# controller distribution; `standard` itself does not gain render-sandbox.
 mapfile -t release_archive < <(ryeos_release_archive_bundle_names)
-[[ "${release_archive[*]}" == "browser central-auth codex core directive environment-qualification graph knowledge opencode render-sandbox ryeos-docs ryeos-ui scheduling web" ]]
-assert_rejected contains render-sandbox "${full[@]}"
+[[ "${release_archive[*]}" == "browser codex core directive graph knowledge opencode render-sandbox ryeos-docs ryeos-ui scheduling web" ]]
+assert_rejected contains render-sandbox "${standard[@]}"
+# Development is standard plus central-auth, environment-qualification and
+# render-sandbox, in that published order.
+[[ "${development[*]}" == "core central-auth scheduling knowledge directive graph ryeos-docs environment-qualification web browser ryeos-ui codex opencode render-sandbox" ]]
 mapfile -t hosted_controller < <(ryeos_bundle_set_names hosted-controller)
 [[ "${hosted_controller[*]}" == "core graph knowledge codex render-sandbox" ]]
 mapfile -t hosted_controller_bins < <(ryeos_bundle_set_bin_managed_names hosted-controller)
@@ -164,7 +168,7 @@ mapfile -t hosted_controller_bins < <(ryeos_bundle_set_bin_managed_names hosted-
 for forbidden in central-auth scheduling directive ryeos-docs opencode local-inference bundle-release; do
   assert_rejected contains "$forbidden" "${hosted_controller[@]}"
 done
-[[ -z "$(ryeos_bundle_set_cargo_features full ryeos-core-tools)" ]]
+[[ -z "$(ryeos_bundle_set_cargo_features standard ryeos-core-tools)" ]]
 assert_rejected ryeos_bundle_set_cargo_features unknown ryeosd
 
 [[ "${hosted_workflow[*]}" == "core scheduling knowledge directive graph ryeos-docs codex opencode" ]]
@@ -179,7 +183,7 @@ for forbidden in central-auth scheduling knowledge directive ryeos-docs web brow
 done
 # ryeos-docs is knowledge-only content and owns no compiled binaries.
 mapfile -t standard_bins < <(ryeos_bundle_set_bin_managed_names standard)
-[[ "${standard_bins[*]}" == "core knowledge directive graph" ]]
+[[ "${standard_bins[*]}" == "core knowledge directive graph ryeos-ui codex opencode web browser" ]]
 # Reference closure: bundles whose kinds depend on other bundles' kinds never
 # appear without them.
 for set_name in "${bundle_set_ids[@]}" release-artifacts; do
@@ -199,7 +203,7 @@ for set_name in "${bundle_set_ids[@]}" release-artifacts; do
 done
 [[ "${release_authority_host_support[*]}" == "ryeos-bundle-publisher" ]]
 contains bundle-release "${release_authority[@]}"
-for set_name in full release-authority release-artifacts; do
+for set_name in development release-authority release-artifacts; do
   mapfile -t members < <(ryeos_bundle_set_names "$set_name")
   contains environment-qualification "${members[@]}"
   mapfile -t managed < <(ryeos_bundle_set_bin_managed_names "$set_name")
@@ -225,7 +229,7 @@ grep -Fq 'sudo cp -a "$bundle_dir/specs" "$share_dir/$name/specs"' \
   "$ROOT/scripts/pkg/install-local-direct.sh"
 grep -Fq 'cp -a "$bundle_dir/specs" "$pkgdir/usr/share/ryeos/$name/specs"' \
   "$ROOT/deploy/aur/ryeos/PKGBUILD"
-for ordinary_set in full central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller; do
+for ordinary_set in development central-host standard standard-central-auth local-inference hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller; do
   mapfile -t ordinary_members < <(ryeos_bundle_set_names "$ordinary_set")
   assert_rejected contains bundle-release "${ordinary_members[@]}"
   [[ -z "$(ryeos_bundle_set_host_support_bins "$ordinary_set")" ]]
@@ -238,7 +242,7 @@ assert_rejected ryeos_bundle_set_node_init_profile release-artifacts
 assert_rejected ryeos_bundle_set_node_init_profile unknown
 
 mapfile -t node_init_profiles < <(ryeos_node_init_profile_names)
-[[ "${node_init_profiles[*]}" == "full central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority" ]]
+[[ "${node_init_profiles[*]}" == "central-host standard standard-central-auth local-inference hosted-node hosted-workflow bundle-source core core-scheduling core-workflow core-knowledge hosted-controller contained-workflow development release-authority" ]]
 [[ "$(ryeos_node_init_profile_bundle_set contained-workflow)" == "hosted-workflow" ]]
 [[ "$(ryeos_node_init_profile_bundle_set hosted-node)" == "core" ]]
 assert_rejected ryeos_bundle_set_names hosted-node
@@ -290,7 +294,7 @@ for profile_name in "${node_init_profiles[@]}"; do
   case "$profile_name" in
     core|core-scheduling|core-workflow|core-knowledge)
       [[ "$declared_host_classes" == "hosted local " ]] ;;
-    standard)
+    standard|bundle-source)
       [[ "$declared_host_classes" == "hosted local local_unconfined " ]] ;;
     hosted-controller)
       [[ "$declared_host_classes" == "hosted local hosted_enforced " ]] ;;
@@ -346,8 +350,8 @@ for profile_name in "${node_init_profiles[@]}"; do
   fi
 done
 
-assert_rejected contains local-inference "${full[@]}"
-assert_rejected contains local-inference "${full_bin_managed[@]}"
+assert_rejected contains local-inference "${standard[@]}"
+assert_rejected contains local-inference "${standard_bin_managed[@]}"
 mapfile -t local_inference_bin_managed < <(ryeos_bundle_set_bin_managed_names local-inference)
 [[ "${local_inference_bin_managed[*]}" == "core knowledge directive graph" ]]
 
@@ -398,7 +402,7 @@ daemon_scope_output="$(
     "$scope_tmp/repo/scripts/populate-bundles.sh" \
       --key "$scope_tmp/publisher.pem" \
       --owner test \
-      --bundle-set full \
+      --bundle-set standard \
       --crates ryeosd 2>&1
 )"
 daemon_scope_status=$?
@@ -520,7 +524,7 @@ combined_static_output="$(
     "$scope_tmp/repo/scripts/populate-bundles.sh" \
       --key "$scope_tmp/publisher.pem" \
       --owner test \
-      --bundle-set full \
+      --bundle-set standard \
       --crates 'ryeos-session-exec ryeos-structured-session ryeos-external-candidate-connector' 2>&1
 )"
 combined_static_status=$?
@@ -531,7 +535,7 @@ set -e
 test -f "$scope_tmp/repo/bundles/core/.ai/refs/sentinel"
 
 # Stage retained payloads for the widest set, so every set checked below
-# (including those carrying render-sandbox, which full no longer does) finds
+# (including those carrying render-sandbox, which standard does not) finds
 # its artifacts.
 set +e
 artifacts_scope_output="$(

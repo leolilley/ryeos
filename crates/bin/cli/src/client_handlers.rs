@@ -261,6 +261,222 @@ pub(crate) async fn remote_delegate(
     .await
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignParameters {
+    #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
+    item_refs: Vec<String>,
+    project_path: String,
+}
+
+/// Sign project items with the operator key, in this process. The node never
+/// holds the key; this reads it from the operator's own key directory and
+/// verifies items against the node's registered generation.
+pub(crate) async fn sign_items(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+    let params: SignParameters = serde_json::from_value(parameters.clone())
+        .map_err(|error| local(format!("sign parameters are invalid: {error}")))?;
+    if params.item_refs.is_empty() {
+        return Err(local("sign requires at least one item ref"));
+    }
+    let app_root = app_root.to_path_buf();
+    let report = tokio::task::spawn_blocking(move || {
+        ryeos_core_tools::actions::sign::run_sign_batch(
+            &app_root,
+            &params.item_refs,
+            Some(Path::new(&params.project_path)),
+            ryeos_core_tools::actions::sign::SignSource::Project,
+        )
+    })
+    .await
+    .map_err(|error| local(format!("sign worker stopped: {error}")))?
+    .map_err(|error| local(format!("{error:#}")))?;
+    if !report.is_total_success() {
+        let failures = report
+            .failed
+            .iter()
+            .map(|item| {
+                format!(
+                    "{}: {}",
+                    item.item_ref,
+                    item.error.as_deref().unwrap_or("signing failed")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(local(format!(
+            "{}/{} items failed validation or signing: {failures}",
+            report.failed.len(),
+            report.total()
+        )));
+    }
+    serde_json::to_value(report).map_err(local_error)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContentPinParameters {
+    item_ref: String,
+    project_path: String,
+    #[serde(
+        default,
+        rename = "id",
+        deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
+    )]
+    ids: Vec<String>,
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    update: bool,
+}
+
+/// Observe current project bytes and complete signed external-content pins
+/// with the operator key, in this process.
+pub(crate) async fn content_pin(app_root: &Path, parameters: &Value) -> Result<Value, CliError> {
+    let params: ContentPinParameters = serde_json::from_value(parameters.clone())
+        .map_err(|error| local(format!("content pin parameters are invalid: {error}")))?;
+    let app_root = app_root.to_path_buf();
+    let report = tokio::task::spawn_blocking(move || {
+        ryeos_core_tools::actions::content_pin::run_content_pin(
+            &app_root,
+            &params.item_ref,
+            Path::new(&params.project_path),
+            &ryeos_core_tools::actions::content_pin::ContentPinOptions {
+                ids: params.ids,
+                all: params.all,
+                update: params.update,
+            },
+        )
+    })
+    .await
+    .map_err(|error| local(format!("content pin worker stopped: {error}")))?
+    .map_err(|error| local(format!("{error:#}")))?;
+    serde_json::to_value(report).map_err(local_error)
+}
+
+/// Export one local qualification as a testimony the operator signs here.
+/// The node derives the exact unsigned statement; this process checks that it
+/// is the statement the operator asked for, signs it with the operator key,
+/// and hands the signed testimony back for the node to verify and submit. The
+/// key never leaves this process.
+pub(crate) async fn export_qualification_testimony(
+    app_root: &Path,
+    parameters: &Value,
+) -> Result<Value, CliError> {
+    let text = |name: &str| {
+        parameters
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| local(format!("testimony export requires {name}")))
+    };
+    let remote = text("remote")?;
+    let qualification_hash = text("qualification_hash")?;
+    let acceptance_policy_ref = text("acceptance_policy_ref")?;
+    let content = match parameters.get("content") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => Some(
+            serde_json::from_str::<Value>(raw)
+                .map_err(|error| local(format!("--content is not JSON: {error}")))?,
+        ),
+        Some(value) => Some(value.clone()),
+    };
+    let mut request = json!({
+        "remote": remote,
+        "qualification_hash": qualification_hash,
+        "acceptance_policy_ref": acceptance_policy_ref,
+    });
+    if let Some(content) = &content {
+        request["content"] = content.clone();
+    }
+
+    crate::daemon_preflight::lifecycle_preflight(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let service_call = |parameters: Value| {
+        json!({
+            "item_ref": "service:external-content/export-qualification-testimony",
+            "ref_bindings": {},
+            "product_selections": [],
+            "parameters": parameters,
+        })
+    };
+    let prepared = execute_service(app_root, &signer, service_call(request.clone())).await?;
+    let unsigned: ryeos_state::objects::Attestation = serde_json::from_value(
+        prepared
+            .get("unsigned_testimony")
+            .cloned()
+            .ok_or_else(|| local("the node did not return an unsigned testimony"))?,
+    )
+    .map_err(|error| local(format!("the node returned a malformed testimony: {error}")))?;
+    check_prepared_testimony(
+        &unsigned,
+        &signer.fingerprint,
+        &qualification_hash,
+        &acceptance_policy_ref,
+        content.as_ref(),
+    )?;
+    let mut signed = unsigned.clone();
+    signed.signature = signer.sign_bytes_base64(&unsigned.signing_bytes().map_err(local_error)?);
+    request["signed_testimony"] = serde_json::to_value(&signed).map_err(local_error)?;
+    execute_service(app_root, &signer, service_call(request)).await
+}
+
+/// Refuse to sign a testimony that is not the one asked for: the signature is
+/// the operator's statement, so the node cannot choose what it covers.
+fn check_prepared_testimony(
+    unsigned: &ryeos_state::objects::Attestation,
+    operator_fingerprint: &str,
+    qualification_hash: &str,
+    acceptance_policy_ref: &str,
+    content: Option<&Value>,
+) -> Result<(), CliError> {
+    use ryeos_state::external_content::products::qualification_testimony::{
+        QualificationLane, REMOTE_QUALIFICATION_TESTIMONY_CLAIM,
+        REMOTE_QUALIFICATION_TESTIMONY_POLICY, RemoteQualificationTestimonyBody,
+    };
+    let refuse = |what: &str| {
+        local(format!(
+            "refusing to sign: the node's testimony {what}; nothing was signed"
+        ))
+    };
+    if !unsigned.signature.is_empty() {
+        return Err(refuse("arrived already signed"));
+    }
+    if unsigned.issuer != format!("fp:{operator_fingerprint}") {
+        return Err(refuse(
+            "names another issuer than the key this CLI signs with",
+        ));
+    }
+    if unsigned.claim != REMOTE_QUALIFICATION_TESTIMONY_CLAIM
+        || unsigned.policy != REMOTE_QUALIFICATION_TESTIMONY_POLICY
+    {
+        return Err(refuse("is not a remote qualification testimony"));
+    }
+    let body =
+        RemoteQualificationTestimonyBody::from_value(&unsigned.evidence).map_err(|error| {
+            local(format!(
+                "refusing to sign: the testimony body is invalid: {error:#}"
+            ))
+        })?;
+    if body.qualification_attestation_hash != qualification_hash {
+        return Err(refuse("speaks to another qualification than the one named"));
+    }
+    if body.acceptance_policy_ref != acceptance_policy_ref {
+        return Err(refuse("names another acceptance policy than the one named"));
+    }
+    match (content, body.lane) {
+        (None, QualificationLane::Product) => {}
+        (Some(content), QualificationLane::Content)
+            if content.get("activation_ref").and_then(Value::as_str)
+                == body.activation_ref.as_deref() => {}
+        _ => {
+            return Err(refuse(
+                "is for another lane or activation than the one named",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Claim an admission token on a remote. Without `--as-principal` the claim
 /// is the node's own, made by the node-owned `remote/admit` service. With it,
 /// the claim is a `remote_principal` claim signed here with the caller's own
@@ -481,5 +697,51 @@ mod tests {
         assert!(absolute_destination(" result.bin").is_err());
         assert!(absolute_destination("result\nbin").is_err());
         assert!(absolute_destination("result.bin").unwrap().is_absolute());
+    }
+
+    fn unsigned_testimony(issuer: &str, claim: &str) -> ryeos_state::objects::Attestation {
+        ryeos_state::objects::Attestation::unsigned(
+            "a".repeat(64),
+            claim.to_owned(),
+            "ryeos.remote_qualification_testimony.v1".to_owned(),
+            "2026-11-15T00:00:00Z".to_owned(),
+            Some("2026-11-16T00:00:00Z".to_owned()),
+            json!({}),
+        )
+        .for_issuer(issuer)
+        .unwrap()
+    }
+
+    #[test]
+    fn the_cli_signs_only_the_testimony_it_asked_for() {
+        let operator = "b".repeat(64);
+        let check = |testimony: &ryeos_state::objects::Attestation| {
+            check_prepared_testimony(
+                testimony,
+                &operator,
+                &"c".repeat(64),
+                "config:test/policy",
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+        };
+
+        // Already signed by someone.
+        let mut signed = unsigned_testimony(&operator, "qualification_testimony");
+        signed.signature = "AAAA".to_owned();
+        assert!(check(&signed).contains("already signed"));
+
+        // Another issuer than the key this CLI holds.
+        let other = unsigned_testimony(&"d".repeat(64), "qualification_testimony");
+        assert!(check(&other).contains("another issuer"));
+
+        // Not a remote qualification testimony at all.
+        let wrong_claim = unsigned_testimony(&operator, "something_else");
+        assert!(check(&wrong_claim).contains("not a remote qualification testimony"));
+
+        // A body that is not a testimony body is never signed.
+        let hollow = unsigned_testimony(&operator, "qualification_testimony");
+        assert!(check(&hollow).contains("testimony body is invalid"));
     }
 }

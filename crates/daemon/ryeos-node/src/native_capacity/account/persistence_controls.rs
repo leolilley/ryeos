@@ -514,6 +514,7 @@ fn signed_reissuance(body: &ReissuanceBody, key: &SigningKey) -> Vec<u8> {
     let signature = key.sign(canonical.as_bytes());
     serde_json::to_vec(&ReissuanceDocument {
         body: body.clone(),
+        request: None,
         signature: format!(
             "ed25519:{}",
             base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
@@ -557,6 +558,7 @@ fn operator_reissue_anchor_opens_only_with_its_present_verified_document() {
         previous_reissuance_digest: None,
         reason: "exhausted".to_owned(),
         issued_at: "2026-10-14T00:00:00Z".to_owned(),
+        authority: Authority::Operator,
     };
     let document = signed_reissuance(&body, &operator);
     let reissue = release

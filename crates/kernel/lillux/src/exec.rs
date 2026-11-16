@@ -11774,7 +11774,12 @@ fn wait_owned_process_group_quiescent(
                     break;
                 }
                 Ok(_) => {}
-                Err(error) if error.contains("No such file or directory") => {}
+                // A member that exits while /proc/<pid>/stat is being read
+                // surfaces as ESRCH ("No such process"), not ENOENT. Either
+                // way the member is gone, which is what cleanup wants.
+                Err(error)
+                    if error.contains("No such file or directory")
+                        || error.contains("No such process") => {}
                 Err(error) => {
                     return Err(format!(
                         "inspect process-group member {pid} during cleanup: {error}"

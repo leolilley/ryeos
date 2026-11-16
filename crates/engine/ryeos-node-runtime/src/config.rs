@@ -30,9 +30,6 @@ pub struct Config {
     /// Daemon-internal signing key.
     /// Defaults to `<app_root>/.ai/node/identity/private_key.pem`.
     pub node_signing_key_path: PathBuf,
-    /// Operator signing key — used for operator edits in project/config space.
-    /// Defaults to `<app_root>/.ai/node/operator/signing/private_key.pem`.
-    pub operator_signing_key_path: PathBuf,
     pub authorized_keys_dir: PathBuf,
 }
 
@@ -58,8 +55,13 @@ struct PartialConfig {
     uds_path: Option<PathBuf>,
     app_root: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
-    operator_signing_key_path: Option<PathBuf>,
     authorized_keys_dir: Option<PathBuf>,
+    /// Retired: nodes initialized before the daemon stopped loading the
+    /// operator private key stored its path here. The value is never read.
+    /// Accepting it keeps the documented cure for such nodes (stop, then
+    /// `ryeos init` on the same app root) from refusing on the stored file.
+    #[serde(default, rename = "operator_signing_key_path")]
+    _retired_operator_signing_key_path: Option<serde::de::IgnoredAny>,
 }
 
 fn publish_bootstrap_config(
@@ -261,19 +263,6 @@ impl Config {
         };
 
         let resolved_runtime_root = RuntimeRoot::new(app_root.clone());
-        let canonical_operator_key_path = resolved_runtime_root.operator_signing_key_path();
-        if let Some(path) = file_cfg
-            .as_ref()
-            .and_then(|cfg| cfg.operator_signing_key_path.as_ref())
-            && path != &canonical_operator_key_path
-        {
-            bail!(
-                "operator_signing_key_path must be {}; got {}",
-                canonical_operator_key_path.display(),
-                path.display()
-            );
-        }
-
         let file_uds = file_cfg.as_ref().and_then(|cfg| cfg.uds_path.clone());
         let uds_path = match (file_uds, sources.uds_path.clone()) {
             (None, None) => default_uds_path(&app_root),
@@ -309,10 +298,6 @@ impl Config {
                 .as_ref()
                 .and_then(|cfg| cfg.node_signing_key_path.clone())
                 .unwrap_or_else(|| resolved_runtime_root.node_signing_key_path()),
-            operator_signing_key_path: file_cfg
-                .as_ref()
-                .map(|_| canonical_operator_key_path.clone())
-                .unwrap_or(canonical_operator_key_path),
             authorized_keys_dir: sources
                 .authorized_keys_dir
                 .clone()
@@ -504,6 +489,35 @@ mod tests {
         .unwrap();
         assert_eq!(first.bind, "127.0.0.1:7400".parse().unwrap());
         assert_eq!(second.bind, first.bind);
+    }
+
+    #[test]
+    fn a_stored_config_with_the_retired_operator_key_path_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("node");
+        let node_dir = app_root.join(ryeos_engine::AI_DIR).join("node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let stored = Config::load(&ConfigSources {
+            app_root: Some(app_root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut yaml = serde_yaml::to_string(&stored).unwrap();
+        yaml.push_str("operator_signing_key_path: /old/operator/private_key.pem\n");
+        std::fs::write(node_dir.join("config.yaml"), yaml).unwrap();
+
+        let loaded = Config::load(&ConfigSources {
+            app_root: Some(app_root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(loaded.bind, stored.bind);
+        assert!(
+            !serde_yaml::to_string(&loaded)
+                .unwrap()
+                .contains("operator_signing_key_path"),
+            "the retired path is never carried forward"
+        );
     }
 
     #[test]

@@ -2318,7 +2318,6 @@ mod tests {
             uds_path: tmpdir.path().join("test.sock"),
             app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
-            operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             authorized_keys_dir: tmpdir.path().join("auth"),
         };
 

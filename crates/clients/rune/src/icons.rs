@@ -42,11 +42,6 @@ solid_icon!(
     "ryeos-expanded",
     r#"<path d="M4.5 6 L11.5 6 L8 11 Z"/>"#
 );
-line_icon!(
-    CHEVRON_DOWN,
-    "ryeos-chevron-down",
-    r#"<path d="M4.5 6.5 L8 10 L11.5 6.5"/>"#
-);
 solid_icon!(
     MORE,
     "ryeos-more",

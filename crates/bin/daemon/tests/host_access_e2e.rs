@@ -61,6 +61,12 @@ fn write_policy(state_path: &Path, node: &SigningKey, section: &str, body: &str)
 
 /// The fixture's local lane, offering host-direct execution.
 fn grant_host_direct_on_the_lane(state_path: &Path, node: &SigningKey) {
+    set_host_direct_on_the_lane(state_path, node, "operator_granted");
+}
+
+/// The fixture's local lane with `host_direct` set explicitly: the shipped
+/// profile's own choice for the class is not what these tests are about.
+fn set_host_direct_on_the_lane(state_path: &Path, node: &SigningKey, host_direct: &str) {
     let path = state_path.join(".ai/node/policies/isolation.yaml");
     let raw = std::fs::read_to_string(&path).expect("read isolation policy");
     let mut body: Value =
@@ -68,7 +74,7 @@ fn grant_host_direct_on_the_lane(state_path: &Path, node: &SigningKey) {
     let document = serde_json::to_value(&body).expect("isolation policy as json");
     let class = common::fast_fixture::fixture_host_class_of_policy(&document)
         .expect("the fixture's host class");
-    body["policy"]["host_classes"][class]["host_direct"] = "operator_granted".into();
+    body["policy"]["host_classes"][class]["host_direct"] = host_direct.into();
     write_policy(
         state_path,
         node,
@@ -156,7 +162,15 @@ async fn start_with_grant(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lane_that_does_not_offer_host_access_refuses_before_anything_runs() {
-    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let (h, fixture) = DaemonHarness::start_fast_with(
+        |state_path: &Path, _user: &Path, fixture: &common::fast_fixture::FastFixture| {
+            set_host_direct_on_the_lane(state_path, &fixture.node, "unavailable");
+            Ok(())
+        },
+        |_| {},
+    )
+    .await
+    .expect("start daemon with a lane that does not offer host access");
     let project = tempfile::tempdir().expect("project tempdir");
     plant(project.path(), "probe", PROBE_TOOL, &fixture.user);
     plant(

@@ -159,7 +159,9 @@ fn build_fixture(
             }),
         ]),
     );
-    let local_operator = NodeIdentity::load(&state.config.operator_signing_key_path).unwrap();
+    let local_operator =
+        ryeos_node_runtime::operator_identity::test_support::load_operator(&state.config.app_root)
+            .unwrap();
     let operator = if remote_owner {
         NodeIdentity::create(&directory.path().join("source-operator.pem")).unwrap()
     } else {
@@ -421,7 +423,10 @@ async fn published_products_remain_exact_without_historical_threads_and_import_f
         assert_eq!(first["total_bytes"], 11);
         let authority = fixture.state.state_store.pinned_state_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
-        let operator = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &fixture.state.config.app_root,
+        )
+        .unwrap();
         for response in [&first, &second] {
             let stage = authority
                 .require_recovery()
@@ -752,7 +757,10 @@ async fn admitted_remote_owner_reads_and_stages_own_product_without_ambient_auth
             .unwrap();
         assert!(stage.admitted_target_hash().is_none());
     }
-    let local = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+    let local = ryeos_node_runtime::operator_identity::test_support::load_operator(
+        &fixture.state.config.app_root,
+    )
+    .unwrap();
     let foreign = HandlerContext::new_with_authority(
         local.principal_id(),
         remote.scopes.clone(),
@@ -1153,7 +1161,10 @@ async fn published_retry_survives_abandoned_upload_retirement() {
     let staging_id = {
         let authority = fixture.state.state_store.pinned_state_authority().unwrap();
         let guard = authority.acquire_shared_guard().unwrap();
-        let operator = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &fixture.state.config.app_root,
+        )
+        .unwrap();
         let mut stage = authority
             .require_recovery()
             .unwrap()
@@ -1198,7 +1209,10 @@ async fn published_retry_survives_abandoned_upload_retirement() {
                 .unwrap(),
             1,
         );
-        let operator = NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+        let operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+            &fixture.state.config.app_root,
+        )
+        .unwrap();
         assert!(
             recovery
                 .open_durable_cas_upload_admitted(&guard, &staging_id, operator.fingerprint())
@@ -1273,8 +1287,10 @@ fn accept_for(
 #[test]
 fn acceptance_core_accepts_for_an_explicit_remote_owner_and_is_idempotent() {
     let fixture = fixture_with_remote_owner(false, 4096, true, true);
-    let local_operator =
-        NodeIdentity::load(&fixture.state.config.operator_signing_key_path).unwrap();
+    let local_operator = ryeos_node_runtime::operator_identity::test_support::load_operator(
+        &fixture.state.config.app_root,
+    )
+    .unwrap();
     assert_ne!(fixture.context.fingerprint, local_operator.principal_id());
     let admission = origin_admission(&fixture);
     let (first, witness) = accept_for(&fixture, &fixture.context.fingerprint, &admission).unwrap();

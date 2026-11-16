@@ -410,7 +410,7 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
     let hosted_only = ["hosted"];
     let controller = ["hosted", "hosted_enforced", "local"];
     let development = ["local", "local_direct"];
-    let expected: [(&str, &[&str]); 16] = [
+    let expected: [(&str, &[&str]); 15] = [
         ("core", &both),
         ("core-scheduling", &both),
         ("core-workflow", &both),
@@ -419,12 +419,11 @@ fn every_shipped_profile_declares_the_host_classes_its_composition_runs_on() {
         ("hosted-controller", &controller),
         ("standard-central-auth", &local_only),
         ("central-host", &local_only),
-        ("bundle-source", &local_only),
+        ("bundle-source", &standard),
         ("local-inference", &local_only),
         ("contained-workflow", &["local"]),
         ("release-authority", &["local"]),
         ("development", &development),
-        ("full", &local_only),
         ("hosted-workflow", &hosted_only),
         ("hosted-node", &hosted_only),
     ];
@@ -470,14 +469,25 @@ fn standard_local_lane_is_enforce() {
         entry["backend"]["implementation"].as_str(),
         Some("linux-lillux")
     );
+    assert_eq!(entry["process_scopes"]["mode"].as_str(), Some("required"));
+    let floor: Vec<&str> = entry["requires_capabilities"]
+        .as_sequence()
+        .expect("a floor list")
+        .iter()
+        .map(|capability| capability.as_str().expect("a named capability"))
+        .collect();
     assert_eq!(
-        entry["process_scopes"]["mode"].as_str(),
-        Some("unconfigured")
-    );
-    assert_eq!(
-        host_classes(&load_profile("development"))["local_direct"]["requires_capabilities"],
-        entry["requires_capabilities"],
-        "the standard local floor is the development direct floor"
+        floor,
+        [
+            "accounting",
+            "limits:scope",
+            "quiescence:scope",
+            "recovery:scope",
+            "storage:durable_root",
+            "termination:scope",
+            "time",
+        ],
+        "the standard local floor requires delegated per-job process scopes"
     );
 }
 
@@ -495,7 +505,6 @@ fn standard_local_unconfined_lane_is_disabled_and_named() {
         "central-host",
         "bundle-source",
         "local-inference",
-        "full",
     ] {
         let profile = load_profile(name);
         assert_eq!(class_lane(&profile, "local").0, "enforce", "{name}");
@@ -517,11 +526,13 @@ fn standard_hosted_lane_unchanged() {
 #[test]
 fn standard_follows_the_host_class_matrix() {
     let cases: Vec<(&str, Host, Expect)> = vec![
+        // The local class requires the per-job process scopes a runit
+        // supervisor or the OCI hook delegates.
         ("local", runit(), Expect::Admit),
-        ("local", local_docker(), Expect::Admit),
+        ("local", local_docker(), Expect::Refuse(SCOPE_TRIO)),
         ("local", local_docker_oci_hook(), Expect::Admit),
         ("local", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
-        ("local", hosted_volume(), Expect::Refuse(NO_ACCOUNTING)),
+        ("local", hosted_volume(), Expect::Refuse(SCOPE_TRIO)),
         ("hosted", local_docker(), Expect::Admit),
         ("hosted", hosted_volume(), Expect::Admit),
         ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
@@ -551,6 +562,23 @@ fn the_central_and_bundle_source_compositions_follow_the_host_class_matrix() {
         for (class, host, expect) in plain_local_cases() {
             check(profile, class, &host, &expect);
         }
+    }
+}
+
+/// The bundle-source composition also runs in a hosting provider's
+/// container: its `hosted` floor admits a volume-backed container that
+/// proves neither accounting nor process scopes, and still needs a disk.
+#[test]
+fn bundle_source_runs_in_a_hosted_container() {
+    let cases: Vec<(&str, Host, Expect)> = vec![
+        ("hosted", local_docker(), Expect::Admit),
+        ("hosted", hosted_volume(), Expect::Admit),
+        ("hosted", hosted_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", local_docker_no_volume(), Expect::Refuse(NO_DISK)),
+        ("hosted", hosted_ephemeral(), Expect::Refuse(NO_DISK)),
+    ];
+    for (class, host, expect) in &cases {
+        check("bundle-source", class, host, expect);
     }
 }
 
@@ -594,7 +622,7 @@ fn the_local_inference_and_scoped_compositions_follow_the_host_class_matrix() {
     };
     for (profile, cases) in [
         ("local-inference", scoped(Expect::Admit)),
-        ("full", scoped(Expect::Admit)),
+        ("standard", scoped(Expect::Admit)),
         // The OCI hook delegates scopes but not user namespaces.
         ("contained-workflow", scoped(Expect::Refuse(NO_NAMESPACES))),
         ("development", scoped(Expect::Refuse(NO_NAMESPACES))),

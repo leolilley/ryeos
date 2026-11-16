@@ -94,7 +94,6 @@ pub struct RyeOsNotice {
 pub enum RyeOsFocusTarget {
     MountedView { instance_key: RyeOsViewInstanceKey },
     ViewSetTile { tile_id: String },
-    Dock { edge: RyeOsDockEdge },
 }
 
 /// Buffer state only — ephemera, never braided. Where text LANDS is the
@@ -417,15 +416,6 @@ fn route_draft_scope(route: &super::seat::InputRoute) -> String {
         "fresh:{}",
         serde_json::to_string(route).expect("InputRoute serializes")
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RyeOsDockEdge {
-    Top,
-    Bottom,
-    Left,
-    Right,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -812,23 +802,6 @@ impl RyeOsCore {
         }
         self.presentation.as_mut()?.mount_local_mut(instance)
     }
-    pub fn shared_dock_instance_key(&self, edge: RyeOsDockEdge) -> Option<RyeOsViewInstanceKey> {
-        let presentation = self.presentation.as_ref()?;
-        let edge = match edge {
-            RyeOsDockEdge::Top => "top",
-            RyeOsDockEdge::Left => "left",
-            RyeOsDockEdge::Right => "right",
-            RyeOsDockEdge::Bottom => "bottom",
-        };
-        Some(
-            presentation
-                .docks()
-                .get(edge)?
-                .view()
-                .instance_key()
-                .clone(),
-        )
-    }
     pub fn input_owner(&self, instance: &RyeOsViewInstanceKey) -> Option<RyeOsInputOwner> {
         let composition = self.presentation.as_ref()?;
         match composition.mount(instance)? {
@@ -862,15 +835,9 @@ impl RyeOsCore {
     pub fn mounted_instances(&self) -> impl Iterator<Item = RyeOsViewInstanceKey> + '_ {
         self.presentation.iter().flat_map(|presentation| {
             presentation
-                .docks()
+                .dialogs()
                 .values()
                 .map(|mount| mount.view().instance_key().clone())
-                .chain(
-                    presentation
-                        .dialogs()
-                        .values()
-                        .map(|mount| mount.view().instance_key().clone()),
-                )
                 .chain(
                     presentation.view_sets().flat_map(|(_, set)| {
                         set.tiles.values().map(|tile| tile.instance_key.clone())
@@ -2136,20 +2103,6 @@ impl RyeOsCore {
             .collect()
     }
 
-    pub fn visible_dock_views(&self) -> Vec<(RyeOsViewInstanceKey, String)> {
-        self.presentation
-            .iter()
-            .flat_map(|presentation| presentation.docks().values())
-            .filter(|mount| mount.visible)
-            .map(|mount| {
-                (
-                    mount.view().instance_key().clone(),
-                    mount.view().view_ref().into(),
-                )
-            })
-            .collect()
-    }
-
     /// Does the instance addressed by `instance_id`/`view_ref` declare an
     /// input buffer? (Layout-neutral — slots and tiles answer the same.)
     pub fn instance_declares_input(&self, instance: &RyeOsViewInstanceKey, view_ref: &str) -> bool {
@@ -2480,7 +2433,6 @@ impl RyeOsCore {
     ) -> Option<RyeOsViewInstanceKey> {
         match target {
             RyeOsFocusTarget::MountedView { instance_key } => Some(instance_key),
-            RyeOsFocusTarget::Dock { edge } => self.shared_dock_instance_key(edge),
             RyeOsFocusTarget::ViewSetTile { tile_id } => {
                 let tile_id = tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)?;
                 Some(
@@ -2499,7 +2451,13 @@ impl RyeOsCore {
     }
 
     pub(crate) fn focus_default_input(&mut self) -> bool {
-        let instance = self.mounted_instances().find(|instance| {
+        let instance = self.default_input_instance();
+        self.focused_input = instance;
+        self.focused_input.is_some()
+    }
+
+    pub fn default_input_instance(&self) -> Option<RyeOsViewInstanceKey> {
+        self.mounted_instances().find(|instance| {
             self.presentation
                 .as_ref()
                 .and_then(|presentation| presentation.mount(instance))
@@ -2507,30 +2465,6 @@ impl RyeOsCore {
                 && self
                     .mounted_view_ref(instance)
                     .is_some_and(|view| self.instance_declares_input(instance, view))
-        });
-        self.focused_input = instance;
-        self.focused_input.is_some()
-    }
-
-    pub fn default_input_edge(&self) -> Option<RyeOsDockEdge> {
-        [
-            RyeOsDockEdge::Top,
-            RyeOsDockEdge::Left,
-            RyeOsDockEdge::Right,
-            RyeOsDockEdge::Bottom,
-        ]
-        .into_iter()
-        .find(|edge| {
-            self.shared_dock_instance_key(*edge)
-                .is_some_and(|instance| {
-                    self.presentation
-                        .as_ref()
-                        .and_then(|presentation| presentation.mount(&instance))
-                        .is_some_and(|mount| {
-                            mount.visible()
-                                && self.instance_declares_input(&instance, mount.view_ref())
-                        })
-                })
         })
     }
 
@@ -2664,9 +2598,8 @@ impl RyeOsCore {
                         .any(|dialog| dialog.is_open() && dialog.view().instance_key() == &key)
                 })
             }),
-            input_visible: focused.is_some() || self.default_input_edge().is_some(),
+            input_visible: focused.is_some() || self.default_input_instance().is_some(),
             input_focused: focused.is_some(),
-            input_blurrable: matches!(self.focus_target(), Some(RyeOsFocusTarget::Dock { .. })),
             input_has_text: !text.is_empty(),
             input_is_live_filter: input.is_some_and(|i| i.is_live_filter()),
             input_filter_fields: input
@@ -3389,30 +3322,22 @@ mod tests {
             "view:ryeos/input".into(),
             serde_json::json!({"widget":"rows"}),
         );
-        shared.presentation.views.insert(
-            "view:ryeos/item/inspector".into(),
-            serde_json::json!({"widget":"unsupported-test-widget"}),
-        );
         let mut core = test_support::core(session);
         core.initial_effects();
-        let dock = core
-            .shared_dock_instance_key(RyeOsDockEdge::Bottom)
-            .unwrap();
+        let input = core.presentation.as_ref().unwrap().dialogs()["input"]
+            .view()
+            .instance_key()
+            .clone();
         let dialog = core.presentation.as_ref().unwrap().dialogs()["launcher"]
             .view()
             .instance_key()
             .clone();
-        let unsupported = core.shared_dock_instance_key(RyeOsDockEdge::Right).unwrap();
-        for instance in [&dock, &dialog] {
+        for instance in [&input, &dialog] {
             assert!(matches!(
                 core.mounted_local_state(instance),
                 Some(ViewLocalState::GenericList { cursor: 0, .. })
             ));
         }
-        assert!(matches!(
-            core.mounted_local_state(&unsupported),
-            Some(ViewLocalState::None)
-        ));
         let ViewLocalState::GenericList {
             cursor,
             collapsed_tree_rows,
@@ -3429,10 +3354,6 @@ mod tests {
         core.open_dialog("launcher");
         core.normalize_mounted_local_states();
         assert_eq!(core.mounted_local_state(&dialog), Some(&before));
-        assert!(matches!(
-            core.mounted_local_state(&unsupported),
-            Some(ViewLocalState::None)
-        ));
     }
 
     use super::*;
@@ -3727,10 +3648,7 @@ mod tests {
     }
 
     fn test_session(effective_surface: serde_json::Value) -> BrowserSession {
-        crate::ui::reducer::test_support::session_with_surface_and_docks(
-            effective_surface,
-            serde_json::json!({}),
-        )
+        crate::ui::reducer::test_support::session_with_surface(effective_surface)
     }
 
     #[test]
@@ -4032,27 +3950,19 @@ mod tests {
     }
 
     #[test]
-    fn hint_refetch_reaches_visible_slot_views() {
-        let session = crate::ui::reducer::test_support::session_with_surface_and_docks(
-            serde_json::json!({
-                "name": "t",
-                "tiles": [],
-                "views": {
-                    "view:ryeos/node/status": {
-                        "widget": "text",
-                        "sources": { "default": { "ref": "service:node/status" } },
-                        "refresh": { "on_hint": "thread" }
-                    }
+    fn hint_refetch_reaches_visible_tile_views() {
+        let session = crate::ui::reducer::test_support::session_with_surface(serde_json::json!({
+            "name": "t",
+            "tiles": ["view:ryeos/node/status"],
+            "views": {
+                "view:ryeos/node/status": {
+                    "widget": "text",
+                    "sources": { "default": { "ref": "service:node/status" } },
+                    "refresh": { "on_hint": "thread" }
                 }
-            }),
-            serde_json::json!({"top":{"content":"view:ryeos/node/status","open":true,"size":1}}),
-        );
-        let mut core = RyeOsCore::new(
-            session,
-            crate::ui::reducer::test_support::FIXTURE_PRESENTATION_ID,
-            BrowserViewport::default(),
-            0,
-        );
+            }
+        }));
+        let mut core = crate::ui::reducer::test_support::core(session);
         let fetches: Vec<(String, crate::ui::binding::UiBindingCoordinate)> = core
             .effects_for_hint("thread")
             .iter()
@@ -4067,7 +3977,14 @@ mod tests {
             fetches,
             vec![(
                 crate::ui::source_key::RyeOsSourceInstanceKey::named(
-                    core.shared_dock_instance_key(RyeOsDockEdge::Top).unwrap(),
+                    core.active_view_set()
+                        .unwrap()
+                        .tiles
+                        .values()
+                        .next()
+                        .unwrap()
+                        .instance_key
+                        .clone(),
                     "default",
                 )
                 .encode(),
@@ -4079,31 +3996,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unbound_core_has_no_fabricated_shared_dock_mounts() {
-        let core = RyeOsCore::default();
-        assert!(core.presentation.is_none());
-        let docks = super::super::view_model::build_view_model(&core).docks;
-        assert!(docks.top.is_none());
-        assert!(docks.bottom.is_none());
-        assert!(docks.left.is_none());
-        assert!(docks.right.is_none());
-    }
-
     /// Seed a `view:ryeos/input` binding (chat box: route-fold submit).
     fn with_input_view(core: &mut RyeOsCore) {
-        let session = crate::ui::reducer::test_support::session_with_surface_and_docks(
-            serde_json::json!({"name":"input-fixture", "views":{
-                "view:ryeos/input":{"widget":"text","input":{"id":"line","placeholder":"Ask or run a command","submit":"route"}}
-            }}),
-            serde_json::json!({"bottom":{"content":"view:ryeos/input","open":true,"size":7}}),
+        *core = crate::ui::reducer::test_support::core(
+            crate::ui::reducer::test_support::session_with_surface(
+                serde_json::json!({"name":"input-fixture"}),
+            ),
         );
-        *core = RyeOsCore::new(
-            session,
-            crate::ui::reducer::test_support::FIXTURE_PRESENTATION_ID,
-            BrowserViewport::default(),
-            0,
-        );
+        crate::ui::reducer::test_support::fixture_input(core);
         // Test the explicit-focus transition separately from normal boot focus.
         core.focused_input = None;
     }
@@ -4114,28 +4014,23 @@ mod tests {
         // No input view embedded yet: no instance owns input.
         assert!(!core.has_focused_input());
         with_input_view(&mut core);
-        // The visible bottom slot is available, but does not own input until
+        // The open input dialog is available, but does not own input until
         // focus explicitly moves there.
         assert!(!core.has_focused_input());
-        assert_eq!(core.default_input_edge(), Some(RyeOsDockEdge::Bottom));
+        let input = core.default_input_instance().unwrap();
         core.dispatch(super::super::event::RyeOsEvent::Ui {
             event: super::super::event::RyeOsUiEvent::FocusInput,
         });
         let (key, view_ref) = core.focused_input_instance().expect("input focused");
         assert_eq!(view_ref, "view:ryeos/input");
-        assert_eq!(
-            key.view_instance_key,
-            core.shared_dock_instance_key(RyeOsDockEdge::Bottom)
-                .unwrap()
-        );
+        assert_eq!(key.view_instance_key, input);
         assert_eq!(key.input_id, "line");
-        // Hiding the slot removes the instance: focus falls through.
-        core.presentation
-            .as_mut()
-            .unwrap()
-            .dock_mut("bottom")
-            .unwrap()
-            .visible = false;
+        // Closing the dialog removes the instance: focus falls through.
+        core.dispatch(super::super::event::RyeOsEvent::Ui {
+            event: super::super::event::RyeOsUiEvent::CloseDialog {
+                instance_key: input,
+            },
+        });
         assert!(!core.has_focused_input());
     }
 
@@ -4143,12 +4038,12 @@ mod tests {
     fn draft_namespace_requires_the_exact_admitted_binding_coordinate() {
         let session = crate::ui::reducer::test_support::session();
         let descriptor = &session.binding_attachments[0];
-        let instance = RyeOsViewInstanceKey::shared_dock(
+        let instance = RyeOsViewInstanceKey::shared_dialog(
             &crate::ids::PresentationId::try_new(
                 crate::ui::reducer::test_support::FIXTURE_PRESENTATION_ID,
             )
             .unwrap(),
-            "bottom",
+            "input",
         )
         .unwrap();
         let original = InputBufferKey::new(instance.clone(), "view:test/chat", "line", descriptor);
@@ -4199,12 +4094,12 @@ mod tests {
         .unwrap();
         let base = || {
             InputBufferKey::new(
-                RyeOsViewInstanceKey::shared_dock(
+                RyeOsViewInstanceKey::shared_dialog(
                     &crate::ids::PresentationId::try_new(
                         crate::ui::reducer::test_support::FIXTURE_PRESENTATION_ID,
                     )
                     .unwrap(),
-                    "bottom",
+                    "input",
                 )
                 .unwrap(),
                 "view:ryeos/input",
@@ -4233,52 +4128,6 @@ mod tests {
         let other = base().scoped_for_input(&input, &other_work).storage_key();
         assert_eq!(first, continued, "a head ratchet retains the work draft");
         assert_ne!(first, other, "another chain cannot inherit that draft");
-    }
-
-    #[test]
-    fn ryeos_core_initializes_docks_only_from_admitted_shared_config() {
-        let session = crate::ui::reducer::test_support::session_with_surface_and_docks(
-            serde_json::json!({"name":"custom", "style":{"border":"thick"}, "views":{
-                "view:custom/list":{"widget":"rows"}, "view:ryeos/input":{"widget":"text","input":{"id":"line","submit":"route"}}
-            }}),
-            serde_json::json!({"left":{"content":"view:custom/list","open":true,"size":20},
-                "bottom":{"content":"view:ryeos/input","open":false,"size":5}}),
-        );
-        let core = RyeOsCore::new(
-            session,
-            crate::ui::reducer::test_support::FIXTURE_PRESENTATION_ID,
-            BrowserViewport::default(),
-            0,
-        );
-        let core = crate::ui::reducer::test_support::core(core.data.session.clone().unwrap());
-        let presentation = core.presentation.as_ref().unwrap();
-        let left = &presentation.docks()["left"];
-        assert!(left.visible);
-        assert_eq!(left.size, 20);
-        assert_eq!(left.view().view_ref(), "view:custom/list");
-        let bottom = &presentation.docks()["bottom"];
-        assert!(!bottom.visible);
-        assert_eq!(bottom.size, 5);
-        assert!(!presentation.docks().contains_key("right"));
-        assert!(!presentation.docks().contains_key("top"));
-        assert_eq!(
-            core.active_surface()
-                .unwrap()
-                .binding()
-                .binding_attachment_id,
-            "fixture-attachment"
-        );
-        let binding = core.binding_attachment("fixture-attachment").unwrap();
-        assert_eq!(
-            binding
-                .presentation
-                .definition
-                .surface()
-                .unwrap()
-                .style
-                .border,
-            crate::surface::BorderStyleSpec::Thick
-        );
     }
 
     #[test]
@@ -4320,24 +4169,16 @@ mod tests {
 
         assert!(core.binding_attachments.is_empty());
         assert!(core.presentation.is_none());
-        assert!(
-            super::super::view_model::build_view_model(&core)
-                .docks
-                .bottom
-                .is_none()
-        );
         assert!(!core.ui.notices.is_empty());
     }
 
     #[test]
-    fn ryeos_core_vm_exposes_default_input_dock() {
+    fn ryeos_core_exposes_the_open_input_dialog_as_default_input() {
         let mut core = RyeOsCore::default();
         with_input_view(&mut core);
         let vm = super::super::view_model::build_view_model(&core);
-        assert!(vm.docks.bottom.is_some());
-        assert!(vm.docks.top.is_none());
-        assert!(vm.docks.left.is_none());
-        assert!(vm.docks.right.is_none());
+        assert!(crate::ui::reducer::test_support::fixture_input_vm(&vm).is_some());
+        assert!(core.default_input_instance().is_some());
     }
 
     #[test]
@@ -4349,12 +4190,12 @@ mod tests {
         });
         let (key, _) = core.focused_input_instance().unwrap();
         let stale_address = core.input_address_for(key).unwrap();
-        core.presentation
-            .as_mut()
-            .unwrap()
-            .dock_mut("bottom")
-            .unwrap()
-            .visible = false;
+        let input = core.default_input_instance().unwrap();
+        core.dispatch(super::super::event::RyeOsEvent::Ui {
+            event: super::super::event::RyeOsUiEvent::CloseDialog {
+                instance_key: input,
+            },
+        });
 
         let effects = core.dispatch(super::super::event::RyeOsEvent::Ui {
             event: super::super::event::RyeOsUiEvent::InsertInputChar { ch: 'x' },

@@ -123,15 +123,16 @@ impl VaultCeilings {
     }
 
     /// The ceilings of the node's compiled policy generation, bound to the
-    /// operator whose signing key is at `operator_signing_key_path`.
+    /// operator named by the node's public operator records under `app_root`.
     pub fn from_node_policy(
         snapshot: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
-        operator_signing_key_path: &std::path::Path,
+        app_root: &std::path::Path,
     ) -> anyhow::Result<Self> {
         use anyhow::Context as _;
         let policy = snapshot.require::<SealedVaultNamesPolicy>()?.clone();
-        let operator = ryeos_node_runtime::identity::NodeIdentity::load(operator_signing_key_path)
-            .context("load the configured local operator identity for the sealed vault")?;
+        let operator =
+            ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(app_root)
+                .context("load the configured local operator identity for the sealed vault")?;
         Self::new(policy, operator.principal_id())
     }
 

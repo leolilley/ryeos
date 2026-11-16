@@ -29,7 +29,7 @@ pub async fn handle(
     let lifetime_secs = request.lifetime_secs;
     let params = request.into_params_as_local_operator(state.config.app_root.clone())?;
     let operator =
-        ryeos_node_runtime::identity::NodeIdentity::load(&state.config.operator_signing_key_path)
+        ryeos_node_runtime::operator_identity::OperatorPublicIdentity::load(&state.config.app_root)
             .context("load configured operator identity")?;
     if lillux::crypto::fingerprint(&params.public_key) == operator.fingerprint() {
         return Err(anyhow::Error::from(

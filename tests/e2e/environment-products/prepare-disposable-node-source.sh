@@ -63,7 +63,7 @@ source "$populated_repository/scripts/pkg/bundle-sets.sh"
 while IFS= read -r bundle_name; do
   bundle=$populated_repository/bundles/$bundle_name
   [[ -d $bundle/.ai ]] || {
-    printf 'populated full-set Bundle is missing: %s\n' "$bundle" >&2
+    printf 'populated development-set Bundle is missing: %s\n' "$bundle" >&2
     exit 66
   }
   /usr/bin/mkdir -p -- "$destination/$bundle_name"
@@ -72,8 +72,8 @@ while IFS= read -r bundle_name; do
     /usr/bin/cp -a -- "$bundle/PUBLISHER_TRUST.toml" \
       "$destination/$bundle_name/PUBLISHER_TRUST.toml"
   fi
-done < <(ryeos_bundle_set_names full)
+done < <(ryeos_bundle_set_names development)
 
 printf '%s\n' \
-  "prepared closed full node source for the enforced development profile at $destination" \
+  "prepared closed development node source for the enforced development profile at $destination" \
   'node initialization, trust admission, project signing and node start were not run'

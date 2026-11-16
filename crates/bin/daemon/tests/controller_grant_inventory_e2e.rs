@@ -72,16 +72,22 @@ const SESSION_CAPS: [&str; 3] = [
 /// `external-content/product-offer`, `objects/stage-chunk` and
 /// `external-content/product-accept`. Credential and worker-execution services
 /// are listed individually; none outside this list is granted.
-const OPERATOR_SERVICES: [&str; 16] = [
+const OPERATOR_SERVICES: [&str; 22] = [
     "credential-profiles/abandon-login",
     "credential-profiles/confirm",
     "credential-profiles/create",
     "credential-profiles/get",
+    "external-content/accept-qualification-testimony",
     "external-content/product-accept",
     "external-content/product-offer",
+    "launch/cancel",
+    "launch/status",
     "objects/has",
     "objects/put",
     "objects/stage-chunk",
+    "offline-operations/facts",
+    "offline-operations/status",
+    "offline-operations/submit",
     "project/status",
     "worker-executions/candidate-result",
     "worker-executions/command",
@@ -116,6 +122,11 @@ const LIVE_PROJECT_WRITE: &str = "ryeos.write.project.live";
 /// not use it.
 const PROJECT_SCAFFOLD: [&str; 2] = ["ryeos.read.project.live", "ryeos.write.project.live"];
 
+/// The offline scope that lets the operator compose an external placement
+/// binding on the stopped node. An offline scope rides only on the grant: a
+/// delegation never lends one.
+const OFFLINE_COMPOSE_CAP: &str = "ryeos.offline.node.external-execution.compose";
+
 fn service_cap(service: &str) -> String {
     format!("ryeos.execute.service.{service}")
 }
@@ -130,6 +141,7 @@ fn derived_grant() -> Vec<String> {
     grant.extend(SESSION_CAPS.map(str::to_owned));
     grant.extend(OPERATOR_SERVICES.map(service_cap));
     grant.extend(SINGLE_SERVICES.map(service_cap));
+    grant.push(OFFLINE_COMPOSE_CAP.to_owned());
     grant
 }
 
@@ -355,6 +367,7 @@ struct Controller {
 /// scenarios add to the grant.
 fn delegation_ceiling() -> Vec<String> {
     let mut lent = derived_grant();
+    lent.retain(|cap| cap != OFFLINE_COMPOSE_CAP);
     lent.extend(PROJECT_SCAFFOLD.map(str::to_owned));
     lent.push(OPERATOR_VAULT_CAP.to_owned());
     lent.push(LIVE_PROJECT_WRITE.to_owned());
@@ -680,6 +693,23 @@ async fn each_operator_service_needs_exactly_its_own_execute_cap(lane: Lane) {
             "the refusal must name {dropped}: {body:#}"
         );
     }
+}
+
+/// The offline scope is grant-only: a delegation that lends it is refused, and
+/// the delegation ceiling never includes it.
+#[test]
+fn the_offline_compose_scope_is_grant_only() {
+    assert!(derived_grant().iter().any(|cap| cap == OFFLINE_COMPOSE_CAP));
+    assert!(
+        !delegation_ceiling()
+            .iter()
+            .any(|cap| cap == OFFLINE_COMPOSE_CAP)
+    );
+    assert!(
+        ryeos_node_runtime::identity::reject_offline_scopes(&[OFFLINE_COMPOSE_CAP.to_owned()])
+            .is_err(),
+        "a delegation lending {OFFLINE_COMPOSE_CAP} must be refused"
+    );
 }
 
 /// Every granted service ships as a core service item.
