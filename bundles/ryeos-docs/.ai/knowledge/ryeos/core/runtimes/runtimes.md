@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T04:15:12Z:d6979f2f55fcd4f96237f937ad9c6166e2977a3f82fd425b2f545f1366187790:wwfydoD7z2Wd0s7fef1d4ILBjbvEm6btzzheklz8RSN8DKwnJGcixQ3PSR+jjMpr9zQ1DyUL5+onCWkvmy99BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T07:52:03Z:a0b79d05007c94568946f360cd76d5c3ce34a6cbd24c7b82858351e7e25b9dc4:IyYhLT1qqOzpLD+2ov0VVzArSAvGf+NnVItjch8G1WoS6AwZYrKn4bjuOd+wJcLeLyWbfR5cPtsEREpyqFTYAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
@@ -109,6 +109,12 @@ cut-off) defaults to resuming from the predecessor's checkpoint and fails if
 none exists. A runtime that rebuilds from the event braid declares
 `replay_continuation: true`; its successor then cold-starts, with no
 checkpoint copy and no `RYEOS_RESUME=1`, and replays its predecessor chain.
+
+A runtime that writes its own `child_thread_spawned` lineage events declares
+`writes_child_lineage: true` (default `false`). For every other runtime the
+daemon records a generic spawn event for each child dispatched through the
+action callback. The graph runtime sets it because its own spawn event carries
+the node and step.
 
 ### Nonterminal process control
 

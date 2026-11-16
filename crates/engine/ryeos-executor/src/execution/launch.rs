@@ -6734,6 +6734,22 @@ async fn run_claimed_thread_row_inner(
                 parent_ctx.parent_thread_id
             )));
         }
+        // This path also relaunches a child after a restart, when its parent
+        // has normally settled; a settled parent only means there is no
+        // event left to author, so it is logged and the launch proceeds.
+        if let ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+            ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+        ) = state
+            .threads
+            .record_dispatch_child_lineage(&thread_id)
+            .map_err(BuildAndLaunchError::Internal)?
+        {
+            tracing::warn!(
+                parent_thread_id = %parent_ctx.parent_thread_id,
+                thread_id = %thread_id,
+                "parent settled before the child's lineage event was recorded"
+            );
+        }
     }
 
     // A local machine-continuation successor continues its predecessor's work

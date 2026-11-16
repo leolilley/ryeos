@@ -179,6 +179,13 @@ impl StateStore {
             .settle_open_commands(thread_id, terminal_status)
     }
 
+    /// The effective relation under which `child_thread_id` is linked to its
+    /// parent, or `None` when no link has been recorded.
+    pub fn child_link_relation(&self, child_thread_id: &str) -> Result<Option<String>> {
+        let g = self.lock()?;
+        g.runtime_db.child_link_relation(child_thread_id)
+    }
+
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
     /// lineage for cancel/kill cascade). An exact replay is idempotent;
     /// conflicting parent or relation authority is rejected. If the parent was

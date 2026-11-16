@@ -3162,6 +3162,33 @@ fn awaited_action_parent_is_open(
         && matches!(current.status.as_str(), "created" | "running"))
 }
 
+/// Re-run the lineage append for a dispatched child that may have been born
+/// before a crash. A child born before a crash may lack its lineage event. The
+/// parent has usually settled by now, which is the normal recovery case, so a
+/// settled parent or a failed append is logged and the caller's pass continues.
+fn recover_child_lineage(
+    threads: &ryeos_app::thread_lifecycle::ThreadLifecycleService,
+    operation_id: &str,
+    child_thread_id: &str,
+) {
+    match threads.record_dispatch_child_lineage(child_thread_id) {
+        Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+            ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+        )) => tracing::warn!(
+            operation_id,
+            child_thread_id,
+            "parent settled before the dispatched child's lineage event was recovered"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            operation_id,
+            child_thread_id,
+            error = %error,
+            "failed to recover the dispatched child's lineage event"
+        ),
+    }
+}
+
 fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
     for intent in state.state_store.runtime_action_intents()? {
         if !matches!(
@@ -3303,6 +3330,11 @@ fn repair_root_runtime_action_links(state: &AppState) -> Result<()> {
             &intent.child_thread_id,
             "dispatch",
         )?;
+        recover_child_lineage(
+            &state.threads,
+            &intent.operation_id,
+            &intent.child_thread_id,
+        );
         if inherited_stop.is_some() {
             continue;
         }
@@ -4247,6 +4279,98 @@ fn converge_reserved_follow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lineage_thread(thread_id: &str) -> ryeos_app::state_store::NewThreadRecord {
+        let hash = "a".repeat(64);
+        ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "directive".to_string(),
+            item_ref: format!("directive:test/{thread_id}"),
+            executor_ref: "native:test".to_string(),
+            launch_mode: "wait".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("fp:test".to_string()),
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: Some(ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: format!("directive:test/{thread_id}"),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::test_policy(),
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn lineage_recovery_continues_past_a_child_whose_parent_settled() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (_owner, state) = ryeos_app::state::test_support::build(root.path()).expect("compose");
+        let store = &state.state_store;
+        for (index, (parent, child)) in [("T-p1", "T-c1"), ("T-p2", "T-c2")].iter().enumerate() {
+            store
+                .create_thread_for_test(&lineage_thread(parent))
+                .unwrap();
+            store.mark_thread_running(parent, None).unwrap();
+            store
+                .reserve_runtime_action_intent(
+                    &format!("{index}").repeat(64),
+                    parent,
+                    ryeos_app::runtime_db::RuntimeActionMode::Detached,
+                    &"b".repeat(64),
+                    child,
+                    None,
+                )
+                .unwrap();
+            store
+                .create_thread_for_test(&lineage_thread(child))
+                .unwrap();
+            store.record_child_link(parent, child, "dispatch").unwrap();
+        }
+        store
+            .finalize_thread(
+                "T-p1",
+                &ryeos_app::state_store::FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("completed".to_string()),
+                    result_json: None,
+                    error_json: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    managed_envelope: None,
+                    result_project_snapshot_hash: None,
+                    result_workspace_output_capture_hash: None,
+                },
+            )
+            .unwrap();
+
+        for (operation, child) in [("op-1", "T-c1"), ("op-2", "T-c2")] {
+            recover_child_lineage(&state.threads, operation, child);
+        }
+
+        let spawned = |parent: &str| {
+            store
+                .replay_events(parent, Some(parent), None, 64, 1024 * 1024)
+                .unwrap()
+                .events
+                .into_iter()
+                .filter(|event| event.event_type == "child_thread_spawned")
+                .count()
+        };
+        assert_eq!(spawned("T-p1"), 0);
+        assert_eq!(spawned("T-p2"), 1);
+    }
 
     #[test]
     fn advance_head_ref_coordinates_accept_only_the_canonical_project_head() {

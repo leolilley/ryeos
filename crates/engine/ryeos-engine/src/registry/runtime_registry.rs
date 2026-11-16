@@ -132,6 +132,13 @@ pub struct RuntimeYaml {
     /// runtime writes a native checkpoint and the successor resumes from it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_continuation: bool,
+    /// `true` => this runtime writes its own `child_thread_spawned` lineage
+    /// events for the children it dispatches, so the daemon does not write a
+    /// generic one for them. Default `false`: the daemon records the
+    /// parent->child lineage of each child created through the runtime's
+    /// action callback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub writes_child_lineage: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1659,11 +1666,26 @@ mod tests {
         assert!(checked > 0, "no bundled runtime descriptors were checked");
     }
 
+    #[test]
+    fn child_lineage_ownership_is_declared_on_the_descriptor() {
+        let bundles = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../bundles");
+        let declared = |bundle: &str, name: &str| {
+            let path = bundles.join(bundle).join(".ai/runtimes").join(name);
+            let body = std::fs::read_to_string(&path).unwrap();
+            parse_runtime_yaml(&path, &body)
+                .unwrap()
+                .writes_child_lineage
+        };
+        assert!(declared("graph", "graph-runtime.yaml"));
+        assert!(!declared("directive", "directive-runtime.yaml"));
+    }
+
     fn minimal_yaml() -> RuntimeYaml {
         RuntimeYaml {
             kind: "runtime".to_owned(),
             serves: "test_kind".to_owned(),
             replay_continuation: false,
+            writes_child_lineage: false,
             default: None,
             binary_ref: "bin/x86_64-unknown-linux-gnu/test-runtime".to_owned(),
             abi_version: SUPPORTED_RUNTIME_ABI_VERSION.to_owned(),
