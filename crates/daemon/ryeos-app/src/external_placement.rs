@@ -2275,10 +2275,33 @@ fn admit_current_runtime_qualification(
         )?;
         (witness.attestation_hash, witness.evidence, None)
     };
+    retain_admitted_runtime_qualification(
+        state,
+        contract,
+        binding_hash,
+        &qualification.owner_principal,
+        attestation_hash,
+        evidence,
+        remote_testimony,
+    )
+}
+
+/// Retain one admitted proof for the launch: the launch shape it was
+/// qualified under is compared first, then the retained proof is verified.
+fn retain_admitted_runtime_qualification(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+    binding_hash: &str,
+    owner_principal: &str,
+    attestation_hash: String,
+    evidence: ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
+    remote_testimony: Option<ryeos_state::objects::RetainedRemoteQualificationTestimony>,
+) -> Result<Option<ryeos_state::objects::RetainedExternalRuntimeQualification>> {
+    require_qualified_launch_shape(contract, &evidence)?;
     let retained = ryeos_state::objects::RetainedExternalRuntimeQualification {
         binding_hash: binding_hash.to_owned(),
         guest_runtime_manifest_hash: contract.guest_runtime_manifest_hash.clone(),
-        owner_principal: qualification.owner_principal.clone(),
+        owner_principal: owner_principal.to_owned(),
         proof: ryeos_state::external_content::products::composition::AdmittedProductQualification {
             attestation_hash,
             evidence,
@@ -2286,7 +2309,6 @@ fn admit_current_runtime_qualification(
         remote_testimony,
     };
     retained.validate()?;
-    require_qualified_launch_shape(contract, &retained.proof.evidence)?;
     verify_retained_runtime_proof(state, &retained)?;
     Ok(Some(retained))
 }
@@ -2301,26 +2323,37 @@ fn binding_launch_shape_kinds(
     contract: &ExternalPlacementBackendContract,
 ) -> (
     ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
-    &'static str,
+    ryeos_external_execution_contract::runtime_snapshot::LaunchSandboxNetworkPolicy,
 ) {
-    use ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport;
+    use ryeos_external_execution_contract::runtime_snapshot::{
+        LaunchControllerTransport, LaunchSandboxNetworkPolicy,
+    };
     match &contract.controller_transport {
         ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(_) => {
-            (LaunchControllerTransport::Https, "allow_list")
+            (
+                LaunchControllerTransport::Https,
+                LaunchSandboxNetworkPolicy::AllowList {
+                    hosts: Default::default(),
+                },
+            )
         }
         ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_) => {
-            (LaunchControllerTransport::Relay, "deny_all")
+            (
+                LaunchControllerTransport::Relay,
+                LaunchSandboxNetworkPolicy::DenyAll,
+            )
         }
     }
 }
 
 /// Refuse a launch whose shape differs from the shape its qualification ran
-/// under, naming the differing field and both values.
+/// under, naming the differing field and both values. Only the policy kind is
+/// compared: the launch's hosts are not known here.
 fn compare_launch_shape(
     qualified: &ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
     launch: (
         ryeos_external_execution_contract::runtime_snapshot::LaunchControllerTransport,
-        &'static str,
+        ryeos_external_execution_contract::runtime_snapshot::LaunchSandboxNetworkPolicy,
     ),
 ) -> Result<()> {
     ensure!(
@@ -2331,11 +2364,11 @@ fn compare_launch_shape(
         launch.0
     );
     ensure!(
-        qualified.sandbox_network_policy.kind() == launch.1,
+        qualified.sandbox_network_policy.kind() == launch.1.kind(),
         "launch shape differs from the qualified shape: launch_shape.sandbox_network_policy \
          qualified {}, launch {}",
         qualified.sandbox_network_policy.kind(),
-        launch.1
+        launch.1.kind()
     );
     Ok(())
 }
@@ -2344,18 +2377,22 @@ fn require_qualified_launch_shape(
     contract: &ExternalPlacementBackendContract,
     evidence: &ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
 ) -> Result<()> {
-    match evidence.remote_consumer_launch_shape() {
-        Some(qualified) => {
-            compare_launch_shape(qualified, binding_launch_shape_kinds(contract))?;
-            if let ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(http) =
-                &contract.controller_transport
-            {
-                compare_binding_network_input_sources(&http.network_inputs)?;
-            }
-            Ok(())
-        }
-        None => Ok(()),
+    use ryeos_state::external_content::products::qualification::ProductQualificationSubordinateAttemptProof as Attempt;
+    let Some(qualified) = evidence.remote_consumer_launch_shape() else {
+        let kind = match evidence.execution_proof.subordinate_attempt.as_ref() {
+            None => "no subordinate attempt",
+            Some(Attempt::ScopedProducer { .. }) => "scoped producer attempt",
+            Some(Attempt::RemoteConsumer { .. }) => "remote owner measurement attempt",
+        };
+        bail!("the runtime qualification retained no launch shape (proof kind: {kind})");
+    };
+    compare_launch_shape(qualified, binding_launch_shape_kinds(contract))?;
+    if let ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(http) =
+        &contract.controller_transport
+    {
+        compare_binding_network_input_sources(&http.network_inputs)?;
     }
+    Ok(())
 }
 
 /// The qualification verified the supervisor's observed network inputs
@@ -11184,19 +11221,31 @@ mod tests {
     #[test]
     fn a_launch_shape_that_differs_from_the_qualified_one_is_refused_with_both_values() {
         use ryeos_external_execution_contract::runtime_snapshot::{
-            LaunchControllerTransport, LaunchShape,
+            LaunchControllerTransport, LaunchSandboxNetworkPolicy, LaunchShape,
         };
         let https = LaunchShape::https_allow_list(["controller.invalid".to_owned()]);
         // Hosts are not compared: the qualification's host never resolves.
-        compare_launch_shape(&https, (LaunchControllerTransport::Https, "allow_list")).unwrap();
+        let allow = || LaunchSandboxNetworkPolicy::AllowList {
+            hosts: Default::default(),
+        };
+        compare_launch_shape(&https, (LaunchControllerTransport::Https, allow())).unwrap();
         compare_launch_shape(
             &LaunchShape::relay_deny_all(),
-            (LaunchControllerTransport::Relay, "deny_all"),
+            (
+                LaunchControllerTransport::Relay,
+                LaunchSandboxNetworkPolicy::DenyAll,
+            ),
         )
         .unwrap();
         let transport = format!(
             "{:#}",
-            compare_launch_shape(&https, (LaunchControllerTransport::Relay, "deny_all"))
+            compare_launch_shape(
+                &https,
+                (
+                    LaunchControllerTransport::Relay,
+                    LaunchSandboxNetworkPolicy::DenyAll,
+                ),
+            )
                 .unwrap_err()
         );
         assert!(
@@ -11207,7 +11256,13 @@ mod tests {
         );
         let policy = format!(
             "{:#}",
-            compare_launch_shape(&https, (LaunchControllerTransport::Https, "deny_all"))
+            compare_launch_shape(
+                &https,
+                (
+                    LaunchControllerTransport::Https,
+                    LaunchSandboxNetworkPolicy::DenyAll,
+                ),
+            )
                 .unwrap_err()
         );
         assert!(
@@ -11215,6 +11270,156 @@ mod tests {
                 && policy.contains("allow_list")
                 && policy.contains("deny_all"),
             "{policy}"
+        );
+    }
+
+    fn qualified_evidence(
+    ) -> ryeos_state::external_content::products::qualification::ProductQualificationEvidence {
+        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
+            &"a".repeat(64),
+        )
+        .unwrap();
+        selections
+            .get("auxiliary")
+            .unwrap()
+            .qualification
+            .clone()
+            .unwrap()
+            .evidence
+    }
+
+    /// The remote consumer proof a lease qualification retains, stating the
+    /// launch shape its occurrence was created under.
+    fn remote_consumer_proof(
+        launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
+    ) -> ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof
+    {
+        use ryeos_external_execution_contract::restored_runtime_measurement::{
+            ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
+            ConsumerRuntimeVerifierSelection, ConsumerVerifierAdapterObservation,
+            RemoteVerificationPurpose, RestoredVerifierAttemptIntent,
+        };
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            RuntimeSnapshotQualificationTerminalObservation,
+            RuntimeSnapshotQualificationTerminationIntent,
+        };
+        let hash = |c: char| c.to_string().repeat(64);
+        ryeos_state::external_content::products::qualification::ProductQualificationRemoteConsumerProof {
+            launch_owner_digest: hash('b'),
+            consumer_input_blob_hash: hash('c'),
+            intent: RestoredVerifierAttemptIntent {
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
+                operation_id: hash('1'),
+                qualification_operation_id: hash('1'),
+                restored_occurrence_id: "fixture-occurrence".into(),
+                verifier_artifact_hash: hash('2'),
+                upload_sha256: hash('3'),
+                upload_bytes: 1,
+                attempt_deadline_ms: 1000,
+                purpose: RemoteVerificationPurpose::ConsumerRuntime {
+                    coordinate: ConsumerRuntimeVerificationCoordinate {
+                        schema: 1,
+                        accepted_root_id: "root".into(),
+                        accepted_capsule_hash: hash('4'),
+                        qualification_purpose_digest: hash('4'),
+                        scenario_id: "guest_wire".into(),
+                        scenario_source_digest: hash('5'),
+                        subject_digest: hash('6'),
+                        use_digest: hash('7'),
+                        prerequisite_measurement_attempt_id: hash('8'),
+                        prerequisite_measurement_observation_digest: hash('9'),
+                    },
+                    nonce_hex: hash('a'),
+                    guest_runtime_manifest_hash: hash('b'),
+                    launch_shape,
+                },
+            },
+            selection: ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: hash('5'),
+                verifier_artifact_hash: hash('2'),
+                archive_budget: ConsumerArchiveBudget::new(8, 1024, 4096).unwrap(),
+            },
+            observation: ConsumerVerifierAdapterObservation {
+                schema: 1,
+                operation_id: hash('1'),
+                occurrence_id: "fixture-occurrence".into(),
+                verifier_artifact_hash: hash('2'),
+                challenge_digest: hash('d'),
+                upload_token_execution_id: "exe-upload".into(),
+                run_token_execution_id: "exe-run".into(),
+                upload_response_sha256: hash('c'),
+                run_stream_sha256: hash('d'),
+                evidence_sha256: hash('e'),
+                evidence_bytes: 1,
+                contact_deadline_exceeded: false,
+            },
+            termination_intent: RuntimeSnapshotQualificationTerminationIntent {
+                schema: 1,
+                operation_id: hash('1'),
+                qualification_operation_id: hash('1'),
+                occurrence_id: "fixture-occurrence".into(),
+                owner_principal: "owner".into(),
+                provider_id: "provider".into(),
+                provider_spec_digest: hash('f'),
+                attempt_deadline_ms: 2000,
+            },
+            terminal_observation: RuntimeSnapshotQualificationTerminalObservation {
+                schema: 1,
+                operation_id: hash('1'),
+                occurrence_id: "fixture-occurrence".into(),
+                provider_response_sha256: hash('a'),
+                terminated_at: "2026-10-01T00:00:00Z".into(),
+                contact_deadline_exceeded: false,
+            },
+        }
+    }
+
+    #[test]
+    fn a_proof_that_retained_no_launch_shape_is_refused_naming_its_kind() {
+        let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
+        let contract = binding.backend_contract();
+        let evidence = qualified_evidence();
+        assert!(evidence.execution_proof.subordinate_attempt.is_none());
+        let error = require_qualified_launch_shape(&contract, &evidence).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("the runtime qualification retained no launch shape")
+                && message.contains("no subordinate attempt"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn launch_admission_compares_the_shape_the_proof_retained_with_the_binding() {
+        use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+        use ryeos_state::external_content::products::qualification::ProductQualificationSubordinateAttemptProof;
+        let binding = InstalledExternalExecutionBinding::direct_test_fixture(30);
+        let contract = binding.backend_contract();
+        let root = tempfile::tempdir().unwrap();
+        let (_owner, state) = crate::state::test_support::build(root.path()).unwrap();
+        let mut evidence = qualified_evidence();
+        // The binding's controller is https with a guest network allow-list;
+        // a proof qualified under the relay shape does not qualify it.
+        evidence.execution_proof.subordinate_attempt =
+            Some(ProductQualificationSubordinateAttemptProof::RemoteConsumer {
+                proof: remote_consumer_proof(LaunchShape::relay_deny_all()),
+            });
+        let error = retain_admitted_runtime_qualification(
+            &state,
+            &contract,
+            binding.digest(),
+            &format!("fp:{}", "7".repeat(64)),
+            "1".repeat(64),
+            evidence,
+            None,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("launch_shape.controller_transport")
+                && message.contains("Relay")
+                && message.contains("Https"),
+            "{message}"
         );
     }
 
