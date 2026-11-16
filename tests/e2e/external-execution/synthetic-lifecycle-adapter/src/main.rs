@@ -26,8 +26,7 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV,
     LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleRuntimeProbeRequest,
-    LifecycleRuntimeProbeResponse, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
+    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
     from_json_slice_strict,
 };
 use ryeos_state::external_execution::transport::{
@@ -343,7 +342,6 @@ fn run() -> Result<()> {
         .context("lifecycle adapter operation is absent")?;
     match operation.as_str() {
         "inspect" => inspect(&adapter),
-        "verify-runtime-probe" => verify_runtime_probe(&adapter),
         "operate" => operate(&adapter),
         "produce-snapshot" => snapshot_lane::produce_snapshot(&adapter),
         "produce-snapshot-upload" => snapshot_lane::produce_snapshot_upload(&adapter),
@@ -473,44 +471,6 @@ fn inspect(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
     };
     response.validate_for(&request)?;
     write_response(&response)
-}
-
-/// Credential-free interpretation of one authenticated runtime probe. The
-/// controller has already authenticated the product and its testimony; this
-/// operation only confirms that the sealed request names this exact adapter
-/// and the exact settings it was signed with, then echoes the request digest.
-fn verify_runtime_probe(adapter: &lillux::InheritedDescriptorAuthority) -> Result<()> {
-    ensure!(
-        [
-            LIFECYCLE_CREDENTIAL_FD_ENV,
-            LIFECYCLE_BOOTSTRAP_FD_ENV,
-            LIFECYCLE_GUEST_PACKAGE_FD_ENV,
-        ]
-        .into_iter()
-        .all(|name| std::env::var_os(name).is_none()),
-        "runtime probe interpretation received contact authority"
-    );
-    let request_bytes = read_sealed_env(LIFECYCLE_REQUEST_FD_ENV, MAX_LIFECYCLE_REQUEST_BYTES)?;
-    let request: LifecycleRuntimeProbeRequest =
-        from_json_slice_strict(&request_bytes, MAX_LIFECYCLE_REQUEST_BYTES)?;
-    request.validate()?;
-    ensure!(
-        request.canonical_bytes()? == request_bytes
-            && request.protocol == LIFECYCLE_ADAPTER_PROTOCOL,
-        "runtime probe request is noncanonical or for another protocol"
-    );
-    verify_artifact(adapter, &request.adapter_artifact_hash, None, "adapter")?;
-    let settings_bytes = read_sealed_env(LIFECYCLE_SETTINGS_FD_ENV, MAX_SETTINGS_BYTES)?;
-    ensure!(
-        lillux::sha256_hex(&settings_bytes) == request.settings_digest,
-        "runtime probe settings digest changed"
-    );
-    write_response(&LifecycleRuntimeProbeResponse {
-        schema: 1,
-        protocol: LIFECYCLE_ADAPTER_PROTOCOL.into(),
-        adapter_id: request.adapter_id.clone(),
-        request_digest: request.digest()?,
-    })
 }
 
 fn inject_response_loss_once(

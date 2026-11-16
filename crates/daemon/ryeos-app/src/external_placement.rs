@@ -59,31 +59,6 @@ enum RuntimeAdmissionBasis {
     RestoredOwnerMeasurement,
 }
 
-/// Adapter interpretation input, not a qualification publication or grant.
-/// The caller must independently authenticate the exact source, attestation,
-/// retained journal and policy before constructing this value.
-pub(crate) struct RuntimeProbeInput {
-    pub qualification_attestation_hash: String,
-    pub runtime_source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource,
-    pub subject_manifest_hash: String,
-    pub probe_evidence: serde_json::Value,
-}
-
-impl RuntimeProbeInput {
-    fn from_product(
-        proof: &ryeos_state::external_content::products::composition::AdmittedProductQualification,
-    ) -> Self {
-        Self {
-            qualification_attestation_hash: proof.attestation_hash.clone(),
-            runtime_source: ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
-                product_witness_hash: proof.evidence.product_witness_hash.clone(),
-            },
-            subject_manifest_hash: proof.evidence.result.subject_manifest_hash.clone(),
-            probe_evidence: proof.evidence.result.probe_evidence.clone(),
-        }
-    }
-}
-
 /// The binding facts a provider inventory lists under: the signed settings
 /// that name the owner scope, and the network inputs the adapter may use.
 pub(crate) struct ProviderInventorySource<'a> {
@@ -354,20 +329,6 @@ pub(crate) trait ExternalPlacementBackend: Send + Sync + std::fmt::Debug {
         contract: &ExternalPlacementBackendContract,
         credential: &PlacementCredential,
     ) -> Result<()>;
-
-    /// Interpret an already-authenticated, CAS-owned runtime probe
-    /// against this exact signed placement contract. This operation must be
-    /// credential-free and provider-contact-free. It cannot authenticate the
-    /// qualification attestation, grant lifecycle capability, or permit allocation.
-    fn verify_runtime_probe(
-        &self,
-        _contract: &ExternalPlacementBackendContract,
-        _proof: &RuntimeProbeInput,
-        _source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
-        _binding_hash: &str,
-    ) -> Result<()> {
-        bail!("external lifecycle adapter does not verify runtime qualification probes")
-    }
 
     /// Whether this backend's signed provider spec declares that activation
     /// uploads the guest runtime itself, so the controller must produce that
@@ -1685,34 +1646,6 @@ impl ExternalPlacementBackendRegistry {
         backend.observe_runtime_snapshot_readiness(binding, credential, request, deadline)
     }
 
-    fn verify_runtime_probe(
-        &self,
-        contract: &ExternalPlacementBackendContract,
-        proof: &RuntimeProbeInput,
-        source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
-        binding_hash: &str,
-    ) -> Result<()> {
-        let backend = self
-            .backends
-            .get(&(
-                contract.backend.clone(),
-                contract.backend_artifact_hash.clone(),
-            ))
-            .ok_or_else(|| {
-                self.binding_artifact_not_installed(
-                    "exact signed external placement backend generation is not installed",
-                    serde_json::json!({
-                        "section": crate::node_config::sections::external_execution::SECTION_NAME,
-                        "digest": binding_hash,
-                    }),
-                    "backend_artifact_hash",
-                    &contract.backend,
-                    &contract.backend_artifact_hash,
-                )
-            })?;
-        backend.verify_runtime_probe(contract, proof, source, binding_hash)
-    }
-
     /// Exact installed artifact coordinates of the one lifecycle generation
     /// registered under this backend id, for composing a signed placement
     /// binding.
@@ -2367,18 +2300,6 @@ fn admit_current_runtime_qualification(
             qualification,
             &contract.guest_runtime_manifest_hash,
         )?;
-        // The probe snapshot locator is rejoined to this node's own provider
-        // journal, which a remote testimony cannot satisfy. Refuse rather
-        // than skip the rejoin.
-        ensure!(
-            remote
-                .evidence
-                .result
-                .probe_evidence
-                .get("runtime_snapshot_locator")
-                .is_none(),
-            "remote qualification testimony cannot carry a runtime snapshot locator"
-        );
         (
             remote.qualification_attestation_hash,
             remote.evidence,
@@ -2407,8 +2328,7 @@ fn admit_current_runtime_qualification(
         remote_testimony,
     };
     retained.validate()?;
-    let source = verify_retained_runtime_proof(state, &retained)?;
-    verify_retained_runtime_probe(state, contract, &retained, &source, binding_hash)?;
+    verify_retained_runtime_proof(state, &retained)?;
     Ok(Some(retained))
 }
 
@@ -2454,46 +2374,8 @@ fn require_retained_session_runtime_qualification(
     else {
         return Ok(());
     };
-    let source = verify_retained_runtime_proof(state, retained)?;
-    verify_retained_runtime_probe(state, &contract, retained, &source, binding.digest())
-}
-
-/// Judge the retained qualification's probe evidence against the exact placement.
-///
-/// A probe that names a snapshot locator was produced on this node's own
-/// provider: its locator is rejoined to this node's journal and the backend's
-/// adapter then interprets it against the exact adapter, settings and binding.
-/// A remote qualification testimony cannot carry a locator, because the
-/// attesting node's journal is not this node's; its evidence was already
-/// authenticated against the accepted testimony, so no adapter interprets it.
-/// Locator-less evidence with no testimony is refused rather than skipped.
-fn verify_retained_runtime_probe(
-    state: &AppState,
-    contract: &ExternalPlacementBackendContract,
-    retained: &ryeos_state::objects::RetainedExternalRuntimeQualification,
-    source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
-    binding_hash: &str,
-) -> Result<()> {
-    let locator = crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
-        state,
-        &retained.proof,
-        source,
-        &contract.backend,
-        &retained.owner_principal,
-    )?;
-    if locator.is_none() {
-        ensure!(
-            retained.remote_testimony.is_some(),
-            "runtime qualification probe names no snapshot locator and carries no remote testimony"
-        );
-        return Ok(());
-    }
-    state.external_placement_backends.verify_runtime_probe(
-        contract,
-        &RuntimeProbeInput::from_product(&retained.proof),
-        source,
-        binding_hash,
-    )
+    verify_retained_runtime_proof(state, retained)?;
+    Ok(())
 }
 
 /// What a retained product-sourced session must and must not carry: its
@@ -12775,55 +12657,6 @@ mod tests {
             )
             .unwrap()
             .is_some()
-        );
-    }
-
-    #[test]
-    fn runtime_probe_interpretation_requires_an_exact_installed_backend() {
-        let binding = RetainedExternalExecutionBinding::test_fixture();
-        let contract = binding.backend_contract();
-        let selections = ryeos_state::external_content::products::qualification::test_support::qualified_runtime_selections(
-            &contract.guest_runtime_manifest_hash,
-        )
-        .unwrap();
-        let proof = selections
-            .get("auxiliary")
-            .unwrap()
-            .qualification
-            .as_ref()
-            .unwrap();
-        let input = RuntimeProbeInput::from_product(proof);
-        assert_eq!(
-            input.runtime_source,
-            ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotSource::CapturedProduct {
-                product_witness_hash: proof.evidence.product_witness_hash.clone(),
-            }
-        );
-        assert_eq!(input.qualification_attestation_hash, proof.attestation_hash);
-        assert_eq!(
-            input.subject_manifest_hash,
-            proof.evidence.result.subject_manifest_hash
-        );
-        assert_eq!(input.probe_evidence, proof.evidence.result.probe_evidence);
-        let source =
-            ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity {
-                manifest_hash: contract.guest_runtime_manifest_hash.clone(),
-                owner_executable_sha256: "7".repeat(64),
-            };
-        assert!(
-            ExternalPlacementBackendRegistry::default()
-                .verify_runtime_probe(&contract, &input, &source, binding.digest(),)
-                .is_err()
-        );
-        let registry =
-            ExternalPlacementBackendRegistry::from_backends(vec![Arc::new(FixtureBackend {
-                artifact: contract.backend_artifact_hash.clone(),
-            })])
-            .unwrap();
-        assert!(
-            registry
-                .verify_runtime_probe(&contract, &input, &source, binding.digest(),)
-                .is_err()
         );
     }
 

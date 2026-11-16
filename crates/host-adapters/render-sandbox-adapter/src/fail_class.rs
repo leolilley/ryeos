@@ -130,7 +130,6 @@ pub(crate) fn unclassified_exit_code(invocation: Option<&str>) -> i32 {
         Some("admit-lease") => 34,
         Some("await-lease-ready") => 35,
         Some("relay-file") => 36,
-        Some("verify-runtime-probe") => 37,
         Some("list-provider-resources") => 38,
         _ => 2,
     }
