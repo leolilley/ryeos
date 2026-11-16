@@ -1972,17 +1972,10 @@ impl ExternalPlacementBackendRegistry {
         if require_activation {
             match runtime_basis {
                 // Current guest mechanism testimony is mandatory for every
-                // ordinary start (admit_current_runtime_qualification), so a
-                // binding always carries a runtime qualification. An adapter
-                // that itself requires independent guest runtime admission
-                // can never run without one; an adapter that does not require
-                // it still starts only on the binding's qualification.
-                RuntimeAdmissionBasis::OrdinarySignedRelationship => ensure!(
-                    contract.runtime_qualification.is_some()
-                        || !effective
-                            .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
-                    "external runtime qualification relationship differs from installed adapter admission"
-                ),
+                // ordinary start (admit_current_runtime_qualification), so no
+                // relation between the binding's qualification and the
+                // adapter's capability set is left to judge here.
+                RuntimeAdmissionBasis::OrdinarySignedRelationship => {}
                 // A provider whose activation stages the runtime itself admits
                 // it independently of any prior qualification; the session
                 // being qualified is then the product it stages.
@@ -12884,18 +12877,19 @@ mod tests {
         });
         let qualified_registry =
             ExternalPlacementBackendRegistry::from_backends(vec![qualified_backend]).unwrap();
-        assert!(
-            qualified_registry
-                .qualify(
-                    &contract,
-                    &credential,
-                    &AdmittedExternalExecutionProgram::StructuredSession(program()),
-                )
-                .is_err(),
-            "an active independent-runtime adapter cannot admit a missing relationship"
-        );
-        // The registry checks the shape. Session admission and first contact
+        // The ordinary-session relation between the binding's qualification and
+        // the adapter's capability set is gone: guest mechanism testimony is
+        // mandatory for every ordinary start and is judged by
+        // admit_current_runtime_qualification, not by this registry. The
+        // registry checks the shape. Session admission and first contact
         // independently authenticate the exact witness and adapter probe.
+        qualified_registry
+            .qualify(
+                &contract,
+                &credential,
+                &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            )
+            .unwrap();
         qualified_registry
             .qualify(
                 &unverified,
