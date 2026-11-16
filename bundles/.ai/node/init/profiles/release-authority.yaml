@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T13:27:47Z:a85d0b71df6758e16463520cd8406339900c2cf3c51a6ca6febfcb3482d1f1c9:1A574ERH1x5c9l1Dwq0WN68mTVvvVKVZ0pVCa9cJwAUGBdi2YhH+jNByo15NweqcOiiB9nOBJ9p+t8d+9ZVuDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-17T01:21:17Z:95cbcb6a44fc654a8985928972361592dadab2a313af32e9b753f5bb970072cf:MDm3RztYRP24VdmW5nHoRWmRBixTcl8NFF2crindushxEQYsf2ay7N1YZwNWhklHdVfRRZtS81Q19dM1f5bEBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 schema: 1
 exact_bundles:
   - bundle-release
@@ -233,6 +233,17 @@ policies:
     default_retention: durable
     item_authored_retention: allow
     minimum_terminal_for: null
+  thread_attachments:
+    schema: 1
+    max_bytes_per_attachment: 4194304
+    max_attachments_per_turn: 16
+    max_attachments_per_run: 256
+    accepted_media_types:
+      - application/json
+      - image/gif
+      - image/jpeg
+      - image/png
+      - image/webp
   maintenance:
     schema: 5
     # Process-scoped native envelopes for stopped-node maintenance, keyed by
