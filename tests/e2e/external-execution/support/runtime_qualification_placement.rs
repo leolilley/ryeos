@@ -15,8 +15,8 @@ use super::runtime_qualification::{
 /// owner members, observed as one ordinary tree manifest.
 pub const OWNER_GUEST_PRODUCT: GuestProductStorage = GuestProductStorage {
     storage: "content",
-    maximum_file_bytes: 1_048_576,
-    maximum_total_bytes: 2_097_152,
+    maximum_file_bytes: 33_554_432,
+    maximum_total_bytes: 41_943_040,
 };
 
 /// Lay out the three-member guest owner runtime a placement binding names as
@@ -24,6 +24,23 @@ pub const OWNER_GUEST_PRODUCT: GuestProductStorage = GuestProductStorage {
 /// and the owner profile. `owner_bytes` stands in for the executable; the
 /// synthetic adapter never runs it.
 pub fn write_owner_runtime_tree(root: &Path, owner_bytes: &[u8]) {
+    write_owner_runtime_tree_with_profile(root, owner_bytes, 600, 32 * 1024 * 1024, 1024);
+}
+
+/// The tree a provider that really runs the installed owner holds, with the
+/// codex bundle's production owner profile (600 s, a 1 GiB private-source
+/// ceiling and 4096 inodes).
+pub fn write_installed_owner_runtime_tree(root: &Path, owner_bytes: &[u8]) {
+    write_owner_runtime_tree_with_profile(root, owner_bytes, 600, 1024 * 1024 * 1024, 4096);
+}
+
+fn write_owner_runtime_tree_with_profile(
+    root: &Path,
+    owner_bytes: &[u8],
+    owner_timeout_seconds: u32,
+    private_source_max_bytes: u64,
+    private_source_max_inodes: u64,
+) {
     use std::os::unix::fs::PermissionsExt as _;
 
     std::fs::create_dir_all(root.join("bin")).unwrap();
@@ -43,9 +60,9 @@ pub fn write_owner_runtime_tree(root: &Path, owner_bytes: &[u8]) {
             uid: 65534,
             gid: 65534,
         },
-        private_source_max_bytes: 32 * 1024 * 1024,
-        private_source_max_inodes: 1024,
-        owner_timeout_seconds: 600,
+        private_source_max_bytes,
+        private_source_max_inodes,
+        owner_timeout_seconds,
     };
     write(
         "guest-owner-profile.json",

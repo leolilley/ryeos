@@ -998,6 +998,7 @@ fn prepare_runtime_qualification_inputs(
     node_root: &Path,
     state: &ryeos_app::state::AppState,
     session_runtime: &Path,
+    installed_owner: Option<&Path>,
 ) -> RuntimeQualificationInputs {
     let guest_tree = tempfile::tempdir().unwrap();
     lillux::PinnedDirectory::open(guest_tree.path())
@@ -1005,10 +1006,30 @@ fn prepare_runtime_qualification_inputs(
         .unwrap()
         .tighten_owner_private_directory()
         .unwrap();
-    runtime_qualification_placement::write_owner_runtime_tree(
-        guest_tree.path(),
-        b"synthetic guest owner executable",
-    );
+    match installed_owner {
+        // A provider whose snapshot really holds the guest owner: its tree
+        // carries the real executable and a lifetime that outlives the lease.
+        Some(executable) => {
+            // A debug build exceeds the owner executable's admitted size
+            // bound; the installed product is its stripped form.
+            let stripped = tempfile::NamedTempFile::new().unwrap();
+            let status = std::process::Command::new("strip")
+                .arg("-o")
+                .arg(stripped.path())
+                .arg(executable)
+                .status()
+                .unwrap();
+            assert!(status.success(), "strip of the guest owner failed");
+            runtime_qualification_placement::write_installed_owner_runtime_tree(
+                guest_tree.path(),
+                &std::fs::read(stripped.path()).unwrap(),
+            )
+        }
+        None => runtime_qualification_placement::write_owner_runtime_tree(
+            guest_tree.path(),
+            b"synthetic guest owner executable",
+        ),
+    }
     let guest_manifest =
         runtime_qualification_placement::install_ordinary_runtime_content(state, guest_tree.path());
     let guest_manifest_hash =
@@ -1514,7 +1535,7 @@ fn run_signed_worker_admission_on(
         None,
     );
     let qualification_inputs =
-        prepare_runtime_qualification_inputs(root.path(), &state, runtime.path());
+        prepare_runtime_qualification_inputs(root.path(), &state, runtime.path(), None);
     author_guest_runtime_sources(
         &qualification_inputs,
         &candidate_authoring_bundle.root,
@@ -2802,7 +2823,70 @@ fn install_signed_test_bundle(
     connector_new_group: bool,
     independent_guest_runtime_admission: bool,
 ) -> (PathBuf, ryeos_engine::trust::TrustStore, PathBuf) {
+    install_signed_test_bundle_with_guests(
+        root,
+        connector_new_group,
+        independent_guest_runtime_admission,
+        false,
+    )
+}
+
+/// The statically linked build of one guest executable. A guest sandbox holds
+/// no host libraries, so a provider that really runs the installed owner can
+/// only start static guests. Build them first with
+/// `RUSTFLAGS='-C target-feature=+crt-static' cargo build --target
+/// x86_64-unknown-linux-gnu -p ryeos-synthetic-external-lifecycle-adapter
+/// --bin ryeos-synthetic-mounted-candidate-supervisor --bin
+/// ryeos-synthetic-external-candidate-launcher --bin
+/// ryeos-synthetic-external-candidate-connector`.
+fn static_guest(dynamic: &str, name: &str) -> PathBuf {
+    let path = Path::new(dynamic)
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("x86_64-unknown-linux-gnu/debug")
+        .join(name);
+    assert!(
+        path.is_file(),
+        "the static guest executable {} is not built; see `static_guest`",
+        path.display()
+    );
+    path
+}
+
+fn install_signed_test_bundle_with_guests(
+    root: &Path,
+    connector_new_group: bool,
+    independent_guest_runtime_admission: bool,
+    static_guests: bool,
+) -> (PathBuf, ryeos_engine::trust::TrustStore, PathBuf) {
     let key = lillux::crypto::SigningKey::from_bytes(&[61; 32]);
+    let supervisor_dynamic = env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-supervisor");
+    let launcher_dynamic = env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-launcher");
+    let connector_dynamic = env!("CARGO_BIN_EXE_ryeos-synthetic-external-candidate-connector");
+    let (supervisor, launcher, connector) = if static_guests {
+        (
+            // The guest sandbox starts the production held-launch entry.
+            static_guest(
+                supervisor_dynamic,
+                "ryeos-synthetic-mounted-candidate-supervisor",
+            ),
+            static_guest(
+                launcher_dynamic,
+                "ryeos-synthetic-external-candidate-launcher",
+            ),
+            static_guest(
+                connector_dynamic,
+                "ryeos-synthetic-external-candidate-connector",
+            ),
+        )
+    } else {
+        (
+            PathBuf::from(supervisor_dynamic),
+            PathBuf::from(launcher_dynamic),
+            PathBuf::from(connector_dynamic),
+        )
+    };
     signed_bundle::install_signed_test_bundle_with_guest_admission(
         root,
         connector_new_group,
@@ -2812,15 +2896,9 @@ fn install_signed_test_bundle(
             adapter: Path::new(env!(
                 "CARGO_BIN_EXE_ryeos-synthetic-external-lifecycle-adapter"
             )),
-            supervisor: Path::new(env!(
-                "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-supervisor"
-            )),
-            launcher: Path::new(env!(
-                "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-launcher"
-            )),
-            connector: Path::new(env!(
-                "CARGO_BIN_EXE_ryeos-synthetic-external-candidate-connector"
-            )),
+            supervisor: &supervisor,
+            launcher: &launcher,
+            connector: &connector,
             configuration: Path::new(env!(
                 "CARGO_BIN_EXE_ryeos-synthetic-codex-external-configuration"
             )),
@@ -3255,7 +3333,7 @@ fn composed_controller_attachment_on(
     );
     let verifier_manifest_hash = qualification_node::manifest_hash(&verifier_manifest);
     let qualification_inputs =
-        prepare_runtime_qualification_inputs(root.path(), &state, runtime.path());
+        prepare_runtime_qualification_inputs(root.path(), &state, runtime.path(), None);
     let (authoring, _) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
@@ -3573,13 +3651,43 @@ fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
 }
 
 /// The no-spend lease lane: the real codex placement requirements, a lease the
-/// synthetic adapter admits through the shared lease core, and the held
-/// supervisor over https.
+/// synthetic adapter admits through the shared lease core, the real guest
+/// owner and held supervisor in a local enclosure on the daemon's signed
+/// inputs, and the production controller routes over https. Needs the static
+/// guest executables of `static_guest`.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-#[ignore = "the synthetic supervisor start has no guest-owner ready boot inputs for a leased guest; see run.md W7"]
+#[ignore = "the real guest supervisor reaches the controller (attach) and then refuses its launcher spawn: \"mapped target 65 aliases process-control authority\" (lillux exec.rs:9729); see run.md W7"]
 fn production_tls_candidate_on_a_remote_lease() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Lease);
+}
+
+/// The lease lane's test-owned resolver and hosts files, parsed as the guest's
+/// network context parses them, put the controller name on the loopback the
+/// fixture listens on.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn lease_lane_network_inputs_reach_the_controller_name() {
+    let lane = LeaseLaneController::new(PublicationScenario::Lease);
+    let context = lillux::network::NetworkContext::from_config_bytes(
+        &std::fs::read(lane.resolver_source()).unwrap(),
+        &std::fs::read(lane.hosts_source()).unwrap(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let deadline = lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(5));
+    let stream = context
+        .connect(
+            LEASE_LANE_CONTROLLER_HOST,
+            port,
+            deadline,
+            deadline,
+            lillux::time::Duration::from_secs(5),
+            lillux::network::NetworkCancellation::default(),
+        )
+        .unwrap();
+    drop(stream);
 }
 
 /// With the fixture's 60 s binding and the real codex requirements, launch
@@ -3682,10 +3790,19 @@ impl LeaseLaneController {
             PublicationScenario::Lease | PublicationScenario::LeaseTooShort
         )
         .then(|| {
-            let dir = tempfile::tempdir().unwrap();
+            // Not under `/tmp`: the guest owner hides its old `/tmp`, and the
+            // inputs must exist at the same path on the controller and in
+            // the guest.
+            let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
             std::fs::write(
                 dir.path().join("hosts"),
-                format!("127.0.0.1 localhost\n127.0.0.1 {LEASE_LANE_CONTROLLER_HOST}\n"),
+                // Both address families come from this file: the captured resolver
+                // queries IPv6 and IPv4 together, and a nameserver that is not
+                // there would hold the lookup past the connect window.
+                format!(
+                    "127.0.0.1 localhost\n::1 localhost\n\
+                     127.0.0.1 {LEASE_LANE_CONTROLLER_HOST}\n::1 {LEASE_LANE_CONTROLLER_HOST}\n"
+                ),
             )
             .unwrap();
             std::fs::write(dir.path().join("resolv.conf"), b"nameserver 127.0.0.1\n").unwrap();
@@ -4119,7 +4236,12 @@ async fn run_production_tls_candidate(
     let command_tools_manifest_hash = command_tools.as_ref().map(|(_, hash)| hash.as_str());
     state.started_at_iso = lillux::time::iso8601_now();
     let (external_bundle, external_trust, _) =
-        install_signed_test_bundle(root.path(), codex.is_some(), true);
+        install_signed_test_bundle_with_guests(
+            root.path(),
+            codex.is_some(),
+            true,
+            publication == PublicationScenario::Lease,
+        );
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
@@ -4155,7 +4277,13 @@ async fn run_production_tls_candidate(
             .then(|| candidate_authoring::real_codex_placement_requires(fixture_repository_source_root())),
     );
     let qualification_inputs =
-        prepare_runtime_qualification_inputs(root.path(), &state, runtime.path());
+        prepare_runtime_qualification_inputs(
+            root.path(),
+            &state,
+            runtime.path(),
+            (publication == PublicationScenario::Lease)
+                .then(|| Path::new(env!("CARGO_BIN_EXE_ryeos-synthetic-guest-occurrence-owner"))),
+        );
     author_guest_runtime_sources(
         &qualification_inputs,
         &candidate_authoring_bundle.root,
@@ -4634,6 +4762,19 @@ async fn run_production_tls_candidate(
         "startup_timeout_ms": 5_000,
         "state_root": provider_state.path(),
     });
+    let mut settings = settings;
+    if publication == PublicationScenario::Lease {
+        // The provider's snapshot already holds the installed guest runtime;
+        // its sandbox sees the binding's network input files at their paths.
+        settings["guest_owner"] = serde_json::json!({
+            "runtime_root": qualification_inputs._guest_tree.path(),
+            "host_files": [
+                {"from": lease_lane.resolver_source(), "guest_path": lease_lane.resolver_source()},
+                {"from": lease_lane.hosts_source(), "guest_path": lease_lane.hosts_source()},
+            ],
+        });
+        settings["startup_timeout_ms"] = 30_000.into();
+    }
     if publication == PublicationScenario::PublicDispatch {
         let public_project =
             ryeos_executor::execution::project_source::resolve_pinned_snapshot_context(

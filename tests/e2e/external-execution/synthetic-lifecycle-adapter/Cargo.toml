@@ -20,6 +20,7 @@ ryeos-remote-lease-core = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+signal-hook = { workspace = true }
 tar = { workspace = true }
 toml = { workspace = true }
 
@@ -81,6 +82,18 @@ path = "src/bin/routed_guest.rs"
 [[bin]]
 name = "ryeos-synthetic-external-candidate-connector"
 path = "../../../../crates/tools/external-candidate-connector/src/main.rs"
+
+# The production supervisor entry (held, mounted launch) a provider's guest
+# sandbox starts; the direct-launch fixture supervisor above is not one.
+[[bin]]
+name = "ryeos-synthetic-mounted-candidate-supervisor"
+path = "../../../../crates/tools/external-candidate-supervisor/src/main.rs"
+
+# The real guest occurrence owner, compiled from its production source, so a
+# provider fixture can preinstall it in its guest runtime.
+[[bin]]
+name = "ryeos-synthetic-guest-occurrence-owner"
+path = "../../../../crates/tools/external-guest-occurrence-owner/src/main.rs"
 
 [[bin]]
 name = "ryeos-synthetic-codex-external-configuration"
