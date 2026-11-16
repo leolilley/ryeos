@@ -2970,6 +2970,12 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
                 epoch,
             )?
             else {
+                settle_unattached_trusted_holding(
+                    state,
+                    &session.placement_thread_id,
+                    worker_id,
+                    epoch,
+                )?;
                 continue;
             };
             if reservation.daemon_generation_id == ryeos_app::runtime_db::daemon_generation_id() {
@@ -3026,6 +3032,64 @@ fn quiesce_unattached_worker_scopes(state: &AppState) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The trusted-process-group form of the pre-contact holding. There is no
+/// scope to terminate, so the only thing that can settle it is the recorded
+/// host lifetime having ended; otherwise, or when Lillux cannot decide, or
+/// when no holding was recorded, nothing is claimed and the session stays
+/// quarantined with its credential lock held. An undecidable lifetime must
+/// not abort daemon startup.
+fn settle_unattached_trusted_holding(
+    state: &AppState,
+    placement_thread_id: &str,
+    worker_id: &str,
+    epoch: u64,
+) -> Result<()> {
+    use ryeos_app::runtime_db::UnattachedTrustedHoldingProof as Proof;
+    let Some(holding) = state.state_store.dedicated_worker_trusted_holding(
+        placement_thread_id,
+        worker_id,
+        epoch,
+    )?
+    else {
+        return Ok(());
+    };
+    if holding.daemon_generation_id == ryeos_app::runtime_db::daemon_generation_id() {
+        return Ok(());
+    }
+    match state.state_store.unattached_trusted_holding_proof(
+        placement_thread_id,
+        worker_id,
+        epoch,
+    )? {
+        Proof::Ended => state.state_store.fail_dedicated_session_start(
+            placement_thread_id,
+            worker_id,
+            epoch,
+            "unattached trusted process group and launcher belonged to an ended host lifetime",
+            true,
+        ),
+        Proof::Absent | Proof::NotEnded => {
+            tracing::warn!(
+                placement_thread_id,
+                worker_instance_id = worker_id,
+                boot_epoch = epoch,
+                "unattached trusted worker launcher is not proved gone; session stays quarantined"
+            );
+            Ok(())
+        }
+        Proof::Undecided(reason) => {
+            tracing::warn!(
+                placement_thread_id,
+                worker_instance_id = worker_id,
+                boot_epoch = epoch,
+                reason,
+                "unattached trusted worker host lifetime cannot be decided; session stays quarantined"
+            );
+            Ok(())
+        }
+    }
 }
 
 fn reconcile_dedicated_workers(state: &AppState) -> Result<()> {
