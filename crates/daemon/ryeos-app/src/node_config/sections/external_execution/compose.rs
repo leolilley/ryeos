@@ -420,14 +420,15 @@ impl ComposeTransportRequest {
 
 /// Host adapter contact inputs and the pinned bounds an operator binding uses.
 pub(crate) fn operator_network_inputs() -> ExternalNetworkInputPolicy {
+    let sources = ryeos_external_execution_contract::operator_network_inputs();
     ExternalNetworkInputPolicy {
         resolver: ExternalNetworkInputSelection {
-            source: "/etc/resolv.conf".into(),
-            max_bytes: 64 * 1024,
+            source: sources.resolver_source.into(),
+            max_bytes: sources.resolver_max_bytes,
         },
         hosts: ExternalNetworkInputSelection {
-            source: "/etc/hosts".into(),
-            max_bytes: 64 * 1024,
+            source: sources.hosts_source.into(),
+            max_bytes: sources.hosts_max_bytes,
         },
     }
 }
@@ -2230,6 +2231,26 @@ pub(crate) mod tests {
         );
         let error = format!("{:#}", refusal(result));
         assert!(error.contains("no observation timeout fits"), "{error}");
+    }
+
+    /// A binding's network inputs are the contract crate's one definition, and
+    /// the transport compose selects carries exactly those values.
+    #[test]
+    fn binding_network_inputs_are_the_contract_definition() {
+        let sources = ryeos_external_execution_contract::operator_network_inputs();
+        let policy = operator_network_inputs();
+        assert_eq!(policy.resolver.source, sources.resolver_source);
+        assert_eq!(policy.resolver.max_bytes, sources.resolver_max_bytes);
+        assert_eq!(policy.hosts.source, sources.hosts_source);
+        assert_eq!(policy.hosts.max_bytes, sources.hosts_max_bytes);
+        policy.validate().unwrap();
+        let selected = select_transport(&ComposeTransportRequest::FileRelay {
+            owner_workspace_id: "w".into(),
+            private_mailbox_parent: ryeos_external_execution_contract::GUEST_OCCURRENCES_ROOT
+                .into(),
+        })
+        .unwrap();
+        assert_eq!(selected.network_inputs, policy);
     }
 
     /// Compose and launch judge a placement with one function over one input

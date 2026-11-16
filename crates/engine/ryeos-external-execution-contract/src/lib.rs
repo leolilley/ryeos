@@ -44,6 +44,28 @@ use zeroize::Zeroize as _;
 /// private mailbox parent is exactly this path.
 pub const GUEST_OCCURRENCES_ROOT: &str = "/ryeos/occurrences";
 
+/// The target-local resolver and hosts files a binding's controller transport
+/// captures, and the byte bound on each. One definition: composing a binding
+/// and building a qualification under the same shape both take these values,
+/// so the two cannot drift apart silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorNetworkInputSources {
+    pub resolver_source: &'static str,
+    pub resolver_max_bytes: u64,
+    pub hosts_source: &'static str,
+    pub hosts_max_bytes: u64,
+}
+
+/// The network inputs an operator binding captures from the sandbox it runs in.
+pub const fn operator_network_inputs() -> OperatorNetworkInputSources {
+    OperatorNetworkInputSources {
+        resolver_source: "/etc/resolv.conf",
+        resolver_max_bytes: 64 * 1024,
+        hosts_source: "/etc/hosts",
+        hosts_max_bytes: 64 * 1024,
+    }
+}
+
 pub const LIFECYCLE_ADAPTER_PROTOCOL: &str = "ryeos.external-execution.lifecycle-adapter.v3";
 pub const PROVIDER_DECLARATION_PROTOCOL: &str = "ryeos.external-execution.provider-declaration.v2";
 pub const PROVIDER_CONFIGURATION_PROTOCOL: &str =
