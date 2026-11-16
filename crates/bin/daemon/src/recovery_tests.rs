@@ -105,6 +105,11 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
     super::reconcile::reconcile_dedicated_worker_startup(&state)
         .await
         .unwrap();
+    // The ended session settled, but the current and undecided holdings are
+    // unsettled evidence of a launcher that may still exist: the fence keeps
+    // the current lifetime until the last of them settles. It is never
+    // cleared by the ended case's settlement.
+    assert_eq!(execution_lifetime_fence(db), Some(current.clone()));
     let ended = db.dedicated_session("T-ended").unwrap().unwrap();
     assert_eq!(ended.state, "terminal");
     assert!(ended.worker_instance_id.is_none());
@@ -136,6 +141,22 @@ async fn unattached_scope_recovery_settles_only_an_ended_host_lifetime() {
             .recovery
             .is_some()
     );
+}
+
+/// The execution lifetime fence as the runtime store holds it.
+#[cfg(target_os = "linux")]
+fn execution_lifetime_fence(
+    db: &ryeos_app::state_store::StateStore,
+) -> Option<serde_json::Value> {
+    db.with_runtime_sql_for_test(|connection| {
+        let raw: Option<String> = connection.query_row(
+            "SELECT host_lifetime FROM execution_lifetime_fence WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(raw.map(|raw| serde_json::from_str(&raw).unwrap()))
+    })
+    .unwrap()
 }
 
 /// Four unattached trusted-process-group sessions at boot: a holding from an
@@ -300,6 +321,9 @@ async fn unattached_trusted_holding_recovery_settles_only_an_ended_host_lifetime
         .unwrap();
     let settled = db.dedicated_session("T-current").unwrap().unwrap();
     assert_eq!(settled.state, "terminal");
+    // The undecided holding is still unsettled, so settling T-current does
+    // not clear the fence.
+    assert_eq!(execution_lifetime_fence(db), Some(current.clone()));
     assert!(
         db.credential_profile("profile-current")
             .unwrap()

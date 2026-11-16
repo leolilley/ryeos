@@ -6368,10 +6368,27 @@ async fn terminate_session_without_worker_row(
             "the session's worker was never recorded and its host lifetime cannot be decided \
              ({why}); cleanup is unproved until this node starts under a new host lifetime"
         ),
-        Proof::Absent => bail!(
-            "the session's worker was never recorded and no host lifetime was recorded for its \
-             launcher; cleanup cannot be proved"
-        ),
+        Proof::Absent => {
+            // No trusted holding. A scope reservation means the session was
+            // launched as a contained process scope, whose retained evidence
+            // (not a host lifetime) is what settles it; otherwise nothing at
+            // all was recorded for the launcher.
+            if state
+                .state_store
+                .dedicated_worker_scope(placement_thread_id, worker_instance_id, worker_boot_epoch)?
+                .is_some()
+            {
+                bail!(
+                    "the session's worker was never recorded and its launcher belongs to a \
+                     contained process scope; only the retained scope evidence can settle it, \
+                     and a host lifetime does not apply to this form"
+                )
+            }
+            bail!(
+                "the session's worker was never recorded and no host lifetime or scope was \
+                 recorded for its launcher; cleanup cannot be proved"
+            )
+        }
     }
     if let Some(outcome) = bounded_outcome {
         state
