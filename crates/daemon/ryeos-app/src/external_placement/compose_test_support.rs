@@ -15,6 +15,9 @@ pub(crate) struct CoordinateOnlyBackend {
     supervisor_hash: String,
     launcher_hash: String,
     relay_scope_setting: Option<String>,
+    capabilities: BTreeSet<LifecycleCapability>,
+    /// Whether the adapter admits a lease. A refusing one says it admits none.
+    admits_leases: bool,
 }
 
 impl CoordinateOnlyBackend {
@@ -25,6 +28,31 @@ impl CoordinateOnlyBackend {
         supervisor_hash: &str,
         launcher_hash: &str,
     ) -> Arc<dyn ExternalPlacementBackend> {
+        Self::shared_with(
+            backend_id,
+            artifact_hash,
+            settings_schema_digest,
+            supervisor_hash,
+            launcher_hash,
+            BTreeSet::from([
+                LifecycleCapability::SupervisorActivation,
+                LifecycleCapability::ExactTerminalObservation,
+            ]),
+            false,
+        )
+    }
+
+    /// A generation with exactly these capabilities, which does or does not
+    /// admit leases.
+    pub(crate) fn shared_with(
+        backend_id: &str,
+        artifact_hash: &str,
+        settings_schema_digest: &str,
+        supervisor_hash: &str,
+        launcher_hash: &str,
+        capabilities: BTreeSet<LifecycleCapability>,
+        admits_leases: bool,
+    ) -> Arc<dyn ExternalPlacementBackend> {
         Arc::new(Self {
             backend_id: backend_id.to_owned(),
             artifact_hash: artifact_hash.to_owned(),
@@ -32,13 +60,31 @@ impl CoordinateOnlyBackend {
             supervisor_hash: supervisor_hash.to_owned(),
             launcher_hash: launcher_hash.to_owned(),
             relay_scope_setting: Some("owner_id".to_owned()),
+            capabilities,
+            admits_leases,
         })
     }
 }
 
 impl ExternalPlacementBackend for CoordinateOnlyBackend {
     fn lifecycle_capabilities(&self) -> BTreeSet<LifecycleCapability> {
-        BTreeSet::new()
+        self.capabilities.clone()
+    }
+
+    fn admit_lease(
+        &self,
+        _inputs: &crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs,
+        _deadline: lillux::time::MonotonicDeadline,
+    ) -> Result<crate::external_lifecycle_adapter::lease_admission::AdmittedLease> {
+        ensure!(
+            self.admits_leases,
+            "lease admission refused: external placement backend `{}` admits no leases",
+            self.backend_id()
+        );
+        Ok(crate::external_lifecycle_adapter::lease_admission::AdmittedLease {
+            request: b"{\"admitted\":true}".to_vec(),
+            budget_weight: 1,
+        })
     }
 
     fn backend_id(&self) -> &str {

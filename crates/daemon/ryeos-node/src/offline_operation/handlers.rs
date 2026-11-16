@@ -1036,6 +1036,14 @@ pub(super) fn external_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
                 .context("mailbox parent")?,
         },
     };
+    let trust_store = ryeos_engine::trust::TrustStore::load_node_registry(ctx.app_root)
+        .context("load trust store for the node policy")?;
+    let node_policy = ryeos_node_runtime::node_policy::load_snapshot(
+        ctx.app_root,
+        &trust_store,
+        &ryeos_node_runtime::node_policy::NodePolicyTable::new(),
+    )
+    .context("load verified node policy generation")?;
     let report = compose_external_execution_binding(ComposeRequest {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
@@ -1054,6 +1062,7 @@ pub(super) fn external_compose(ctx: &HandlerContext<'_>) -> Result<Value> {
         runtime_qualification: optional("runtime_qualification")?,
         runtime_content_qualification: optional("runtime_content_qualification")?,
         limits,
+        node_policy: &node_policy,
     })?;
     Ok(serde_json::to_value(report)?)
 }

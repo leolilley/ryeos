@@ -2286,12 +2286,16 @@ fn admit_session_capsule(
                     executable_search,
                     environment,
                 )?;
+                let placement = ryeos_engine::structured_session_profile::external_program_placement(
+                    &profile.contract,
+                    lifecycle.ready_timeout_ms,
+                )?;
                 let program = match requirement.runtime_authority {
                     ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct =>
-                        requirement.resolve_for_use(retained_product_selections.as_ref(), &qualification_use)?,
+                        requirement.resolve_for_use(retained_product_selections.as_ref(), &qualification_use, placement)?,
                     ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::ActivatedContent => {
                         let (program, content) = ryeos_app::external_placement::prepare_content_candidate_program(
-                            state, &requirement, &qualification_use, &realized,
+                            state, &requirement, &qualification_use, &realized, placement,
                         )?;
                         program.verify_runtime_authority(retained_product_selections.as_ref(), Some(&content))?;
                         prepared_runtime_content = Some(content);
@@ -6322,6 +6326,12 @@ mod tests {
             qualification_attestation_hash: "3".repeat(64),
             selection_identity_digest: "4".repeat(64),
             runtime_recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         });
         assert_ne!(original, capsule.authority().digest().unwrap());
         assert!(

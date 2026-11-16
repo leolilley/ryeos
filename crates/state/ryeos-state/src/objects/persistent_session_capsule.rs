@@ -1080,16 +1080,25 @@ impl AdmittedPersistentSessionCapsule {
                         &self.executable_search,
                         &self.process_environment,
                     )?;
+                // The program carries its placement whole; validation joins
+                // everything else to the profile and never rebuilds it.
+                let placement = self
+                    .external_candidate
+                    .as_ref()
+                    .map(|program| program.placement.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("external candidate requirement has no admitted program")
+                    })?;
                 match self.external_candidate.as_ref().map(|program| &program.runtime_source) {
                     Some(crate::external_execution::admission::ExternalCandidateRuntimeSource::ActivatedContent { .. }) => {
                         let retained = self.retained_external_runtime_content_qualification.as_ref()
                             .ok_or_else(|| anyhow::anyhow!("activated candidate has no retained content authority"))?;
-                        let program = requirement.resolve_for_content(retained, &qualification_use)?;
+                        let program = requirement.resolve_for_content(retained, &qualification_use, placement)?;
                         program.verify_runtime_authority(self.retained_product_selections.as_ref(), Some(retained))?;
                         Ok(program)
                     }
                     _ => requirement.resolve_for_use(
-                        self.retained_product_selections.as_ref(), &qualification_use,
+                        self.retained_product_selections.as_ref(), &qualification_use, placement,
                     ),
                 }
             })

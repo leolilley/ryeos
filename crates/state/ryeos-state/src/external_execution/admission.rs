@@ -588,8 +588,10 @@ impl ExternalCandidateRequirement {
         &self,
         selections: Option<&ResolvedExternalProductSelections>,
         qualification_use: &ExternalCandidateQualificationUse,
+        placement: ExternalProgramPlacement,
     ) -> Result<AdmittedExternalCandidateProgram> {
         self.validate()?;
+        placement.validate()?;
         ensure!(
             self.runtime_authority == ExternalCandidateRuntimeAuthority::CapturedProduct,
             "activated runtime requirement cannot resolve from product selections"
@@ -647,6 +649,7 @@ impl ExternalCandidateRequirement {
             qualification_attestation_hash: qualification.attestation_hash.clone(),
             selection_identity_digest: runtime.semantic_identity_digest()?,
             runtime_recipe_digest: self.runtime_recipe.digest()?,
+            placement,
         })
     }
 
@@ -656,6 +659,7 @@ impl ExternalCandidateRequirement {
         &self,
         content: &crate::objects::RetainedExternalRuntimeContentQualification,
         qualification_use: &ExternalCandidateQualificationUse,
+        placement: ExternalProgramPlacement,
     ) -> Result<AdmittedExternalCandidateProgram> {
         content.validate()?;
         self.resolve_for_content_evidence(
@@ -664,6 +668,7 @@ impl ExternalCandidateRequirement {
             &content.attestation_hash,
             &content.evidence,
             qualification_use,
+            placement,
         )
     }
 
@@ -678,8 +683,10 @@ impl ExternalCandidateRequirement {
         attestation_hash: &str,
         evidence: &crate::external_content::qualification_evidence::ContentQualificationEvidence,
         qualification_use: &ExternalCandidateQualificationUse,
+        placement: ExternalProgramPlacement,
     ) -> Result<AdmittedExternalCandidateProgram> {
         self.validate()?;
+        placement.validate()?;
         ensure!(
             self.runtime_authority == ExternalCandidateRuntimeAuthority::ActivatedContent,
             "product runtime requirement cannot resolve from acquired content"
@@ -731,6 +738,7 @@ impl ExternalCandidateRequirement {
                 "coordinate": coordinate_id,
             }))?,
             runtime_recipe_digest: self.runtime_recipe.digest()?,
+            placement,
         };
         program.require_content_qualification(evidence)?;
         Ok(program)
@@ -785,6 +793,53 @@ pub struct AdmittedExternalCandidateProgram {
     pub qualification_attestation_hash: String,
     pub selection_identity_digest: String,
     pub runtime_recipe_digest: String,
+    /// What a lease for this exact program is judged with. Fixed where the
+    /// program is admitted, from the profile's `requires` and the Worker's
+    /// signed readiness budget; retained and recovered programs carry it whole
+    /// and never rebuild it.
+    pub placement: ExternalProgramPlacement,
+}
+
+/// The lease-relevant facts of one admitted program: its workload class, the
+/// lease and guest capability floors it requires, and the readiness budget its
+/// Worker declares. Empty `lease` and `guest` mean the program needs no lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalProgramPlacement {
+    pub workload_class: String,
+    pub lease: Vec<lillux::process_control::CapabilityRequirement>,
+    pub guest: Vec<lillux::process_control::CapabilityRequirement>,
+    pub ready_timeout_ms: u64,
+}
+
+impl ExternalProgramPlacement {
+    /// A program needs a lease exactly when its profile names lease or guest
+    /// requirements.
+    pub fn needs_lease(&self) -> bool {
+        !self.lease.is_empty() || !self.guest.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.workload_class.is_empty()
+                && self.workload_class.len() <= 128
+                && self.workload_class.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                }),
+            "external program workload class is not a bounded identifier"
+        );
+        ensure!(
+            (1..=24 * 60 * 60 * 1_000).contains(&self.ready_timeout_ms),
+            "external program readiness budget is outside its bound"
+        );
+        ensure!(
+            self.lease.len() <= 64 && self.guest.len() <= 64,
+            "external program placement requirement lists exceed their bound"
+        );
+        Ok(())
+    }
 }
 
 impl AdmittedExternalCandidateProgram {
@@ -812,9 +867,11 @@ impl AdmittedExternalCandidateProgram {
                     );
                 }
                 ensure!(
-                    self.requirement
-                        .resolve_for_content(content, &self.qualification_use)?
-                        == *self,
+                    self.requirement.resolve_for_content(
+                        content,
+                        &self.qualification_use,
+                        self.placement.clone()
+                    )? == *self,
                     "activated runtime program contradicts retained content authority"
                 );
                 Ok(())
@@ -890,6 +947,7 @@ impl AdmittedExternalCandidateProgram {
         ] {
             super::hash(hash)?;
         }
+        self.placement.validate()?;
         self.runtime_source.validate(&self.runtime_manifest_hash)?;
         if let ExternalCandidateRuntimeSource::ActivatedContent { subject, .. } =
             &self.runtime_source
@@ -919,9 +977,11 @@ impl AdmittedExternalCandidateProgram {
             "activated runtime requires retained content authority, not product selections"
         );
         ensure!(
-            self.requirement
-                .resolve_for_use(selections, &self.qualification_use)?
-                == *self,
+            self.requirement.resolve_for_use(
+                selections,
+                &self.qualification_use,
+                self.placement.clone()
+            )? == *self,
             "external candidate program contradicts retained product authority"
         );
         Ok(())
@@ -930,7 +990,7 @@ impl AdmittedExternalCandidateProgram {
     pub fn digest(&self) -> Result<String> {
         self.validate()?;
         canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.external-candidate-program.v4",
+            "domain": "ryeos.external-candidate-program.v5",
             "program": self,
         }))
     }
@@ -1482,6 +1542,17 @@ impl AdmittedExternalDirectProgram {
     }
 }
 
+/// A placement for fixtures that admit a program without a lease.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_placement() -> ExternalProgramPlacement {
+    ExternalProgramPlacement {
+        workload_class: "fixture.workload".into(),
+        lease: Vec::new(),
+        guest: Vec::new(),
+        ready_timeout_ms: 60_000,
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1635,7 +1706,7 @@ pub mod test_support {
             &requirement,
             &qualification_use,
         )?;
-        let program = requirement.resolve_for_use(Some(&selections), &qualification_use)?;
+        let program = requirement.resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())?;
         let exact_program = json!({"resolution_output":{"composed":{"derived":{
             (EXTERNAL_PRODUCT_SELECTIONS_DERIVED_KEY): selections.semantic_identity_value()?,
             (SOURCE_CLOSURE_DERIVED_KEY): source.to_value()?,
@@ -1873,7 +1944,7 @@ pub mod test_support {
             receiver_join: None,
         };
         capsule.external_candidate =
-            Some(requirement.resolve_for_content(&retained, &use_context)?);
+            Some(requirement.resolve_for_content(&retained, &use_context, crate::external_execution::admission::fixture_placement())?);
         capsule.retained_external_runtime_content_qualification = Some(retained);
         capsule.retained_product_selections = None;
         capsule.structured_session_profile = Some(profile);
@@ -2424,7 +2495,7 @@ mod tests {
         activated.runtime_authority = ExternalCandidateRuntimeAuthority::ActivatedContent;
         let use_context = test_support::fixture_qualification_use(&activated).unwrap();
         let error = activated
-            .resolve_for_use(Some(&selections()), &use_context)
+            .resolve_for_use(Some(&selections()), &use_context, crate::external_execution::admission::fixture_placement())
             .unwrap_err();
         assert!(
             error
@@ -2483,7 +2554,7 @@ mod tests {
         let selections = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let program = requirement
-            .resolve_for_use(Some(&selections), &qualification_use)
+            .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         assert_eq!(
             program.selection_identity_digest,
@@ -2496,21 +2567,21 @@ mod tests {
         program.verify_selections(Some(&selections)).unwrap();
         assert!(
             requirement
-                .resolve_for_use(None, &qualification_use)
+                .resolve_for_use(None, &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut missing = requirement.clone();
         missing.runtime_product_declaration_id = "absent".into();
         assert!(
             missing
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut unqualified = requirement.clone();
         unqualified.runtime_product_declaration_id = "runtime".into();
         assert!(
             unqualified
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut weaker = selections.clone().into_inner();
@@ -2524,7 +2595,7 @@ mod tests {
         let weaker = ResolvedExternalProductSelections::new(weaker).unwrap();
         assert!(
             requirement
-                .resolve_for_use(Some(&weaker), &qualification_use)
+                .resolve_for_use(Some(&weaker), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         for field in [
@@ -2551,11 +2622,11 @@ mod tests {
         changed.runtime_recipe.arguments.push("--changed".into());
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut program = requirement
-            .resolve_for_use(Some(&selections), &qualification_use)
+            .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         program.requirement = changed;
         assert!(program.validate().is_err());
@@ -2563,7 +2634,7 @@ mod tests {
         changed.runtime_recipe.cwd = "/workspace/changed".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut changed = requirement.clone();
@@ -2573,7 +2644,7 @@ mod tests {
             .insert("SCENARIO".into(), "changed".into());
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut changed = requirement.clone();
@@ -2582,42 +2653,42 @@ mod tests {
         changed.runtime_recipe.nested_sandbox = false;
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.runtime_recipe.max_stdout_bytes += 1;
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.runtime_recipe.max_stderr_bytes += 1;
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.runtime_recipe.executable_relative_path = "bin/other".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.provider_configuration_destination = "other-environments.toml".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut changed = requirement.clone();
         changed.provider_declaration_id = "other-provider".into();
         assert!(
             changed
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let mut without_context = selections.clone().into_inner();
@@ -2637,7 +2708,7 @@ mod tests {
         let without_context = ResolvedExternalProductSelections::new(without_context).unwrap();
         assert!(
             requirement
-                .resolve_for_use(Some(&without_context), &qualification_use)
+                .resolve_for_use(Some(&without_context), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         for invalid in [
@@ -2702,7 +2773,7 @@ mod tests {
         .unwrap();
         let selections = selections();
         requirement
-            .resolve_for_use(Some(&selections), &original)
+            .resolve_for_use(Some(&selections), &original, crate::external_execution::admission::fixture_placement())
             .unwrap();
 
         let mut changed_profile = profile.clone();
@@ -2719,7 +2790,7 @@ mod tests {
         .unwrap();
         assert_ne!(changed.profile_hash, original.profile_hash);
         let error = requirement
-            .resolve_for_use(Some(&selections), &changed)
+            .resolve_for_use(Some(&selections), &changed, crate::external_execution::admission::fixture_placement())
             .unwrap_err();
         assert!(
             error
@@ -2746,7 +2817,7 @@ mod tests {
             assert_eq!(changed.profile_hash, original.profile_hash);
             assert!(
                 requirement
-                    .resolve_for_use(Some(&selections), &changed)
+                    .resolve_for_use(Some(&selections), &changed, crate::external_execution::admission::fixture_placement())
                     .is_err()
             );
         }
@@ -2770,7 +2841,7 @@ mod tests {
         );
         assert!(
             requirement
-                .resolve_for_use(Some(&selections), &changed)
+                .resolve_for_use(Some(&selections), &changed, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
 
@@ -2868,7 +2939,7 @@ mod tests {
             );
             assert!(
                 requirement
-                    .resolve_for_use(Some(&selections()), &changed)
+                    .resolve_for_use(Some(&selections()), &changed, crate::external_execution::admission::fixture_placement())
                     .is_err()
             );
         }
@@ -3004,7 +3075,7 @@ mod tests {
         let original = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let program = requirement
-            .resolve_for_use(Some(&original), &qualification_use)
+            .resolve_for_use(Some(&original), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         let mut changed = original.into_inner();
         changed
@@ -3016,7 +3087,7 @@ mod tests {
             .attestation_hash = "f".repeat(64);
         let changed = ResolvedExternalProductSelections::new(changed).unwrap();
         let replacement = requirement
-            .resolve_for_use(Some(&changed), &qualification_use)
+            .resolve_for_use(Some(&changed), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         assert_ne!(
             program.selection_identity_digest,
@@ -3071,7 +3142,7 @@ mod tests {
         let selections = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let program = requirement
-            .resolve_for_use(Some(&selections), &qualification_use)
+            .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         let capsule = test_support::qualified_external_candidate_capsule(
             requirement.clone(),
@@ -3084,7 +3155,7 @@ mod tests {
             .insert(LifecycleCapability::ExactAllocationReconciliation);
         assert!(
             reconciled
-                .resolve_for_use(Some(&selections), &qualification_use)
+                .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                 .is_err()
         );
         let reconciled_use = test_support::fixture_qualification_use(&reconciled).unwrap();
@@ -3095,7 +3166,7 @@ mod tests {
         )
         .unwrap();
         let reconciled_program = reconciled
-            .resolve_for_use(Some(&reconciled_selections), &reconciled_use)
+            .resolve_for_use(Some(&reconciled_selections), &reconciled_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         let reconciled_capsule =
             test_support::qualified_external_candidate_capsule(reconciled, &"a".repeat(64))
@@ -3136,7 +3207,7 @@ mod tests {
         let ordinary = selections();
         let qualification_use = test_support::fixture_qualification_use(&requirement).unwrap();
         let ordinary_program = requirement
-            .resolve_for_use(Some(&ordinary), &qualification_use)
+            .resolve_for_use(Some(&ordinary), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         let mut large = ordinary.into_inner();
         let runtime = large.get_mut("auxiliary").unwrap();
@@ -3145,7 +3216,7 @@ mod tests {
         runtime.manifest_kind = crate::objects::EXTERNAL_LARGE_CONTENT_MANIFEST_KIND.into();
         let large = ResolvedExternalProductSelections::new(large).unwrap();
         let large_program = requirement
-            .resolve_for_use(Some(&large), &qualification_use)
+            .resolve_for_use(Some(&large), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         assert_eq!(
             large_program.runtime_manifest_kind,
@@ -3254,7 +3325,7 @@ mod tests {
             kind: PERSISTENT_SESSION_CAPSULE_KIND.into(),
             external_candidate: Some(
                 requirement
-                    .resolve_for_use(Some(&selections), &qualification_use)
+                    .resolve_for_use(Some(&selections), &qualification_use, crate::external_execution::admission::fixture_placement())
                     .unwrap(),
             ),
             exact_program_hash: canonical_value_digest(&exact_program).unwrap(),
@@ -3400,11 +3471,12 @@ mod tests {
                 &retained.attestation_hash,
                 &retained.evidence,
                 &program.qualification_use,
+                crate::external_execution::admission::fixture_placement(),
             )
             .unwrap();
         let through_retained = program
             .requirement
-            .resolve_for_content(retained, &program.qualification_use)
+            .resolve_for_content(retained, &program.qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         assert_eq!(direct, through_retained);
         assert_eq!(&direct, program);
@@ -3426,6 +3498,7 @@ mod tests {
                 &retained.attestation_hash,
                 &retained.evidence,
                 &program.qualification_use,
+                crate::external_execution::admission::fixture_placement(),
             )
             .unwrap_err();
         assert!(error.to_string().contains("coordinate differs"));
@@ -3495,7 +3568,7 @@ mod tests {
             .clone();
         assert_eq!(carried, REQUIRED_CLAIMS);
         requirement
-            .resolve_for_use(Some(&exact), &qualification_use)
+            .resolve_for_use(Some(&exact), &qualification_use, crate::external_execution::admission::fixture_placement())
             .unwrap();
         for (omitted, omitted_claim) in REQUIRED_CLAIMS.iter().enumerate() {
             let mut fewer = exact.clone().into_inner();
@@ -3509,7 +3582,7 @@ mod tests {
             let fewer = ResolvedExternalProductSelections::new(fewer).unwrap();
             assert!(
                 requirement
-                    .resolve_for_use(Some(&fewer), &qualification_use)
+                    .resolve_for_use(Some(&fewer), &qualification_use, crate::external_execution::admission::fixture_placement())
                     .is_err(),
                 "relationship without {omitted_claim} was admitted"
             );

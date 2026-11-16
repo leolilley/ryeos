@@ -210,9 +210,14 @@ fn admit_blocking(
             .get(QUALIFICATION_CONTEXT_PARAMETER)
             .context("content qualification policy has no sealed use context")?,
     )?;
+    let placement = ryeos_engine::structured_session_profile::external_program_placement(
+        &inputs.worker_source.profile.contract,
+        crate::source_closure_admission::worker_ready_timeout_ms(&state.engine)?,
+    )?;
     assemble(
         &requirement,
         &qualification_use,
+        placement,
         &evidence,
         request,
         owner_principal,
@@ -301,6 +306,7 @@ pub fn check_remote_testimony(
 fn assemble(
     requirement: &ExternalCandidateRequirement,
     qualification_use: &ExternalCandidateQualificationUse,
+    placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
     evidence: &ContentQualificationEvidence,
     request: &CandidateProgramRequest,
     owner_principal: String,
@@ -316,6 +322,7 @@ fn assemble(
         &request.attestation_hash,
         evidence,
         qualification_use,
+        placement,
     )?;
     program.validate()?;
     ensure!(
@@ -389,6 +396,7 @@ mod tests {
         let response = assemble(
             &fixture.requirement,
             &fixture.qualification_use,
+            fixture.program.placement.clone(),
             &fixture.retained.evidence,
             &request(&fixture, claims.clone()),
             owner(),
@@ -396,7 +404,11 @@ mod tests {
         )?;
         let launch = fixture
             .requirement
-            .resolve_for_content(&fixture.retained, &fixture.qualification_use)?;
+            .resolve_for_content(
+                &fixture.retained,
+                &fixture.qualification_use,
+                fixture.program.placement.clone(),
+            )?;
         ensure!(
             response.program == launch && response.program == fixture.program,
             "emitted program differs from the launch derivation"
@@ -420,6 +432,7 @@ mod tests {
         let local = assemble(
             &fixture.requirement,
             &fixture.qualification_use,
+            fixture.program.placement.clone(),
             &fixture.retained.evidence,
             &request(&fixture, claims.clone()),
             owner(),
@@ -432,6 +445,7 @@ mod tests {
         let remote = assemble(
             &fixture.requirement,
             &fixture.qualification_use,
+            fixture.program.placement.clone(),
             &fixture.retained.evidence,
             &request(&fixture, claims),
             owner(),
@@ -491,6 +505,7 @@ mod tests {
             assemble(
                 &fixture.requirement,
                 &fixture.qualification_use,
+                fixture.program.placement.clone(),
                 &fixture.retained.evidence,
                 &request(&fixture, vec![absent]),
                 owner(),
@@ -511,6 +526,7 @@ mod tests {
             assemble(
                 &fixture.requirement,
                 &fixture.qualification_use,
+                fixture.program.placement.clone(),
                 &fixture.retained.evidence,
                 &other,
                 owner(),
@@ -531,6 +547,7 @@ mod tests {
             assemble(
                 &fixture.requirement,
                 &fixture.qualification_use,
+                fixture.program.placement.clone(),
                 &fixture.retained.evidence,
                 &other,
                 owner(),

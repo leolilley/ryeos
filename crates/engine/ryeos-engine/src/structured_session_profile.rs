@@ -1536,6 +1536,26 @@ pub fn placement_requirements(contract: &Value) -> Result<Option<PlacementRequir
     parse_placement_requirements(requires, remote).map(Some)
 }
 
+/// The placement of the program an external-candidate profile admits: the
+/// profile's workload class and lease and guest requirement floors, with the
+/// readiness budget its Worker declares. A profile with an external candidate
+/// must declare `requires`; there is no default.
+pub fn external_program_placement(
+    contract: &Value,
+    ready_timeout_ms: u64,
+) -> Result<ryeos_state::external_execution::admission::ExternalProgramPlacement> {
+    let requirements = placement_requirements(contract)?
+        .ok_or_else(|| anyhow!("external candidate profile declares no `requires`"))?;
+    let placement = ryeos_state::external_execution::admission::ExternalProgramPlacement {
+        workload_class: requirements.workload_class,
+        lease: requirements.lease,
+        guest: requirements.guest,
+        ready_timeout_ms,
+    };
+    placement.validate()?;
+    Ok(placement)
+}
+
 fn validate_placement_requirements(requires: &Value, remote: bool) -> Result<()> {
     parse_placement_requirements(requires, remote).map(|_| ())
 }

@@ -1863,7 +1863,7 @@ impl ExternalPlacementBackendRegistry {
         backend: Arc<dyn ExternalPlacementBackend>,
         contract: &ExternalPlacementBackendContract,
         credential: &PlacementCredential,
-        mut required: BTreeSet<LifecycleCapability>,
+        required: BTreeSet<LifecycleCapability>,
         require_activation: bool,
         runtime_basis: RuntimeAdmissionBasis,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
@@ -1876,55 +1876,13 @@ impl ExternalPlacementBackendRegistry {
             contract.cleanup_proof == "provider_terminal_occurrence_v1",
             "external placement has an unsupported cleanup evidence contract"
         );
-        // Allocation without an installed activation operation strands a paid
-        // occurrence. Require startup capability before any provider contact.
-        if require_activation {
-            required.insert(LifecycleCapability::SupervisorActivation);
-        }
-        // A relay transport moves files through the adapter's relay operation;
-        // a binding must not select it over an adapter that does not declare
-        // that operation. Retained cleanup never relays, so it is not gated.
-        if require_activation
-            && matches!(
-                contract.controller_transport,
-                ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_)
-            )
-        {
-            required.insert(LifecycleCapability::ControllerFileRelay);
-            crate::node_config::sections::external_execution::require_relay_scope(
-                &contract.controller_transport,
-                backend.relay_scope_setting(),
-                &contract.settings,
-            )?;
-        }
-        // This is inherent to the admitted cleanup proof. Reconciliation is
-        // optional: an unknown outcome may remain quarantined with its capacity
-        // reserved, but cannot be converted into an unsupported stronger fact.
-        required.insert(LifecycleCapability::ExactTerminalObservation);
-        let effective = backend.lifecycle_capabilities();
-        if require_activation {
-            match runtime_basis {
-                // Current guest mechanism testimony is mandatory for every
-                // ordinary start (admit_current_runtime_qualification), so no
-                // relation between the binding's qualification and the
-                // adapter's capability set is left to judge here.
-                RuntimeAdmissionBasis::OrdinarySignedRelationship => {}
-                // A provider whose activation stages the runtime itself admits
-                // it independently of any prior qualification; the session
-                // being qualified is then the product it stages.
-                RuntimeAdmissionBasis::RestoredOwnerMeasurement => ensure!(
-                    backend.stages_guest_runtime_upload()
-                        || !effective
-                            .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
-                    "qualification-only startup cannot satisfy adapter independent guest runtime admission"
-                ),
-            }
-        }
-        let missing: BTreeSet<_> = required.difference(&effective).copied().collect();
-        ensure!(
-            missing.is_empty(),
-            "external lifecycle adapter lacks required capabilities: {missing:?}"
-        );
+        require_adapter_capabilities(
+            backend.as_ref(),
+            contract,
+            required,
+            require_activation,
+            runtime_basis,
+        )?;
         Ok(backend)
     }
 
@@ -1932,7 +1890,7 @@ impl ExternalPlacementBackendRegistry {
     /// any credential. This qualifies nothing: it serves only the offline
     /// steps that must precede the credential read, such as lease admission,
     /// and full qualification still follows before any provider contact.
-    fn installed(
+    pub(crate) fn installed(
         &self,
         contract: &ExternalPlacementBackendContract,
     ) -> Result<Arc<dyn ExternalPlacementBackend>> {
@@ -2864,6 +2822,66 @@ pub fn preflight_external_qualification_guest(
     Ok(())
 }
 
+/// The adapter's effective capability set against what the program and the
+/// placement require. Compose and launch judge it with this one function.
+fn require_adapter_capabilities(
+    backend: &dyn ExternalPlacementBackend,
+    contract: &ExternalPlacementBackendContract,
+    mut required: BTreeSet<LifecycleCapability>,
+    require_activation: bool,
+    runtime_basis: RuntimeAdmissionBasis,
+) -> Result<()> {
+    // Allocation without an installed activation operation strands a paid
+    // occurrence. Require startup capability before any provider contact.
+    if require_activation {
+        required.insert(LifecycleCapability::SupervisorActivation);
+    }
+    // A relay transport moves files through the adapter's relay operation;
+    // a binding must not select it over an adapter that does not declare
+    // that operation. Retained cleanup never relays, so it is not gated.
+    if require_activation
+        && matches!(
+            contract.controller_transport,
+            ryeos_state::external_execution::transport::ExternalControllerTransportSelection::ControllerFileRelay(_)
+        )
+    {
+        required.insert(LifecycleCapability::ControllerFileRelay);
+        crate::node_config::sections::external_execution::require_relay_scope(
+            &contract.controller_transport,
+            backend.relay_scope_setting(),
+            &contract.settings,
+        )?;
+    }
+    // This is inherent to the admitted cleanup proof. Reconciliation is
+    // optional: an unknown outcome may remain quarantined with its capacity
+    // reserved, but cannot be converted into an unsupported stronger fact.
+    required.insert(LifecycleCapability::ExactTerminalObservation);
+    let effective = backend.lifecycle_capabilities();
+    if require_activation {
+        match runtime_basis {
+            // Current guest mechanism testimony is mandatory for every
+            // ordinary start (admit_current_runtime_qualification), so no
+            // relation between the binding's qualification and the
+            // adapter's capability set is left to judge here.
+            RuntimeAdmissionBasis::OrdinarySignedRelationship => {}
+            // A provider whose activation stages the runtime itself admits
+            // it independently of any prior qualification; the session
+            // being qualified is then the product it stages.
+            RuntimeAdmissionBasis::RestoredOwnerMeasurement => ensure!(
+                backend.stages_guest_runtime_upload()
+                    || !effective.contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
+                "qualification-only startup cannot satisfy adapter independent guest runtime admission"
+            ),
+        }
+    }
+    let missing: BTreeSet<_> = required.difference(&effective).copied().collect();
+    ensure!(
+        missing.is_empty(),
+        "external lifecycle adapter lacks required capabilities: {missing:?}"
+    );
+    Ok(())
+}
+
 /// Resolve one explicitly content-backed requirement against uniquely matching
 /// signed placement configuration. No credential access or provider operation.
 pub fn prepare_content_candidate_program(
@@ -2871,6 +2889,7 @@ pub fn prepare_content_candidate_program(
     requirement: &ryeos_state::external_execution::admission::ExternalCandidateRequirement,
     qualification_use: &ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
     realizations: &ryeos_state::objects::ExternalContentRealizationSet,
+    placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
 ) -> Result<(
     ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     ryeos_state::objects::RetainedExternalRuntimeContentQualification,
@@ -2922,7 +2941,7 @@ pub fn prepare_content_candidate_program(
         &retained.evidence.purpose.subject else { bail!("runtime content proof lost its activated source"); };
     content
         .verify_verifier_realizations(realizations, &requirement.runtime_product_declaration_id)?;
-    let program = requirement.resolve_for_content(&retained, qualification_use)?;
+    let program = requirement.resolve_for_content(&retained, qualification_use, placement)?;
     binding.check_program(&program)?;
     Ok((program, retained))
 }
@@ -6137,11 +6156,7 @@ impl<'a> ExternalPlacementOwner<'a> {
             None => {
                 let (lease, credential) = admit_fresh_lease_then_read_credential(
                     self.state,
-                    capsule
-                        .structured_session_profile
-                        .as_ref()
-                        .map(|profile| &profile.contract),
-                    capsule.lifecycle.ready_timeout_ms,
+                    program,
                     || {
                         crate::dedicated_session_service::ensure_hosted_contact_deadline(
                             self.state, &session,
@@ -6162,12 +6177,9 @@ impl<'a> ExternalPlacementOwner<'a> {
                 .external_placement_backends
                 .qualify(&contract, &credential, &admitted)?;
         if existing.is_none() {
+            // The supervisor journal window was judged with the lease, before
+            // the credential was read.
             require_guest_package_artifact_floor(&contract, backend.as_ref())?;
-            crate::external_supervisor_native::external_supervisor_journal_quota(
-                self.state.node_policy.as_ref(),
-                &contract,
-                contract.timeout_seconds,
-            )?;
         }
         let contact_gate = self
             .state
@@ -9077,16 +9089,15 @@ fn read_placement_credential(
     )
 }
 
-/// A fresh placement's lease admission, then its placement credential, in
-/// that order. Admission runs through the exact installed backend generation
-/// the binding names and needs only the session's profile, its deadline, the
-/// binding and node policy, so a refused lease returns before the vault is
-/// touched. `session_deadline` is asked only when a lease is needed. The
-/// caller still fully qualifies the backend with the credential afterwards.
+/// A fresh placement's judgment, then its placement credential, in that
+/// order. The judgment runs through the exact installed backend generation the
+/// binding names and needs only the admitted program, its deadline, the
+/// binding and node policy, so a refusal returns before the vault is touched.
+/// `session_deadline` is asked only when a lease is needed. The caller still
+/// fully qualifies the backend with the credential afterwards.
 fn admit_fresh_lease_then_read_credential(
     state: &AppState,
-    profile_contract: Option<&serde_json::Value>,
-    ready_timeout_ms: u64,
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     session_deadline: impl FnOnce() -> Result<Option<i64>>,
     contract: &ExternalPlacementBackendContract,
     credential_access: &crate::vault::placement::PlacementCredentialAccess,
@@ -9098,88 +9109,102 @@ fn admit_fresh_lease_then_read_credential(
     PlacementCredential,
 )> {
     let installed = state.external_placement_backends.installed(contract)?;
-    let lease = admit_session_lease(
-        state,
-        profile_contract,
-        ready_timeout_ms,
-        session_deadline,
+    let lease = judge_placement(
+        program,
         contract,
         installed.as_ref(),
+        state.node_policy.as_ref(),
+        Some(session_deadline),
     )?;
     let credential = read_placement_credential(state, credential_access)?;
     Ok((lease, credential))
 }
 
-/// Stage-one lease admission for a fresh placed session: the binding's
-/// adapter judges the lease [`session_lease_request`] builds, offline. Returns
-/// the admitted request bytes, encoded for the reservation, and the lease's
-/// charge against the node budget at the budget weight of the provider spec
-/// that admitted it, which the reservation takes in its own transaction. A
-/// session with no structured-session profile needs no lease. A session whose
-/// deadline the lease could not cover is refused before the adapter is asked.
-fn admit_session_lease(
-    state: &AppState,
-    profile_contract: Option<&serde_json::Value>,
-    ready_timeout_ms: u64,
-    session_deadline: impl FnOnce() -> Result<Option<i64>>,
+/// The one judgment of what a placement needs against what the node, the
+/// binding and the adapter provide, with no credential and no provider
+/// contact. Compose runs it before it publishes a binding; launch runs it,
+/// with the same inputs, before it reads a credential. Launch adds only the
+/// session's own deadline, which depends on live state.
+///
+/// In order: the adapter's capability set against what the program and the
+/// transport require; the lease the program's placement asks for (built from
+/// the program alone, then the session deadline when launch supplies one, then
+/// the binding's adapter admits it offline); and the node's supervisor journal
+/// window against the binding's whole occurrence lifetime. Returns the
+/// admitted request bytes, encoded for the reservation, and the lease's
+/// charge at the admitting provider spec's budget weight, when the program
+/// needs a lease.
+pub(crate) fn judge_placement(
+    program: &ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram,
     contract: &ExternalPlacementBackendContract,
     backend: &dyn ExternalPlacementBackend,
+    policy: &ryeos_node_runtime::node_policy::NodePolicySnapshot,
+    session_deadline: Option<impl FnOnce() -> Result<Option<i64>>>,
 ) -> Result<
     Option<(
         String,
         crate::runtime_db::external_execution::ExternalLeaseCharge,
     )>,
 > {
-    let Some(profile_contract) = profile_contract else {
-        return Ok(None);
-    };
-    let budget = state
-        .node_policy
+    require_adapter_capabilities(
+        backend,
+        contract,
+        program.requirement.required_lifecycle_capabilities.clone(),
+        true,
+        RuntimeAdmissionBasis::OrdinarySignedRelationship,
+    )?;
+    let budget = policy
         .require::<ryeos_node_runtime::node_policy::sections::execution::NodeExecutionAdmissionPolicy>()?
         .external_lease_budget
         .as_ref();
-    let Some((inputs, charge)) =
-        session_lease_request(profile_contract, ready_timeout_ms, contract, budget)?
-    else {
-        return Ok(None);
+    let lease = match session_lease_request(&program.placement, contract, budget)? {
+        None => None,
+        Some((inputs, charge)) => {
+            let margin_seconds = budget
+                .map(|budget| budget.turn_end_margin_seconds)
+                .context("lease refused: this node's execution policy declares no external lease budget")?;
+            if let Some(session_deadline) = session_deadline {
+                lease_lifecycle::refuse_session_unfit_for_fresh_lease(
+                    session_deadline()?,
+                    charge.lifetime_seconds,
+                    margin_seconds,
+                    lillux::time::timestamp_millis(),
+                )?;
+            }
+            let admitted = backend.admit_lease(
+                &inputs,
+                lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(
+                    u64::from(contract.contact_timeout_seconds),
+                )),
+            )?;
+            let charge = charge
+                .weighted_by(admitted.budget_weight)
+                .with_context(|| format!("lease refused for workload `{}`", inputs.workload))?;
+            Some((
+                ExternalAllocationReservation::encode_admitted_adapter_request(&admitted.request)?,
+                charge,
+            ))
+        }
     };
-    let margin_seconds = budget
-        .map(|budget| budget.turn_end_margin_seconds)
-        .context("lease refused: this node's execution policy declares no external lease budget")?;
-    lease_lifecycle::refuse_session_unfit_for_fresh_lease(
-        session_deadline()?,
-        charge.lifetime_seconds,
-        margin_seconds,
-        lillux::time::timestamp_millis(),
+    crate::external_supervisor_native::external_supervisor_journal_quota(
+        policy,
+        contract,
+        contract.timeout_seconds,
     )?;
-    let admitted = backend.admit_lease(
-        &inputs,
-        lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_secs(u64::from(
-            contract.contact_timeout_seconds,
-        ))),
-    )?;
-    let charge = charge
-        .weighted_by(admitted.budget_weight)
-        .with_context(|| format!("lease refused for workload `{}`", inputs.workload))?;
-    Ok(Some((
-        ExternalAllocationReservation::encode_admitted_adapter_request(&admitted.request)?,
-        charge,
-    )))
+    Ok(lease)
 }
 
 /// The lease a placed session needs, if any, and its charge before the
 /// admitting provider spec's budget weight is known.
 ///
-/// Only a session whose admitted structured-session profile names `lease`
-/// or `guest` requirements needs a lease; any other is placed without one.
-/// The request is built from signed data alone: the profile's workload class
-/// and requirement lists, the one host the guest may reach (the binding's
-/// HTTPS controller origin), the binding's execution timeout as the lease
-/// lifetime and the session's readiness budget as its activation deadline.
-/// The node's lease budget must exist and allow that lifetime.
+/// Only a program whose placement names `lease` or `guest` requirements needs
+/// a lease; any other is placed without one. The request is built from the
+/// program's placement alone, the one host the guest may reach (the binding's
+/// HTTPS controller origin) and the binding's execution timeout as the lease
+/// lifetime; the placement's readiness budget is its activation deadline. The
+/// node's lease budget must exist and allow that lifetime.
 fn session_lease_request(
-    profile_contract: &serde_json::Value,
-    ready_timeout_ms: u64,
+    placement: &ryeos_state::external_execution::admission::ExternalProgramPlacement,
     contract: &ExternalPlacementBackendContract,
     budget: Option<&ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget>,
 ) -> Result<
@@ -9188,15 +9213,10 @@ fn session_lease_request(
         crate::runtime_db::external_execution::UnweightedLeaseCharge,
     )>,
 > {
-    let Some(requirements) =
-        ryeos_engine::structured_session_profile::placement_requirements(profile_contract)?
-    else {
-        return Ok(None);
-    };
-    if requirements.lease.is_empty() && requirements.guest.is_empty() {
+    if !placement.needs_lease() {
         return Ok(None);
     }
-    let workload = requirements.workload_class;
+    let workload = placement.workload_class.clone();
     let budget = budget.with_context(|| {
         format!(
             "lease refused: workload `{workload}` needs a remote lease and this node's \
@@ -9224,11 +9244,11 @@ fn session_lease_request(
         )?;
     let inputs = crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs {
         workload,
-        requires_before_spend: requirements.lease,
-        requires_from_guest: requirements.guest,
+        requires_before_spend: placement.lease.clone(),
+        requires_from_guest: placement.guest.clone(),
         controller_host,
         maximum_lifetime_seconds: contract.timeout_seconds,
-        activation_deadline_seconds: u32::try_from(ready_timeout_ms.div_ceil(1_000))
+        activation_deadline_seconds: u32::try_from(placement.ready_timeout_ms.div_ceil(1_000))
             .context("lease activation deadline exceeds its bound")?,
     };
     Ok(Some((inputs, charge)))
@@ -11540,7 +11560,7 @@ mod tests {
         }
     }
 
-    fn program() -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
+    pub(super) fn program() -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
         let runtime_recipe =
             ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
                 schema: 2,
@@ -11586,6 +11606,12 @@ mod tests {
             qualification_attestation_hash: "2".repeat(64),
             selection_identity_digest: "c".repeat(64),
             runtime_recipe_digest,
+            placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+                workload_class: "fixture.workload".into(),
+                lease: Vec::new(),
+                guest: Vec::new(),
+                ready_timeout_ms: 60_000,
+            },
         }
     }
 

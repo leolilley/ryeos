@@ -133,6 +133,7 @@ pub mod test_support {
         selected_products: ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
         external_candidate_requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
         qualification_use: ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+        placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
         qualification: &ryeos_app::external_placement::test_support::PlacementQualificationSelection,
     ) -> Result<String> {
         let tls_roots = vec!["Zml4dHVyZSBjb250cm9sbGVyIFRMUyByb290".to_owned()];
@@ -172,6 +173,7 @@ pub mod test_support {
             selected_products,
             external_candidate_requirement,
             qualification_use,
+            placement,
             controller,
             tls_roots,
             serde_json::json!({"region":"composed-test", "plan":"bounded-fixture"}),
@@ -191,6 +193,7 @@ pub mod test_support {
         selected_products: ryeos_state::external_content::products::composition::ResolvedExternalProductSelections,
         external_candidate_requirement: ryeos_state::external_execution::admission::ExternalCandidateRequirement,
         qualification_use: ryeos_state::external_execution::admission::ExternalCandidateQualificationUse,
+        placement: ryeos_state::external_execution::admission::ExternalProgramPlacement,
         controller: ryeos_state::external_execution::transport::ExternalControllerTransportContract,
         tls_roots: Vec<String>,
         placement_settings: serde_json::Value,
@@ -411,7 +414,7 @@ pub mod test_support {
         }
         let selected_products = ryeos_state::external_content::products::composition::ResolvedExternalProductSelections::new(selection_map)?;
         let program = external_candidate_requirement
-            .resolve_for_use(Some(&selected_products), &qualification_use)?;
+            .resolve_for_use(Some(&selected_products), &qualification_use, placement)?;
         ryeos_app::external_placement::test_support::install_precontact_binding_with_settings(
             state,
             &program,

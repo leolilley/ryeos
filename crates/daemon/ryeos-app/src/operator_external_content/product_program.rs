@@ -213,7 +213,12 @@ pub(crate) fn derive_program(
         process_environment: &prepared.environment.definition.process_environment,
     }
     .derive()?;
-    let program = requirement.resolve_for_use(Some(selections), &qualification_use)?;
+    let placement = ryeos_engine::structured_session_profile::external_program_placement(
+        &prepared.worker_source.profile.contract,
+        crate::source_closure_admission::worker_ready_timeout_ms(&state.engine)?,
+    )?;
+    let program =
+        requirement.resolve_for_use(Some(selections), &qualification_use, placement)?;
     program.validate()?;
     let selections_digest =
         ryeos_state::objects::canonical_value_digest(&selections.semantic_identity_value()?)?;

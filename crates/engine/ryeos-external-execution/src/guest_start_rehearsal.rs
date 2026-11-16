@@ -565,6 +565,14 @@ fn rehearsal_program(
         qualification_attestation_hash: digest_of("attestation", run),
         selection_identity_digest: digest_of("selection", run),
         runtime_recipe_digest,
+        // A rehearsal runs against a loopback controller with no lease, like
+        // every other identity of this program it is rehearsal-only.
+        placement: ryeos_state::external_execution::admission::ExternalProgramPlacement {
+            workload_class: "guest-start-rehearsal".into(),
+            lease: Vec::new(),
+            guest: Vec::new(),
+            ready_timeout_ms: 60_000,
+        },
     };
     program.validate()?;
     Ok(program)
