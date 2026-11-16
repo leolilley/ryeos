@@ -62,7 +62,7 @@ use ryeos_node_runtime::identity::NodeIdentity;
 use serde_json::{Value, json};
 
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_workflow_bundles};
+use common::fast_fixture::FastFixture;
 
 const BUNDLE_NAME: &str = "claude-code";
 const TURN_ITEM: &str = "worker_execution:claude-code/bounded-turn";
@@ -136,14 +136,6 @@ fn plant_sealed_vault_secrets(state_path: &Path, secrets: &HashMap<String, Strin
 fn plant_claude_code(state_path: &Path, fixture: &FastFixture) -> Result<()> {
     common::require_bundles_prepared(&["core", BUNDLE_NAME])
         .context("the claude-code bundle must be prepared (populated and published) first")?;
-    register_workflow_bundles(state_path, fixture)?;
-    let bundle_root = common::workspace_root().join("bundles").join(BUNDLE_NAME);
-    common::fast_fixture::register_presigned_fixture_bundle(
-        state_path,
-        BUNDLE_NAME,
-        &bundle_root,
-        fixture,
-    )?;
     plant_sealed_vault_secrets(
         state_path,
         &HashMap::from([
@@ -491,7 +483,7 @@ fn parent_lineage_events(finished: &Finished) -> Result<(Value, Value)> {
 }
 
 async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
-    DaemonHarness::start_fast_with(
+    DaemonHarness::start_fast_development_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             plant_claude_code(state_path, fixture)
         },

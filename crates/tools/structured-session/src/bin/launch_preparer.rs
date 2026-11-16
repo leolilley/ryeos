@@ -1541,12 +1541,16 @@ mod tests {
             assert!(!validated.has_external_content, "{file}");
             assert!(validated.workload_client.is_none(), "{file}");
             // Every variable the profile requires is delivered as a secret
-            // under its own name, and nothing else is.
-            assert_eq!(
-                validated.process_environment.len(),
-                required.len(),
-                "{file}"
-            );
+            // under its own name, and no other variable is a delivered
+            // secret: the adapter's own settings are literals.
+            let delivered = validated
+                .process_environment
+                .values()
+                .filter(|value| {
+                    matches!(value, AuthoredWorkerEnvironmentValue::DeliveredSecret { .. })
+                })
+                .count();
+            assert_eq!(delivered, required.len(), "{file}");
             for name in &required {
                 assert!(
                     matches!(
