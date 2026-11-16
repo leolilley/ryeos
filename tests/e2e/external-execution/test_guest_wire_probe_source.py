@@ -82,6 +82,10 @@ class GuestWireProbeSourceTests(unittest.TestCase):
         self.assertEqual(scenario["launch_shape"], {
             "controller_transport": "https",
             "sandbox_network_policy": {"kind": "allow_list", "hosts": ["controller.invalid"]},
+            "network_inputs": {
+                "resolver": {"source": "/etc/resolv.conf", "max_bytes": 65536},
+                "hosts": {"source": "/etc/hosts", "max_bytes": 65536},
+            },
         })
         self.assertEqual(scenario["remote_probe_input"], {
             "schema": "ryeos.guest_wire_probe_input.v1",

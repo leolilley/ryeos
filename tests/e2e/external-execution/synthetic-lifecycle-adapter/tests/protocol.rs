@@ -1005,6 +1005,9 @@ struct RuntimeQualificationInputs {
     guest_manifest_hash: String,
     archive: runtime_qualification::RuntimeArchive,
     grant: qualification_node::ManagedActivationGrant,
+    /// The launch shape the guest-runtime policy declares and the lane's
+    /// binding launches under.
+    launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
 }
 
 /// Lay the guest owner runtime into the node's object store and pack the
@@ -1014,6 +1017,7 @@ fn prepare_runtime_qualification_inputs(
     state: &ryeos_app::state::AppState,
     session_runtime: &Path,
     installed_owner: Option<&Path>,
+    launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape,
 ) -> RuntimeQualificationInputs {
     let guest_tree = tempfile::tempdir().unwrap();
     lillux::PinnedDirectory::open(guest_tree.path())
@@ -1059,6 +1063,7 @@ fn prepare_runtime_qualification_inputs(
         guest_manifest_hash,
         archive,
         grant,
+        launch_shape,
     }
 }
 
@@ -1077,6 +1082,7 @@ fn author_guest_runtime_sources(
         verifier_runtime_manifest_hash,
         &runtime_qualification::GUEST_RUNTIME_REQUIRED_CLAIMS,
         &runtime_qualification_placement::OWNER_GUEST_PRODUCT,
+        &inputs.launch_shape,
     );
 }
 
@@ -1555,8 +1561,13 @@ fn run_signed_worker_admission_on(
         None,
         None,
     );
-    let qualification_inputs =
-        prepare_runtime_qualification_inputs(root.path(), &state, runtime.path(), None);
+    let qualification_inputs = prepare_runtime_qualification_inputs(
+        root.path(),
+        &state,
+        runtime.path(),
+        None,
+        runtime_qualification::ordinary_launch_shape(),
+    );
     author_guest_runtime_sources(
         &qualification_inputs,
         &candidate_authoring_bundle.root,
@@ -3353,8 +3364,13 @@ fn composed_controller_attachment_on(
             .unwrap(),
     );
     let verifier_manifest_hash = qualification_node::manifest_hash(&verifier_manifest);
-    let qualification_inputs =
-        prepare_runtime_qualification_inputs(root.path(), &state, runtime.path(), None);
+    let qualification_inputs = prepare_runtime_qualification_inputs(
+        root.path(),
+        &state,
+        runtime.path(),
+        None,
+        runtime_qualification::ordinary_launch_shape(),
+    );
     let (authoring, _) = write_candidate_authoring_bundle(
         fixture_repository_source_root(),
         root.path(),
@@ -3890,6 +3906,25 @@ impl LeaseLaneController {
         format!("https://{host}:{port}")
     }
 
+    /// The sources the lane's binding captures, as a launch shape declares them.
+    fn network_inputs(
+        &self,
+    ) -> ryeos_external_execution_contract::runtime_snapshot::LaunchNetworkInputs {
+        use ryeos_external_execution_contract::runtime_snapshot::{
+            LaunchNetworkInput, LaunchNetworkInputs,
+        };
+        LaunchNetworkInputs {
+            resolver: LaunchNetworkInput {
+                source: self.resolver_source(),
+                max_bytes: 64 * 1024,
+            },
+            hosts: LaunchNetworkInput {
+                source: self.hosts_source(),
+                max_bytes: 64 * 1024,
+            },
+        }
+    }
+
     fn resolver_source(&self) -> String {
         match &self.inputs {
             Some(dir) => dir
@@ -4355,12 +4390,16 @@ async fn run_production_tls_candidate(
             requires
         }),
     );
+    // The lane's own resolver and hosts sources: its guest-runtime policy
+    // declares them, so the lane's binding matches the proof it launches on.
+    let lease_lane = LeaseLaneController::new(publication);
     let qualification_inputs = prepare_runtime_qualification_inputs(
         root.path(),
         &state,
         runtime.path(),
         (publication == PublicationScenario::Lease)
             .then(|| Path::new(env!("CARGO_BIN_EXE_ryeos-synthetic-guest-occurrence-owner"))),
+        runtime_qualification::launch_shape_with_sources(lease_lane.network_inputs()),
     );
     author_guest_runtime_sources(
         &qualification_inputs,
@@ -4809,7 +4848,6 @@ async fn run_production_tls_candidate(
         .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let controller_port = listener.local_addr().unwrap().port();
-    let lease_lane = LeaseLaneController::new(publication);
     let roots = lease_lane.roots();
     let controller_contract = ExternalControllerTransportContract {
         schema: 2,

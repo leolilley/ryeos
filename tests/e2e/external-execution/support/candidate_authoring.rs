@@ -51,6 +51,7 @@ pub fn sign_candidate_qualification_inputs(
                 "tool:fixtures/verify-external-runtime",
                 claim_names,
                 parameters,
+                None,
             ),
             identity.signing_key(),
             "#",
@@ -85,14 +86,24 @@ pub fn qualification_policy_source(
     verifier_ref: &str,
     claims: &[&str],
     parameters: &serde_json::Value,
+    launch_shape: Option<&ryeos_external_execution_contract::runtime_snapshot::LaunchShape>,
 ) -> String {
     let parameters = lillux::canonical_json(parameters).unwrap();
+    // A policy states the launch shape its verifier qualifies the runtime for;
+    // JSON is valid YAML, so the shape is written as its canonical wire form.
+    let launch_shape = match launch_shape {
+        Some(shape) => format!(
+            "  launch_shape: {}\n",
+            lillux::canonical_json(&serde_json::to_value(shape).unwrap()).unwrap()
+        ),
+        None => String::new(),
+    };
     let claims = claims
         .iter()
         .map(|claim| format!("    - {claim}\n"))
         .collect::<String>();
     format!(
-        "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v5\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n"
+        "category: fixtures\nversion: \"1.0.0\"\ndescription: {description}\nproduct_qualification_policy:\n  schema: ryeos.product_qualification_policy.v5\n  verifier_ref: {verifier_ref}\n  subject_declaration_id: subject\n  allowed_claims:\n{claims}  minimum_verifier_process_settlement: trusted_process_group_absent\n  verifier_parameters: {parameters}\n{launch_shape}"
     )
 }
 
