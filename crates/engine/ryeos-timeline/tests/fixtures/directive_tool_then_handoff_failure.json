@@ -1,0 +1,463 @@
+{
+ "events": [
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 1,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "event_id": 149,
+   "event_type": "thread_created",
+   "payload": {
+    "executor_ref": "native:ryeos-directive-runtime",
+    "item_ref": "directive:test/continuation/force_continue",
+    "kind": "directive_run",
+    "launch_mode": "wait"
+   },
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 1,
+   "ts": "2026-11-16T03:26:55Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 2,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "event_id": 150,
+   "event_type": "as_launched_resolution",
+   "payload": {
+    "ancestors": [],
+    "effective_trust_class": "trusted_project",
+    "policy_facts": {
+     "effective_caps": [
+      "ryeos.execute.tool.test/anchor_demo/anchor_demo"
+     ]
+    },
+    "referenced_items": [],
+    "root": {
+     "raw_content_digest": "0000000000000000000000000000000000000000000000000000000000000003",
+     "requested_id": "directive:test/continuation/force_continue",
+     "resolved_ref": "directive:test/continuation/force_continue",
+     "signer_fingerprint": "0000000000000000000000000000000000000000000000000000000000000004",
+     "source_root": {
+      "kind": "project"
+     },
+     "source_space": "project",
+     "trust_class": "trusted_project"
+    }
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000001",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 2,
+   "ts": "2026-11-16T03:26:55Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 3,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "event_id": 151,
+   "event_type": "as_launched_ref_bindings",
+   "payload": {
+    "records": {
+     "model": {
+      "canonical_ref": "directive:test/continuation/force_continue",
+      "effective_trust_class": "trusted_project",
+      "resolution": {
+       "ancestors": [],
+       "effective_trust_class": "trusted_project",
+       "policy_facts": {
+        "effective_caps": [
+         "ryeos.execute.tool.test/anchor_demo/anchor_demo"
+        ]
+       },
+       "referenced_items": [],
+       "root": {
+        "raw_content_digest": "0000000000000000000000000000000000000000000000000000000000000003",
+        "requested_id": "directive:test/continuation/force_continue",
+        "resolved_ref": "directive:test/continuation/force_continue",
+        "signer_fingerprint": "0000000000000000000000000000000000000000000000000000000000000004",
+        "source_root": {
+         "kind": "project"
+        },
+        "source_space": "project",
+        "trust_class": "trusted_project"
+       }
+      },
+      "source_space": "project"
+     }
+    },
+    "ref_bindings": {}
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000002",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 3,
+   "ts": "2026-11-16T03:26:55Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 4,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "event_id": 152,
+   "event_type": "runtime_launch_facts",
+   "payload": {
+    "facts": {
+     "authority_digest": "0000000000000000000000000000000000000000000000000000000000000007",
+     "config_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+     "config_sources": [
+      "bundle:directive"
+     ],
+     "config_value_digest": "0000000000000000000000000000000000000000000000000000000000000009",
+     "context_window": 500,
+     "matched_profile": "deepseek-v4-flash-spend",
+     "model_name": "deepseek-v4-flash",
+     "provider_id": "deepseek",
+     "reasoning": null,
+     "sampling": null,
+     "spend_bound": "paid"
+    },
+    "node_requirements_met_by": {}
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000005",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 4,
+   "ts": "2026-11-16T03:26:55Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 5,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "event_id": 153,
+   "event_type": "thread_started",
+   "payload": {},
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000006",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 5,
+   "ts": "2026-11-16T03:26:56Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 6,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "event_id": 154,
+   "event_type": "cognition_in",
+   "payload": {
+    "content": "<scrubbed content 2444 chars>"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000a",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 6,
+   "ts": "2026-11-16T03:26:56Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 7,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000c",
+   "event_id": 155,
+   "event_type": "cognition_in",
+   "payload": {
+    "turn": 1
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000b",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 7,
+   "ts": "2026-11-16T03:26:56Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 8,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "event_id": 156,
+   "event_type": "provider_attempt_budget_transition_v1",
+   "payload": {
+    "attempt_id": "A-255a07e51354209b",
+    "attempt_number": 1,
+    "audit_chain_root_id": "T-0001",
+    "budget_authority_site_id": "S-a9fba24caf583176",
+    "config_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+    "directive_budget_id": "D-c4c8151ea9014a9f",
+    "execution_budget_id": "B-9c8010c050a59301",
+    "ledger_epoch": 1,
+    "model": "deepseek-v4-flash",
+    "observation": false,
+    "occurred_at_ms": 1794799616531,
+    "profile": "deepseek-v4-flash-spend",
+    "provider_id": "deepseek",
+    "reserved_usd_nanos": 9246440,
+    "root_chain_id": "T-0001",
+    "thread_id": "T-0001",
+    "transition": "reserved",
+    "transition_id": "accounting-transition/A-255a07e51354209b/1",
+    "transition_sequence": 1,
+    "turn": 1,
+    "version": 1
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000c",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000c",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 8,
+   "ts": "2026-11-16T03:26:56Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 9,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "event_id": 157,
+   "event_type": "provider_attempt_budget_transition_v1",
+   "payload": {
+    "attempt_id": "A-255a07e51354209b",
+    "attempt_number": 1,
+    "audit_chain_root_id": "T-0001",
+    "budget_authority_site_id": "S-a9fba24caf583176",
+    "config_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+    "directive_budget_id": "D-c4c8151ea9014a9f",
+    "execution_budget_id": "B-9c8010c050a59301",
+    "ledger_epoch": 1,
+    "model": "deepseek-v4-flash",
+    "observation": false,
+    "occurred_at_ms": 1794799616569,
+    "profile": "deepseek-v4-flash-spend",
+    "provider_id": "deepseek",
+    "reserved_usd_nanos": 9246440,
+    "root_chain_id": "T-0001",
+    "thread_id": "T-0001",
+    "transition": "issued",
+    "transition_id": "accounting-transition/A-255a07e51354209b/2",
+    "transition_sequence": 2,
+    "turn": 1,
+    "version": 1
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000d",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 9,
+   "ts": "2026-11-16T03:26:56Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 10,
+   "event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
+   "event_id": 158,
+   "event_type": "thread_usage",
+   "payload": {
+    "completed_turns": 1,
+    "elapsed_ms": 2070,
+    "input_tokens": 1202,
+    "last_settled_turn_seq": 1,
+    "model": "deepseek-v4-flash",
+    "output_tokens": 209,
+    "profile": "deepseek-v4-flash-spend",
+    "provider_id": "deepseek",
+    "settled_at": "2026-11-16T03:26:58Z",
+    "spawns_used": 0,
+    "spend_usd": "0.000209239",
+    "started_at": "2026-11-16T03:26:58Z"
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000e",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 10,
+   "ts": "2026-11-16T03:26:58Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 11,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000010",
+   "event_id": 159,
+   "event_type": "cognition_out",
+   "payload": {
+    "input_tokens": 1202,
+    "output_tokens": 209,
+    "provider_accounting": {
+     "attempt_id": "T-12fc6691-86fd-3854-096c-fc67933b4748:1:1",
+     "attempt_number": 1,
+     "comparability": "not_comparable",
+     "contract_anomalies": [],
+     "cost_details": null,
+     "generation_header_id": null,
+     "input_tokens": 1202,
+     "is_byok": null,
+     "metadata_errors": [],
+     "observed_output": {
+      "accepted_output_events": 165,
+      "live_output_events_emitted": 18,
+      "reasoning_bytes": 695,
+      "text_bytes": 0,
+      "tool_argument_bytes": 45
+     },
+     "output_tokens": 209,
+     "pricing_source": "per_model",
+     "provider_limit_contract": "within_requested_limit",
+     "reasoning_tokens": 146,
+     "replayed_from": null,
+     "reported_cost_usd": null,
+     "requested_output_tokens": 32768,
+     "response_id": "ab9e2213-f221-4c44-9ef0-cb68186ba362",
+     "schema_errors": [],
+     "settled_cost_usd": "0.000209239",
+     "snapshots_seen": 1,
+     "source": "signed_metadata"
+    },
+    "reasoning_content": "<scrubbed reasoning_content 695 chars>",
+    "tool_calls": [
+     {
+      "arguments": {
+       "name": "continuation",
+       "style": "friendly"
+      },
+      "id": "call_1",
+      "name": "test_anchor_demo_anchor_demo"
+     }
+    ],
+    "turn": 1
+   },
+   "prev_chain_event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
+   "prev_thread_event_hash": "000000000000000000000000000000000000000000000000000000000000000f",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 11,
+   "ts": "2026-11-16T03:26:58Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 12,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000011",
+   "event_id": 160,
+   "event_type": "stream_opened",
+   "payload": {
+    "turn": 1
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000010",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000010",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 12,
+   "ts": "2026-11-16T03:26:58Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 13,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
+   "event_id": 161,
+   "event_type": "tool_call_start",
+   "payload": {
+    "call_id": "call_1",
+    "effective_caps": [
+     "ryeos.execute.tool.test/anchor_demo/anchor_demo"
+    ],
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000013",
+    "tool": "test_anchor_demo_anchor_demo"
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000011",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000011",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 13,
+   "ts": "2026-11-16T03:26:58Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 14,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000014",
+   "event_id": 162,
+   "event_type": "provider_attempt_budget_transition_v1",
+   "payload": {
+    "attempt_id": "A-255a07e51354209b",
+    "attempt_number": 1,
+    "audit_chain_root_id": "T-0001",
+    "budget_authority_site_id": "S-a9fba24caf583176",
+    "budget_charge_usd_nanos": 209239,
+    "charge_basis": "deterministic_tariff",
+    "config_hash": "0000000000000000000000000000000000000000000000000000000000000008",
+    "directive_budget_id": "D-c4c8151ea9014a9f",
+    "execution_budget_id": "B-9c8010c050a59301",
+    "ledger_epoch": 1,
+    "model": "deepseek-v4-flash",
+    "observation": false,
+    "occurred_at_ms": 1794799618461,
+    "profile": "deepseek-v4-flash-spend",
+    "provider_actual_usd_nanos": 209239,
+    "provider_id": "deepseek",
+    "reason": "deterministic_tariff",
+    "released_usd_nanos": 9037201,
+    "reserved_usd_nanos": 9246440,
+    "root_chain_id": "T-0001",
+    "thread_id": "T-0001",
+    "transition": "reconciled",
+    "transition_id": "accounting-transition/A-255a07e51354209b/3",
+    "transition_sequence": 3,
+    "turn": 1,
+    "version": 1
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000012",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 14,
+   "ts": "2026-11-16T03:26:59Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 15,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000015",
+   "event_id": 166,
+   "event_type": "tool_call_result",
+   "payload": {
+    "call_id": "call_1",
+    "operation_id": "0000000000000000000000000000000000000000000000000000000000000013",
+    "result_size_bytes": 298,
+    "result_text": "<scrubbed result_text 298 chars>",
+    "tool": "test_anchor_demo_anchor_demo",
+    "truncated": false
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000014",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000014",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 15,
+   "ts": "2026-11-16T03:27:00Z"
+  },
+  {
+   "chain_root_id": "T-0001",
+   "chain_seq": 16,
+   "event_hash": "0000000000000000000000000000000000000000000000000000000000000016",
+   "event_id": 167,
+   "event_type": "thread_failed",
+   "payload": {
+    "artifact_count": 0,
+    "error": {
+     "reason": "runtime_exited_without_callback_finalization",
+     "result": "<scrubbed 357 chars>",
+     "runtime_status": "failed"
+    },
+    "error_digest": "0000000000000000000000000000000000000000000000000000000000000017",
+    "error_size_bytes": 452,
+    "has_error": true,
+    "outcome_code": "failed",
+    "result_digest": "0000000000000000000000000000000000000000000000000000000000000018",
+    "result_present": true,
+    "result_project_snapshot_hash": null,
+    "result_size_bytes": 359,
+    "result_workspace_output_capture_hash": null
+   },
+   "prev_chain_event_hash": "0000000000000000000000000000000000000000000000000000000000000015",
+   "prev_thread_event_hash": "0000000000000000000000000000000000000000000000000000000000000015",
+   "storage_class": "indexed",
+   "thread_id": "T-0001",
+   "thread_seq": 16,
+   "ts": "2026-11-16T03:27:01Z"
+  }
+ ]
+}

@@ -5389,6 +5389,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryeos-timeline"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "ryeos-tracing"
 version = "0.1.0"
 dependencies = [

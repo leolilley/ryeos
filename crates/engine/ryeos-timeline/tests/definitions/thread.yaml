@@ -1,0 +1,180 @@
+vocabulary:
+  - {key: other, one: operation, many: operations}
+  - {key: child, one: child run, many: child runs}
+
+# Threads linked into the viewed thread's story, in either direction.
+spine:
+  - {event: thread_continued, from: thread_id, to: payload.successor_thread_id}
+  - {event: thread_created, from: payload.continuation_from, to: thread_id}
+
+events:
+  # Bookkeeping that contributes no entry, declared deliberately.
+  thread_created: [{drop: true}]
+  thread_started: [{drop: true}]
+  as_launched_resolution: [{drop: true}]
+  as_launched_ref_bindings: [{drop: true}]
+  runtime_launch_facts: [{drop: true}]
+  provider_attempt_budget_transition_v1: [{drop: true}]
+  stream_opened: [{drop: true}]
+  thread_usage: [{drop: true}]
+
+  cognition_in:
+    - when: {has: payload.content}
+      emit:
+        - {type: message, starts_exchange: true, project: {body: payload.content}}
+    - when: {has: payload.turn}
+      drop: true
+
+  # One event may carry reasoning, text and tool calls: it emits an entry per part.
+  cognition_out:
+    - emit:
+        - type: thought
+          when: {has: payload.reasoning_content}
+          project: {body: payload.reasoning_content}
+        - type: prose
+          flow: true
+          when: {has: payload.content}
+          project: {body: payload.content}
+
+
+
+  # A continuation: the predecessor names its successor and why; the
+  # successor's own record of the link adds nothing to draw.
+  thread_continued:
+    - when: {has: payload.successor_thread_id}
+      emit:
+        - type: marker
+          project:
+            headline: {join: [{path: payload.reason, prefix: "continued: "}]}
+            target: payload.successor_thread_id
+    - drop: true
+
+  # A failed thread writes two terminal events; both address one outcome entry.
+  thread_failed:
+    - when: {on_spine: true}
+      emit:
+        - type: outcome
+          key: [thread_id]
+          state: failed
+          tone: [{default: danger}]
+          project:
+            headline: {first: [payload.outcome_code, payload.message]}
+            reason: {first: [payload.message, payload.error.reason, payload.error.error, payload.error.summary, payload.error]}
+
+  thread_completed:
+    - when: {on_spine: true}
+      emit:
+        - type: outcome
+          key: [thread_id]
+          state: completed
+          tone: [{default: good}]
+          project: {headline: payload.outcome_code}
+
+  # Graph steps. A step and its tool call are one activity: the key is the node
+  # and step, which every graph event of the step carries.
+  graph_node_retry:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: retrying
+          tone: [{default: warn}]
+          project: {detail: {join: [{path: payload.attempt, prefix: "attempt "}, {path: payload.attempts, prefix: "of "}]}}
+
+  graph_started:
+    - emit:
+        - type: marker
+          starts_exchange: true
+          project: {headline: {join: [{path: payload.definition_ref, prefix: "graph "}]}}
+
+  graph_foreach_started:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: running
+          project: {detail: {join: [{path: payload.total, prefix: "items: "}]}}
+
+  graph_step_started:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: running
+          project: {headline: {join: [{path: payload.node, prefix: "step "}]}}
+
+  graph_step_completed:
+    - emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: {from: payload.status, map: {ok: done, retry: retrying}, default: failed}
+          tone:
+            - {field: payload.status, map: {ok: good, retry: warn}}
+            - {default: danger}
+
+  # The graph runtime also writes tool events for an action node: they update
+  # the step's activity rather than adding a second one.
+  tool_call_start:
+    - when: {has: payload.graph_run_id}
+      emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          counts_as: other
+          project: {tool: payload.item_id}
+    - emit:
+        - type: activity
+          key: [payload.operation_id]
+          state: running
+          counts_as: other
+          project:
+            headline: payload.tool
+            detail: {lookup: {event: cognition_out, array: payload.tool_calls, find: [id, payload.call_id], get: arguments}}
+
+  tool_call_result:
+    - when: {has: payload.graph_run_id}
+      emit:
+        - type: activity
+          key: [payload.node, payload.step]
+          state: {from: payload.status, map: {ok: done}, default: failed}
+    - emit:
+        - type: activity
+          key: [payload.operation_id]
+          state: {from: payload.truncated_reason, map: {error_envelope: failed}, default: done}
+          tone:
+            - {field: payload.truncated_reason, map: {error_envelope: danger, result_guard: warn}}
+            - {default: good}
+          project:
+            badge: {join: [{path: payload.result_size_bytes, format: bytes}, payload.truncated_reason]}
+
+  # Work in another thread. The child's outcome is not in this chain, so the
+  # link's state is unknown from here.
+  child_thread_spawned:
+    - when: {has: payload.node}
+      emit:
+        - type: link
+          key: [payload.child_thread_id]
+          state: unknown
+          counts_as: child
+          parent: {type: activity, key: [payload.node, payload.step]}
+          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.node, payload.step]}}
+          project: {headline: payload.item_id, target: payload.child_thread_id}
+    - emit:
+        - type: link
+          key: [payload.child_thread_id]
+          state: unknown
+          counts_as: child
+          parent: {type: activity, key: [payload.operation_id]}
+          adopt: {thread: payload.child_thread_id, under: {type: activity, key: [payload.operation_id]}}
+          project: {headline: payload.item_id, target: payload.child_thread_id}
+
+  artifact_published:
+    - when: {eq: [payload.artifact_type, graph_node_receipt]}
+      drop: true
+    - emit:
+        - type: marker
+          project: {headline: {join: [{path: payload.artifact_type, prefix: "artifact "}]}}
+
+  graph_completed:
+    - emit:
+        - type: outcome
+          key: [thread_id]
+          state: completed
+          tone: [{default: good}]
+          project: {detail: {join: [{path: payload.steps, prefix: "steps: "}]}}

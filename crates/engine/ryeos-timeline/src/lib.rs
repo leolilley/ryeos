@@ -1,0 +1,287 @@
+//! Pure projection of a thread log into timeline entries.
+//!
+//! The engine knows a closed set of mechanisms (entities, singles, flow
+//! merging, exchanges, clusters, recaps) and nothing about any event type or
+//! provider: which event feeds which mechanism is declared in a
+//! [`Definition`]. Folding is a deterministic function of the ordered events
+//! and the definition, and an entry id depends only on durable facts, so the
+//! same input always yields the same entries.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+mod fold;
+mod passes;
+mod path;
+
+pub use fold::fold;
+
+/// How events fold into entries. Parsed from signed data.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Definition {
+    /// Counting nouns for clusters, in display order.
+    #[serde(default)]
+    pub vocabulary: Vec<Noun>,
+    /// Which events link threads into the viewed thread's story.
+    #[serde(default)]
+    pub spine: Vec<SpineEdge>,
+    /// Rules per event type. The first rule whose `when` holds applies.
+    pub events: BTreeMap<String, Vec<Rule>>,
+}
+
+/// An event of `event` type links thread `from` to thread `to` (both paths into
+/// the event record). The spine is the root thread plus everything reachable
+/// over these edges, in either direction.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpineEdge {
+    pub event: String,
+    pub from: String,
+    pub to: String,
+}
+
+impl Definition {
+    pub fn from_yaml(text: &str) -> Result<Self, String> {
+        serde_yaml::from_str(text).map_err(|error| format!("invalid definition: {error}"))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Noun {
+    pub key: String,
+    pub one: String,
+    pub many: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    #[serde(default)]
+    pub when: Option<When>,
+    /// The event contributes nothing, deliberately.
+    #[serde(default)]
+    pub drop: bool,
+    /// Apply the emissions once per element of the array at this path, in
+    /// element order, so entries keep the order of the parts they come from.
+    /// Each element is visible to `when`, keys and slots as `item`, and its
+    /// position as `item_index`; a keyless entry's id gains `/<index>`.
+    #[serde(default)]
+    pub over: Option<String>,
+    /// Entries this event creates or updates; one event may emit several.
+    #[serde(default)]
+    pub emit: Vec<Emission>,
+}
+
+/// A condition on one event. Every present field must hold.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct When {
+    #[serde(default)]
+    pub has: Option<String>,
+    #[serde(default)]
+    pub lacks: Option<String>,
+    /// `[path, literal]`.
+    #[serde(default)]
+    pub eq: Option<(String, Value)>,
+    /// Whether the event's thread is on the spine.
+    #[serde(default)]
+    pub on_spine: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Emission {
+    #[serde(rename = "type")]
+    pub kind: EntryKind,
+    #[serde(default)]
+    pub when: Option<When>,
+    /// Entity key paths. Empty means a single-event entry.
+    #[serde(default)]
+    pub key: Vec<String>,
+    #[serde(default)]
+    pub state: Option<StateSpec>,
+    #[serde(default)]
+    pub project: BTreeMap<String, Slot>,
+    /// Tried in order; the first that yields a tone wins.
+    #[serde(default)]
+    pub tone: Vec<ToneRule>,
+    #[serde(default)]
+    pub counts_as: Option<String>,
+    /// Nest this entry under another entry, found by that entry's type and key.
+    #[serde(default)]
+    pub parent: Option<ParentRef>,
+    /// Adopt a thread: later entries from it nest under the named entry.
+    #[serde(default)]
+    pub adopt: Option<Adopt>,
+    /// This entry opens an exchange.
+    #[serde(default)]
+    pub starts_exchange: bool,
+    /// Adjacent flow emissions merge into one entry.
+    #[serde(default)]
+    pub flow: bool,
+}
+
+/// The entity an entry nests under. Membership is by key, not by position, so
+/// parallel work nests correctly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentRef {
+    #[serde(rename = "type")]
+    pub kind: EntryKind,
+    pub key: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Adopt {
+    /// Path to the adopted thread's id.
+    pub thread: String,
+    pub under: ParentRef,
+}
+
+/// The closed set of entries a rule can create. `cluster` and `recap` are
+/// produced by engine passes, never by a rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Message,
+    Prose,
+    Thought,
+    Activity,
+    Link,
+    Marker,
+    Outcome,
+    Ask,
+}
+
+impl EntryKind {
+    pub(crate) fn prefix(self) -> &'static str {
+        match self {
+            Self::Message => "msg",
+            Self::Prose => "pro",
+            Self::Thought => "tho",
+            Self::Activity => "act",
+            Self::Link => "lnk",
+            Self::Marker => "mrk",
+            Self::Outcome => "out",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StateSpec {
+    Literal(String),
+    FromPath {
+        from: String,
+        map: BTreeMap<String, String>,
+        default: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToneRule {
+    #[serde(default)]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub map: BTreeMap<String, String>,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+/// How one slot's text is built from an event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Slot {
+    Path(String),
+    First { first: Vec<String> },
+    Join { join: Vec<Part> },
+    Lookup { lookup: Lookup },
+}
+
+/// A value taken from an earlier event of the same thread: the latest event of
+/// type `event` whose array at `array` has an element whose `find.0` equals
+/// this event's `find.1`; the slot is that element's `get`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lookup {
+    pub event: String,
+    pub array: String,
+    pub find: (String, String),
+    pub get: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Part {
+    Path(String),
+    Spec {
+        path: String,
+        #[serde(default)]
+        format: Option<Format>,
+        #[serde(default)]
+        prefix: Option<String>,
+    },
+}
+
+/// Closed set of display formatters.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Format {
+    Bytes,
+    Count,
+    ShortHash,
+}
+
+/// One drawable unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Entry {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: EntryKind,
+    pub state: Option<String>,
+    pub tone: Option<String>,
+    pub thread: String,
+    pub parent: Option<String>,
+    pub exchange: Option<String>,
+    pub counts_as: Option<String>,
+    pub slots: BTreeMap<String, String>,
+    pub seq: (i64, i64),
+    pub ts: (String, String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Cluster {
+    pub id: String,
+    pub headline: String,
+    pub members: Vec<Entry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Recap {
+    pub id: String,
+    pub exchange: String,
+    pub work: usize,
+    pub duration_s: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "item", rename_all = "snake_case")]
+pub enum Item {
+    Entry(Entry),
+    Cluster(Cluster),
+    Recap(Recap),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Timeline {
+    pub items: Vec<Item>,
+    /// Event types with no rule, and how often they occurred.
+    pub undeclared: BTreeMap<String, u32>,
+}

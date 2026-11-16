@@ -1,0 +1,103 @@
+{
+  "items": [
+    {
+      "item": "entry",
+      "id": "msg:6",
+      "type": "message",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6",
+      "counts_as": null,
+      "slots": {
+        "body": "<scrubbed content 2444 chars>"
+      },
+      "seq": [
+        6,
+        6
+      ],
+      "ts": [
+        "2026-11-16T03:26:56Z",
+        "2026-11-16T03:26:56Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "tho:11",
+      "type": "thought",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6",
+      "counts_as": null,
+      "slots": {
+        "body": "<scrubbed reasoning_content 695 chars>"
+      },
+      "seq": [
+        11,
+        11
+      ],
+      "ts": [
+        "2026-11-16T03:26:58Z",
+        "2026-11-16T03:26:58Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "act:0000000000000000000000000000000000000000000000000000000000000013",
+      "type": "activity",
+      "state": "done",
+      "tone": "good",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6",
+      "counts_as": "other",
+      "slots": {
+        "badge": "298 B",
+        "detail": "{\"name\":\"continuation\",\"style\":\"friendly\"}",
+        "headline": "test_anchor_demo_anchor_demo"
+      },
+      "seq": [
+        13,
+        15
+      ],
+      "ts": [
+        "2026-11-16T03:26:58Z",
+        "2026-11-16T03:27:00Z"
+      ]
+    },
+    {
+      "item": "recap",
+      "id": "rc:msg:6",
+      "exchange": "msg:6",
+      "work": 1,
+      "duration_s": 5
+    },
+    {
+      "item": "entry",
+      "id": "out:T-0001",
+      "type": "outcome",
+      "state": "failed",
+      "tone": "danger",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6",
+      "counts_as": null,
+      "slots": {
+        "headline": "failed",
+        "reason": "runtime_exited_without_callback_finalization"
+      },
+      "seq": [
+        16,
+        16
+      ],
+      "ts": [
+        "2026-11-16T03:27:01Z",
+        "2026-11-16T03:27:01Z"
+      ]
+    }
+  ],
+  "undeclared": {}
+}

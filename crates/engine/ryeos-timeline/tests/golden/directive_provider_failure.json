@@ -1,0 +1,50 @@
+{
+  "items": [
+    {
+      "item": "entry",
+      "id": "msg:6",
+      "type": "message",
+      "state": null,
+      "tone": null,
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6",
+      "counts_as": null,
+      "slots": {
+        "body": "<scrubbed content 2454 chars>"
+      },
+      "seq": [
+        6,
+        6
+      ],
+      "ts": [
+        "2026-11-16T03:25:32Z",
+        "2026-11-16T03:25:32Z"
+      ]
+    },
+    {
+      "item": "entry",
+      "id": "out:T-0001",
+      "type": "outcome",
+      "state": "failed",
+      "tone": "danger",
+      "thread": "T-0001",
+      "parent": null,
+      "exchange": "msg:6",
+      "counts_as": null,
+      "slots": {
+        "headline": "failed",
+        "reason": "<scrubbed summary 546 chars>"
+      },
+      "seq": [
+        8,
+        9
+      ],
+      "ts": [
+        "2026-11-16T03:25:32Z",
+        "2026-11-16T03:25:32Z"
+      ]
+    }
+  ],
+  "undeclared": {}
+}
