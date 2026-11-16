@@ -5,7 +5,7 @@
 //!   `session/start` refuses a payload that carries a `stub` object, every
 //!   session is a Claude Code session, and an unusable Claude Code
 //!   configuration fails `initialize` loudly.
-//! - A binary built with the feature (the default, for tests) starts a stub
+//! - A binary built with the feature (opt-in, for the test bundle refresh) starts a stub
 //!   session only when the `session/start` payload carries a `stub` object.
 //!   A session without one is always a Claude Code session, and refuses when
 //!   Claude Code is not configured: a missing executable never silently

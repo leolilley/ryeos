@@ -22,8 +22,9 @@ exists. The real driver replaces the stub behind the same wire.
 | `.ai/workers/claude-code/lib/hosted/schema/` | one JSON schema per route request, response and notification |
 | `.ai/workers/claude-code/lib/hosted/settings.baseline.json` | the baseline written to `$CLAUDE_CONFIG_DIR/settings.json` |
 | `.ai/worker-executions/claude-code/` | `bounded-turn` (read-write), `bounded-turn-read-only`, `bounded-turn-recovery`, `bounded-turn-continue` (resumes a completed predecessor named by `continue_from`) |
-| `.ai/config/claude-code/environments/` | `ryeos.worker_environment.v7` for each worker, delivering the model key and gateway address as secrets |
+| `.ai/config/claude-code/environments/` | `ryeos.worker_environment.v7` for each worker and auth path: a model key and gateway address, or a Claude subscription token, delivered as secrets |
 | `.ai/node/commands/claude-code-profile-create.yaml` | `ryeos claude-code profile create <id>` |
+| `.ai/node/commands/claude-code-subscription-profile-create.yaml` | `ryeos claude-code profile create-subscription <id>` |
 | `.ai/knowledge/claude-code/hosted-activation.md` | operator runbook |
 | `test_contract.py` | authored-contract checks |
 

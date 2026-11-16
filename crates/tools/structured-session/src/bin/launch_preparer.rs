@@ -1500,22 +1500,17 @@ mod tests {
     fn claude_code_environments_pass_the_launch_preparer_validator() {
         let bundle = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../bundles/claude-code/.ai");
-        let profile: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(
-                bundle.join("workers/claude-code/lib/hosted/structured-session.profile.json"),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let required: Vec<&str> = profile["required_process_environment"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|name| name.as_str().unwrap())
-            .collect();
-        for (file, worker) in [
-            ("default", "worker:claude-code/hosted"),
-            ("trusted-lane", "worker:claude-code/trusted-hosted"),
+        let key: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"];
+        let subscription: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN"];
+        for (file, worker, required) in [
+            ("default", "worker:claude-code/hosted", key),
+            ("trusted-lane", "worker:claude-code/trusted-hosted", key),
+            ("subscription", "worker:claude-code/hosted", subscription),
+            (
+                "subscription-trusted-lane",
+                "worker:claude-code/trusted-hosted",
+                subscription,
+            ),
         ] {
             let path = bundle.join(format!("config/claude-code/environments/{file}.yaml"));
             let document: serde_yaml::Value =
@@ -1540,9 +1535,8 @@ mod tests {
             );
             assert!(!validated.has_external_content, "{file}");
             assert!(validated.workload_client.is_none(), "{file}");
-            // Every variable the profile requires is delivered as a secret
-            // under its own name, and no other variable is a delivered
-            // secret: the adapter's own settings are literals.
+            // Exactly this environment's credentials are delivered secrets,
+            // each under its own name; the adapter's settings are literals.
             let delivered = validated
                 .process_environment
                 .values()
@@ -1554,7 +1548,7 @@ mod tests {
                 })
                 .count();
             assert_eq!(delivered, required.len(), "{file}");
-            for name in &required {
+            for name in required {
                 assert!(
                     matches!(
                         validated.process_environment.get(*name),

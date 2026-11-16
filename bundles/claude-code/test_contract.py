@@ -30,9 +30,15 @@ WORKERS = {
     "hosted": BUNDLE / ".ai/workers/claude-code/hosted.yaml",
     "trusted-hosted": BUNDLE / ".ai/workers/claude-code/trusted-hosted.yaml",
 }
+# Each environment: its worker and the secrets it delivers. A model key
+# (optionally through a gateway) or a Claude subscription token.
+KEY_NAMES = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
+SUBSCRIPTION_NAMES = ["CLAUDE_CODE_OAUTH_TOKEN"]
 ENVIRONMENTS = {
-    "hosted": BUNDLE / ".ai/config/claude-code/environments/default.yaml",
-    "trusted-hosted": BUNDLE / ".ai/config/claude-code/environments/trusted-lane.yaml",
+    "default": ("hosted", KEY_NAMES),
+    "trusted-lane": ("trusted-hosted", KEY_NAMES),
+    "subscription": ("hosted", SUBSCRIPTION_NAMES),
+    "subscription-trusted-lane": ("trusted-hosted", SUBSCRIPTION_NAMES),
 }
 EXECUTIONS = {
     "bounded-turn": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn.yaml",
@@ -40,7 +46,13 @@ EXECUTIONS = {
     "bounded-turn-recovery": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-recovery.yaml",
     "bounded-turn-continue": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-continue.yaml",
 }
-COMMAND = BUNDLE / ".ai/node/commands/claude-code-profile-create.yaml"
+COMMANDS = {
+    "create": (BUNDLE / ".ai/node/commands/claude-code-profile-create.yaml", KEY_NAMES),
+    "create-subscription": (
+        BUNDLE / ".ai/node/commands/claude-code-subscription-profile-create.yaml",
+        SUBSCRIPTION_NAMES,
+    ),
+}
 
 TOP_LEVEL_KEYS = {
     "schema_version", "external_candidate", "transport", "http_sse",
@@ -122,11 +134,9 @@ class ClaudeCodeContractTests(unittest.TestCase):
         self.assertTrue(absence["absolute_paths"])
         for key in ("absolute_paths", "startup_ancestor_paths", "route_ancestor_paths"):
             self.assertEqual(absence[key], sorted(set(absence[key])), key)
-        self.assertEqual(
-            self.profile["required_process_environment"],
-            sorted(set(self.profile["required_process_environment"])),
-        )
-        self.assertIn("ANTHROPIC_API_KEY", self.profile["required_process_environment"])
+        # The profile fixes no credential: each environment delivers one auth
+        # path, and the adapter refuses a session without exactly one.
+        self.assertEqual(self.profile["required_process_environment"], [])
 
     def test_initialization_is_pure_read(self) -> None:
         self.assertTrue(self.profile["initialization"])
@@ -247,11 +257,11 @@ class ClaudeCodeContractTests(unittest.TestCase):
                 worker["external_content"][0]["id"], self.profile["workload_realization_id"]
             )
 
-    def test_environments_deliver_the_model_key_and_name_their_worker(self) -> None:
-        for name, path in ENVIRONMENTS.items():
-            environment = load_yaml(path)
+    def test_environments_deliver_one_auth_path_and_name_their_worker(self) -> None:
+        for name, (worker, names) in ENVIRONMENTS.items():
+            environment = load_yaml(BUNDLE / f".ai/config/claude-code/environments/{name}.yaml")
             self.assertEqual(environment["schema"], "ryeos.worker_environment.v7", name)
-            self.assertEqual(environment["worker_ref"], f"worker:claude-code/{name}", name)
+            self.assertEqual(environment["worker_ref"], f"worker:claude-code/{worker}", name)
             self.assertEqual(
                 environment["credential_requirement"],
                 {
@@ -269,9 +279,7 @@ class ClaudeCodeContractTests(unittest.TestCase):
                 for variable, value in variables.items()
                 if value.get("kind") == "delivered_secret"
             }
-            self.assertEqual(
-                set(delivered), set(self.profile["required_process_environment"]), name
-            )
+            self.assertEqual(set(delivered), set(names), name)
             for variable, value in delivered.items():
                 self.assertEqual(value, {"kind": "delivered_secret", "name": variable}, name)
             # Everything else is a plain literal: no other kind may carry a value.
@@ -322,17 +330,18 @@ class ClaudeCodeContractTests(unittest.TestCase):
             load_yaml(EXECUTIONS["bounded-turn-recovery"])["config"]["mode"]["require_post_completion_recovery"]
         )
 
-    def test_profile_command_activates_from_the_delivered_names(self) -> None:
-        command = load_yaml(COMMAND)
-        self.assertEqual(command["tokens"], ["claude-code", "profile", "create"])
-        self.assertEqual(
-            command["defaults"]["activation"],
-            {
-                "kind": "delivered_secret",
-                "names": sorted(self.profile["required_process_environment"]),
-            },
-        )
-        self.assertEqual(command["dispatch"]["execute"], "service:credential-profiles/create")
+    def test_profile_commands_activate_from_their_environments_names(self) -> None:
+        for verb, (path, names) in COMMANDS.items():
+            command = load_yaml(path)
+            self.assertEqual(command["tokens"], ["claude-code", "profile", verb])
+            self.assertEqual(
+                command["defaults"]["activation"],
+                {"kind": "delivered_secret", "names": sorted(names)},
+                verb,
+            )
+            self.assertEqual(
+                command["dispatch"]["execute"], "service:credential-profiles/create", verb
+            )
 
     def test_adapter_is_not_a_scripted_workload_and_ships_in_no_profile_source(self) -> None:
         for path in SOURCE.rglob("*"):

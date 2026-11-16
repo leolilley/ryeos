@@ -8,10 +8,7 @@
   "workload_executable": "claude-code-adapter",
   "workload_args": [],
   "workload_home_env": "CLAUDE_CONFIG_DIR",
-  "required_process_environment": [
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_BASE_URL"
-  ],
+  "required_process_environment": [],
   "workload_client": null,
   "baseline_config": "settings.baseline.json",
   "baseline_destination": "settings.json",

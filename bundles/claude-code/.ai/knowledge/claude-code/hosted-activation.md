@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T12:47:54Z:9a15ae3802a6d1f53f7ce94f600916ee71a71dade3cd2d4301f42b0f279e4aec:nm6aQs1CfkrVX/vRuVwstOcMI/5xtUIqpdhMWncRjfJsvmSSAtOf3DFuU63k5R53YFAyNlr/AWskFuiDhFaWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T23:03:58Z:06f29ce6f931a4c071bacbd91e4464c5c38ee25bfa82bb38749b983adfecf369:QTo6roSbc4dX5F+gZAin8tBxOfGjZVN97+DlshCgy3g3vME4V6PA6ekGqarypyvY3cED2HqHJjFXvX4kSlZ7Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: claude-code
 tags: [claude-code, hosted-worker, activation, runbook]
@@ -27,11 +27,16 @@ asks for, or with a default sentence.
 - `worker_execution:claude-code/bounded-turn` (read-write),
   `bounded-turn-read-only`, and `bounded-turn-recovery`. None requires durable
   storage or a credential private home, so a disposable node can run them.
-- `config:claude-code/environments/default` and `trusted-lane`, the worker
-  environments the executions bind. Each delivers `ANTHROPIC_API_KEY` and
-  `ANTHROPIC_BASE_URL` to the worker as delivered secrets.
+- The worker environments the executions bind, two per auth path:
+  - `config:claude-code/environments/default` and `trusted-lane` deliver a
+    model key: `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`.
+  - `subscription` and `subscription-trusted-lane` deliver a Claude
+    subscription token: `CLAUDE_CODE_OAUTH_TOKEN`.
 
-## Operator steps
+  The adapter refuses a session unless exactly one of the two is present, and
+  a subscription token never goes through a gateway.
+
+## Operator steps (model key)
 
 1. Provide the two host values to the node. Each name must be an admitted
    provider-environment name whose recipient capability the session owner
@@ -44,6 +49,21 @@ asks for, or with a default sentence.
 3. Launch a bounded turn with the `environment` binding set to
    `config:claude-code/environments/default` (or `trusted-lane` on a trusted
    node) and the profile id as `credential_profile_id`.
+
+## Operator steps (Claude subscription)
+
+1. On a machine with a browser, run `claude setup-token` once and sign in
+   with the subscription. It prints a long-lived token.
+2. Provide that token to the node as the host value `CLAUDE_CODE_OAUTH_TOKEN`,
+   under the same exact recipient rule as the model key.
+3. Create the credential profile from it:
+
+       ryeos claude-code profile create-subscription <profile-id>
+
+4. Launch with the `environment` binding set to
+   `config:claude-code/environments/subscription` (or
+   `subscription-trusted-lane`). Turns draw on the subscription's own usage
+   limits.
 
 ## Driving the stub
 
@@ -83,8 +103,10 @@ settings (`--setting-sources user`), only the adapter's MCP file
 (`--strict-mcp-config`), `--permission-mode dontAsk` with prompts denied, and
 `--bare` when a gateway base URL is delivered.
 
-An adapter built for shipping uses `--no-default-features`: that binary has no
-stub and refuses the `stub` knob. The default build keeps the stub for tests.
+A default build has no stub and refuses the `stub` knob; that is what ships.
+Only the test bundle refresh (`populate-bundles.sh --build-profile test`, which
+`gate.sh --refresh-bundles` selects) builds the adapter with its `stub-driver`
+feature.
 
 ## Not in this slice
 

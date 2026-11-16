@@ -9,9 +9,10 @@ use serde_json::{Value, json};
 
 /// Names the adapter copies from its own environment into Claude Code's.
 /// Everything else is dropped: the child starts from an empty environment.
-const PASSTHROUGH: [&str; 15] = [
+const PASSTHROUGH: [&str; 16] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
     "HOME",
     "PATH",
     "TMPDIR",
@@ -101,9 +102,36 @@ impl Config {
             .iter()
             .filter_map(|name| get(name).map(|value| ((*name).to_owned(), value)))
             .collect();
-        let bare = environment
-            .iter()
-            .any(|(name, value)| name == "ANTHROPIC_BASE_URL" && !value.is_empty());
+        let present = |wanted: &str| {
+            environment
+                .iter()
+                .any(|(name, value)| name == wanted && !value.is_empty())
+        };
+        // Exactly one way to authenticate: a model key (optionally through a
+        // gateway), or a Claude subscription token. The subscription signs in
+        // directly, so it never goes through a gateway.
+        match (
+            present("ANTHROPIC_API_KEY"),
+            present("CLAUDE_CODE_OAUTH_TOKEN"),
+        ) {
+            (true, false) => {}
+            (false, true) if !present("ANTHROPIC_BASE_URL") => {}
+            (false, true) => {
+                return Err(
+                    "CLAUDE_CODE_OAUTH_TOKEN signs in directly and cannot use ANTHROPIC_BASE_URL"
+                        .to_owned(),
+                );
+            }
+            (true, true) => {
+                return Err("set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, not both".to_owned());
+            }
+            (false, false) => {
+                return Err(
+                    "no credential: set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN".to_owned(),
+                );
+            }
+        }
+        let bare = present("ANTHROPIC_BASE_URL");
         Ok(Self {
             executable,
             home,
@@ -454,6 +482,7 @@ mod tests {
         let ok = Config::from_environment(env(vec![
             ("CLAUDE_CODE_EXECUTABLE", exe.clone()),
             ("CLAUDE_CONFIG_DIR", "/home/w/.claude".into()),
+            ("ANTHROPIC_API_KEY", "sk-x".into()),
             ("ANTHROPIC_BASE_URL", "http://gw".into()),
             (
                 "CLAUDE_CODE_MCP_CONFIG",
@@ -463,6 +492,54 @@ mod tests {
         .unwrap();
         assert!(ok.bare);
         assert_eq!(ok.mcp_config["mcpServers"]["task"]["type"], "http");
+        // A subscription token alone is a complete credential, and never bare.
+        let subscription = Config::from_environment(env(vec![
+            ("CLAUDE_CODE_EXECUTABLE", exe.clone()),
+            ("CLAUDE_CONFIG_DIR", "/home/w/.claude".into()),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "oauth-x".into()),
+        ]))
+        .unwrap();
+        assert!(!subscription.bare);
+        assert!(
+            subscription
+                .child_environment()
+                .contains(&("CLAUDE_CODE_OAUTH_TOKEN".to_owned(), "oauth-x".to_owned()))
+        );
+        let base = || {
+            vec![
+                ("CLAUDE_CODE_EXECUTABLE", exe.clone()),
+                ("CLAUDE_CONFIG_DIR", "/h".to_owned()),
+            ]
+        };
+        let with = |extra: Vec<(&'static str, &str)>| {
+            let mut pairs = base();
+            pairs.extend(
+                extra
+                    .into_iter()
+                    .map(|(key, value)| (key, value.to_owned())),
+            );
+            pairs
+        };
+        for (pairs, needle) in [
+            (base(), "no credential"),
+            (
+                with(vec![
+                    ("ANTHROPIC_API_KEY", "sk"),
+                    ("CLAUDE_CODE_OAUTH_TOKEN", "o"),
+                ]),
+                "not both",
+            ),
+            (
+                with(vec![
+                    ("CLAUDE_CODE_OAUTH_TOKEN", "o"),
+                    ("ANTHROPIC_BASE_URL", "http://gw"),
+                ]),
+                "cannot use ANTHROPIC_BASE_URL",
+            ),
+        ] {
+            let error = Config::from_environment(env(pairs)).unwrap_err();
+            assert!(error.contains(needle), "{error}");
+        }
         for (pairs, needle) in [
             (vec![("CLAUDE_CONFIG_DIR", "/h".to_owned())], "not set"),
             (
@@ -487,6 +564,7 @@ mod tests {
                 vec![
                     ("CLAUDE_CODE_EXECUTABLE", exe.clone()),
                     ("CLAUDE_CONFIG_DIR", "/h".to_owned()),
+                    ("ANTHROPIC_API_KEY", "sk".to_owned()),
                     (
                         "CLAUDE_CODE_MCP_CONFIG",
                         r#"{"mcpServers":{"a":1}}"#.to_owned(),

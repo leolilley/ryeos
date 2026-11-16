@@ -190,13 +190,13 @@ if [[ "$refresh_bundles" == "1" ]]; then
     if [[ -n "${GATE_BUNDLE_TARGET_DIR:-}" ]]; then
         gate_info "using disposable bundle-build target: $GATE_BUNDLE_TARGET_DIR"
         CARGO_TARGET_DIR="$GATE_BUNDLE_TARGET_DIR" \
-            "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --all
+            "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --build-profile test --all
         # Bundle binaries and signed manifests have been staged into their
         # source trees. The optimized build graph is no longer needed by the
         # test profile and must not compete with it for hosted-runner disk.
         "$CARGO" clean --target-dir "$GATE_BUNDLE_TARGET_DIR"
     else
-        "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --all
+        "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --build-profile test --all
     fi
 elif [[ "$skip_tests" == "1" ]]; then
     gate_fail "--no-tests without --refresh-bundles has nothing to do"
@@ -390,6 +390,19 @@ if [[ "$crash_qualification_only" != "1" ]]; then
         }
         [[ -z "$composition_feature" ]] || gate_features+="${gate_features:+,}$composition_feature"
     done
+    # The claude-code adapter's stub driver is opt-in and off in shipped
+    # builds; the test build turns it on so the stub's own tests still run.
+    adapter_selected=0
+    if [[ ${#selected_packages[@]} -eq 0 || "$explicit_workspace" == 1 ]]; then
+        adapter_selected=1
+    else
+        for selection in "${selected_packages[@]}"; do
+            # shellcheck disable=SC2254
+            case ryeos-claude-code-adapter in ${selection%@*}) adapter_selected=1 ;; esac
+        done
+    fi
+    [[ "$adapter_selected" == 0 ]] \
+        || gate_features+="${gate_features:+,}ryeos-claude-code-adapter/stub-driver"
     feature_args=()
     [[ -z "$gate_features" ]] || feature_args=(--features "$gate_features")
     if [[ -n "$nextest_archive" ]]; then

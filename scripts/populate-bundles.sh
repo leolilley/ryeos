@@ -10,7 +10,7 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set standard|development|central-host|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set standard|development|central-host|standard-central-auth|local-inference|hosted-workflow|bundle-source|core|core-scheduling|core-workflow|core-knowledge|hosted-controller|release-authority|release-artifacts] (--crates "<package ...>" | --all) [--build-profile release|latency-profiling|test]
 #
 # Bundle sets:
 #   standard        core + scheduling + knowledge + directive + graph + ryeos-docs +
@@ -63,6 +63,8 @@ CRATES_OVERRIDE="" # space-separated Cargo package list; empty = bundle-set defa
 POPULATE_ALL=0     # explicit opt-in to rebuild the whole bundle set
 # The build profile is an explicit artifact property, not ambient process
 # configuration. Containers pass the same closed value through this CLI.
+# `test` is release optimisation plus the test-only stub driver in the
+# claude-code adapter; it is only for bundle refreshes that feed the test suite.
 BUILD_PROFILE="release"
 
 while [[ $# -gt 0 ]]; do
@@ -83,8 +85,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$BUILD_PROFILE" in
-  release|latency-profiling) ;;
-  *) ryeos_term_fail "invalid build profile: $BUILD_PROFILE (expected release or latency-profiling)"; exit 2 ;;
+  release|latency-profiling|test) ;;
+  *) ryeos_term_fail "invalid build profile: $BUILD_PROFILE (expected release, latency-profiling or test)"; exit 2 ;;
 esac
 
 # Refuse to build the whole workspace implicitly — that full release build is
@@ -650,13 +652,29 @@ if (( ${#static_build_labels[@]} > 0 )); then
   ryeos_term_suspend
   # These packages share the same target and flags. One Cargo graph reuses
   # their common dependencies and runs publication only after all succeed.
+  # The test profile builds the claude-code adapter with its stub driver. A
+  # feature is selected per Cargo invocation, so that package builds alone and
+  # every other static package keeps the shared invocation.
   static_build_args=()
+  static_stub_adapter=0
   for package in "${static_build_labels[@]}"; do
-    static_build_args+=(-p "$package")
+    if [[ "$BUILD_PROFILE" == test && "$package" == ryeos-claude-code-adapter ]]; then
+      static_stub_adapter=1
+    else
+      static_build_args+=(-p "$package")
+    fi
   done
   ryeos_term_info "static worker build: ${static_build_labels[*]}"
-  RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
-    "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
+  if (( ${#static_build_args[@]} > 0 )); then
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" "${static_build_args[@]}"
+  fi
+  if (( static_stub_adapter == 1 )); then
+    ryeos_term_info "static worker build: ryeos-claude-code-adapter with features stub-driver"
+    RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-feature=+crt-static" \
+      "$CARGO" build --release --locked --target "$TRIPLE" "${jobs_args[@]}" \
+      -p ryeos-claude-code-adapter --features stub-driver
+  fi
   ryeos_term_resume "selected static worker build complete"
 else
   ryeos_term_update "retaining static worker binaries" "no static packages selected"

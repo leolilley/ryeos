@@ -25,9 +25,13 @@ use crate::sessions::{Record, SessionMap, Verdict};
 use crate::stream::{End, Redactor, StreamParser};
 use crate::wire::Emitter;
 
-/// Host-provided values the adapter holds; the profile's
-/// `required_process_environment` lists the same names.
-const REDACTED_ENVIRONMENT: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"];
+/// Host-provided credential values the adapter holds. They never appear in
+/// anything the adapter reports.
+const REDACTED_ENVIRONMENT: [&str; 3] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+];
 /// The longest line read from Claude Code. A longer one is dropped whole.
 const MAX_STREAM_LINE_BYTES: usize = 8 * 1024 * 1024;
 const STDERR_TAIL_BYTES: usize = 512;
