@@ -49,8 +49,6 @@ pub const PLACEMENT_ID: &str = "T-guest-wire-probe";
 pub const OCCURRENCE_ID: &str = "occ-guest-wire-probe";
 pub const IMPORT_NAME: &str = "signed-import.json";
 pub const PACKAGE_NAME: &str = "guest-package";
-pub const RESOLVER_NAME: &str = "network-resolver";
-pub const HOSTS_NAME: &str = "network-hosts";
 const PRODUCT_MOUNT: &str = "runtime";
 const COMMAND_RELATIVE: &str = "bin/evaluate";
 const COMMAND_PATH: &str = "/ryeos/realizations/runtime/bin/evaluate";
@@ -139,7 +137,6 @@ pub struct FixtureInputs<'a> {
     pub launcher: &'a [u8],
     pub tls_root_der: &'a [u8],
     pub port: u16,
-    pub activation_root: &'a str,
 }
 
 pub struct Prepared {
@@ -149,8 +146,6 @@ pub struct Prepared {
     pub package: PreparedGuestPackage,
     pub projection: ExternalGuestInputProjection,
     pub expected_ready_inputs: Vec<String>,
-    pub resolver_bytes: Vec<u8>,
-    pub hosts_bytes: Vec<u8>,
 }
 
 fn base_snapshot(
@@ -333,8 +328,10 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
 
     // Sealed bootstrap naming the loopback controller and its ephemeral root.
     let roots = vec![STANDARD.encode(inputs.tls_root_der)];
-    let resolver_bytes = b"nameserver 127.0.0.1\n".to_vec();
-    let hosts_bytes = b"127.0.0.1 localhost\n".to_vec();
+    // The shape a lease binding captures: the sandbox's own resolver and
+    // hosts files, named by the one contract definition. The verifier writes
+    // no substitute for them.
+    let network_sources = ryeos_external_execution_contract::operator_network_inputs();
     let attachment_deadline_ms = now + 180_000;
     let allocation_request_digest = digest_of("allocation");
     let admitted_capsule_hash = digest_of("capsule");
@@ -345,12 +342,12 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
             schema: 2,
             network_inputs: ExternalNetworkInputPolicy {
                 resolver: ExternalNetworkInputSelection {
-                    source: format!("{}/{RESOLVER_NAME}", inputs.activation_root),
-                    max_bytes: 65_536,
+                    source: network_sources.resolver_source.into(),
+                    max_bytes: network_sources.resolver_max_bytes,
                 },
                 hosts: ExternalNetworkInputSelection {
-                    source: format!("{}/{HOSTS_NAME}", inputs.activation_root),
-                    max_bytes: 65_536,
+                    source: network_sources.hosts_source.into(),
+                    max_bytes: network_sources.hosts_max_bytes,
                 },
             },
             https_origin: format!("https://127.0.0.1:{}", inputs.port),
@@ -518,8 +515,6 @@ pub fn prepare(inputs: &FixtureInputs<'_>) -> Result<Prepared> {
         package,
         projection,
         expected_ready_inputs,
-        resolver_bytes,
-        hosts_bytes,
     })
 }
 

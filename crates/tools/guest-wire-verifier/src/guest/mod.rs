@@ -254,8 +254,11 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         launcher,
         tls_root_der: pki.root_der(),
         port: server.port(),
-        activation_root: ACTIVATION_ROOT,
     })?;
+    // 4a. The provider sandbox's real network files, read before the overlay
+    // can hide or replace anything. The supervisor must report, in its Ready,
+    // the same bytes it sees mounted.
+    let provider_network_inputs = controller::read_provider_network_inputs()?;
     let package_bytes = prepared.package.bytes();
     std::fs::create_dir_all(ACTIVATION_ROOT)?;
     std::fs::create_dir_all(OCCURRENCES_ROOT)?;
@@ -291,7 +294,8 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     ])
     .map_err(anyhow::Error::msg)?;
 
-    // 6. Deliver the signed import, package and network inputs.
+    // 6. Deliver the signed import and package. The network inputs are the
+    // provider sandbox's own files, read in step 4a; none is written here.
     let activation = lillux::PinnedDirectory::open(Path::new(ACTIVATION_ROOT))?
         .context("activation overlay is absent")?;
     fixture::write_file(
@@ -307,19 +311,13 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         .map_err(anyhow::Error::msg)?;
     fixture::write_file(&activation, fixture::PACKAGE_NAME, &payload_bytes, 0o600)?;
     drop(payload_bytes);
-    for (name, bytes) in [
-        (fixture::RESOLVER_NAME, &prepared.resolver_bytes),
-        (fixture::HOSTS_NAME, &prepared.hosts_bytes),
-    ] {
-        let file = fixture::write_file(&activation, name, bytes, 0o600)?;
-        profile.account.grant_private_file(&file)?;
-    }
 
     // 7. Serve the controller while the owner runs as shipped.
     let controller = controller::Controller::new(
         &prepared.bootstrap_bytes,
         controller_key,
         prepared.expected_ready_inputs.clone(),
+        provider_network_inputs,
     )?;
     let assignment = URL_SAFE_NO_PAD.encode(&prepared.signed_assignment);
     let remaining = request.attempt_deadline.remaining();
