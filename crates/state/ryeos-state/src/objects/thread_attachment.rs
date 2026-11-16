@@ -81,6 +81,25 @@ impl ThreadAttachment {
         Ok(())
     }
 
+    /// The attachment object for these bytes: the blob hash is the bytes'
+    /// content hash and the length is their length.
+    pub fn for_bytes(media_type: &str, bytes: &[u8]) -> anyhow::Result<Self> {
+        let attachment = Self {
+            media_type: media_type.to_owned(),
+            byte_length: u64::try_from(bytes.len()).context("attachment length exceeds u64")?,
+            blob_hash: lillux::sha256_hex(bytes),
+        };
+        attachment.validate()?;
+        Ok(attachment)
+    }
+
+    /// The content address of this object: the hash of its canonical form.
+    pub fn object_hash(&self) -> anyhow::Result<String> {
+        let canonical = lillux::canonical_json(&self.to_value())
+            .context("canonicalize thread_attachment object")?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
     pub fn to_value(&self) -> Value {
         json!({
             "kind": THREAD_ATTACHMENT_KIND,
@@ -136,6 +155,19 @@ mod tests {
             ThreadAttachment::from_value(&attachment.to_value()).unwrap(),
             attachment
         );
+    }
+
+    #[test]
+    fn an_object_for_bytes_has_the_content_addressed_hashes() {
+        let attachment = ThreadAttachment::for_bytes("image/png", b"pixels").unwrap();
+        assert_eq!(attachment.byte_length, 6);
+        assert_eq!(attachment.blob_hash, lillux::sha256_hex(b"pixels"));
+        let canonical = lillux::canonical_json(&attachment.to_value()).unwrap();
+        assert_eq!(
+            attachment.object_hash().unwrap(),
+            lillux::sha256_hex(canonical.as_bytes())
+        );
+        assert!(ThreadAttachment::for_bytes("not a type", b"x").is_err());
     }
 
     #[test]

@@ -36,10 +36,10 @@ pub use authorizer::{
     CapabilityParseError, canonical_cap, cap_matches,
 };
 pub use callback::{
-    ActionPayload, CallbackError, DispatchActionRequest, ProjectObservationPublishParams,
-    RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure,
-    RuntimeFailureDiagnosticLocator, TerminalCompletion, client_from_env, parse_hook_action,
-    validate_runtime_thread_id,
+    ActionPayload, CallbackError, DispatchActionRequest, EventAppendOptions, EventAttachment,
+    ProjectObservationPublishParams, RUNTIME_FAILURE_KIND, ReplayResponse, ReplayedEventRecord,
+    RuntimeCallbackAPI, RuntimeFailure, RuntimeFailureDiagnosticLocator, TerminalCompletion,
+    client_from_env, parse_hook_action, validate_runtime_thread_id,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{

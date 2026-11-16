@@ -5809,6 +5809,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             &self,
             _thread_id: &str,
             events: Vec<Value>,
+            _options: ryeos_runtime::callback::EventAppendOptions,
         ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
             self.batch_offsets
                 .lock()

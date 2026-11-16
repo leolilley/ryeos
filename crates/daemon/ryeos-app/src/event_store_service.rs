@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use base64::Engine as _;
 use ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy;
+use ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy;
 use ryeos_runtime::{
     CognitionInAssembler, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
     MAX_RUNTIME_EVENT_PAYLOAD_BYTES,
@@ -9,11 +12,26 @@ use ryeos_runtime::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::state_store::{NewEventRecord, PersistedEventRecord, StateStore};
+use crate::state_store::{NewEventRecord, NewThreadAttachment, PersistedEventRecord, StateStore};
+
+/// Most append receipts kept to answer a retried idempotent append.
+const MAX_APPEND_RECEIPTS: usize = 256;
+const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
+
+/// What a keyed append returned, kept so that a retry after a lost
+/// acknowledgement gets the same answer and writes nothing twice.
+#[derive(Debug)]
+struct AppendReceipt {
+    thread_id: String,
+    key: String,
+    fingerprint: String,
+    persisted: Vec<PersistedEventRecord>,
+}
 
 #[derive(Debug, Clone)]
 pub struct EventStoreService {
     state_store: Arc<StateStore>,
+    receipts: Arc<Mutex<VecDeque<AppendReceipt>>>,
 }
 
 /// One runtime-appended event. It carries no storage class: the daemon
@@ -33,11 +51,30 @@ pub struct EventAppendParams {
     pub event: EventAppendItem,
 }
 
+/// Bytes that travel inline with the append that names them. The daemon
+/// stores them as `thread_attachment` objects under the append's write permit;
+/// an event refers to one through the hash of its object in `attachment_refs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventAttachmentUpload {
+    pub media_type: String,
+    pub bytes_b64: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventAppendBatchParams {
     pub thread_id: String,
     pub events: Vec<EventAppendItem>,
+    /// Attachments stored with this append; every one must be named by an
+    /// event of the batch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<EventAttachmentUpload>,
+    /// A caller-chosen key for the batch. Repeating a key with the same
+    /// batch returns the first answer without appending again; repeating it
+    /// with a different batch is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,7 +114,10 @@ fn default_replay_limit() -> usize {
 
 impl EventStoreService {
     pub fn new(state_store: Arc<StateStore>) -> Self {
-        Self { state_store }
+        Self {
+            state_store,
+            receipts: Arc::new(Mutex::new(VecDeque::new())),
+        }
     }
 
     /// Append one runtime event, stored under `storage`'s class for it.
@@ -85,13 +125,17 @@ impl EventStoreService {
         &self,
         params: &EventAppendParams,
         storage: &EventStoragePolicy,
+        attachments: &ThreadAttachmentsPolicy,
     ) -> Result<PersistedEventRecord> {
         let result = self.append_batch(
             &EventAppendBatchParams {
                 thread_id: params.thread_id.clone(),
                 events: vec![params.event.clone()],
+                attachments: Vec::new(),
+                idempotency_key: None,
             },
             storage,
+            attachments,
         )?;
         result
             .persisted
@@ -115,8 +159,54 @@ impl EventStoreService {
         &self,
         params: &EventAppendBatchParams,
         storage: &EventStoragePolicy,
+        attachments: &ThreadAttachmentsPolicy,
+    ) -> Result<EventAppendBatchResult> {
+        let Some(key) = params.idempotency_key.as_deref() else {
+            return self.append_batch_once(params, storage, attachments);
+        };
+        validate_idempotency_key(key)?;
+        let fingerprint = batch_fingerprint(params)?;
+        // Held across the append so a concurrent retry of the same key waits
+        // for the first attempt's answer instead of writing a second batch.
+        let mut receipts = self
+            .receipts
+            .lock()
+            .map_err(|_| anyhow::anyhow!("append receipt registry is poisoned"))?;
+        if let Some(receipt) = receipts
+            .iter()
+            .find(|receipt| receipt.thread_id == params.thread_id && receipt.key == key)
+        {
+            if receipt.fingerprint != fingerprint {
+                bail!(
+                    "idempotency key '{key}' was already used for a different batch on thread '{}'",
+                    params.thread_id
+                );
+            }
+            return Ok(EventAppendBatchResult {
+                persisted: receipt.persisted.clone(),
+            });
+        }
+        let result = self.append_batch_once(params, storage, attachments)?;
+        if receipts.len() == MAX_APPEND_RECEIPTS {
+            receipts.pop_front();
+        }
+        receipts.push_back(AppendReceipt {
+            thread_id: params.thread_id.clone(),
+            key: key.to_owned(),
+            fingerprint,
+            persisted: result.persisted.clone(),
+        });
+        Ok(result)
+    }
+
+    fn append_batch_once(
+        &self,
+        params: &EventAppendBatchParams,
+        storage: &EventStoragePolicy,
+        attachments_policy: &ThreadAttachmentsPolicy,
     ) -> Result<EventAppendBatchResult> {
         validate_runtime_event_batch(&params.events)?;
+        let uploads = validate_attachment_uploads(params, attachments_policy)?;
         let thread = self
             .state_store
             .get_thread(&params.thread_id)?
@@ -149,7 +239,12 @@ impl EventStoreService {
 
         let persisted = self
             .state_store
-            .append_events_if_thread_running(&thread.chain_root_id, &thread.thread_id, &events)?
+            .append_events_with_attachments_if_thread_running(
+                &thread.chain_root_id,
+                &thread.thread_id,
+                &events,
+                &uploads,
+            )?
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "event append refused: thread '{}' is no longer running",
@@ -213,6 +308,86 @@ impl EventStoreService {
     pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
         self.state_store.chain_head_thread(chain_root_id)
     }
+}
+
+fn validate_idempotency_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || key.len() > MAX_IDEMPOTENCY_KEY_BYTES
+        || !key.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        bail!("idempotency_key must be 1..={MAX_IDEMPOTENCY_KEY_BYTES} visible ASCII bytes");
+    }
+    Ok(())
+}
+
+/// The digest of everything a keyed append writes, so a retry is recognised
+/// as the same batch and a reused key with other content is refused.
+fn batch_fingerprint(params: &EventAppendBatchParams) -> Result<String> {
+    let value = serde_json::json!({
+        "events": params.events,
+        "attachments": params.attachments,
+    });
+    let canonical = lillux::canonical_json(&value).context("canonicalize event batch")?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
+}
+
+/// Decode the batch's attachments and hold them to the node's
+/// `thread_attachments` limits. Every upload must be named by an event of the
+/// batch, so none is stored unreferenced, and only an indexed event may name
+/// one, so a stored attachment is always reachable from the signed chain.
+fn validate_attachment_uploads(
+    params: &EventAppendBatchParams,
+    policy: &ThreadAttachmentsPolicy,
+) -> Result<Vec<NewThreadAttachment>> {
+    if params.attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    if params.attachments.len() > policy.max_attachments_per_turn as usize {
+        bail!(
+            "append carries {} attachments (node limit {} per turn)",
+            params.attachments.len(),
+            policy.max_attachments_per_turn
+        );
+    }
+    let mut named = BTreeSet::new();
+    for event in &params.events {
+        for hash in ryeos_state::objects::payload_attachment_refs(&event.payload)? {
+            named.insert(hash.to_owned());
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut uploads = Vec::with_capacity(params.attachments.len());
+    for upload in &params.attachments {
+        if !policy.accepts(&upload.media_type) {
+            bail!(
+                "attachment media type '{}' is not accepted by this node",
+                upload.media_type
+            );
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&upload.bytes_b64)
+            .context("attachment bytes_b64 is not valid base64")?;
+        if bytes.len() as u64 > policy.max_bytes_per_attachment {
+            bail!(
+                "attachment is {} bytes (node limit {})",
+                bytes.len(),
+                policy.max_bytes_per_attachment
+            );
+        }
+        let object = ryeos_state::objects::ThreadAttachment::for_bytes(&upload.media_type, &bytes)?;
+        let hash = object.object_hash()?;
+        if !seen.insert(hash.clone()) {
+            bail!("attachment {hash} is uploaded twice in one append");
+        }
+        if !named.contains(&hash) {
+            bail!("attachment {hash} is not named by any event of the append");
+        }
+        uploads.push(NewThreadAttachment {
+            media_type: upload.media_type.clone(),
+            bytes,
+        });
+    }
+    Ok(uploads)
 }
 
 fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
@@ -343,6 +518,152 @@ mod tests {
             &EventStoragePolicy::as_shipped(),
         )
         .map(ryeos_runtime::StorageClass::as_str)
+    }
+
+    fn upload(media_type: &str, bytes: &[u8]) -> (EventAttachmentUpload, String) {
+        let hash = ryeos_state::objects::ThreadAttachment::for_bytes(media_type, bytes)
+            .unwrap()
+            .object_hash()
+            .unwrap();
+        (
+            EventAttachmentUpload {
+                media_type: media_type.to_owned(),
+                bytes_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            },
+            hash,
+        )
+    }
+
+    fn batch(
+        refs: &[String],
+        attachments: Vec<EventAttachmentUpload>,
+        key: Option<&str>,
+    ) -> EventAppendBatchParams {
+        EventAppendBatchParams {
+            thread_id: "T-1".to_owned(),
+            events: vec![EventAppendItem {
+                event_type: "cognition_frame".to_owned(),
+                payload: json!({"attachment_refs": refs}),
+            }],
+            attachments,
+            idempotency_key: key.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn uploads_must_be_named_accepted_and_within_the_node_limits() {
+        let policy = ThreadAttachmentsPolicy::as_shipped();
+        let (first, first_hash) = upload("application/json", b"{}");
+        let (second, second_hash) = upload("image/png", b"pixels");
+
+        let ok = batch(
+            &[first_hash.clone(), second_hash.clone()],
+            vec![first.clone(), second.clone()],
+            None,
+        );
+        let uploads = validate_attachment_uploads(&ok, &policy).unwrap();
+        assert_eq!(uploads.len(), 2);
+        assert_eq!(uploads[0].bytes, b"{}");
+
+        let unnamed = batch(
+            std::slice::from_ref(&first_hash),
+            vec![first.clone(), second],
+            None,
+        );
+        assert!(
+            format!(
+                "{:#}",
+                validate_attachment_uploads(&unnamed, &policy).unwrap_err()
+            )
+            .contains("not named")
+        );
+
+        let twice = batch(
+            std::slice::from_ref(&first_hash),
+            vec![first.clone(), first],
+            None,
+        );
+        assert!(
+            format!(
+                "{:#}",
+                validate_attachment_uploads(&twice, &policy).unwrap_err()
+            )
+            .contains("twice")
+        );
+
+        let (bmp, bmp_hash) = upload("image/bmp", b"x");
+        let refused_type = batch(&[bmp_hash], vec![bmp], None);
+        assert!(
+            format!(
+                "{:#}",
+                validate_attachment_uploads(&refused_type, &policy).unwrap_err()
+            )
+            .contains("not accepted")
+        );
+
+        let mut tight = policy.clone();
+        tight.max_bytes_per_attachment = 1;
+        let (big, big_hash) = upload("application/json", b"{}");
+        let too_big = batch(&[big_hash], vec![big], None);
+        assert!(
+            format!(
+                "{:#}",
+                validate_attachment_uploads(&too_big, &tight).unwrap_err()
+            )
+            .contains("node limit")
+        );
+
+        let mut one_per_turn = policy;
+        one_per_turn.max_attachments_per_turn = 1;
+        let (a, a_hash) = upload("application/json", b"{}");
+        let (b, b_hash) = upload("application/json", b"[]");
+        let too_many = batch(&[a_hash, b_hash], vec![a, b], None);
+        assert!(
+            format!(
+                "{:#}",
+                validate_attachment_uploads(&too_many, &one_per_turn).unwrap_err()
+            )
+            .contains("per turn")
+        );
+    }
+
+    #[test]
+    fn a_batch_without_uploads_needs_no_attachment_check() {
+        let policy = ThreadAttachmentsPolicy::as_shipped();
+        assert!(
+            validate_attachment_uploads(&batch(&[], Vec::new(), None), &policy)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn idempotency_keys_are_bounded_visible_ascii() {
+        assert!(validate_idempotency_key("launch-1:frame").is_ok());
+        for bad in ["", "has space", "caf\u{e9}", &"k".repeat(129)] {
+            assert!(validate_idempotency_key(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_tracks_events_and_attachments_but_not_the_key() {
+        let (first, first_hash) = upload("application/json", b"{}");
+        let base = batch(
+            std::slice::from_ref(&first_hash),
+            vec![first.clone()],
+            Some("a"),
+        );
+        let same_other_key = batch(std::slice::from_ref(&first_hash), vec![first], Some("b"));
+        assert_eq!(
+            batch_fingerprint(&base).unwrap(),
+            batch_fingerprint(&same_other_key).unwrap()
+        );
+        let (second, second_hash) = upload("application/json", b"[]");
+        let different = batch(&[second_hash], vec![second], Some("a"));
+        assert_ne!(
+            batch_fingerprint(&base).unwrap(),
+            batch_fingerprint(&different).unwrap()
+        );
     }
 
     #[test]

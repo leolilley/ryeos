@@ -1531,10 +1531,25 @@ fn event_storage_policy(
         .require::<ryeos_node_runtime::node_policy::sections::event_storage::EventStoragePolicy>()
 }
 
+/// The node's signed `thread_attachments` policy, which bounds the
+/// attachments a runtime may store with an event append.
+fn thread_attachments_policy(
+    state: &AppState,
+) -> Result<&ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy>
+{
+    state.node_policy.require::<
+        ryeos_node_runtime::node_policy::sections::thread_attachments::ThreadAttachmentsPolicy,
+    >()
+}
+
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: EventAppendParams =
         serde_json::from_value(params.clone()).context("invalid events.append params")?;
-    let persisted = state.events.append(&params, event_storage_policy(state)?)?;
+    let persisted = state.events.append(
+        &params,
+        event_storage_policy(state)?,
+        thread_attachments_policy(state)?,
+    )?;
     // Publish AFTER persistence so live subscribers receive the same
     // chain_seq the event store recorded. Persistence-first is the
     // contract; SSE consumers replay from the event store on lag.
@@ -1550,9 +1565,11 @@ fn handle_append_event_batch(
 ) -> Result<serde_json::Value> {
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
-    let result = state
-        .events
-        .append_batch(&params, event_storage_policy(state)?)?;
+    let result = state.events.append_batch(
+        &params,
+        event_storage_policy(state)?,
+        thread_attachments_policy(state)?,
+    )?;
     // Publish the whole batch in persisted order under one hub-lock acquire:
     // each thread's lane sees its events in order, and the firehose sees the
     // batch contiguously without interleaving a concurrent publisher.

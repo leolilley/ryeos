@@ -695,8 +695,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         &self,
         thread_id: &str,
         events: Vec<Value>,
+        options: EventAppendOptions,
     ) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id, "events": events});
+        if let Some(object) = params.as_object_mut() {
+            object.extend(options.wire_fields());
+        }
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.append_events", params)

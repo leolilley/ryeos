@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::callback::{
-    CallbackError, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
+    CallbackError, EventAppendOptions, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI,
+    TerminalCompletion,
 };
 use crate::envelope::EnvelopeCallback;
 use crate::events::RuntimeEventType;
@@ -280,6 +281,18 @@ impl CallbackClient {
         &self,
         events: Vec<(RuntimeEventType, Value)>,
     ) -> Result<()> {
+        self.append_runtime_events_with(events, EventAppendOptions::default())
+            .await
+    }
+
+    /// [`Self::append_runtime_events`] with attachments stored beside the
+    /// batch and an idempotency key for it. An event names an attachment by
+    /// listing its `EventAttachment::object_hash` in `attachment_refs`.
+    pub async fn append_runtime_events_with(
+        &self,
+        events: Vec<(RuntimeEventType, Value)>,
+        options: EventAppendOptions,
+    ) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }
@@ -299,7 +312,7 @@ impl CallbackClient {
                     })
                     .collect();
                 client
-                    .append_events(&self.thread_id, events)
+                    .append_events(&self.thread_id, events, options)
                     .await
                     .map_err(|error| anyhow::anyhow!("{error}"))?;
                 Ok(())
@@ -1061,7 +1074,7 @@ impl CallbackClient {
             })
             .collect();
         client
-            .append_events(&self.thread_id, events)
+            .append_events(&self.thread_id, events, EventAppendOptions::default())
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(())
@@ -1393,6 +1406,7 @@ mod tests {
             &self,
             _thread_id: &str,
             events: Vec<Value>,
+            _options: crate::callback::EventAppendOptions,
         ) -> Result<Value, CallbackError> {
             let mut recorded = self.events.lock().unwrap();
             for event in events {
@@ -2048,7 +2062,12 @@ mod tests {
         async fn append_event(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+        async fn append_events(
+            &self,
+            _: &str,
+            _: Vec<Value>,
+            _: crate::callback::EventAppendOptions,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
