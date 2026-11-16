@@ -42,6 +42,8 @@ mod signed_bundle;
 
 #[path = "../../support/admitted_worker_evidence.rs"]
 mod admitted_worker_evidence;
+#[path = "../../support/node_capability_report.rs"]
+mod node_capability_report;
 #[path = "../../support/candidate_authoring.rs"]
 mod candidate_authoring;
 #[path = "../../support/candidate_operation_sources.rs"]
@@ -1444,6 +1446,13 @@ fn run_signed_worker_admission_on(
     *store_slot = Some(store_owner);
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
+    node_capability_report::install(
+        &state,
+        &node_capability_report::FixtureEnvironment {
+            provided: &["time", "credential:private_home"],
+            missing: &[],
+        },
+    );
     let runtime_manifest = install_external_large_runtime_content(&state, &runtime_directory);
     let runtime_manifest_hash = lillux::sha256_hex(
         lillux::canonical_json(&runtime_manifest.to_value().unwrap())
@@ -3880,6 +3889,13 @@ async fn run_production_tls_candidate(
         .unwrap();
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
+    node_capability_report::install(
+        &state,
+        &node_capability_report::FixtureEnvironment {
+            provided: &["time", "credential:private_home"],
+            missing: &[],
+        },
+    );
     let (project, project_lifeline) = ryeos_app::temp_dir_guard::create_runtime_workspace(
         &root.path().join(".ai/state/cache"),
         "W-external-admission-base",
