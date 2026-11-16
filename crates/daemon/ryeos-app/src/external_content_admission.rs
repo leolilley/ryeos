@@ -1940,6 +1940,55 @@ mod consumer_authority_tests {
         );
         assert!(consumer_authority(&resolution, &generation).is_err());
     }
+
+    #[test]
+    fn project_contributor_predicate_covers_root_ancestor_and_referenced_arms() {
+        let bundle = || ResolvedAncestor {
+            requested_id: "fixture/recipe".into(),
+            resolved_ref: "config:fixture/recipe".into(),
+            source_path: "/fixture/.ai/config/fixture/recipe.yaml".into(),
+            source_space: ItemSpace::Bundle,
+            source_root: ItemSourceRoot::Bundle {
+                name: "fixture".into(),
+            },
+            trust_class: TrustClass::TrustedBundle,
+            signer_fingerprint: Some("a".repeat(64)),
+            alias_resolution: None,
+            added_by: ResolutionStepName::PipelineInit,
+            raw_content: String::new(),
+            source_content_digest: "b".repeat(64),
+            raw_content_digest: "c".repeat(64),
+        };
+        let project = || {
+            let mut item = bundle();
+            item.source_space = ItemSpace::Project;
+            item.source_root = ItemSourceRoot::Project;
+            item.trust_class = TrustClass::TrustedProject;
+            item
+        };
+        let resolution = |root: ResolvedAncestor| ResolutionOutput {
+            root,
+            ancestors: Vec::new(),
+            references_edges: Vec::new(),
+            referenced_items: Vec::new(),
+            step_outputs: Default::default(),
+            effective_trust_class: TrustClass::TrustedBundle,
+            composed: KindComposedView::identity(serde_json::json!({})),
+        };
+        assert!(!resolution_has_project_contributor(&resolution(bundle())));
+        // Root arm: the relationship itself resolved from project space.
+        assert!(resolution_has_project_contributor(&resolution(project())));
+        // Root arm by source root alone.
+        let mut by_root = bundle();
+        by_root.source_root = ItemSourceRoot::Project;
+        assert!(resolution_has_project_contributor(&resolution(by_root)));
+        let mut with_ancestor = resolution(bundle());
+        with_ancestor.ancestors.push(project());
+        assert!(resolution_has_project_contributor(&with_ancestor));
+        let mut with_reference = resolution(bundle());
+        with_reference.referenced_items.push(project());
+        assert!(resolution_has_project_contributor(&with_reference));
+    }
 }
 
 #[cfg(test)]
