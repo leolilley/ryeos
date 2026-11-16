@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-15T02:27:40Z:3abccaf92af7155fdf4ffb9b86b409edb5f4ac58ae11cb763f3d0d3aad266673:DQT0v8NGY5eKNnyNvDlOXa5M3ii7L+v2BpZgnlHWW4RblVV1Dx0sopCdQRFfAL/2KBd5uWnCjO2mKC1EWFlkBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T07:29:37Z:42748d0a21de997965b1709d1493a63e47947e3bdbd5c07bd0c71ef030e1224a:kwV7GtrE8TM4yDAYTJvozvbcYNC0ja/xlhKjVFswlWSxuXnWSDVSP7R4p6HWfGcVTRbwFtqNnXpHBKtkp51LDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -529,7 +529,9 @@ package has two immutable inputs, both listed in its `source=` with a pinned
 - `ryeos-bundles-<version>-x86_64.tar.gz`, the release asset produced by the
   release workflow (`scripts/release/package-bundle-artifact.sh`) after
   populating and signing the release bundle sets with the official publisher
-  key; the archive carries the standard and hosted-controller sets.
+  key; the archive carries every bundle of every installable
+  set (the sorted union over `ryeos_bundle_set_ids`; `modal-sandbox`, which
+  no installable set names, is published but not archived).
 
 The tag archive alone is not enough: it omits the ignored, generated bundle
 artifacts produced by `scripts/populate-bundles.sh` (bundle-owned binaries,
