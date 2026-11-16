@@ -1,0 +1,13 @@
+# ryeos:signed:2026-11-16T21:29:33Z:29d6a8c9ac7fe1629eca8a9d855e9017ee1c1b4e42b06b68b26823cbf4adee07:GBAGyM/GPrpF2We9lrPnkYtyhO2jxlQ/P3VuG/CsySaaeLJmCUgBLZ+vkZvllFfF64XuzWw4h1PLYT5M8RlyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/node/usage
+version: "1.0.0"
+description: >-
+  Settled token and spend usage for the executions visible to the caller,
+  as totals and one row per chain. Totals cover the observed chains only,
+  never node-wide spend.
+endpoint: ui.ryeos.node.usage
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

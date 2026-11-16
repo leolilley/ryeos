@@ -379,6 +379,68 @@ async fn items_list_applies_filters_and_accepts_include_shadowed() {
 }
 
 #[tokio::test]
+async fn usage_observes_only_signed_subjects_owned_by_projectless_caller() {
+    use ryeos_state::objects::{
+        CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+        CapturedThreadHistoryPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        ThreadHistoryRetention,
+    };
+    let (_tmp, _state_owner, state) = test_state::build_test_state();
+    for (thread_id, principal) in [("T-visible", "fp:test"), ("T-private", "fp:foreign")] {
+        state
+            .state_store
+            .create_thread_for_test(&ryeos_app::state_store::NewThreadRecord {
+                thread_id: thread_id.into(),
+                chain_root_id: thread_id.into(),
+                kind: "tool".into(),
+                item_ref: "tool:test/usage".into(),
+                executor_ref: "test/executor".into(),
+                launch_mode: "wait".into(),
+                current_site_id: "site:testhost".into(),
+                origin_site_id: "site:testhost".into(),
+                upstream_thread_id: None,
+                requested_by: Some(principal.into()),
+                project_root: None,
+                project_authority: ExecutionProjectAuthority::Projectless {
+                    environment: EnvironmentAuthority::None,
+                },
+                base_project_snapshot_hash: None,
+                usage_subject: None,
+                usage_subject_asserted_by: None,
+                captured_history_policy: Some(CapturedThreadHistoryPolicy {
+                    retention: ThreadHistoryRetention::Durable,
+                    canonical_item_ref: "tool:test/usage".into(),
+                    item_content_hash: "a".repeat(64),
+                    item_signer_fingerprint: Some("a".repeat(64)),
+                    item_trust_class: CapturedItemTrustClass::Trusted,
+                    kind_schema_content_hash: "a".repeat(64),
+                    resolved_from: CapturedPolicyProvenance::NodeDefault {
+                        node_policy: CapturedNodeHistoryPolicyProvenance::test_policy(),
+                    },
+                }),
+            })
+            .unwrap();
+    }
+    let (context, attachment) = mint_session(&state, None);
+    let result = ryeos_ui::seat_auth::with_compiled_ui_attachment(
+        attachment,
+        (ryeos_ui::handlers::ui_usage::USAGE_DESCRIPTOR.handler)(
+            json!({}),
+            context,
+            Arc::new(state),
+        ),
+    )
+    .await
+    .expect("authorized usage observation");
+    assert_eq!(result["coverage"]["state"], "observed");
+    assert_eq!(result["coverage"]["observed_threads"], 1);
+    assert!(result["chains"].as_array().unwrap().is_empty());
+    assert_eq!(result["totals"][2]["value"], "0.0000");
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains("T-private"));
+}
+
+#[tokio::test]
 async fn activity_returns_only_signed_subjects_owned_by_projectless_caller() {
     use ryeos_state::objects::{
         CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,

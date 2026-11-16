@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-08T06:41:17Z:526f0e9658d8248e5de539b306b2dc03a8f52f5e7b06216ceea6dec9d97c4ae5:KlV/FnfrkFBGv6qKHLTrdZAcBatFjtBCoN66kHFmVdyfcqBbd+xYC1SCzB1ejiFWODzXnfIFLhDwe6sLRM+DCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T21:29:33Z:0022e356d5c615b2ed9ef27a704d9f44b0b601aaf0c0dd6ac5577c23bd79fb7e:Mb3vIZkvJtPNy2ejkgFiKeuQpjGklOu+AEcAw2wKNpH6nmVo3YyhXpvFsoOlHoRoowK2r2q5I22hJpvI5N2gCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui-node
 title: Node
 version: "1.0.0"
@@ -14,6 +14,7 @@ capabilities:
     - ryeos.execute.service.ui/ryeos-ui/thread/inspect
     - ryeos.execute.service.ui/ryeos-ui/thread/tree
     - ryeos.execute.service.ui/ryeos-ui/node/activity
+    - ryeos.execute.service.ui/ryeos-ui/node/usage
     - ryeos.execute.service.ui/ryeos-ui/item/inspect
     - ryeos.execute.service.ui/ryeos-ui/remotes/list
     - ryeos.execute.service.ui/ryeos-ui/gc/status
@@ -49,6 +50,7 @@ library:
     views:
       - view:ryeos/projects/list
       - view:ryeos/node/events
+      - view:ryeos/node/usage
       - view:ryeos/node/remotes
       - view:ryeos/node/bundles
       - view:ryeos/node/gc
