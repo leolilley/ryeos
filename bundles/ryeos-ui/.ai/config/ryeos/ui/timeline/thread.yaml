@@ -1,6 +1,10 @@
-# ryeos:signed:2026-11-16T07:56:53Z:76cff111747722f402b184cb0c670db2aedbb412853b01ea21ae6a1e7a43aec2:lGKxP0Zvs4EzwSzGi3WhqQIg+PolIw/2iT8pkUeOfYlPS3oApEklq1n3IEAqUqWWYm7M2bg8q4W7hmOSGCGDDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T09:49:01Z:ac261e115d4fa30116af2837f5d207bfa628fc820717ab8aef5d75376ed011d8:mRDoKubBztb69KRrRCXnSdf/A/+kaASiWI6RgmHcWjS9TF0gREbieW9m8yKSNE2BB1JTJFfrwB7UIq+7/+xJAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Thread timeline definition: how a chain's events fold into timeline items.
 # Declarative data read by the timeline service; the fold engine names no event type itself.
+category: ryeos/ui/timeline
+version: "1.0.0"
+description: How a chain's events fold into timeline items.
+
 vocabulary:
   - {key: other, one: operation, many: operations}
   - {key: child, one: child run, many: child runs}

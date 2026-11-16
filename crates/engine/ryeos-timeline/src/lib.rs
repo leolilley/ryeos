@@ -22,6 +22,13 @@ pub use fold::fold;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
+    /// Item metadata every signed config carries; the fold does not read it.
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     /// Counting nouns for clusters, in display order.
     #[serde(default)]
     pub vocabulary: Vec<Noun>,
