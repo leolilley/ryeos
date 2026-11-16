@@ -3673,6 +3673,7 @@ pub(crate) mod tests {
         let worker = format!("worker-{suffix}");
         let profile = format!("P-{suffix}");
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: &profile,
             owner_principal: "fp:operator",
             home_id: &format!("home-{suffix}"),

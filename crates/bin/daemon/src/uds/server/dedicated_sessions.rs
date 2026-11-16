@@ -263,11 +263,48 @@ fn bounded_budget_outcome(reason: &str) -> Result<DedicatedSessionBoundedOutcome
     })
 }
 
+/// The subject-projection contract a slot-backed credential profile requires
+/// of its worker environment.
+const DELIVERED_SECRET_SUBJECT_CONTRACT: &str = "ryeos.credential.delivered_secret.v1";
+
+/// Judge the worker environment's admitted subject-projection contract
+/// against the credential profile's activation. A delivered-secret profile
+/// requires exactly the delivered-secret contract; a ceremony profile must not
+/// use it. Only names reach the refusal.
+fn require_subject_contract_matches_activation(
+    profile_id: &str,
+    activation: &ryeos_app::runtime_db::CredentialActivation,
+    contract: Option<&str>,
+) -> Result<()> {
+    let is_delivered_secret_contract = contract == Some(DELIVERED_SECRET_SUBJECT_CONTRACT);
+    if activation.is_slot_backed() != is_delivered_secret_contract {
+        bail!(
+            "credential_subject_contract_mismatch: credential profile '{profile_id}' is {} but the worker environment's subject contract is {}",
+            if activation.is_slot_backed() {
+                "slot-backed"
+            } else {
+                "a ceremony profile"
+            },
+            contract.map_or_else(|| "absent".to_owned(), |name| format!("'{name}'")),
+        );
+    }
+    Ok(())
+}
+
+/// The retained session capsule hash, whether the admitted mode is a bounded
+/// turn, and the worker environment's admitted subject-projection contract
+/// (`None` for a direct worker).
+struct AdmittedSession {
+    capsule_hash: String,
+    bounded_turn: bool,
+    subject_contract: Option<String>,
+}
+
 fn admitted_session_capsule(
     state: &AppState,
     thread_id: &str,
     dependency_ref: &str,
-) -> Result<(String, bool)> {
+) -> Result<AdmittedSession> {
     let launch = state
         .state_store
         .admitted_launch_capsule(thread_id)?
@@ -282,6 +319,15 @@ fn admitted_session_capsule(
     let prepared: ryeos_executor::execution::launch_preparation::PreparedRuntimeLaunch =
         serde_json::from_value(prepared_runtime_launch)
             .context("decode retained runtime launch authority")?;
+    let subject_contract = match prepared
+        .runtime_data
+        .get("worker_execution")
+        .and_then(|value| value.get("credential_subject_contract"))
+    {
+        Some(Value::String(contract)) => Some(contract.clone()),
+        Some(Value::Null) => None,
+        _ => bail!("worker execution has no admitted credential subject contract"),
+    };
     let mode = prepared
         .runtime_data
         .get("worker_execution")
@@ -311,7 +357,11 @@ fn admitted_session_capsule(
         .get(name)
         .cloned()
         .ok_or_else(|| anyhow!("admitted dependency has no retained session capsule"))?;
-    Ok((capsule_hash, bounded_turn))
+    Ok(AdmittedSession {
+        capsule_hash,
+        bounded_turn,
+        subject_contract,
+    })
 }
 
 fn require_structured_session_route_effect_contract(
@@ -428,6 +478,59 @@ fn deliver_session_secrets(
         }
     }
     Ok(delivered)
+}
+
+/// Admit a slot-backed credential profile against the secrets this start
+/// received, and fence it on their values. Every slot the profile names must
+/// have been delivered (names only reach an error). The keyed digest of each
+/// value is recorded on the profile: a first use stores it, an unchanged value
+/// does nothing, and a changed value advances the credential generation so
+/// that sessions started under the old value are fenced by the existing
+/// generation checks. A ceremony profile passes through unchanged. Returns
+/// the profile as it stands after the fence.
+fn admit_slot_backed_profile(
+    state: &AppState,
+    profile: ryeos_app::runtime_db::CredentialProfileRecord,
+    owner: &str,
+    delivered: &ryeos_engine::contracts::DeliveredSecretEnv,
+) -> Result<ryeos_app::runtime_db::CredentialProfileRecord> {
+    let Some(names) = profile.activation.slot_names() else {
+        return Ok(profile);
+    };
+    let missing: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| delivered.get(name).is_none())
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "credential_slot_not_delivered: credential profile '{}' needs [{}], which this session does not receive",
+            profile.profile_id,
+            missing.join(", ")
+        );
+    }
+    let accounting = state.accounting.as_ref().ok_or_else(|| {
+        anyhow!(
+            "credential_slot_fence_unavailable: the node holds no keyed digest authority, so a slot-backed credential profile cannot be fenced"
+        )
+    })?;
+    let digests: std::collections::BTreeMap<String, String> = names
+        .iter()
+        .map(|name| {
+            let value = delivered.get(name).unwrap_or_default();
+            (
+                name.clone(),
+                accounting.credential_slot_value_digest(name, value.as_bytes()),
+            )
+        })
+        .collect();
+    state
+        .state_store
+        .fence_credential_slot_digests(&profile.profile_id, owner, &digests)?;
+    state
+        .state_store
+        .credential_profile(&profile.profile_id)?
+        .ok_or_else(|| anyhow!("credential profile disappeared during slot fencing"))
 }
 
 fn validate_structured_session_route_effect_contract(
@@ -910,8 +1013,11 @@ pub(super) async fn start(
         _ => bail!("dedicated-session candidate disposition contradicts its project policy"),
     };
     let mut aggregate_budget = execution_resource_budget(state, cap)?;
-    let (capsule_hash, bounded_turn) =
-        admitted_session_capsule(state, &request.thread_id, &request.dependency_ref)?;
+    let AdmittedSession {
+        capsule_hash,
+        bounded_turn,
+        subject_contract,
+    } = admitted_session_capsule(state, &request.thread_id, &request.dependency_ref)?;
     if bounded_turn != (candidate_disposition == DedicatedCandidateDisposition::RetainedForReview) {
         bail!("dedicated-session candidate disposition contradicts its admitted worker mode");
     }
@@ -977,6 +1083,11 @@ pub(super) async fn start(
     if profile.owner_principal != owner {
         bail!("credential profile is not owned by the session principal");
     }
+    require_subject_contract_matches_activation(
+        &profile.profile_id,
+        &profile.activation,
+        subject_contract.as_deref(),
+    )?;
     require_structured_session_route_effect_contract(
         state,
         &capsule_hash,
@@ -988,6 +1099,9 @@ pub(super) async fn start(
     // leaves nothing to settle. Recovery re-authorises here too: a value is
     // never replayed from a previous incarnation.
     let delivered_secrets = deliver_session_secrets(state, &capsule_hash, owner, cap, recovering)?;
+    // A slot-backed profile is judged here, before the profile lock, a claim
+    // or any worker contact, against the values this start received.
+    let profile = admit_slot_backed_profile(state, profile, owner, &delivered_secrets)?;
     if !recovering
         && let (Some(scope), Some(accounting)) =
             (cap.accounting_scope.as_ref(), state.accounting.as_ref())
@@ -1409,8 +1523,35 @@ pub(super) async fn start(
 mod tests {
     use super::{
         DedicatedSessionTerminateParams, bounded_worker_failure_reason, require_callback_root,
-        validate_runtime_termination, validate_structured_session_route_effect_contract,
+        require_subject_contract_matches_activation, validate_runtime_termination,
+        validate_structured_session_route_effect_contract,
     };
+    use ryeos_app::runtime_db::CredentialActivation;
+
+    #[test]
+    fn subject_contract_must_match_the_profile_activation() {
+        let slot = CredentialActivation::delivered_secret(["API_KEY"]).unwrap();
+        let ceremony = CredentialActivation::Ceremony;
+        let contract = "ryeos.credential.delivered_secret.v1";
+        require_subject_contract_matches_activation("p", &slot, Some(contract)).unwrap();
+        require_subject_contract_matches_activation("p", &ceremony, Some("fixture.account.v1"))
+            .unwrap();
+        require_subject_contract_matches_activation("p", &ceremony, None).unwrap();
+        for (activation, presented) in [
+            (&slot, Some("fixture.account.v1")),
+            (&slot, None),
+            (&ceremony, Some(contract)),
+        ] {
+            let error = require_subject_contract_matches_activation("p", activation, presented)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("credential_subject_contract_mismatch"),
+                "{error}"
+            );
+            assert!(!error.contains("API_KEY"), "{error}");
+        }
+    }
 
     fn structured_contract() -> serde_json::Value {
         serde_json::json!({

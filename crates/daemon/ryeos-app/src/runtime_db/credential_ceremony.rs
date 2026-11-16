@@ -58,6 +58,11 @@ pub enum CredentialCeremonyRefusal {
         current_login_epoch: u64,
         requested_login_epoch: u64,
     },
+    /// A ceremony step named a profile whose activation is a delivered secret.
+    #[error(
+        "credential_profile_slot_backed: credential profile '{profile_id}' is activated by delivered secrets and has no login ceremony; revoke or delete it instead"
+    )]
+    SlotBacked { profile_id: String },
     /// `abandon-login` may only clear an expired, unlocked enrollment.
     #[error(
         "credential_abandon_refused: credential profile '{profile_id}' is {state} at login epoch {current_login_epoch} (requested {requested_login_epoch}); {reason}"
@@ -93,6 +98,7 @@ impl CredentialCeremonyRefusal {
             Self::ConfirmExpired { .. } => "credential_confirm_expired",
             Self::ConfirmWrongState { .. } => "credential_confirm_wrong_state",
             Self::AbandonRefused { .. } => "credential_abandon_refused",
+            Self::SlotBacked { .. } => "credential_profile_slot_backed",
         }
     }
 
@@ -154,6 +160,7 @@ impl CredentialCeremonyRefusal {
                 "login_epoch": current_login_epoch,
                 "requested_login_epoch": requested_login_epoch,
             }),
+            Self::SlotBacked { profile_id } => json!({ "profile_id": profile_id }),
             Self::AbandonRefused {
                 profile_id,
                 state,
@@ -216,6 +223,9 @@ mod tests {
                 current_login_epoch: 2,
                 requested_login_epoch: 2,
                 reason: "no login to abandon".into(),
+            },
+            CredentialCeremonyRefusal::SlotBacked {
+                profile_id: "p".into(),
             },
         ];
         for refusal in refusals {

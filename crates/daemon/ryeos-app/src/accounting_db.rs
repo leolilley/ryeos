@@ -65,6 +65,8 @@ pub const ACCOUNTING_DB_FILENAME: &str = "accounting.sqlite3";
 pub(crate) const ACCOUNTING_INITIALIZED_FILENAME: &str = "accounting.initialized";
 const ACCOUNTING_INITIALIZED_CONTENT: &[u8] = b"ryeos-accounting-v1\n";
 const CREDENTIAL_BINDING_KEY_FILENAME: &str = "accounting.credential-binding-key";
+/// Domain label separating slot-value digests from launch credential bindings.
+const CREDENTIAL_SLOT_VALUE_DOMAIN: &str = "ryeos.credential.slot_value.v1";
 const CREDENTIAL_BINDING_KEY_LEN: usize = 32;
 
 const SCHEMA_V1_SQL: &str = r#"
@@ -3802,6 +3804,23 @@ impl AccountingDb {
     /// are useless to a reader of the database file alone.
     pub fn credential_binding_key(&self) -> &[u8] {
         &self.credential_binding_key
+    }
+
+    /// Keyed digest of one delivered slot value, for fencing a slot-backed
+    /// credential profile when the value changes. The MAC key is derived from
+    /// the daemon-held binding key under its own domain label, so this digest
+    /// is unrelated to any launch credential binding and is useless to a
+    /// reader of the stored digests alone. The value never leaves this call.
+    pub fn credential_slot_value_digest(&self, name: &str, value: &[u8]) -> String {
+        let slot_key = lillux::crypto::hmac_sha256_hex(
+            &self.credential_binding_key,
+            CREDENTIAL_SLOT_VALUE_DOMAIN.as_bytes(),
+        );
+        let mut message = Vec::with_capacity(name.len() + 1 + value.len());
+        message.extend_from_slice(name.as_bytes());
+        message.push(0);
+        message.extend_from_slice(value);
+        lillux::crypto::hmac_sha256_hex(slot_key.as_bytes(), &message)
     }
 
     /// The persisted `(budget_authority_site_id, ledger_epoch)` identity.

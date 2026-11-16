@@ -36,8 +36,8 @@ def database(path=":memory:"):
     connection.execute("""
         INSERT INTO credential_profile(profile_id,owner_principal,home_id,
             credential_generation,state,login_epoch,lock_owner,
-            created_at_ms,updated_at_ms,authority_revision)
-        VALUES('P-one','operator','home',1,'active',0,'worker',1,1,1)
+            created_at_ms,updated_at_ms,authority_revision,activation_json)
+        VALUES('P-one','operator','home',1,'active',0,'worker',1,1,1,'{"kind":"ceremony"}')
     """)
     connection.execute("""
         INSERT INTO execution_workspace(workspace_id,thread_id,launch_owner,

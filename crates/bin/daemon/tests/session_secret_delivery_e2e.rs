@@ -445,7 +445,7 @@ configuration:
 credential_requirement:
   workload_family: session-secret-fixture
   required_state: active
-  subject_projection_contract: session-secret-fixture.account.v1
+  subject_projection_contract: ryeos.credential.delivered_secret.v1
 portable_state_contract: ryeos.worker_session.restore.v1
 workload_client: null
 "#
@@ -465,27 +465,11 @@ workload_client: null
         &BTreeMap::new(),
     )?;
     store.create_credential_profile(NewCredentialProfile {
+        activation: ryeos_app::runtime_db::CredentialActivation::delivered_secret([SECRET_NAME])?,
         profile_id: CREDENTIAL_PROFILE_ID,
         owner_principal: &owner_principal,
         home_id: BUNDLE_NAME,
     })?;
-    let lock_id = "credential-enrollment:session-secret-fixture";
-    store.acquire_credential_profile(CREDENTIAL_PROFILE_ID, &owner_principal, lock_id)?;
-    let login_id = "credential-login:session-secret-fixture";
-    let epoch = store.begin_credential_enrollment(
-        CREDENTIAL_PROFILE_ID,
-        lock_id,
-        login_id,
-        lillux::time::timestamp_millis() + 60_000,
-    )?;
-    store.complete_credential_enrollment(
-        CREDENTIAL_PROFILE_ID,
-        lock_id,
-        login_id,
-        epoch,
-        &json!({"email":"fixture@example.test","type":"fixture"}),
-    )?;
-    store.release_credential_profile(CREDENTIAL_PROFILE_ID, lock_id)?;
     Ok(())
 }
 

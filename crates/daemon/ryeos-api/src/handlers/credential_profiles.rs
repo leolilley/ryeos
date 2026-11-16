@@ -29,6 +29,10 @@ fn require_operator<'a>(
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
     profile_id: String,
+    /// How the profile becomes usable. Required, and fixed for the profile's
+    /// life: `{"kind":"ceremony"}` or
+    /// `{"kind":"delivered_secret","names":[...]}`.
+    activation: ryeos_app::runtime_db::CredentialActivation,
 }
 
 fn profile_home_id(owner: &str, profile_id: &str) -> Result<String> {
@@ -46,6 +50,13 @@ async fn create(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let owner = require_operator(&state, &ctx)?.to_owned();
+    let activation = match req.activation {
+        ryeos_app::runtime_db::CredentialActivation::DeliveredSecret { names } => {
+            ryeos_app::runtime_db::CredentialActivation::delivered_secret(names)
+                .map_err(|error| HandlerError::BadRequest(format!("{error:#}")))?
+        }
+        ceremony @ ryeos_app::runtime_db::CredentialActivation::Ceremony => ceremony,
+    };
     let home_id = profile_home_id(&owner, &req.profile_id).map_err(internal)?;
     let _operation_guard =
         ryeos_app::hosted_operation::acquire_credential_profile_operation(&req.profile_id)
@@ -61,11 +72,24 @@ async fn create(
                 "credential profile identity conflicts with existing ownership".into(),
             ));
         }
+        if existing.activation != activation {
+            return Err(HandlerError::Structured {
+                code: "credential_profile_activation_mismatch".to_string(),
+                status: 409,
+                body: json!({
+                    "code":"credential_profile_activation_mismatch",
+                    "error":"credential_profile_activation_mismatch: the profile exists with a different activation source, which is fixed at creation; delete it and create it again to change it",
+                    "profile_id":existing.profile_id,
+                    "activation":existing.activation,
+                }),
+            });
+        }
         return Ok(json!({
             "profile_id":existing.profile_id,
             "home_id":existing.home_id,
             "credential_generation":existing.credential_generation,
             "state":existing.state,
+            "activation":existing.activation,
             "idempotent":true,
         }));
     }
@@ -80,6 +104,7 @@ async fn create(
             profile_id: &req.profile_id,
             owner_principal: &owner,
             home_id: &home_id,
+            activation: activation.clone(),
         })
     {
         // RuntimeDb commits the revisioned live projection before folding it
@@ -111,6 +136,7 @@ async fn create(
         "home_id": created.home_id,
         "credential_generation": created.credential_generation,
         "state": created.state,
+        "activation": created.activation,
     }))
 }
 
@@ -703,6 +729,9 @@ mod tests {
                 current_login_epoch: 2,
                 requested_login_epoch: 1,
             },
+            CredentialCeremonyRefusal::SlotBacked {
+                profile_id: "p".into(),
+            },
         ];
         for refusal in refusals {
             let expected = refusal.code();
@@ -721,5 +750,45 @@ mod tests {
             )),
             HandlerError::BadRequest(_)
         ));
+    }
+
+    #[test]
+    fn slot_backed_refusal_names_its_stable_code() {
+        let refusal = CredentialCeremonyRefusal::SlotBacked {
+            profile_id: "p".into(),
+        };
+        assert_eq!(refusal.code(), "credential_profile_slot_backed");
+        assert!(
+            refusal
+                .to_string()
+                .starts_with("credential_profile_slot_backed:")
+        );
+    }
+
+    #[test]
+    fn create_requires_a_closed_activation() {
+        use ryeos_app::runtime_db::CredentialActivation;
+        assert!(serde_json::from_value::<CreateRequest>(json!({"profile_id":"p"})).is_err());
+        let ceremony: CreateRequest =
+            serde_json::from_value(json!({"profile_id":"p","activation":{"kind":"ceremony"}}))
+                .unwrap();
+        assert_eq!(ceremony.activation, CredentialActivation::Ceremony);
+        let slot: CreateRequest = serde_json::from_value(json!({
+            "profile_id":"p",
+            "activation":{"kind":"delivered_secret","names":["B_KEY","A_KEY"]},
+        }))
+        .unwrap();
+        assert_eq!(
+            slot.activation,
+            CredentialActivation::DeliveredSecret {
+                names: vec!["B_KEY".into(), "A_KEY".into()]
+            }
+        );
+        for bad in [
+            json!({"profile_id":"p","activation":{"kind":"other"}}),
+            json!({"profile_id":"p","activation":{"kind":"delivered_secret"}}),
+        ] {
+            assert!(serde_json::from_value::<CreateRequest>(bad).is_err());
+        }
     }
 }

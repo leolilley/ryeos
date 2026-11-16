@@ -11717,6 +11717,7 @@ mod tests {
         };
         let db = crate::runtime_db::test_native::TestRuntime::open(path);
         db.create_credential_profile(NewCredentialProfile {
+            activation: crate::runtime_db::CredentialActivation::Ceremony,
             profile_id: "P-one",
             owner_principal: "fp:operator",
             home_id: "home-one",

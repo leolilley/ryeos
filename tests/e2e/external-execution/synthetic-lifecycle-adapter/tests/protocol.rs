@@ -610,6 +610,7 @@ fn install_active_test_credential_profile(state: &ryeos_app::state::AppState) {
     state
         .state_store
         .create_credential_profile(ryeos_app::runtime_db::NewCredentialProfile {
+            activation: ryeos_app::runtime_db::CredentialActivation::Ceremony,
             profile_id,
             owner_principal: &operator.principal_id(),
             home_id,

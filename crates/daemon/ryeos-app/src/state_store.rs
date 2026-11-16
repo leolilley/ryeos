@@ -25,13 +25,14 @@ use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{
-    CommandRecord, CredentialProfileRecord, CredentialProfileReservationRecord,
-    DedicatedCandidateDisposition, DedicatedSessionApprovalRecord, DedicatedSessionCommandRecord,
-    DedicatedSessionRecord, HookDispatchReservation, LaunchPlanningAlreadyReserved,
-    LaunchPlanningCapacityExceeded, LaunchPlanningRecord, NewCommandRecord, NewCredentialProfile,
-    NewCredentialProfileReservation, NewDedicatedSession, NewDedicatedSessionApproval,
-    NewDedicatedSessionCommand, NewHookDispatch, ObservationBatchReservation, ProcessQuarantine,
-    ProcessQuarantineReason, QuarantinedProcess, RuntimeInfo, StopIntent, WorkerProcessRecord,
+    CommandRecord, CredentialActivation, CredentialProfileRecord,
+    CredentialProfileReservationRecord, DedicatedCandidateDisposition,
+    DedicatedSessionApprovalRecord, DedicatedSessionCommandRecord, DedicatedSessionRecord,
+    HookDispatchReservation, LaunchPlanningAlreadyReserved, LaunchPlanningCapacityExceeded,
+    LaunchPlanningRecord, NewCommandRecord, NewCredentialProfile, NewCredentialProfileReservation,
+    NewDedicatedSession, NewDedicatedSessionApproval, NewDedicatedSessionCommand, NewHookDispatch,
+    ObservationBatchReservation, ProcessQuarantine, ProcessQuarantineReason, QuarantinedProcess,
+    RuntimeInfo, StopIntent, WorkerProcessRecord,
 };
 
 mod live_destination_join;

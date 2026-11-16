@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T08:18:29Z:1d12b9efb35e1fe5bbfa5777bb4ce22cddf2dc8db9676d5660a9269e3bf59c6b:YzBDa4YP0gGdYsRLkOfaOCduiIoXckAO6QLL9NZO6nF3dABdjFK+2ib+OMLwve4fTU0gUO14LlREIuPhTfExAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T09:15:43Z:25aaddca532a97ab8e803e792335d6114526c83c0e936172d64ce50a6a91ea13:nL4BIJ8boLLFTh9lCLnGUXXcentWnksbk1n9VWrRVaXXsto18F35gn90wOVPsrmUj2ZL5cD+bkqnIW3De03SDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: opencode/environments
 schema: ryeos.worker_environment.v7
 external_product_slots: []
@@ -13,6 +13,6 @@ configuration:
 credential_requirement:
   workload_family: opencode
   required_state: active
-  subject_projection_contract: opencode.account.v1
+  subject_projection_contract: ryeos.credential.delivered_secret.v1
 portable_state_contract: ryeos.worker_session.restore.v1
 workload_client: null

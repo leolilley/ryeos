@@ -31,6 +31,7 @@ enum WorkerExecutionMode {
 #[derive(Debug)]
 struct ValidatedWorkerEnvironment {
     worker_ref: String,
+    subject_projection_contract: String,
     has_external_content: bool,
     executable_search: Vec<ExecutableSearchPathEntryWire>,
     process_environment: BTreeMap<String, AuthoredWorkerEnvironmentValue>,
@@ -119,95 +120,99 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
                 )
             })?;
         let selection = validate_execution_config(&config)?;
-        let (worker_ref, content_dependencies, environment_contributions, workload_client_request) =
-            match selection {
-                WorkerSelection::Direct(worker_ref) => {
-                    if !request.ref_bindings.is_empty() {
-                        return Err(wire_error(
-                            "worker_execution_environment_unexpected",
-                            "direct worker execution cannot carry an environment binding",
-                        ));
-                    }
-                    (worker_ref, BTreeMap::new(), BTreeMap::new(), None)
+        let (
+            worker_ref,
+            subject_projection_contract,
+            content_dependencies,
+            environment_contributions,
+            workload_client_request,
+        ) = match selection {
+            WorkerSelection::Direct(worker_ref) => {
+                if !request.ref_bindings.is_empty() {
+                    return Err(wire_error(
+                        "worker_execution_environment_unexpected",
+                        "direct worker execution cannot carry an environment binding",
+                    ));
                 }
-                WorkerSelection::Environment(binding_name) => {
-                    if request.ref_bindings.len() != 1 {
-                        return Err(wire_error(
-                            "worker_execution_environment_missing",
-                            "environment-backed worker execution requires exactly one environment binding",
-                        ));
-                    }
-                    let environment = request.ref_bindings.get(&binding_name).ok_or_else(|| {
-                        wire_error(
-                            "worker_execution_environment_missing",
-                            "worker execution's declared environment binding is absent",
-                        )
-                    })?;
-                    let environment = validate_worker_environment(environment)?;
-                    let content_dependencies = if environment.has_external_content {
+                (worker_ref, None, BTreeMap::new(), BTreeMap::new(), None)
+            }
+            WorkerSelection::Environment(binding_name) => {
+                if request.ref_bindings.len() != 1 {
+                    return Err(wire_error(
+                        "worker_execution_environment_missing",
+                        "environment-backed worker execution requires exactly one environment binding",
+                    ));
+                }
+                let environment = request.ref_bindings.get(&binding_name).ok_or_else(|| {
+                    wire_error(
+                        "worker_execution_environment_missing",
+                        "worker execution's declared environment binding is absent",
+                    )
+                })?;
+                let environment = validate_worker_environment(environment)?;
+                let content_dependencies = if environment.has_external_content {
+                    BTreeMap::from([(
+                        ENVIRONMENT_BINDING.to_owned(),
+                        LaunchContentDependencyRequestWire {
+                            binding: ENVIRONMENT_BINDING.to_owned(),
+                            targets: vec![DEPENDENCY_NAME.to_owned()],
+                            executable_search: environment.executable_search,
+                        },
+                    )])
+                } else {
+                    BTreeMap::new()
+                };
+                let variables = environment
+                    .process_environment
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let value = match value {
+                            AuthoredWorkerEnvironmentValue::Literal { value } => {
+                                LaunchEnvironmentValueWire::Literal { value }
+                            }
+                            AuthoredWorkerEnvironmentValue::RealizationPath {
+                                realization_id,
+                                relative_path,
+                                path_kind,
+                            } => LaunchEnvironmentValueWire::ContentPath {
+                                content_dependency: ENVIRONMENT_BINDING.to_owned(),
+                                realization_id,
+                                relative_path,
+                                path_kind,
+                            },
+                            AuthoredWorkerEnvironmentValue::RuntimeViewDirectory {
+                                relative_path,
+                            } => LaunchEnvironmentValueWire::RuntimeViewDirectory { relative_path },
+                            AuthoredWorkerEnvironmentValue::DeliveredSecret { name } => {
+                                LaunchEnvironmentValueWire::DeliveredSecret { name }
+                            }
+                        };
+                        (name, value)
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let environment_contributions = if !variables.is_empty() {
+                    {
                         BTreeMap::from([(
                             ENVIRONMENT_BINDING.to_owned(),
-                            LaunchContentDependencyRequestWire {
-                                binding: ENVIRONMENT_BINDING.to_owned(),
+                            LaunchEnvironmentContributionRequestWire {
                                 targets: vec![DEPENDENCY_NAME.to_owned()],
-                                executable_search: environment.executable_search,
+                                variables,
                             },
                         )])
-                    } else {
-                        BTreeMap::new()
-                    };
-                    let variables = environment
-                        .process_environment
-                        .into_iter()
-                        .map(|(name, value)| {
-                            let value = match value {
-                                AuthoredWorkerEnvironmentValue::Literal { value } => {
-                                    LaunchEnvironmentValueWire::Literal { value }
-                                }
-                                AuthoredWorkerEnvironmentValue::RealizationPath {
-                                    realization_id,
-                                    relative_path,
-                                    path_kind,
-                                } => LaunchEnvironmentValueWire::ContentPath {
-                                    content_dependency: ENVIRONMENT_BINDING.to_owned(),
-                                    realization_id,
-                                    relative_path,
-                                    path_kind,
-                                },
-                                AuthoredWorkerEnvironmentValue::RuntimeViewDirectory {
-                                    relative_path,
-                                } => LaunchEnvironmentValueWire::RuntimeViewDirectory {
-                                    relative_path,
-                                },
-                                AuthoredWorkerEnvironmentValue::DeliveredSecret { name } => {
-                                    LaunchEnvironmentValueWire::DeliveredSecret { name }
-                                }
-                            };
-                            (name, value)
-                        })
-                        .collect::<BTreeMap<_, _>>();
-                    let environment_contributions = if !variables.is_empty() {
-                        {
-                            BTreeMap::from([(
-                                ENVIRONMENT_BINDING.to_owned(),
-                                LaunchEnvironmentContributionRequestWire {
-                                    targets: vec![DEPENDENCY_NAME.to_owned()],
-                                    variables,
-                                },
-                            )])
-                        }
-                    } else {
-                        Default::default()
-                    };
-                    let workload_client_request = environment.workload_client;
-                    (
-                        environment.worker_ref,
-                        content_dependencies,
-                        environment_contributions,
-                        workload_client_request,
-                    )
-                }
-            };
+                    }
+                } else {
+                    Default::default()
+                };
+                let workload_client_request = environment.workload_client;
+                (
+                    environment.worker_ref,
+                    Some(environment.subject_projection_contract),
+                    content_dependencies,
+                    environment_contributions,
+                    workload_client_request,
+                )
+            }
+        };
         let mut effective_config = config;
         let effective_object = effective_config.as_object_mut().ok_or_else(|| {
             wire_error(
@@ -219,6 +224,15 @@ fn prepare(request: ryeos_handler_protocol::LaunchPrepareRequest) -> LaunchPrepa
         effective_object.insert(
             "worker_ref".to_string(),
             serde_json::Value::String(worker_ref.clone()),
+        );
+        // The environment's declared subject-projection contract, carried so
+        // session admission can judge it against the credential profile's
+        // activation. A direct worker has no environment and records null.
+        effective_object.insert(
+            "credential_subject_contract".to_string(),
+            subject_projection_contract
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
         );
         Ok(LaunchPrepareSuccess {
             runtime_data: BTreeMap::from([("worker_execution".to_owned(), effective_config)]),
@@ -976,8 +990,14 @@ fn validate_worker_environment(
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default(),
     )?;
+    let subject_projection_contract = credential
+        .get("subject_projection_contract")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     Ok(ValidatedWorkerEnvironment {
         worker_ref,
+        subject_projection_contract,
         has_external_content: !shape.is_empty(),
         executable_search,
         process_environment,
@@ -1302,6 +1322,7 @@ mod tests {
         };
         let validated = validate_worker_environment(&environment).unwrap();
         assert_eq!(validated.worker_ref, "worker:fixture/hosted");
+        assert_eq!(validated.subject_projection_contract, "fixture.account.v1");
         assert!(validated.executable_search.is_empty());
         assert_eq!(validated.process_environment.len(), 2);
 
