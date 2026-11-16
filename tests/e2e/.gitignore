@@ -156,3 +156,5 @@ __pycache__/
 !external-execution/fixtures/
 !external-execution/fixtures/independent-scripted-config.toml.template
 !external-execution/fixtures/independent-environments.toml.template
+!external-execution/fixtures/synthetic-provider-spec.json
+!external-execution/fixtures/lease-controller-*
