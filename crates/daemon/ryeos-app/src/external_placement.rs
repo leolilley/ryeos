@@ -9063,6 +9063,11 @@ impl ExternalPlacementReconciliation {
                     placement,
                     outcome = outcome.as_str(),
                     last_phase = report.last_phase().map(|step| step.as_str()),
+                    refusal_site = match &report {
+                        GuestOwnerActivationReport::Refused { site, .. } =>
+                            site.map(|site| site.as_str()),
+                        _ => None,
+                    },
                     supervisor_exit = supervisor_exit.map(|exit| exit.status.to_string()),
                     supervisor_stderr_tail = supervisor_exit.map(|exit| exit.stderr_tail.as_str()),
                     "external activation guest owner report"
@@ -15449,6 +15454,7 @@ mod tests {
                     step: Step::Install,
                     last_phase: Some(Step::Install),
                     detail: None,
+                    site: None,
                 },
                 true,
             ),

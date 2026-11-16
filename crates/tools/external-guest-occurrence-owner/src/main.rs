@@ -30,7 +30,7 @@ use ryeos_external_execution_contract::guest_import_authorization::{
 };
 use ryeos_external_execution_contract::guest_owner_report::{
     GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerStep as Step,
-    GuestRefusalDetail, GuestSupervisorExit, GuestSupervisorStatus,
+    GuestOwnerSite, GuestRefusalDetail, GuestSupervisorExit, GuestSupervisorStatus,
     MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES, RefusedAt as _,
 };
 
@@ -268,6 +268,7 @@ fn run(assignment_bytes: &[u8]) -> Result<()> {
     let (mut supervisor_stderr, supervisor_stderr_writer) =
         lillux::stderr_tail::StderrTail::open(MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES)
             .map_err(anyhow::Error::msg)
+            .at_site(GuestOwnerSite::StderrTail)
             .refused_at(Step::HeldPrepare)?;
     let mut held = prepare_authorized_held_guest_supervisor_once(
         &occurrence,
@@ -422,10 +423,17 @@ fn main() {
         // sanitized tail; the controller shows it and never acts on it.
         // Only a refusal site that vouched for its text sends any: the line
         // otherwise names the closed step word and nothing else.
-        report(GuestOwnerReport::refused(
-            Step::of(&error),
-            GuestRefusalDetail::of(&error).unwrap_or_default(),
-        ));
+        let step = Step::of(&error);
+        let detail = GuestRefusalDetail::of(&error).unwrap_or_default();
+        match GuestOwnerSite::of(&error) {
+            // A refusal that vouched for its text sends that text; one that
+            // names a site sends the closed site word; otherwise the line
+            // names the closed step word and nothing else.
+            Some(site) if detail.is_empty() => {
+                report(GuestOwnerReport::refused_at_site(step, site));
+            }
+            _ => report(GuestOwnerReport::refused(step, detail)),
+        }
         eprintln!("Error: {error:?}");
         std::process::exit(1);
     }
