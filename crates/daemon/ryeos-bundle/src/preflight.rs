@@ -189,7 +189,6 @@ pub fn preflight_verify_named_bundle_report_in_context(
         dependency_bundle_roots,
         app_root,
         Some(expected_bundle_name),
-        true,
         isolation,
     )
 }
@@ -211,7 +210,6 @@ pub fn preflight_verify_bundle_staging_in_context(
         dependency_bundle_roots,
         app_root,
         Some(expected_bundle_name),
-        false,
         isolation,
     )?;
     Ok(())
@@ -236,7 +234,6 @@ pub fn preflight_verify_bundle_report_in_context(
         dependency_bundle_roots,
         app_root,
         None,
-        true,
         isolation,
     )
 }
@@ -247,7 +244,6 @@ fn preflight_verify_bundle_in_context_inner(
     dependency_bundle_roots: &[PathBuf],
     app_root: &Path,
     expected_bundle_name: Option<&str>,
-    check_source_mtime: bool,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
@@ -295,7 +291,6 @@ fn preflight_verify_bundle_in_context_inner(
                 source_path,
                 expected_bundle_name,
                 &trust_store,
-                check_source_mtime,
             ),
             None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
         }
@@ -520,7 +515,6 @@ fn preflight_verify_bundle_in_context_inner(
             source_path,
             expected_bundle_name,
             &trust_store,
-            check_source_mtime,
         ),
         None => verify_manifest_signature(&ai_dir, source_path, &trust_store),
     }
@@ -612,7 +606,7 @@ pub fn verify_manifest_signature(
     source_path: &Path,
     trust_store: &TrustStore,
 ) -> Result<()> {
-    verify_manifest_signature_inner(ai_dir, source_path, None, trust_store, true)
+    verify_manifest_signature_inner(ai_dir, source_path, None, trust_store)
 }
 
 fn verify_manifest_signature_for_bundle_name(
@@ -620,15 +614,8 @@ fn verify_manifest_signature_for_bundle_name(
     source_path: &Path,
     expected_bundle_name: &str,
     trust_store: &TrustStore,
-    check_source_mtime: bool,
 ) -> Result<()> {
-    verify_manifest_signature_inner(
-        ai_dir,
-        source_path,
-        Some(expected_bundle_name),
-        trust_store,
-        check_source_mtime,
-    )
+    verify_manifest_signature_inner(ai_dir, source_path, Some(expected_bundle_name), trust_store)
 }
 
 fn verify_manifest_signature_inner(
@@ -636,7 +623,6 @@ fn verify_manifest_signature_inner(
     source_path: &Path,
     expected_bundle_name: Option<&str>,
     trust_store: &TrustStore,
-    check_source_mtime: bool,
 ) -> Result<()> {
     let manifest_path = ai_dir.join("manifest.yaml");
     let manifest_meta = match fs::symlink_metadata(&manifest_path) {
@@ -766,14 +752,10 @@ fn verify_manifest_signature_inner(
         if !source_meta.file_type().is_file() {
             bail!("manifest.source.yaml must be a regular file, not a symlink or directory");
         }
-        // Copying into an install staging tree does not preserve source mtimes,
-        // so completed-staging verification relies on the exact materialized
-        // manifest comparison below instead of temporary copy order.
-        if check_source_mtime && source_meta.modified()? > manifest_meta.modified()? {
-            bail!(
-                "manifest.yaml is older than manifest.source.yaml — regenerate and re-sign manifest.yaml"
-            );
-        }
+        // Freshness is a content property: the signed manifest must equal
+        // the manifest materialized from manifest.source.yaml. File mtimes
+        // are never consulted (git checkout and copies make them arbitrary),
+        // so install preflight and `node doctor` cannot disagree.
         let source_raw = fs::read_to_string(&source_manifest_path)
             .with_context(|| format!("read manifest source {}", source_manifest_path.display()))?;
         let source_body = lillux::signature::strip_signature_lines(&source_raw);
@@ -784,7 +766,7 @@ fn verify_manifest_signature_inner(
                 .context("materialize manifest.source.yaml for staleness check")?;
         if manifest != expected_manifest {
             bail!(
-                "manifest.yaml is stale relative to manifest.source.yaml — regenerate and re-sign manifest.yaml with the publish pipeline"
+                "manifest.yaml is stale relative to manifest.source.yaml — regenerate and re-sign it with `ryeos bundle manifest-sign`"
             );
         }
     }
@@ -2064,6 +2046,47 @@ description: "fixed parser handler for preflight tests"
             msg.contains("stale relative to manifest.source.yaml"),
             "should reject stale signed manifest: {msg}"
         );
+    }
+
+    #[test]
+    fn verify_manifest_stale_error_names_manifest_sign_cure() {
+        let layout = BundleLayout::new("test-bundle");
+        fs::write(
+            layout.ai_dir.join("manifest.source.yaml"),
+            "name: test-bundle\nversion: '2.0'\ndescription: changed\n",
+        )
+        .unwrap();
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\ndescription: old\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        let ts = layout.trust_store();
+        let msg = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("ryeos bundle manifest-sign"), "{msg}");
+    }
+
+    #[test]
+    fn verify_manifest_ignores_source_mtime_newer_than_manifest() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\ndescription: same\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        let source = layout.ai_dir.join("manifest.source.yaml");
+        fs::write(
+            &source,
+            "name: test-bundle\nversion: '1.0'\ndescription: same\n",
+        )
+        .unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        let ts = layout.trust_store();
+        assert!(verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok());
     }
 
     #[test]
