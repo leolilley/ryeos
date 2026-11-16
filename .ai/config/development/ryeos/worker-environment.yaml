@@ -1,4 +1,4 @@
-# ryeos:signed:2026-09-09T09:15:12Z:e12870326f65d590f2d6892d2040a0f6955027ee23bf95b1a3c9c75ee22153d4:dZdi5H5yRaXPI0I+rR7jYbdXWgN1T6gfvL7oEMa3u6yDiHWclpDxNJtkPr+Yna3C/lbdHOb/5PSnItvBKWj/CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T08:18:29Z:66759b8a9b8a42c5f5bd85d1768e1156934fa066a5df648f9375c2dfbfbdaba0:fZoClRJ74k5V4ocLVLzIjp66rXZVMvTgyyrnNGHNVctC+jJcF5EGFNyjAHnlxvo+mt3uflJ64PH3vJnh9WQLCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Root authoring and child operations are separate admitted programs. This
 # environment requests only the finite project operations below. Their ordinary
 # installed execution has been qualified; worker-to-child acceptance is a

@@ -884,6 +884,7 @@ pub(crate) fn start_external_qualification_local_worker_for_signed_request(
                         writable_runtime_view_mounts,
                         inherited_fds,
                         vec![target_channel],
+                        Vec::new(),
                         &session.lifecycle,
                         session.protocol.workspace_authority,
                         session.protocol.network_authority,

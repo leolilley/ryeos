@@ -291,6 +291,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -433,6 +434,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
@@ -565,6 +567,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
     let (app_root, isolation) = isolation_context();
     let engine_ctx = EngineContext {
         isolation_target_channels: Vec::new(),
+        isolation_target_sealed_payloads: Vec::new(),
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,

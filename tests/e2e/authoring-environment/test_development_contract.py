@@ -1,3 +1,4 @@
+# ryeos:signed:2026-11-16T08:18:29Z:d8f550efe6c7f18a1f73ee93dd3434f23d42df9f3ce123724bcb9bf5164711c5:P+863BS71g3Ip1i033hI7g5DX15K6GKwzaSlwiEisMh5jeX8YIu3lwG4FcCSMG4sTekMJlCSnxBZVaUcdw8rAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Source composition checks, not a claim of installed worker qualification."""
 
 from pathlib import Path

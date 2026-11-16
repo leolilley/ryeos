@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T18:26:28Z:f52ee606e3cf4960fc6c2ccd5f42dfa77761419d45c1b47004746cc584e46c39:WS0CsgC39K03KPz4lm/HbkPXmVav87k8EgAOlVFrnBNtmGFAu28R1oKm2EM/TrYmTRe1UpcFpE+kKH6i1qyEBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T08:18:41Z:8d4dfa69ffdc7de7a3b44fbb49dbdf219ca36e7d75971db67676b54338de2d88:sMKNkrxAh2brH040NbOt4vCgL3r0ZsLFxVny2oDm6wZ+MVjcyJ42osI2sqAdykEw2Ol3872Qp2MOBhs+vS1YDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/core/execution"
 name: "worker-hosted-execution"
@@ -275,7 +275,7 @@ execution and content dependencies remain projectless: selecting them from a
 project must not give their code a project overlay. Same-site recovery keeps
 the captured realizations rather than re-resolving mutable names.
 
-The v6 configuration may also declare `process_environment`. This is not an
+The v7 configuration may also declare `process_environment`. This is not an
 extension of content authority and is not a project/vault environment overlay.
 The kind-owned preparer emits a generic path-free environment contribution as
 a sibling of execution and content dependencies. Every contribution names its
@@ -1112,6 +1112,100 @@ listing authority, and fails closed when the child thread, independent child
 root, or requested owner contradicts the retained dispatch and placement.
 Worker prose about child outcomes is orientation; the projected dispatch,
 capsule, terminal, and result facts are the acceptance evidence.
+
+## Delivered secrets for structured sessions
+
+A structured-session worker environment (`ryeos.worker_environment.v7`) may
+name a secret the daemon delivers to the workload at session start. The
+`configuration.process_environment` entry uses the kind `delivered_secret`.
+The entry's key is the workload's variable; `name` is the secret the node
+delivers, and the two may differ:
+
+```yaml
+configuration:
+  process_environment:
+    MODEL_API_KEY:
+      kind: delivered_secret
+      name: MODEL_API_KEY
+```
+
+Only the name is retained. The environment config, the launch wire, the
+admitted session capsule and the prepared environment hold the name and never a
+value. The launch preparer still returns no required secrets for the root
+runtime, so the root process receives nothing.
+
+**Who may receive.** The daemon reads the values at dedicated-session start,
+before any credential lock, worker identity or process contact. The reader is
+the session owner, acting as recipient under the environment authority sealed
+into the root at admission: the vault or `provider_environment`, whichever the
+root's launch chose. The owner must hold the exact recipient capability the
+source requires. A `*` grant does not count. A followed child of a graph runs
+under its root's sealed authority unchanged, so it can receive only names its
+root could receive.
+
+**Ceiling.** The signed runtime descriptor field `max_delivered_secrets` bounds
+how many names an environment may deliver: 8 for worker execution, 0 for every
+other runtime. An environment naming more is refused when the launch is
+prepared.
+
+**Refusals.** Each is a stable code at the start of the error text, and each
+carries names only:
+
+- `session_secret_missing`: the root's environment authority does not provide
+  one or more of the named secrets.
+- `session_secret_recipient_refused`: the owner is not an admitted recipient
+  for a name, or the source refused the name (including a wildcard-only
+  grant).
+- `session_secret_revoked`: the same refusal as above, raised on recovery. A
+  recipient rule or grant removed while the session was down refuses the resume
+  with this code.
+- `session_secret_unbounded`: a delivered value is empty, longer than 16 KiB,
+  or holds control characters.
+
+With isolation disabled the sealed payload is an inherited descriptor. Under
+enforced isolation the daemon hands it to the isolation adapter as a
+target sealed-payload authority (adapter capability
+`ipc.target_sealed_payload`); the adapter verifies the seals and installs it
+only at its target descriptor in the bridge.
+
+**Recovery.** Recovery re-authorises from the root's retained authority and
+reads the values again. A value is never replayed from the earlier incarnation,
+so a revoked grant stops a recovered session.
+
+**Placement.** Cross-node placement, product and consumer qualification and
+guest transfer refuse an environment that names a delivered secret. A value
+delivered by one node's sources does not travel to another node.
+
+**Channel.** The values travel in a sealed memfd named by
+`RYEOS_SESSION_SECRET_FD`, which holds a descriptor number and not a value. The
+bridge reads and closes it before it spawns anything, then installs the values
+only in the workload's environment and zeroizes its copy. The descriptor is
+close-on-exec, so the workload does not inherit it. The values are never in the
+plan, the runtime environment or the prepared environment.
+
+### What delivery protects and what it does not
+
+It protects RyeOS's own records. The value stays out of the capsule, the plan,
+events and diagnostics. Diagnostics and errors print names only.
+
+It does not hide the value from the workload. On the trusted lane every
+process runs as the same uid, so `/proc/<pid>/environ` of the workload is
+readable by the workload and its descendants, and by anything else running as
+that uid. A workload that echoes the value into its own output, transcripts or
+tool results puts it into the observation stream; keeping it out is the
+adapter's redaction duty.
+
+A value the agent writes into a file can end up in a captured candidate.
+`ingest_ignore` filters by name only and does not inspect content.
+
+Core dumps are disabled for the bridge and all its descendants
+(`RLIMIT_CORE` 0), so a crash does not write the environment to disk.
+
+**Credential home retention.** The credential home persists across executions
+on one profile, until the profile is revoked or deleted. It holds the
+workload's own transcripts and configuration, and anything the workload chose to
+write there, including a delivered value if it persists one. Treat the home as
+holding whatever the workload saw. Revoke or delete the profile to remove it.
 
 ## Explicit non-claims
 

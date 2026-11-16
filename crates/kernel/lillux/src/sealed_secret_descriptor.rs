@@ -28,6 +28,87 @@ pub fn seal_secret_payload(payload: &[u8]) -> Result<InheritedDescriptorAuthorit
     crate::sealed_memfd(SEALED_SECRET_FILE_NAME, payload)
 }
 
+/// Prove that a live descriptor is a regular sealable memory file carrying all
+/// four seals, and return its exact byte length. Nothing is read or changed.
+#[cfg(target_os = "linux")]
+fn inspect_sealed_memfd(raw: i32) -> Result<u64, String> {
+    let mut observed: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(raw, &mut observed) } != 0 {
+        return Err(format!(
+            "inspect sealed secret descriptor: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if observed.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err("sealed secret descriptor is not a regular file".to_owned());
+    }
+    // F_GET_SEALS succeeds only on a sealing-capable anonymous file, so a
+    // pipe, socket or ordinary file is refused here.
+    let seals = unsafe { libc::fcntl(raw, libc::F_GET_SEALS) };
+    if seals < 0 {
+        return Err("sealed secret descriptor is not a sealable memory file".to_owned());
+    }
+    let required = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if seals & required != required {
+        return Err("sealed secret descriptor is missing required seals".to_owned());
+    }
+    u64::try_from(observed.st_size)
+        .map_err(|_| "sealed secret descriptor has a negative size".to_owned())
+}
+
+/// Prove that an owned descriptor is a sealed secret memory file with all four
+/// seals, without reading it.
+pub fn validate_sealed_secret_descriptor(
+    descriptor: &InheritedDescriptorAuthority,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        inspect_sealed_memfd(descriptor.file().as_raw_fd()).map(|_| ())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = descriptor;
+        Err("sealed secret descriptors are supported only on Linux".to_owned())
+    }
+}
+
+/// Prove that an inherited descriptor number, held by a launch adapter that has
+/// not adopted it, is a sealed secret memory file with all four seals. The
+/// descriptor is neither read, closed nor modified.
+pub fn validate_inherited_sealed_secret_descriptor(fd: u32) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = i32::try_from(fd)
+            .map_err(|_| "sealed secret descriptor exceeds the platform range".to_owned())?;
+        inspect_sealed_memfd(raw).map(|_| ())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = fd;
+        Err("sealed secret descriptors are supported only on Linux".to_owned())
+    }
+}
+
+/// Bind one sealed secret descriptor into a Lillux launch request at an exact
+/// target descriptor, publishing that number under `env_name`. The descriptor
+/// is verified first and stays close-on-exec in the parent; only the mapped
+/// target copy survives the child's exec.
+pub fn bind_sealed_secret_to_subprocess_request(
+    descriptor: &InheritedDescriptorAuthority,
+    request: &mut crate::SubprocessRequest,
+    env_name: &str,
+    target_fd: u32,
+) -> Result<(), String> {
+    validate_sealed_secret_descriptor(descriptor)?;
+    crate::exec::bind_inherited_channel_to_subprocess_request(
+        descriptor,
+        request,
+        Some(env_name),
+        target_fd,
+    )
+}
+
 /// Adopt the sealed secret descriptor whose number is held in the environment
 /// variable `name`, read its payload, and close it.
 ///
@@ -64,30 +145,7 @@ pub fn read_sealed_secret_payload(
         use std::os::unix::fs::FileExt as _;
 
         let file = descriptor.file();
-        let raw = file.as_raw_fd();
-        let mut observed: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(raw, &mut observed) } != 0 {
-            return Err(format!(
-                "inspect sealed secret descriptor: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        if observed.st_mode & libc::S_IFMT != libc::S_IFREG {
-            return Err("sealed secret descriptor is not a regular file".to_owned());
-        }
-        // F_GET_SEALS succeeds only on a sealing-capable anonymous file, so a
-        // pipe, socket or ordinary file is refused here.
-        let seals = unsafe { libc::fcntl(raw, libc::F_GET_SEALS) };
-        if seals < 0 {
-            return Err("sealed secret descriptor is not a sealable memory file".to_owned());
-        }
-        let required =
-            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
-        if seals & required != required {
-            return Err("sealed secret descriptor is missing required seals".to_owned());
-        }
-        let length = u64::try_from(observed.st_size)
-            .map_err(|_| "sealed secret descriptor has a negative size".to_owned())?;
+        let length = inspect_sealed_memfd(file.as_raw_fd())?;
         if length > maximum_bytes as u64 {
             return Err("sealed secret payload exceeds its byte bound".to_owned());
         }
@@ -206,5 +264,33 @@ mod tests {
         let error = read_sealed_secret_payload(adopt(file), 16).unwrap_err();
         assert!(error.contains("not a sealable memory file"), "{error}");
         assert!(!error.contains("VALUE-7f3c"), "{error}");
+    }
+
+    #[test]
+    fn inherited_validation_accepts_only_fully_sealed_memory_files() {
+        let sealed = seal_secret_payload(b"value").unwrap();
+        let raw = sealed.inherited_descriptor().unwrap();
+        validate_inherited_sealed_secret_descriptor(raw).unwrap();
+        validate_sealed_secret_descriptor(&sealed).unwrap();
+
+        let unsealed = unsafe {
+            libc::memfd_create(
+                c"unsealed".as_ptr(),
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            )
+        };
+        assert!(unsealed >= 0);
+        let unsealed = unsafe { std::fs::File::from_raw_fd(unsealed) };
+        let error = validate_sealed_secret_descriptor(&adopt(unsealed)).unwrap_err();
+        assert!(error.contains("missing required seals"), "{error}");
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plain");
+        std::fs::write(&path, b"value").unwrap();
+        let plain = adopt(std::fs::File::open(&path).unwrap());
+        assert!(validate_sealed_secret_descriptor(&plain).is_err());
+        let plain_raw = plain.inherited_descriptor().unwrap();
+        assert!(validate_inherited_sealed_secret_descriptor(plain_raw).is_err());
+        assert!(validate_inherited_sealed_secret_descriptor(u32::MAX).is_err());
     }
 }

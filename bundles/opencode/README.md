@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-09-10T10:42:57Z:a3ff07e1b8e25e020a8e53e20868fde92b1b078d46cd248085805d2e11ca284a:EFF+nvGhObCQsUviFdZQRdE2uSJbZyOUNCKDK9skRM0bu5MFyrIYo0CAHUnNKqcOeG0MSphgP4E7Y5s3k6KvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T08:18:29Z:0e7a57fe65294b30b780463642ed02cac21f728da96fa79499a497bb67abc445:Xe8/AQKSx37im4jXiBzgwC2JzbL9sFrXQszpnm4ZKQVljKc+/qI0GKCg48K+SuCORzKZ8P7Q9K6AjcYdfIgGDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS OpenCode
 
 Provider data for hosting a pinned OpenCode server through RyeOS's generic
@@ -173,8 +173,10 @@ worker shares the node's host networking and the loopback transport works.
 
 - Credential write is deliberately absent.  A raw API key, OAuth access token
   or refresh token would be retained in durable command testimony.  Live use
-  must wait for the generic vault-backed late secret-input contract; no caller
-  may place provider secrets in a hosted command.
+  needs the substrate's delivered-secret mechanism, which now exists
+  (`delivered_secret` in worker environment v7). OpenCode's own environment and
+  credential profile are not yet wired to it, so live use is still not
+  available; no caller may place provider secrets in a hosted command.
 - OpenCode's unified database is node-local credential state.  It can resume
   locally but cannot claim portable upstream-conversation handoff without a
   portable subject projection.

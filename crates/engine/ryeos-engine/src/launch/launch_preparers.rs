@@ -292,6 +292,7 @@ impl LaunchPreparerRunner {
                 writable_runtime_view_mounts: &[],
                 producer_prepared_mounts: &[],
                 target_channels: &[],
+                target_sealed_payloads: &[],
                 item_ref: &item_ref,
                 thread_id: "launch-preparer",
                 verbatim_env_names: &[],

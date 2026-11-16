@@ -3777,6 +3777,12 @@ pub(crate) fn prepare_structured_session_configurations(
 /// the bridge. The slot holds a descriptor number only, never a value.
 const SESSION_SECRET_FD_ENV: &str = "RYEOS_SESSION_SECRET_FD";
 
+/// Descriptor at which an isolated target receives the sealed secret payload.
+/// The environment slot carries this number, so the bridge adopts it exactly
+/// as it adopts an inherited descriptor under disabled isolation. It sits
+/// beside the other protected launch descriptors and clear of ordinary ones.
+const SESSION_SECRET_TARGET_FD: u32 = 197;
+
 #[derive(serde::Serialize)]
 struct SessionSecretPayload<'a> {
     schema: u32,
@@ -3791,7 +3797,6 @@ struct SessionSecretPayload<'a> {
 fn seal_delivered_secrets(
     process_environment: &BTreeMap<String, ryeos_state::objects::SessionProcessEnvironmentValue>,
     delivered: &ryeos_engine::contracts::DeliveredSecretEnv,
-    isolation_enforced: bool,
 ) -> Result<Option<lillux::InheritedDescriptorAuthority>> {
     let named = ryeos_state::objects::session_process_environment_delivered_secret_names(
         process_environment,
@@ -3806,12 +3811,6 @@ fn seal_delivered_secrets(
     ensure!(
         named.iter().map(String::as_str).eq(delivered.names()),
         "delivered secret names differ from the names the session environment requires"
-    );
-    // The descriptor is inherited by the bridge as a caller-supplied
-    // descriptor, which an enforced isolation launch refuses by design.
-    ensure!(
-        !isolation_enforced,
-        "session secret delivery is not available under enforced isolation"
     );
     let mut values = BTreeMap::new();
     let mut capacity = 64_usize;
@@ -4232,21 +4231,37 @@ fn spawn_capsule_process_held(
                 bail!("session process environment collides with runtime authority");
             }
         }
-        if let Some(descriptor) = seal_delivered_secrets(
-            &capsule.process_environment,
-            delivered_secrets,
-            state.isolation.is_enforced(),
-        )? {
-            let number = descriptor
-                .inherited_descriptor()
-                .map_err(anyhow::Error::msg)?;
-            if runtime_environment
-                .insert(SESSION_SECRET_FD_ENV.to_owned(), number.to_string())
-                .is_some()
-            {
-                bail!("session secret descriptor collides with runtime authority");
+        let mut target_sealed_payloads = Vec::new();
+        if let Some(descriptor) =
+            seal_delivered_secrets(&capsule.process_environment, delivered_secrets)?
+        {
+            if state.isolation.is_enforced() {
+                // An enforced launch refuses caller-supplied inherited
+                // descriptors. The sealed payload travels as a typed target
+                // authority, and the isolation layer publishes its exact
+                // target descriptor under the environment name itself.
+                if runtime_environment.contains_key(SESSION_SECRET_FD_ENV) {
+                    bail!("session secret descriptor collides with runtime authority");
+                }
+                target_sealed_payloads.push(
+                    ryeos_engine::isolation::IsolationTargetSealedPayloadAuthority::new(
+                        descriptor,
+                        SESSION_SECRET_TARGET_FD,
+                        SESSION_SECRET_FD_ENV,
+                    )?,
+                );
+            } else {
+                let number = descriptor
+                    .inherited_descriptor()
+                    .map_err(anyhow::Error::msg)?;
+                if runtime_environment
+                    .insert(SESSION_SECRET_FD_ENV.to_owned(), number.to_string())
+                    .is_some()
+                {
+                    bail!("session secret descriptor collides with runtime authority");
+                }
+                descriptor.retain_for_child(&mut inherited_fds);
             }
-            descriptor.retain_for_child(&mut inherited_fds);
         }
         let mut runtime_env_allowlist = session_protocol.runtime_env_allowlist.clone();
         if let Some(name) = session_protocol.readiness_identity_env.as_ref() {
@@ -4269,6 +4284,7 @@ fn spawn_capsule_process_held(
             writable_runtime_view_mounts,
             inherited_fds,
             extra_target_channels,
+            target_sealed_payloads,
             &capsule.lifecycle,
             session_protocol.workspace_authority,
             session_protocol.network_authority,
