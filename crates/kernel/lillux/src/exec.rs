@@ -2923,12 +2923,23 @@ pub struct InheritedDuplexChannel {
 
 #[cfg(unix)]
 fn move_owned_descriptor_above_stdio(file: std::fs::File) -> std::io::Result<std::fs::File> {
+    move_owned_descriptor_to_floor(file, libc::STDERR_FILENO + 1)
+}
+
+/// Move an owned descriptor to `floor` or above, closing the original. Used
+/// for parent control coordinates that must not occupy stdio or any target a
+/// launch maps an inherited descriptor onto.
+fn move_owned_descriptor_to_floor(
+    file: std::fs::File,
+    floor: i32,
+) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
 
-    if file.as_raw_fd() > libc::STDERR_FILENO {
+    let floor = floor.max(libc::STDERR_FILENO + 1);
+    if file.as_raw_fd() >= floor {
         return Ok(file);
     }
-    let duplicate = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    let duplicate = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
     if duplicate < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -9114,10 +9125,6 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
     let setup_lease_deadline = crate::time::MonotonicDeadline::after(
         setup_deadline.saturating_duration_since(Instant::now()),
     );
-    let cwd_directory = match request.cwd.take() {
-        Some(path) => Some(open_attachment_cwd(&path, start, setup_lease_deadline)?),
-        None => None,
-    };
     let raw_inherited = normalize_inherited_descriptors(&request.inherited_fds)
         .map_err(|error| spawn_failure(start, error))?;
     let prepared_mappings = prepare_inherited_fd_mappings(
@@ -9127,6 +9134,24 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
         Some(setup_lease_deadline),
     )
     .map_err(|error| spawn_failure(start, error))?;
+    // Every parent control coordinate this launch creates from here on (the
+    // cwd and the attachment pipes) is placed above every mapped target, so
+    // the child's mapping installation can never land on one of them.
+    let control_floor = prepared_mappings
+        .pairs
+        .iter()
+        .map(|(_, target)| *target)
+        .max()
+        .map_or(libc::STDERR_FILENO + 1, |target| target.saturating_add(1));
+    let cwd_directory = match request.cwd.take() {
+        Some(path) => Some(open_attachment_cwd(
+            &path,
+            start,
+            setup_lease_deadline,
+            control_floor,
+        )?),
+        None => None,
+    };
     // Keep exact request/mapping lifelines through the protected setup window.
     // An early worker error cannot retire aliases before main has joined and
     // observed its outcome; deferred Drop is not synchronous close evidence.
@@ -9159,8 +9184,8 @@ fn lib_spawn_awaiting_attachment_in_scope_with_deadline(
     let inherited_child_close_fds = fork_sensitive_descriptors
         .fork_child_close_fds(&preserved)
         .map_err(|error| spawn_failure(start, error))?;
-    let (status_reader, status_writer) = attachment_pipe("readiness", start)?;
-    let (release_reader, release_writer) = attachment_pipe("release", start)?;
+    let (status_reader, status_writer) = attachment_pipe("readiness", start, control_floor)?;
+    let (release_reader, release_writer) = attachment_pipe("release", start, control_floor)?;
     let child_status_reader_fd = status_reader.as_raw_fd();
     let child_release_writer_fd = release_writer.as_raw_fd();
     let gate = AttachmentWorkerGate {
@@ -11227,6 +11252,7 @@ struct LinuxProcessBirth {
 fn attachment_pipe(
     label: &str,
     start: Instant,
+    floor: i32,
 ) -> Result<(std::fs::File, std::fs::File), SubprocessResult> {
     let mut fds = [-1; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -11247,14 +11273,17 @@ fn attachment_pipe(
     };
     // A previously adopted fd0 can leave parent stdin closed. Control
     // coordinates must not then occupy standard I/O: Command sets child
-    // stdin before our hook closes the parent-only control descriptors.
-    let reader = move_owned_descriptor_above_stdio(reader).map_err(|error| {
+    // stdin before our hook closes the parent-only control descriptors. They
+    // must not occupy a mapped inherited target either: the child installs
+    // each mapping onto its fixed target, so a control pipe there would be
+    // overwritten. `floor` is above every target of this launch.
+    let reader = move_owned_descriptor_to_floor(reader, floor).map_err(|error| {
         spawn_failure(
             start,
             format!("Failed to relocate attachment {label} reader: {error}"),
         )
     })?;
-    let writer = move_owned_descriptor_above_stdio(writer).map_err(|error| {
+    let writer = move_owned_descriptor_to_floor(writer, floor).map_err(|error| {
         spawn_failure(
             start,
             format!("Failed to relocate attachment {label} writer: {error}"),
@@ -11268,6 +11297,7 @@ fn open_attachment_cwd(
     path: &str,
     start: Instant,
     deadline: crate::time::MonotonicDeadline,
+    floor: i32,
 ) -> Result<InheritedDescriptorAuthority, SubprocessResult> {
     let path = std::ffi::CString::new(path).map_err(|_| {
         spawn_failure(
@@ -11297,7 +11327,16 @@ fn open_attachment_cwd(
         ));
     }
     // SAFETY: open returned a new uniquely-owned descriptor.
-    InheritedDescriptorAuthority::from_owned_file(unsafe { std::fs::File::from_raw_fd(fd) }, &lease)
+    let directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    // The cwd coordinate is a parent control descriptor of this launch: keep
+    // it above every mapped inherited target, like the attachment pipes.
+    let directory = move_owned_descriptor_to_floor(directory, floor).map_err(|error| {
+        spawn_failure(
+            start,
+            format!("Failed to spawn awaiting attachment: relocate cwd: {error}"),
+        )
+    })?;
+    InheritedDescriptorAuthority::from_owned_file(directory, &lease)
         .map_err(|error| spawn_failure(start, error))
 }
 
