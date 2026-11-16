@@ -81,10 +81,12 @@ impl ExternalPlacementBackend for CoordinateOnlyBackend {
             "lease admission refused: external placement backend `{}` admits no leases",
             self.backend_id()
         );
-        Ok(crate::external_lifecycle_adapter::lease_admission::AdmittedLease {
-            request: b"{\"admitted\":true}".to_vec(),
-            budget_weight: 1,
-        })
+        Ok(
+            crate::external_lifecycle_adapter::lease_admission::AdmittedLease {
+                request: b"{\"admitted\":true}".to_vec(),
+                budget_weight: 1,
+            },
+        )
     }
 
     fn backend_id(&self) -> &str {

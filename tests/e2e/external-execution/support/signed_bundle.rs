@@ -86,8 +86,7 @@ pub fn install_signed_test_bundle_with_guest_admission(
         .unwrap();
         item_source_hashes.insert(item_ref, serde_json::Value::String(item_source_hash));
     }
-    let provider_spec_bytes: &[u8] =
-        include_bytes!("../fixtures/synthetic-provider-spec.json");
+    let provider_spec_bytes: &[u8] = include_bytes!("../fixtures/synthetic-provider-spec.json");
     let provider_spec_path = bundle.join("lifecycle/provider.json");
     std::fs::create_dir_all(provider_spec_path.parent().unwrap()).unwrap();
     std::fs::write(&provider_spec_path, provider_spec_bytes).unwrap();

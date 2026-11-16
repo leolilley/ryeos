@@ -453,8 +453,11 @@ pub mod test_support {
             selection.declaration.mount = slot.mount;
         }
         let selected_products = ryeos_state::external_content::products::composition::ResolvedExternalProductSelections::new(selection_map)?;
-        let program = external_candidate_requirement
-            .resolve_for_use(Some(&selected_products), &qualification_use, placement)?;
+        let program = external_candidate_requirement.resolve_for_use(
+            Some(&selected_products),
+            &qualification_use,
+            placement,
+        )?;
         ryeos_app::external_placement::test_support::install_precontact_binding_with_settings_and_timeout(
             state,
             &program,

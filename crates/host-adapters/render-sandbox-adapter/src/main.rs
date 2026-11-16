@@ -29,13 +29,12 @@ use lillux::time::{Duration, MonotonicDeadline};
 use provider_spec::{PlanValue, ProviderSpec, RouteName, RouteTarget};
 use ryeos_external_execution_contract::{
     LIFECYCLE_ADAPTER_EXECUTABLE_FD_ENV, LIFECYCLE_ADAPTER_PROTOCOL, LIFECYCLE_BOOTSTRAP_FD_ENV,
-    LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV,
-    LIFECYCLE_NETWORK_POLICY_SHA256_ENV, LIFECYCLE_PROVIDER_SPEC_FD_ENV,
-    LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_RESOLVER_FD_ENV,
-    LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV, LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV,
-    LIFECYCLE_SIGNED_IMPORT_FD_ENV, LifecycleAdapterInspectionRequest,
-    LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole,
+    LIFECYCLE_HOSTS_FD_ENV, LIFECYCLE_HOSTS_SHA256_ENV, LIFECYCLE_NETWORK_POLICY_SHA256_ENV,
+    LIFECYCLE_PROVIDER_SPEC_FD_ENV, LIFECYCLE_PROVIDER_SPEC_SHA256_ENV, LIFECYCLE_REQUEST_FD_ENV,
+    LIFECYCLE_RESOLVER_FD_ENV, LIFECYCLE_RESOLVER_SHA256_ENV, LIFECYCLE_SETTINGS_FD_ENV,
+    LIFECYCLE_SIGNED_ASSIGNMENT_FD_ENV, LIFECYCLE_SIGNED_IMPORT_FD_ENV,
+    LifecycleAdapterInspectionRequest, LifecycleAdapterInspectionResponse, LifecycleAdapterRequest,
+    LifecycleAdapterResponse, LifecycleArtifactInspection, LifecycleArtifactRole,
     MAX_LIFECYCLE_PROVIDER_SPEC_BYTES, MAX_LIFECYCLE_REQUEST_BYTES, canonical_json,
     from_json_slice_strict,
 };
@@ -595,10 +594,7 @@ fn operate() -> Result<()> {
             .classed(FailClass::RequestParse)?;
     request.validate().classed(FailClass::RequestParse)?;
     ensure!(
-        request
-            .canonical_bytes()
-            .classed(FailClass::RequestParse)?
-            == request_bytes,
+        request.canonical_bytes().classed(FailClass::RequestParse)? == request_bytes,
         "operation request is noncanonical"
     );
     let maximum_provider_spec_bytes = usize::try_from(MAX_LIFECYCLE_PROVIDER_SPEC_BYTES)?;

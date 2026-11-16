@@ -63,7 +63,10 @@ impl SyntheticSpec {
             "synthetic provider spec differs from its captured digest"
         );
         let spec: Self = serde_json::from_slice(bytes)?;
-        ensure!(spec.schema == 2, "unsupported synthetic provider spec schema");
+        ensure!(
+            spec.schema == 2,
+            "unsupported synthetic provider spec schema"
+        );
         ensure!(
             spec.budget_weight >= 1 && spec.maximum_lease_seconds >= 1,
             "synthetic provider spec budget weight and lifetime must be positive"
@@ -166,8 +169,10 @@ mod tests {
 
     /// The signed spec the e2e bundle publishes.
     pub(crate) fn spec_json() -> serde_json::Value {
-        serde_json::from_slice(include_bytes!("../../fixtures/synthetic-provider-spec.json"))
-            .unwrap()
+        serde_json::from_slice(include_bytes!(
+            "../../fixtures/synthetic-provider-spec.json"
+        ))
+        .unwrap()
     }
 
     fn parse(value: &serde_json::Value) -> Result<SyntheticSpec> {
@@ -232,7 +237,11 @@ mod tests {
             .unwrap()
             .remove("network_policy_source");
         let spec = parse(&without).unwrap();
-        assert!(!spec.attested_lease_guarantees().contains(LEASE_NETWORK_POLICY));
+        assert!(
+            !spec
+                .attested_lease_guarantees()
+                .contains(LEASE_NETWORK_POLICY)
+        );
     }
 
     #[test]

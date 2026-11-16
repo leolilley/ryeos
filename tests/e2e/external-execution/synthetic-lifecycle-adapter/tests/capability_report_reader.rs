@@ -19,8 +19,9 @@ use ryeos_node_runtime::identity::NodeIdentity;
 const POLICY_GENERATION: &str = "test-policy-generation";
 
 fn codex_contract() -> serde_json::Value {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../../../bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json",
+    );
     serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
 }
 

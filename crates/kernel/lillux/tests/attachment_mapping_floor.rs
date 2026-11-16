@@ -26,7 +26,9 @@ fn shell(script: String) -> SubprocessRequest {
 }
 #[test]
 fn mapped_targets_at_the_lowest_free_descriptors_leave_attachment_control_intact() {
-    let _serial = DESCRIPTOR_NUMBERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serial = DESCRIPTOR_NUMBERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::os::fd::AsRawFd as _;
 
     // The attachment gate's own pipes and cwd used to take the lowest free
@@ -39,9 +41,7 @@ fn mapped_targets_at_the_lowest_free_descriptors_leave_attachment_control_intact
     // exactly where a newly created control pipe or cwd descriptor would land.
     let count = 16_u32;
     let sources: Vec<_> = (0..count)
-        .map(|_| {
-            lillux::sealed_memfd(c"ryeos-mapping-probe", b"mapped").expect("sealed memfd")
-        })
+        .map(|_| lillux::sealed_memfd(c"ryeos-mapping-probe", b"mapped").expect("sealed memfd"))
         .collect();
     let probe = std::fs::File::open("/dev/null").expect("probe descriptor");
     let lowest = u32::try_from(probe.as_raw_fd()).unwrap().max(3);
@@ -67,7 +67,9 @@ fn mapped_targets_at_the_lowest_free_descriptors_leave_attachment_control_intact
 
 #[test]
 fn a_second_launch_may_map_onto_an_earlier_held_childs_control_descriptors() {
-    let _serial = DESCRIPTOR_NUMBERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serial = DESCRIPTOR_NUMBERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     use std::os::fd::AsRawFd as _;
 
     // A held supervisor keeps an earlier pending child while it starts the
@@ -113,6 +115,9 @@ fn a_second_launch_may_map_onto_an_earlier_held_childs_control_descriptors() {
         .expect("release second")
         .wait();
     assert!(second_result.success, "stderr: {}", second_result.stderr);
-    let first_result = first.release_after_attachment().expect("release first").wait();
+    let first_result = first
+        .release_after_attachment()
+        .expect("release first")
+        .wait();
     assert!(first_result.success, "stderr: {}", first_result.stderr);
 }

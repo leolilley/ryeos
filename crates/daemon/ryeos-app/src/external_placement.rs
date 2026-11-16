@@ -9162,7 +9162,9 @@ pub(crate) fn judge_placement(
         Some((inputs, charge)) => {
             let margin_seconds = budget
                 .map(|budget| budget.turn_end_margin_seconds)
-                .context("lease refused: this node's execution policy declares no external lease budget")?;
+                .context(
+                    "lease refused: this node's execution policy declares no external lease budget",
+                )?;
             if let Some(session_deadline) = session_deadline {
                 lease_lifecycle::refuse_session_unfit_for_fresh_lease(
                     session_deadline()?,
@@ -11585,7 +11587,8 @@ mod tests {
         }
     }
 
-    pub(super) fn program() -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
+    pub(super) fn program()
+    -> ryeos_state::external_execution::admission::AdmittedExternalCandidateProgram {
         let runtime_recipe =
             ryeos_state::external_execution::admission::ExternalCandidateRuntimeRecipe {
                 schema: 2,

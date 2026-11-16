@@ -48,9 +48,9 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
     LifecycleArtifactInspection, LifecycleArtifactRole, LifecycleGuestPackageDelivery,
-    LifecycleOperationCommon, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES,
-    MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent,
-    TerminationIntent, from_json_slice_strict,
+    LifecycleOperationCommon, MAX_LIFECYCLE_GUEST_FRAME_MESSAGE_BYTES, MAX_LIFECYCLE_REQUEST_BYTES,
+    MAX_LIFECYCLE_RESPONSE_BYTES, SupervisorActivationIntent, TerminationIntent,
+    from_json_slice_strict,
 };
 use ryeos_state::objects::RetainedLifecycleExecutableRole;
 

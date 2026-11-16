@@ -1026,9 +1026,10 @@ mod runtime_recipe_tests {
 /// is judged with.
 pub fn real_codex_placement_requires(repository_source_root: &Path) -> serde_json::Value {
     let profile: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(repository_source_root.join(
-            "bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json",
-        ))
+        &std::fs::read(
+            repository_source_root
+                .join("bundles/codex/.ai/workers/codex/lib/hosted/external-authoring.profile.json"),
+        )
         .unwrap(),
     )
     .unwrap();

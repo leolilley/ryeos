@@ -29,8 +29,8 @@ use ryeos_external_execution_contract::guest_import_authorization::{
     MAX_GUEST_IMPORT_AUTHORIZATION_BYTES, MAX_SIGNED_GUEST_OCCURRENCE_ASSIGNMENT_BYTES,
 };
 use ryeos_external_execution_contract::guest_owner_report::{
-    GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerStep as Step,
-    GuestOwnerSite, GuestRefusalDetail, GuestSupervisorExit, GuestSupervisorStatus,
+    GuestClockReport, GuestClockTrust, GuestOwnerReport, GuestOwnerSite, GuestOwnerStep as Step,
+    GuestRefusalDetail, GuestSupervisorExit, GuestSupervisorStatus,
     MAX_GUEST_SUPERVISOR_STDERR_TAIL_BYTES, RefusedAt as _,
 };
 

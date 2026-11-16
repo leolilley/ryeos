@@ -402,13 +402,11 @@ mod tests {
             owner(),
             None,
         )?;
-        let launch = fixture
-            .requirement
-            .resolve_for_content(
-                &fixture.retained,
-                &fixture.qualification_use,
-                fixture.program.placement.clone(),
-            )?;
+        let launch = fixture.requirement.resolve_for_content(
+            &fixture.retained,
+            &fixture.qualification_use,
+            fixture.program.placement.clone(),
+        )?;
         ensure!(
             response.program == launch && response.program == fixture.program,
             "emitted program differs from the launch derivation"

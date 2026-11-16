@@ -1164,7 +1164,10 @@ mod tests {
                 )
             );
             assert!(line.trim_end().len() <= MAX_GUEST_OWNER_REPORT_LINE_BYTES);
-            assert_eq!(GuestOwnerReport::parse_line(line.trim_end()).unwrap(), report);
+            assert_eq!(
+                GuestOwnerReport::parse_line(line.trim_end()).unwrap(),
+                report
+            );
             assert_eq!(GuestOwnerSite::from_word(site.as_str()), Some(site));
         }
         // Only the exact canonical line is accepted: an unknown site word, a
@@ -1191,7 +1194,10 @@ mod tests {
             stdout.push(&line).unwrap(),
             Some(GuestOwnerTerminal::Refused(GuestOwnerStep::HeldPrepare))
         );
-        assert_eq!(stdout.refusal_site(), Some(GuestOwnerSite::NetworkInputCapture));
+        assert_eq!(
+            stdout.refusal_site(),
+            Some(GuestOwnerSite::NetworkInputCapture)
+        );
         assert_eq!(stdout.refusal_detail(), None);
         // A refusal with no site reports none.
         let mut plain = GuestOwnerStdout::new();
@@ -1209,7 +1215,10 @@ mod tests {
             .at_site(GuestOwnerSite::NetworkInputCapture)
             .refused_at(GuestOwnerStep::HeldPrepare)
             .unwrap_err();
-        assert_eq!(GuestOwnerSite::of(&error), Some(GuestOwnerSite::NetworkInputParse));
+        assert_eq!(
+            GuestOwnerSite::of(&error),
+            Some(GuestOwnerSite::NetworkInputParse)
+        );
         assert_eq!(GuestOwnerStep::of(&error), GuestOwnerStep::HeldPrepare);
         assert_eq!(GuestOwnerSite::of(&anyhow::anyhow!("no site")), None);
     }

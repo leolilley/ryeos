@@ -17,15 +17,13 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
     RESTORED_VERIFIER_ADAPTER_PROTOCOL, RestoredOwnerChallenge, RestoredOwnerMeasurement,
     RestoredVerifierAdapterRequest, RestoredVerifierAdapterResponse,
 };
+use ryeos_external_execution_contract::runtime_snapshot::RuntimeSnapshotLocator;
 use ryeos_external_execution_contract::runtime_snapshot::{
     MAX_RUNTIME_SNAPSHOT_ADAPTER_REQUEST_BYTES, RuntimeSnapshotIntent,
     RuntimeSnapshotQualificationAdapterRequest, RuntimeSnapshotQualificationAdapterResponse,
     RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotQualificationTerminalObservation,
     RuntimeSnapshotQualificationTerminationAdapterRequest,
     RuntimeSnapshotQualificationTerminationAdapterResponse, RuntimeSnapshotReadinessObservation,
-};
-use ryeos_external_execution_contract::runtime_snapshot::{
-    RuntimeSnapshotLocator,
 };
 use ryeos_http_transport::{SseLimits, SseReader};
 

@@ -2286,10 +2286,11 @@ fn admit_session_capsule(
                     executable_search,
                     environment,
                 )?;
-                let placement = ryeos_engine::structured_session_profile::external_program_placement(
-                    &profile.contract,
-                    lifecycle.ready_timeout_ms,
-                )?;
+                let placement =
+                    ryeos_engine::structured_session_profile::external_program_placement(
+                        &profile.contract,
+                        lifecycle.ready_timeout_ms,
+                    )?;
                 let program = match requirement.runtime_authority {
                     ryeos_state::external_execution::admission::ExternalCandidateRuntimeAuthority::CapturedProduct =>
                         requirement.resolve_for_use(retained_product_selections.as_ref(), &qualification_use, placement)?,

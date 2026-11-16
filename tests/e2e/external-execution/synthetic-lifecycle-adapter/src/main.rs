@@ -27,8 +27,8 @@ use ryeos_external_execution_contract::{
     LIFECYCLE_LAUNCHER_FD_ENV, LIFECYCLE_REQUEST_FD_ENV, LIFECYCLE_SETTINGS_FD_ENV,
     LIFECYCLE_SUPERVISOR_FD_ENV, LifecycleAdapterInspectionRequest,
     LifecycleAdapterInspectionResponse, LifecycleAdapterRequest, LifecycleAdapterResponse,
-    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_REQUEST_BYTES, MAX_LIFECYCLE_RESPONSE_BYTES,
-    from_json_slice_strict,
+    LifecycleArtifactInspection, LifecycleArtifactRole, MAX_LIFECYCLE_REQUEST_BYTES,
+    MAX_LIFECYCLE_RESPONSE_BYTES, from_json_slice_strict,
 };
 use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, MAX_EXTERNAL_SUPERVISOR_BOOTSTRAP_BYTES,
@@ -673,7 +673,10 @@ impl SyntheticSettings {
         require_absolute_normalized(&self.state_root)?;
         if let Some(owner) = &self.guest_owner {
             require_absolute_normalized(&owner.runtime_root)?;
-            ensure!(owner.host_files.len() <= 8, "too many guest owner host files");
+            ensure!(
+                owner.host_files.len() <= 8,
+                "too many guest owner host files"
+            );
             for file in &owner.host_files {
                 require_absolute_normalized(&file.from)?;
                 require_absolute_normalized(&file.guest_path)?;
@@ -865,12 +868,13 @@ fn activate(
             "synthetic guest package descriptor changed at handoff"
         );
         let bootstrap_sha256 = lillux::sha256_hex(&bootstrap_bytes);
-        let import_context = ryeos_external_execution_contract::staging_package::GuestImportContext {
-            binding_hash: &request.common().binding_hash,
-            allocation_request_digest: &occurrence.request_digest,
-            occurrence_id: &retained.occurrence_id,
-            activation_request_digest: &retained.activation_request_digest,
-        };
+        let import_context =
+            ryeos_external_execution_contract::staging_package::GuestImportContext {
+                binding_hash: &request.common().binding_hash,
+                allocation_request_digest: &occurrence.request_digest,
+                occurrence_id: &retained.occurrence_id,
+                activation_request_digest: &retained.activation_request_digest,
+            };
         ensure!(
             import_ticket.bootstrap_sha256 == bootstrap_sha256
                 && import_ticket.supervisor_sha256 == retained.supervisor_digest
@@ -944,7 +948,10 @@ fn activate(
                 let name = mount_name(index);
                 for (_, digest, bytes) in input.content_authority.record_descriptors() {
                     let source = staged_root
-                        .open_pinned_regular(OsStr::new(&format!("record-{record_index:02}")), false)?
+                        .open_pinned_regular(
+                            OsStr::new(&format!("record-{record_index:02}")),
+                            false,
+                        )?
                         .context("staged guest content record is absent")?
                         .inherited_descriptor_authority()?;
                     stage_regular(
@@ -1015,7 +1022,9 @@ fn activate(
             (Err(error), Ok(())) => return Err(error),
             (Ok(()), Err(error)) => return Err(error.context("guest package cleanup failed")),
             (Err(error), Err(cleanup)) => {
-                return Err(error.context(format!("guest package cleanup also failed: {cleanup:#}")));
+                return Err(
+                    error.context(format!("guest package cleanup also failed: {cleanup:#}"))
+                );
             }
         }
     }
@@ -1412,7 +1421,14 @@ fn serve_occurrence(
         .open_pinned_regular(OsStr::new(OWNER_LAUNCH_FILE), false)?
         .is_some()
     {
-        return serve_guest_owner(adapter, &occurrence, phase_lock, activation, &server_process, path);
+        return serve_guest_owner(
+            adapter,
+            &occurrence,
+            phase_lock,
+            activation,
+            &server_process,
+            path,
+        );
     }
     let bootstrap_file = occurrence
         .open_pinned_regular(OsStr::new(BOOTSTRAP_FILE), false)?
@@ -1751,7 +1767,10 @@ fn run_guest_owner(path: &Path) -> Result<()> {
                 .with_context(|| format!("open enclosure host file {}", file.from.display()))
         })
         .collect::<Result<Vec<_>>>()?;
-    let observed = ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime::observe(&runtime)?;
+    let observed =
+        ryeos_external_execution::guest_import_authorization::ObservedGuestRuntime::observe(
+            &runtime,
+        )?;
     let manifest = observed.manifest_hash().to_owned();
     let deadline =
         lillux::time::Duration::from_secs(u64::from(observed.profile().owner_timeout_seconds) + 60);

@@ -1909,7 +1909,9 @@ pub(crate) mod tests {
     /// and whose execution policy carries `lease_budget`.
     fn node_policy(
         operation_millis: u64,
-        lease_budget: Option<ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget>,
+        lease_budget: Option<
+            ryeos_node_runtime::node_policy::sections::execution::ExternalLeaseBudget,
+        >,
     ) -> ryeos_node_runtime::node_policy::NodePolicySnapshot {
         let envelope = crate::external_supervisor_native::test_supervisor_journal_envelope();
         let maintenance = ryeos_scheduler_contract::NodeMaintenancePolicy {
@@ -2105,7 +2107,9 @@ pub(crate) mod tests {
     }
 
     fn backend_with(
-        capabilities: std::collections::BTreeSet<ryeos_external_execution_contract::LifecycleCapability>,
+        capabilities: std::collections::BTreeSet<
+            ryeos_external_execution_contract::LifecycleCapability,
+        >,
         admits_leases: bool,
     ) -> std::sync::Arc<dyn crate::external_placement::ExternalPlacementBackend> {
         installed::CoordinateOnlyBackend::shared_with(
@@ -2119,8 +2123,8 @@ pub(crate) mod tests {
         )
     }
 
-    fn full_capabilities(
-    ) -> std::collections::BTreeSet<ryeos_external_execution_contract::LifecycleCapability> {
+    fn full_capabilities()
+    -> std::collections::BTreeSet<ryeos_external_execution_contract::LifecycleCapability> {
         use ryeos_external_execution_contract::LifecycleCapability::*;
         [SupervisorActivation, ExactTerminalObservation].into()
     }
@@ -2171,7 +2175,10 @@ pub(crate) mod tests {
         let (result, published) =
             compose_over(&node, request, backend_with(full_capabilities(), true));
         let error = format!("{:#}", refusal(result));
-        assert!(error.contains("declares no external lease budget"), "{error}");
+        assert!(
+            error.contains("declares no external lease budget"),
+            "{error}"
+        );
         assert!(!published);
     }
 
@@ -2183,10 +2190,14 @@ pub(crate) mod tests {
         request.transport = relay();
         request.settings = relay_settings();
         let mut capabilities = full_capabilities();
-        capabilities.insert(ryeos_external_execution_contract::LifecycleCapability::ControllerFileRelay);
+        capabilities
+            .insert(ryeos_external_execution_contract::LifecycleCapability::ControllerFileRelay);
         let (result, published) = compose_over(&node, request, backend_with(capabilities, true));
         let error = format!("{:#}", refusal(result));
-        assert!(error.contains("names no HTTPS controller origin"), "{error}");
+        assert!(
+            error.contains("names no HTTPS controller origin"),
+            "{error}"
+        );
         assert!(!published);
     }
 

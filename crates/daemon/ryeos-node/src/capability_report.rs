@@ -1789,13 +1789,11 @@ pub fn current_node_capability_view(
     policy_generation: &str,
 ) -> Result<lillux::process_control::HostCapabilities> {
     use ryeos_app::node_requirement_admission::{NodeReportUnreadable, NodeRequirementRefused};
-    let signed =
-        SignedNodeCapabilityReport::read_verified(app_root)?
-            .ok_or_else(|| {
-                NodeRequirementRefused(
-                    "launch refused: no verified node capability report is recorded".to_owned(),
-                )
-            })?;
+    let signed = SignedNodeCapabilityReport::read_verified(app_root)?.ok_or_else(|| {
+        NodeRequirementRefused(
+            "launch refused: no verified node capability report is recorded".to_owned(),
+        )
+    })?;
     let staleness = signed.staleness(Some(policy_generation)).map_err(|error| {
         NodeReportUnreadable(format!("observe this host's generation: {error:#}"))
     })?;

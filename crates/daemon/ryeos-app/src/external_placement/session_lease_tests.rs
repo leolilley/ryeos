@@ -52,10 +52,13 @@ fn contract() -> ExternalPlacementBackendContract {
 
 #[test]
 fn a_remote_session_asks_for_one_lease_built_from_signed_data() {
-    let (inputs, charge) =
-        session_lease_request(&placement(&remote_profile(), 120_500), &contract(), Some(&budget()))
-            .unwrap()
-            .unwrap();
+    let (inputs, charge) = session_lease_request(
+        &placement(&remote_profile(), 120_500),
+        &contract(),
+        Some(&budget()),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(inputs.workload, "codex.authoring.remote");
     assert_eq!(
         inputs
@@ -102,8 +105,9 @@ fn a_session_without_lease_requirements_needs_no_lease_or_budget() {
 #[test]
 fn a_lease_is_refused_plainly_without_a_budget_that_allows_it() {
     let text = |error: anyhow::Error| format!("{error:#}");
-    let missing =
-        text(session_lease_request(&placement(&remote_profile(), 1_000), &contract(), None).unwrap_err());
+    let missing = text(
+        session_lease_request(&placement(&remote_profile(), 1_000), &contract(), None).unwrap_err(),
+    );
     assert!(
         missing.contains("workload `codex.authoring.remote` needs a remote lease")
             && missing.contains("declares no external lease budget"),
@@ -115,7 +119,12 @@ fn a_lease_is_refused_plainly_without_a_budget_that_allows_it() {
         ..budget()
     };
     let too_long = text(
-        session_lease_request(&placement(&remote_profile(), 1_000), &contract(), Some(&short)).unwrap_err(),
+        session_lease_request(
+            &placement(&remote_profile(), 1_000),
+            &contract(),
+            Some(&short),
+        )
+        .unwrap_err(),
     );
     assert!(
         too_long.contains("60s lifetime exceeds the node's 59s lease lifetime ceiling"),
@@ -133,7 +142,12 @@ fn a_lease_is_refused_when_the_controller_has_no_dns_host_for_the_guest() {
         .https_origin = "https://192.0.2.1".into();
     let refusal = format!(
         "{:#}",
-        session_lease_request(&placement(&remote_profile(), 1_000), &contract, Some(&budget())).unwrap_err()
+        session_lease_request(
+            &placement(&remote_profile(), 1_000),
+            &contract,
+            Some(&budget())
+        )
+        .unwrap_err()
     );
     assert!(refusal.contains("names no HTTPS DNS host"), "{refusal}");
 }

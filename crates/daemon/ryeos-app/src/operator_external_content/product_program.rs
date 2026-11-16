@@ -217,8 +217,7 @@ pub(crate) fn derive_program(
         &prepared.worker_source.profile.contract,
         crate::source_closure_admission::worker_ready_timeout_ms(&state.engine)?,
     )?;
-    let program =
-        requirement.resolve_for_use(Some(selections), &qualification_use, placement)?;
+    let program = requirement.resolve_for_use(Some(selections), &qualification_use, placement)?;
     program.validate()?;
     let selections_digest =
         ryeos_state::objects::canonical_value_digest(&selections.semantic_identity_value()?)?;

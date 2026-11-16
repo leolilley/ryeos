@@ -42,8 +42,6 @@ mod signed_bundle;
 
 #[path = "../../support/admitted_worker_evidence.rs"]
 mod admitted_worker_evidence;
-#[path = "../../support/node_capability_report.rs"]
-mod node_capability_report;
 #[path = "../../support/candidate_authoring.rs"]
 mod candidate_authoring;
 #[path = "../../support/candidate_operation_sources.rs"]
@@ -52,6 +50,8 @@ mod candidate_operation_sources;
 mod candidate_requirement;
 #[path = "../../support/independent_verifier_scenario.rs"]
 mod independent_verifier_scenario;
+#[path = "../../support/node_capability_report.rs"]
+mod node_capability_report;
 #[path = "../../support/qualification_node.rs"]
 mod qualification_node;
 #[path = "../../support/runtime_qualification.rs"]
@@ -470,33 +470,33 @@ fn install_live_engine(
     state.services = Arc::new(ryeos_api::registry::build_service_registry());
     state.service_descriptors = ryeos_api::handlers::ALL;
     let mut fixed: Vec<Arc<dyn ryeos_node_runtime::node_policy::ErasedNodePolicy>> = vec![
-            Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
-            Arc::new(import_policy),
-            Arc::new(
-                ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
-                    schema: 1,
-                    max_roots: 256,
-                    max_objects: 32_768,
-                    max_blobs: 32_768,
-                    max_object_bytes: 32 * 1024 * 1024,
-                    max_total_object_bytes: 64 * 1024 * 1024,
-                    // The large runtime is retained by the large-object
-                    // store, not transported as a single small-CAS blob.
-                    max_blob_bytes: 128 * 1024 * 1024,
-                    max_total_blob_bytes: if large_runtime {
-                        640 * 1024 * 1024
-                    } else {
-                        128 * 1024 * 1024
-                    },
-                    max_response_bytes: if large_runtime {
-                        1024 * 1024 * 1024
-                    } else {
-                        256 * 1024 * 1024
-                    },
-                    max_links_per_object: 100_000,
-                    local_verification: None,
+        Arc::new(ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::test_policy()),
+        Arc::new(import_policy),
+        Arc::new(
+            ryeos_node_runtime::node_policy::sections::object_closure::NodeObjectClosurePolicy {
+                schema: 1,
+                max_roots: 256,
+                max_objects: 32_768,
+                max_blobs: 32_768,
+                max_object_bytes: 32 * 1024 * 1024,
+                max_total_object_bytes: 64 * 1024 * 1024,
+                // The large runtime is retained by the large-object
+                // store, not transported as a single small-CAS blob.
+                max_blob_bytes: 128 * 1024 * 1024,
+                max_total_blob_bytes: if large_runtime {
+                    640 * 1024 * 1024
+                } else {
+                    128 * 1024 * 1024
                 },
-            ),
+                max_response_bytes: if large_runtime {
+                    1024 * 1024 * 1024
+                } else {
+                    256 * 1024 * 1024
+                },
+                max_links_per_object: 100_000,
+                local_verification: None,
+            },
+        ),
     ];
     if let Some(budget) = lease_budget {
         // The node's execution policy with a lease budget: the rest of the
@@ -1257,7 +1257,11 @@ async fn prepare_external_worker_program_and_binding(
         "selection must retain the original verifier artifact and execution substrate"
     );
     let program = requirement
-        .resolve_for_use(Some(&selected), &qualification_use, admitted_placement(&state))
+        .resolve_for_use(
+            Some(&selected),
+            &qualification_use,
+            admitted_placement(&state),
+        )
         .unwrap();
     let consumer = ryeos_app::external_content_admission::derive_consumer_authority_for_test(
         &resolution,
@@ -3747,7 +3751,8 @@ fn lease_lane_budget(
 /// The capability names the real codex profile's controller and credential
 /// requirements need, one per entry: the environment the lease-lane node states.
 fn lease_lane_environment_names() -> Vec<String> {
-    let requires = candidate_authoring::real_codex_placement_requires(fixture_repository_source_root());
+    let requires =
+        candidate_authoring::real_codex_placement_requires(fixture_repository_source_root());
     let requirements = ryeos_engine::structured_session_profile::placement_requirements(
         &serde_json::json!({"external_candidate": {}, "requires": requires}),
     )
@@ -3821,7 +3826,10 @@ impl LeaseLaneController {
     }
 
     fn pem_der(pem: &str) -> Vec<u8> {
-        let body: String = pem.lines().filter(|line| !line.starts_with("-----")).collect();
+        let body: String = pem
+            .lines()
+            .filter(|line| !line.starts_with("-----"))
+            .collect();
         STANDARD.decode(body).unwrap()
     }
 
@@ -3844,7 +3852,11 @@ impl LeaseLaneController {
 
     fn resolver_source(&self) -> String {
         match &self.inputs {
-            Some(dir) => dir.path().join("resolv.conf").to_string_lossy().into_owned(),
+            Some(dir) => dir
+                .path()
+                .join("resolv.conf")
+                .to_string_lossy()
+                .into_owned(),
             None => "/etc/resolv.conf".into(),
         }
     }
@@ -3863,11 +3875,10 @@ impl LeaseLaneController {
         let certificate = rustls::pki_types::CertificateDer::from(Self::pem_der(&Self::fixture(
             "lease-controller-server.pem",
         )));
-        let private_key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(Self::pem_der(&Self::fixture(
-                "lease-controller-server.key.pem",
-            ))),
-        );
+        let private_key =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+                Self::pem_der(&Self::fixture("lease-controller-server.key.pem")),
+            ));
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         Arc::new(
             rustls::ServerConfig::builder_with_provider(provider)
@@ -4196,7 +4207,10 @@ async fn run_production_tls_candidate(
         .unwrap();
     install_test_operator_grant(&state);
     install_active_test_credential_profile(&state);
-    let environment_names: Vec<String> = if matches!(publication, PublicationScenario::Lease | PublicationScenario::LeaseTooShort) {
+    let environment_names: Vec<String> = if matches!(
+        publication,
+        PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+    ) {
         lease_lane_environment_names()
     } else {
         vec!["time".into(), "credential:private_home".into()]
@@ -4204,7 +4218,10 @@ async fn run_production_tls_candidate(
     node_capability_report::install(
         &state,
         &node_capability_report::FixtureEnvironment {
-            provided: &environment_names.iter().map(String::as_str).collect::<Vec<_>>(),
+            provided: &environment_names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             missing: &[],
         },
     );
@@ -4235,13 +4252,12 @@ async fn run_production_tls_candidate(
         .map(|(path, _)| install_pinned_codex_command_tools(&state, path, scripted_turn));
     let command_tools_manifest_hash = command_tools.as_ref().map(|(_, hash)| hash.as_str());
     state.started_at_iso = lillux::time::iso8601_now();
-    let (external_bundle, external_trust, _) =
-        install_signed_test_bundle_with_guests(
-            root.path(),
-            codex.is_some(),
-            true,
-            publication == PublicationScenario::Lease,
-        );
+    let (external_bundle, external_trust, _) = install_signed_test_bundle_with_guests(
+        root.path(),
+        codex.is_some(),
+        true,
+        publication == PublicationScenario::Lease,
+    );
     let external_artifacts = ryeos_app::external_artifacts::resolve_external_execution_artifacts(
         &[external_bundle],
         &external_trust,
@@ -4273,17 +4289,21 @@ async fn run_production_tls_candidate(
         true,
         scripted_model_origin.as_deref(),
         command_tools_manifest_hash,
-        matches!(publication, PublicationScenario::Lease | PublicationScenario::LeaseTooShort)
-            .then(|| candidate_authoring::real_codex_placement_requires(fixture_repository_source_root())),
+        matches!(
+            publication,
+            PublicationScenario::Lease | PublicationScenario::LeaseTooShort
+        )
+        .then(|| {
+            candidate_authoring::real_codex_placement_requires(fixture_repository_source_root())
+        }),
     );
-    let qualification_inputs =
-        prepare_runtime_qualification_inputs(
-            root.path(),
-            &state,
-            runtime.path(),
-            (publication == PublicationScenario::Lease)
-                .then(|| Path::new(env!("CARGO_BIN_EXE_ryeos-synthetic-guest-occurrence-owner"))),
-        );
+    let qualification_inputs = prepare_runtime_qualification_inputs(
+        root.path(),
+        &state,
+        runtime.path(),
+        (publication == PublicationScenario::Lease)
+            .then(|| Path::new(env!("CARGO_BIN_EXE_ryeos-synthetic-guest-occurrence-owner"))),
+    );
     author_guest_runtime_sources(
         &qualification_inputs,
         &candidate_authoring_bundle.root,
