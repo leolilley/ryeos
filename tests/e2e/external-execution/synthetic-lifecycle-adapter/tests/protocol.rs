@@ -3661,7 +3661,6 @@ fn public_bounded_worker_dispatch_uses_production_tls_candidate_route() {
 /// guest executables of `static_guest`.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
-#[ignore = "the real guest supervisor reaches the controller (attach) and then refuses its launcher spawn: \"mapped target 65 aliases process-control authority\" (lillux exec.rs:9729); see run.md W7"]
 fn production_tls_candidate_on_a_remote_lease() {
     run_production_tls_candidate_with_test_stack(None, false, PublicationScenario::Lease);
 }
