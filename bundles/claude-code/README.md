@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T09:38:06Z:3a31d87ed17dbba28b059abb0d7bc693249b942700b4ac49c9de16e2383bc8db:wgdR64OuzPFiYx3GR8jck3FItZh2Q+Wpht8aZWlbBopoZT0NIUA59JER4jhpBxYKcgXFzCp1m2Ey6FaPHHEUAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T12:02:07Z:fce96fcfe3f1450695c4c0ee51456c75fb21a7ba828914b9f76c5b499faf2ed0:7NRgsl0ldEqClGXgdg1Ezto0pTp27VfstW9bLNtWqIN/Sta/LrqBa1uiCd3EzU1l4aisSg7BAuD468CIkJRgAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # RyeOS Claude Code
 
 Provider data for hosting Claude Code through RyeOS's generic
@@ -21,7 +21,7 @@ exists. The real driver replaces the stub behind the same wire.
 | `.ai/workers/claude-code/lib/hosted/structured-session.profile.json` | schema-12 `stdio_jsonrpc` profile |
 | `.ai/workers/claude-code/lib/hosted/schema/` | one JSON schema per route request, response and notification |
 | `.ai/workers/claude-code/lib/hosted/settings.baseline.json` | the baseline written to `$CLAUDE_CONFIG_DIR/settings.json` |
-| `.ai/worker-executions/claude-code/` | `bounded-turn` (read-write), `bounded-turn-read-only`, `bounded-turn-recovery` |
+| `.ai/worker-executions/claude-code/` | `bounded-turn` (read-write), `bounded-turn-read-only`, `bounded-turn-recovery`, `bounded-turn-continue` (resumes a completed predecessor named by `continue_from`) |
 | `.ai/config/claude-code/environments/` | `ryeos.worker_environment.v7` for each worker, delivering the model key and gateway address as secrets |
 | `.ai/node/commands/claude-code-profile-create.yaml` | `ryeos claude-code profile create <id>` |
 | `.ai/knowledge/claude-code/hosted-activation.md` | operator runbook |

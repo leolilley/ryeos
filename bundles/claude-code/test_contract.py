@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-16T10:06:19Z:ddfb8673a45158bbe0e34a40ef7bae29cdaa9f8d695f78e25e7d6c6875e6abc6:US+zC3ff4ANxbELe2rTaM5agQSBcvi85jWxQ1AMI8zc2uVv3G8Of5Wy9U5izUEb9ePZmq4zY1gaSNnwXf02mCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T12:02:07Z:06dc70a29d9760f9d9253306e96f5139d4a31c7910c1688a07c6a3a754c9358e:wpOD5p3MG4EP7M+/595KJMBxHuG2mMvZO4+QhdhCqcEbR5ziUVkpnmi28XXnHhQAG1+0h2tKW4leOk3aM38CDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance checks for the claude-code provider data.
 
 These checks pin the authored shape the Rust validators judge: the profile
@@ -38,6 +38,7 @@ EXECUTIONS = {
     "bounded-turn": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn.yaml",
     "bounded-turn-read-only": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-read-only.yaml",
     "bounded-turn-recovery": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-recovery.yaml",
+    "bounded-turn-continue": BUNDLE / ".ai/worker-executions/claude-code/bounded-turn-continue.yaml",
 }
 COMMAND = BUNDLE / ".ai/node/commands/claude-code-profile-create.yaml"
 
@@ -160,6 +161,13 @@ class ClaudeCodeContractTests(unittest.TestCase):
         self.assertEqual(routes["session.start"]["fixed_params"], {"access": "read_write"})
         self.assertEqual(routes["session.start_read_only"]["fixed_params"], {"access": "read_only"})
         self.assertNotIn("session.start", self.profile["route_sets"]["read_only"])
+        # A continuation resumes a predecessor's conversation: it carries the
+        # recovery pair and the turn routes, and no route that starts one.
+        self.assertEqual(
+            self.profile["route_sets"]["continue"],
+            ["session.read", "session.resume", "turn.interrupt", "turn.start"],
+        )
+        self.assertEqual(recovery["route_sets"], ["continue", "read_only", "session"])
         self.assertNotIn("session.start_read_only", self.profile["route_sets"]["session"])
         for route in self.profile["routes"]:
             self.assertNotIn(route["effect_class"], ("credential_read", "credential_write", "credential_delete"))
@@ -271,7 +279,22 @@ class ClaudeCodeContractTests(unittest.TestCase):
             self.assertEqual(config["mode"]["kind"], "bounded_turn", name)
             self.assertEqual(config["mode"]["turn_start_route"], "turn.start", name)
             self.assertIn(config["route_set"], self.profile["route_sets"], name)
-            self.assertIn(config["mode"]["session_start_route"], self.profile["route_sets"][config["route_set"]], name)
+            if name == "bounded-turn-continue":
+                # The closed continuation shape: no session-start route at all.
+                self.assertEqual(
+                    set(config["mode"]),
+                    {"kind", "continuation", "turn_start_route", "max_uncontacted_attempts"},
+                )
+                self.assertEqual(config["mode"]["continuation"], "completed_predecessor")
+                self.assertNotIn(
+                    "session.start", self.profile["route_sets"][config["route_set"]]
+                )
+                self.assertNotIn(
+                    "session.start_read_only", self.profile["route_sets"][config["route_set"]]
+                )
+            else:
+                self.assertIn(config["mode"]["session_start_route"], self.profile["route_sets"][config["route_set"]], name)
+            self.assertIn(config["mode"]["turn_start_route"], self.profile["route_sets"][config["route_set"]], name)
             self.assertTrue(
                 set(config["allowed_effect_classes"])
                 >= {route["effect_class"] for route in self.profile["routes"]},
@@ -285,6 +308,7 @@ class ClaudeCodeContractTests(unittest.TestCase):
             self.assertNotIn("credential:private_home", path.read_text(), name)
         self.assertEqual(load_yaml(EXECUTIONS["bounded-turn"])["config"]["route_set"], "session")
         self.assertEqual(load_yaml(EXECUTIONS["bounded-turn-read-only"])["config"]["route_set"], "read_only")
+        self.assertEqual(load_yaml(EXECUTIONS["bounded-turn-continue"])["config"]["route_set"], "continue")
         self.assertTrue(
             load_yaml(EXECUTIONS["bounded-turn-recovery"])["config"]["mode"]["require_post_completion_recovery"]
         )

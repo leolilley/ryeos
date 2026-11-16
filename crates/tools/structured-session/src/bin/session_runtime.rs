@@ -27,6 +27,9 @@ struct SessionInputs {
 #[serde(deny_unknown_fields)]
 struct BoundedTurnInputs {
     credential_profile_id: String,
+    /// The completed predecessor whose upstream conversation this turn
+    /// continues. Present exactly when the admitted mode is a continuation.
+    continue_from: Option<String>,
     goal: BoundedTurnGoal,
     #[serde(default)]
     evidence_attachments: Vec<EvidenceAttachmentRequestWire>,
@@ -35,8 +38,38 @@ struct BoundedTurnInputs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BoundedTurnGoal {
-    session_start_payload: Value,
+    /// Absent exactly in continuation mode, where no session is started.
+    session_start_payload: Option<Value>,
     turn_start_payload: Value,
+}
+
+/// The one admitted `continuation` value of a bounded-turn mode.
+const CONTINUATION_COMPLETED_PREDECESSOR: &str = "completed_predecessor";
+
+/// How a bounded turn opens its upstream session.
+enum BoundedOpening<'a> {
+    /// Start a fresh session with the sealed payload, then the turn.
+    StartSession { route: &'a str, payload: Value },
+    /// The daemon admitted the placement with the completed predecessor's
+    /// upstream session; the runtime reattaches and goes straight to the turn.
+    Continue,
+}
+
+/// The reason a continuation's reattach could not prove the predecessor's
+/// conversation is still resumable.
+const CONTINUATION_CONVERSATION_LOST: &str = "continuation_conversation_lost";
+
+/// Whether a continuation's first worker boot ended without the upstream
+/// conversation proved idle: recovery was uncertain or the upstream reported
+/// it lost. Only the first boot epoch resumes the predecessor's conversation;
+/// a later epoch is an ordinary restart of this placement and keeps the
+/// ordinary outcome-unknown meaning.
+fn continuation_conversation_lost(session: &Value) -> bool {
+    session.get("worker_boot_epoch").and_then(Value::as_u64) == Some(1)
+        && matches!(
+            session.get("state").and_then(Value::as_str),
+            Some("outcome_unknown" | "recovering")
+        )
 }
 
 #[derive(Clone, Deserialize)]
@@ -44,11 +77,14 @@ struct BoundedTurnGoal {
 enum WorkerExecutionMode {
     Session,
     BoundedTurn {
-        session_start_route: String,
+        /// Absent exactly in a continuation, which never starts a session.
+        session_start_route: Option<String>,
         turn_start_route: String,
         max_uncontacted_attempts: u32,
         #[serde(default)]
         require_post_completion_recovery: bool,
+        /// Present only in a continuation: the kind of predecessor resumed.
+        continuation: Option<String>,
     },
 }
 
@@ -262,22 +298,37 @@ async fn run_session(
     }
     validate_runtime_mode_policy(&config)?;
     validate_runtime_delegation_ceiling(&config.workload_client_delegation_caps)?;
-    let (credential_profile_id, bounded_goal) = match &config.mode {
+    let (credential_profile_id, bounded_goal, continue_from) = match &config.mode {
         WorkerExecutionMode::Session => {
             let inputs: SessionInputs =
                 serde_json::from_value(inputs).context("decode session worker inputs")?;
-            (inputs.credential_profile_id, None)
+            (inputs.credential_profile_id, None, None)
         }
-        WorkerExecutionMode::BoundedTurn { .. } => {
+        WorkerExecutionMode::BoundedTurn {
+            session_start_route,
+            continuation,
+            ..
+        } => {
             let inputs: BoundedTurnInputs =
                 serde_json::from_value(inputs).context("decode bounded-turn worker inputs")?;
-            validate_goal_payload("session-start", &inputs.goal.session_start_payload)?;
+            validate_bounded_inputs_match_mode(
+                session_start_route.as_deref(),
+                continuation.as_deref(),
+                &inputs,
+            )?;
+            if let Some(payload) = &inputs.goal.session_start_payload {
+                validate_goal_payload("session-start", payload)?;
+            }
             validate_goal_payload("turn-start", &inputs.goal.turn_start_payload)?;
             // Admission owns authorization and materialization of these exact
             // requests. The runtime accepts the closed input shape but never
             // interprets request coordinates as filesystem authority.
             let _ = inputs.evidence_attachments;
-            (inputs.credential_profile_id, Some(inputs.goal))
+            (
+                inputs.credential_profile_id,
+                Some(inputs.goal),
+                inputs.continue_from,
+            )
         }
     };
     let interactive_deadline = lillux::time::MonotonicDeadline::after(
@@ -301,6 +352,7 @@ async fn run_session(
             required_terminal_publication: config.required_terminal_publication.clone(),
             recover_upstream_session: config.recover_upstream_session,
             candidate_disposition: config.candidate_disposition.clone(),
+            continue_from,
         })
         .await
         .map_err(|error| anyhow!(error.to_string()))?;
@@ -479,19 +531,26 @@ async fn run_session(
             turn_start_route,
             max_uncontacted_attempts,
             require_post_completion_recovery,
+            ..
         },
         Some(goal),
     ) = (&config.mode, bounded_goal)
     {
+        let turn_start_payload = goal.turn_start_payload;
+        let opening = match (session_start_route, goal.session_start_payload) {
+            (Some(route), Some(payload)) => BoundedOpening::StartSession { route, payload },
+            (None, None) => BoundedOpening::Continue,
+            _ => bail!("bounded-turn inputs disagree with the admitted mode"),
+        };
         return run_bounded_turn(
             &client,
             &thread_id,
             &mut started,
-            session_start_route,
+            opening,
             turn_start_route,
             *max_uncontacted_attempts,
             *require_post_completion_recovery,
-            goal,
+            turn_start_payload,
             deadline,
         )
         .await;
@@ -550,6 +609,8 @@ fn validate_runtime_mode_policy(config: &WorkerExecutionConfig) -> Result<()> {
         (
             WorkerExecutionMode::BoundedTurn {
                 max_uncontacted_attempts,
+                session_start_route,
+                continuation,
                 ..
             },
             "retained_for_review",
@@ -557,7 +618,11 @@ fn validate_runtime_mode_policy(config: &WorkerExecutionConfig) -> Result<()> {
             && config.required_terminal_publication == "retain_result"
             && config.required_credential_state == "active"
             && config.recover_upstream_session
-            && (1..=8).contains(max_uncontacted_attempts) =>
+            && (1..=8).contains(max_uncontacted_attempts)
+            && matches!(
+                (session_start_route, continuation.as_deref()),
+                (Some(_), None) | (None, Some(CONTINUATION_COMPLETED_PREDECESSOR))
+            ) =>
         {
             Ok(())
         }
@@ -582,6 +647,34 @@ fn validate_runtime_delegation_ceiling(capabilities: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The admitted bounded mode and the invocation's inputs must agree on
+/// whether a session is started or a completed predecessor is continued: a
+/// fresh turn carries a session-start payload and no `continue_from`, and a
+/// continuation carries `continue_from` and no session-start payload.
+fn validate_bounded_inputs_match_mode(
+    session_start_route: Option<&str>,
+    continuation: Option<&str>,
+    inputs: &BoundedTurnInputs,
+) -> Result<()> {
+    match (
+        session_start_route,
+        continuation,
+        &inputs.continue_from,
+        &inputs.goal.session_start_payload,
+    ) {
+        (Some(_), None, None, Some(_)) => Ok(()),
+        (None, Some(CONTINUATION_COMPLETED_PREDECESSOR), Some(predecessor), None) => {
+            if predecessor.is_empty() || predecessor.len() > 256 {
+                bail!("continue_from is not a bounded thread id");
+            }
+            Ok(())
+        }
+        _ => bail!(
+            "bounded-turn inputs disagree with the admitted mode: a continuation takes `continue_from` and no session-start payload, a fresh turn the reverse"
+        ),
+    }
+}
+
 fn validate_goal_payload(label: &str, payload: &Value) -> Result<()> {
     if !payload.is_object() {
         bail!("bounded {label} payload must be an object");
@@ -598,11 +691,11 @@ async fn run_bounded_turn(
     client: &UdsRuntimeClient,
     thread_id: &str,
     session: &mut Value,
-    session_start_route: &str,
+    opening: BoundedOpening<'_>,
     turn_start_route: &str,
     max_uncontacted_attempts: u32,
     require_post_completion_recovery: bool,
-    goal: BoundedTurnGoal,
+    turn_start_payload: Value,
     deadline: lillux::time::MonotonicDeadline,
 ) -> Result<RuntimeResult> {
     if let Some(approval) = pending_approval(session, thread_id)? {
@@ -621,6 +714,21 @@ async fn run_bounded_turn(
         // worker or create another turn.
         Some("idle" | "turn_running") => {}
         Some("outcome_unknown" | "recovering" | "awaiting_approval") => {
+            if matches!(opening, BoundedOpening::Continue)
+                && continuation_conversation_lost(session)
+            {
+                // Never fall through to a fresh session: the predecessor's
+                // conversation is the whole point of a continuation.
+                return cancel_bounded_session(
+                    client,
+                    thread_id,
+                    bounded_outcome(DedicatedSessionBoundedOutcomeKind::WorkerFailure),
+                    &format!(
+                        "{CONTINUATION_CONVERSATION_LOST}: the predecessor's upstream conversation could not be resumed"
+                    ),
+                )
+                .await;
+            }
             return cancel_bounded_session(
                 client,
                 thread_id,
@@ -633,61 +741,75 @@ async fn run_bounded_turn(
         None => bail!("bounded worker session projection has no state"),
     }
 
-    let _session_settlement = match issue_bounded_step(
-        client,
-        thread_id,
-        "session-start",
-        session_start_route,
-        goal.session_start_payload,
-        max_uncontacted_attempts,
-        deadline,
-    )
-    .await
+    if let BoundedOpening::StartSession {
+        route: session_start_route,
+        payload: session_start_payload,
+    } = opening
     {
-        Ok(settlement) => settlement,
-        Err(error) => {
-            let detail = format!("session-start command did not settle safely: {error}");
-            return cancel_bounded_session(client, thread_id, error.outcome, &detail).await;
-        }
-    };
-    // Session start may itself surface an approval request, and pushed
-    // observations can arrive immediately after its response. Refresh the
-    // daemon's exact projection before admitting the turn contact. The daemon
-    // repeats this gate under the hosted-root operation lease, so a request
-    // racing this read still cannot slip through.
-    *session = client
-        .dedicated_session_status(thread_id)
-        .await
-        .map_err(|error| anyhow!(error.to_string()))?;
-    if let Some(approval) = pending_approval(session, thread_id)? {
-        return cancel_bounded_session(
+        let _session_settlement = match issue_bounded_step(
             client,
             thread_id,
-            approval_required_outcome(approval),
-            "unattended bounded workers never continue past a requested authority expansion",
+            "session-start",
+            session_start_route,
+            session_start_payload,
+            max_uncontacted_attempts,
+            deadline,
         )
-        .await;
-    }
-    match session.get("state").and_then(Value::as_str) {
-        Some("idle" | "turn_running") => {}
-        Some("awaiting_approval" | "outcome_unknown" | "recovering") => {
+        .await
+        {
+            Ok(settlement) => settlement,
+            Err(error) => {
+                let detail = format!("session-start command did not settle safely: {error}");
+                return cancel_bounded_session(client, thread_id, error.outcome, &detail).await;
+            }
+        };
+        // Session start may itself surface an approval request, and pushed
+        // observations can arrive immediately after its response. Refresh the
+        // daemon's exact projection before admitting the turn contact. The daemon
+        // repeats this gate under the hosted-root operation lease, so a request
+        // racing this read still cannot slip through.
+        *session = client
+            .dedicated_session_status(thread_id)
+            .await
+            .map_err(|error| anyhow!(error.to_string()))?;
+        if let Some(approval) = pending_approval(session, thread_id)? {
             return cancel_bounded_session(
                 client,
                 thread_id,
-                bounded_outcome(DedicatedSessionBoundedOutcomeKind::OutcomeUnknown),
-                "session-start did not leave an exact approval-free operation boundary",
+                approval_required_outcome(approval),
+                "unattended bounded workers never continue past a requested authority expansion",
             )
             .await;
         }
-        Some(state) => bail!("session-start left invalid bounded worker state `{state}`"),
-        None => bail!("session-start projection has no bounded worker state"),
-    }
-    if let Err(error) = require_bounded_upstream_session(session) {
+        match session.get("state").and_then(Value::as_str) {
+            Some("idle" | "turn_running") => {}
+            Some("awaiting_approval" | "outcome_unknown" | "recovering") => {
+                return cancel_bounded_session(
+                    client,
+                    thread_id,
+                    bounded_outcome(DedicatedSessionBoundedOutcomeKind::OutcomeUnknown),
+                    "session-start did not leave an exact approval-free operation boundary",
+                )
+                .await;
+            }
+            Some(state) => bail!("session-start left invalid bounded worker state `{state}`"),
+            None => bail!("session-start projection has no bounded worker state"),
+        }
+        if let Err(error) = require_bounded_upstream_session(session) {
+            return cancel_bounded_session(
+                client,
+                thread_id,
+                bounded_outcome(DedicatedSessionBoundedOutcomeKind::WorkerFailure),
+                &format!("session-start did not establish an upstream session: {error}"),
+            )
+            .await;
+        }
+    } else if let Err(error) = require_bounded_upstream_session(session) {
         return cancel_bounded_session(
             client,
             thread_id,
             bounded_outcome(DedicatedSessionBoundedOutcomeKind::WorkerFailure),
-            &format!("session-start did not establish an upstream session: {error}"),
+            &format!("{CONTINUATION_CONVERSATION_LOST}: {error}"),
         )
         .await;
     }
@@ -696,7 +818,7 @@ async fn run_bounded_turn(
         thread_id,
         "turn-start",
         turn_start_route,
-        goal.turn_start_payload,
+        turn_start_payload,
         max_uncontacted_attempts,
         deadline,
     )
@@ -1269,10 +1391,11 @@ mod tests {
             max_lifetime_seconds: 60,
             recover_upstream_session: true,
             mode: WorkerExecutionMode::BoundedTurn {
-                session_start_route: "session.start".to_owned(),
+                session_start_route: Some("session.start".to_owned()),
                 turn_start_route: "turn.start".to_owned(),
                 max_uncontacted_attempts: 3,
                 require_post_completion_recovery: false,
+                continuation: None,
             },
             candidate_disposition: "retained_for_review".to_owned(),
             workload_client_delegation_caps: vec!["ryeos.execute.tool.*".to_owned()],
@@ -1283,6 +1406,131 @@ mod tests {
         let mut owner_decision = config;
         owner_decision.candidate_disposition = "owner_decision".to_owned();
         assert!(validate_runtime_mode_policy(&owner_decision).is_err());
+    }
+
+    fn bounded_inputs(
+        continue_from: Option<&str>,
+        session_start: Option<Value>,
+    ) -> BoundedTurnInputs {
+        serde_json::from_value(json!({
+            "credential_profile_id":"profile",
+            "continue_from":continue_from,
+            "goal":{
+                "session_start_payload":session_start,
+                "turn_start_payload":{"prompt":"go on"},
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_continuation_takes_continue_from_and_no_session_start_payload() {
+        let fresh = bounded_inputs(None, Some(json!({"cwd":"/w"})));
+        let continuing = bounded_inputs(Some("T-predecessor"), None);
+        validate_bounded_inputs_match_mode(Some("session.start"), None, &fresh).unwrap();
+        validate_bounded_inputs_match_mode(
+            None,
+            Some(CONTINUATION_COMPLETED_PREDECESSOR),
+            &continuing,
+        )
+        .unwrap();
+        // Every disagreement between the admitted mode and the inputs is refused.
+        assert!(
+            validate_bounded_inputs_match_mode(
+                None,
+                Some(CONTINUATION_COMPLETED_PREDECESSOR),
+                &fresh
+            )
+            .is_err()
+        );
+        assert!(
+            validate_bounded_inputs_match_mode(Some("session.start"), None, &continuing).is_err()
+        );
+        assert!(
+            validate_bounded_inputs_match_mode(
+                None,
+                Some(CONTINUATION_COMPLETED_PREDECESSOR),
+                &bounded_inputs(Some("T-predecessor"), Some(json!({"cwd":"/w"}))),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_bounded_inputs_match_mode(
+                None,
+                Some(CONTINUATION_COMPLETED_PREDECESSOR),
+                &bounded_inputs(None, None),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_bounded_inputs_match_mode(None, Some("any_session"), &continuing).is_err()
+        );
+    }
+
+    #[test]
+    fn a_continuation_mode_decodes_without_a_session_start_route() {
+        let mode: WorkerExecutionMode = serde_json::from_value(json!({
+            "kind":"bounded_turn",
+            "continuation":"completed_predecessor",
+            "turn_start_route":"turn.start",
+            "max_uncontacted_attempts":3,
+        }))
+        .unwrap();
+        assert!(matches!(
+            mode,
+            WorkerExecutionMode::BoundedTurn {
+                session_start_route: None,
+                continuation: Some(_),
+                ..
+            }
+        ));
+        let mut config = WorkerExecutionConfig {
+            worker_ref: "worker:claude-code/hosted".to_owned(),
+            required_credential_state: "active".to_owned(),
+            route_set: "continue".to_owned(),
+            allowed_effect_classes: vec!["external_effect".to_owned()],
+            credential_home_env: "RYEOS_WORKLOAD_HOME".to_owned(),
+            workspace_env: "RYEOS_WORKSPACE".to_owned(),
+            require_pinned_cow: true,
+            required_terminal_publication: "retain_result".to_owned(),
+            max_lifetime_seconds: 60,
+            recover_upstream_session: true,
+            mode,
+            candidate_disposition: "retained_for_review".to_owned(),
+            workload_client_delegation_caps: Vec::new(),
+            credential_subject_contract: None,
+        };
+        validate_runtime_mode_policy(&config).unwrap();
+        // A continuation that also names a session-start route is a
+        // contradictory mode.
+        if let WorkerExecutionMode::BoundedTurn {
+            session_start_route,
+            ..
+        } = &mut config.mode
+        {
+            *session_start_route = Some("session.start".to_owned());
+        }
+        assert!(validate_runtime_mode_policy(&config).is_err());
+    }
+
+    #[test]
+    fn only_a_first_boot_that_did_not_prove_the_conversation_idle_is_lost() {
+        let session = |epoch: u64, state: &str| json!({"worker_boot_epoch":epoch,"state":state});
+        assert!(continuation_conversation_lost(&session(
+            1,
+            "outcome_unknown"
+        )));
+        assert!(continuation_conversation_lost(&session(1, "recovering")));
+        assert!(!continuation_conversation_lost(&session(1, "idle")));
+        assert!(!continuation_conversation_lost(&session(1, "turn_running")));
+        // A restart of the continuation itself is an ordinary recovery.
+        assert!(!continuation_conversation_lost(&session(
+            2,
+            "outcome_unknown"
+        )));
+        assert!(!continuation_conversation_lost(
+            &json!({"state":"outcome_unknown"})
+        ));
     }
 
     #[test]

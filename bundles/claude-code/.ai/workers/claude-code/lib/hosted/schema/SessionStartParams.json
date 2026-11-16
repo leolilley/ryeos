@@ -19,6 +19,18 @@
     "system_prompt": {
       "type": "string",
       "maxLength": 100000
+    },
+    "stub": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resume": {
+          "type": "string",
+          "enum": [
+            "lost"
+          ]
+        }
+      }
     }
   },
   "required": [

@@ -16,6 +16,18 @@
 //! `crash` and `interrupt` still end with `turn/completed`, carrying status
 //! `crashed` and `interrupted`: a turn that cannot report its own end would
 //! leave the session running forever.
+//!
+//! A session id minted by an earlier process resumes as idle, so a later
+//! worker can continue a conversation an earlier one began. One knob on
+//! `session/start` makes the opposite testable:
+//!
+//! ```json
+//! "stub": { "resume": "lost" }   // the session can never be resumed
+//! ```
+//!
+//! The knob is carried in the minted id itself (it survives the process that
+//! started the session), so a later process answers `lost` for that id
+//! whenever it is resumed or read.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -40,6 +52,8 @@ const MAX_DURATION_MS: u64 = 600_000;
 /// never appear in it.
 const REDACTED_ENVIRONMENT: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"];
 const MIN_REDACTED_VALUE_BYTES: usize = 4;
+/// Prefix of the ids of sessions started with `stub.resume: lost`.
+const UNRESUMABLE_ID_PREFIX: &str = "stub-session-lost-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
@@ -175,6 +189,12 @@ impl StubDriver {
     fn is_stub_id(id: &str) -> bool {
         id.starts_with("stub-session-")
     }
+
+    /// Ids minted for a session started with `stub.resume: lost`. They stay
+    /// unresumable for every later process.
+    fn is_unresumable_id(id: &str) -> bool {
+        id.starts_with(UNRESUMABLE_ID_PREFIX)
+    }
 }
 
 fn redact_text(text: &str, redactions: &[String]) -> String {
@@ -234,9 +254,23 @@ impl Driver for StubDriver {
             Some("read_only") => "read_only",
             Some(_) => return Err(RpcError::invalid("access is not admitted")),
         };
+        let unresumable = match params
+            .get("stub")
+            .filter(|value| !value.is_null())
+            .map(|stub| stub.get("resume").and_then(Value::as_str))
+        {
+            None => false,
+            Some(Some("lost")) => true,
+            Some(_) => return Err(RpcError::invalid("stub.resume is not admitted")),
+        };
         let mut state = lock(&self.state);
         state.next_session += 1;
-        let session_id = format!("stub-session-{}-{}", self.epoch, state.next_session);
+        let session_id = format!(
+            "stub-session-{}{}-{}",
+            if unresumable { "lost-" } else { "" },
+            self.epoch,
+            state.next_session
+        );
         state
             .sessions
             .insert(session_id.clone(), Session::default());
@@ -246,6 +280,9 @@ impl Driver for StubDriver {
     fn session_resume(&self, params: &Value) -> Result<Value, RpcError> {
         let session_id = Self::session_id_param(params)?;
         let mut state = lock(&self.state);
+        if Self::is_unresumable_id(session_id) {
+            return Ok(json!({"session_id": session_id, "state": "lost"}));
+        }
         if !state.sessions.contains_key(session_id) {
             if !Self::is_stub_id(session_id) {
                 return Ok(json!({"session_id": session_id, "state": "lost"}));
@@ -268,6 +305,7 @@ impl Driver for StubDriver {
         let session_id = Self::session_id_param(params)?;
         let state = lock(&self.state);
         let state_name = match state.sessions.get(session_id) {
+            _ if Self::is_unresumable_id(session_id) => "lost",
             Some(session) if session.running.is_some() => "running",
             Some(_) => "idle",
             None if Self::is_stub_id(session_id) => "idle",
@@ -604,6 +642,44 @@ mod tests {
         assert_eq!(lines[4]["result"]["state"], "lost");
         assert_eq!(lines[5]["error"]["code"], -32601);
         assert_eq!(lines.len(), 6, "`initialized` is never answered");
+    }
+
+    #[test]
+    fn a_session_from_an_earlier_process_resumes_idle_and_a_lost_knob_never_does() {
+        // A first process mints one ordinary and one unresumable session.
+        let first = StubDriver::new(Vec::new());
+        let ordinary = first.session_start(&json!({"cwd": "/work"})).unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let lost = first
+            .session_start(&json!({"cwd": "/work", "stub": {"resume": "lost"}}))
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(lost.starts_with(UNRESUMABLE_ID_PREFIX));
+        assert!(!ordinary.starts_with(UNRESUMABLE_ID_PREFIX));
+        // A later process knows neither session, yet resumes the ordinary one
+        // as idle and reports the other lost, by resume and by read.
+        let later = StubDriver::new(Vec::new());
+        for call in [StubDriver::session_resume, StubDriver::session_read] {
+            let resumed = call(&later, &json!({"session_id": ordinary, "cwd": "/work"})).unwrap();
+            assert_eq!(resumed["state"], "idle");
+            assert_eq!(resumed["session_id"], json!(ordinary));
+            let gone = call(&later, &json!({"session_id": lost, "cwd": "/work"})).unwrap();
+            assert_eq!(gone["state"], "lost");
+        }
+        // The first process itself also refuses to resume the lost session.
+        assert_eq!(
+            first.session_resume(&json!({"session_id": lost})).unwrap()["state"],
+            "lost"
+        );
+        assert!(
+            first
+                .session_start(&json!({"stub": {"resume": "elsewhere"}}))
+                .is_err()
+        );
     }
 
     #[test]

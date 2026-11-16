@@ -59,11 +59,18 @@
     "resume_route": "session.resume",
     "inspect_route": "session.read",
     "route_sets": [
+      "continue",
       "read_only",
       "session"
     ]
   },
   "route_sets": {
+    "continue": [
+      "session.read",
+      "session.resume",
+      "turn.interrupt",
+      "turn.start"
+    ],
     "read_only": [
       "session.read",
       "session.resume",

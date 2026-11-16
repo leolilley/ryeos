@@ -27,6 +27,18 @@
 //!    `on_error` redirect reads `state._outcome`, and the settled event carries
 //!    the same kind.
 //!
+//! 4. Continuation. A second turn runs `bounded-turn-continue` with
+//!    `continue_from` naming the first turn's child thread. It resumes the
+//!    same upstream session id (the stub answers `idle` for an id an earlier
+//!    process minted), starts no session, and the successor carries one
+//!    `worker_continuation_admitted` event. A second continuation of the same
+//!    predecessor, and a continuation of an unknown thread, are refused with
+//!    their stable codes. A predecessor whose session the upstream reports
+//!    `lost` (stub knob `resume: lost` on session start) settles the
+//!    continuation as `worker_failure` with `continuation_conversation_lost`.
+//!    The owner, profile, generation and outcome refusals are judged by the
+//!    daemon's unit tests: this node has one operator and one profile.
+//!
 //! Prerequisites beyond the ordinary daemon suite: the Core and `claude-code`
 //! bundles must be prepared (published with their binaries), and the host must
 //! qualify process scopes for a dedicated worker session. A host that cannot
@@ -54,6 +66,7 @@ use common::fast_fixture::{FastFixture, register_workflow_bundles};
 
 const BUNDLE_NAME: &str = "claude-code";
 const TURN_ITEM: &str = "worker_execution:claude-code/bounded-turn";
+const CONTINUE_ITEM: &str = "worker_execution:claude-code/bounded-turn-continue";
 const ENVIRONMENT_REF: &str = "config:claude-code/environments/trusted-lane";
 const CREDENTIAL_PROFILE_ID: &str = "credential:claude-code-follow-e2e";
 
@@ -366,6 +379,15 @@ async fn run_graph(
     graph: &str,
     timeout: Duration,
 ) -> Result<Run> {
+    // An earlier run on the same node left its own completed successor
+    // behind; this run's successor is the one that was not there before.
+    let already_completed: std::collections::BTreeSet<String> = daemon
+        .principal_events()
+        .await
+        .into_iter()
+        .filter(|(_, event, _)| event == "graph_completed")
+        .map(|(thread, _, _)| thread)
+        .collect();
     let (status, body) = daemon
         .post_json(
             "/execute",
@@ -399,7 +421,11 @@ async fn run_graph(
         let events = daemon.principal_events().await;
         let successor = events
             .iter()
-            .find(|(thread, event, _)| event == "graph_completed" && *thread != parent_thread_id)
+            .find(|(thread, event, _)| {
+                event == "graph_completed"
+                    && *thread != parent_thread_id
+                    && !already_completed.contains(thread)
+            })
             .map(|(thread, _, _)| thread.clone());
         if let Some(successor) = successor {
             break (events, successor);
@@ -639,6 +665,407 @@ async fn a_turn_that_outlives_the_duration_limit_fails_the_node_as_a_deadline() 
     assert_eq!(
         probe["child_thread_id"], spawned["child_thread_id"],
         "{probe:#}"
+    );
+    Ok(())
+}
+
+/// A one-node graph that follows `item` once and returns a `probe`: the
+/// followed value on success, the node's structured outcome on failure.
+/// `session_start` is the sealed session-start payload (absent for a
+/// continuation) and `continue_from` the predecessor a continuation names.
+#[allow(clippy::too_many_arguments)]
+fn plant_turn_graph(
+    project: &Path,
+    signer: &SigningKey,
+    name: &str,
+    item: &str,
+    session_start: Option<&Value>,
+    continue_from: Option<&str>,
+    stub: &Value,
+) -> Result<()> {
+    let capability = item
+        .strip_prefix("worker_execution:")
+        .context("turn item is not a worker execution")?;
+    let continue_line = continue_from
+        .map(|id| format!("          continue_from: \"{id}\"\n"))
+        .unwrap_or_default();
+    let session_start_line = session_start
+        .map(|payload| format!("            session_start_payload: {payload}\n"))
+        .unwrap_or_default();
+    let body = format!(
+        r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.worker_execution.{capability}
+      - ryeos.execute.config.claude-code/environments/trusted-lane
+      - ryeos.runtime.dedicated_session.start
+      - ryeos.runtime.dedicated_session.command
+      - ryeos.runtime.dedicated_session.terminate
+config:
+  start: turn
+  nodes:
+    turn:
+      node_type: action
+      follow: true
+      action:
+        item_id: "{item}"
+        ref_bindings:
+          environment: "{ENVIRONMENT_REF}"
+        params:
+          credential_profile_id: "{CREDENTIAL_PROFILE_ID}"
+{continue_line}          goal:
+{session_start_line}            turn_start_payload:
+              prompt: "{PROMPT}"
+              stub: {stub}
+      assign:
+        child_thread_id: "${{result.child_thread_id}}"
+        status: "${{result.status}}"
+        outcome_kind: "${{result.outcome_kind}}"
+        text: "${{result.result.result.text}}"
+      on_error: recover
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output:
+        probe:
+          route: completed
+          child_thread_id: "${{state.child_thread_id}}"
+          status: "${{state.status}}"
+          outcome_kind: "${{state.outcome_kind}}"
+          text: "${{state.text}}"
+    recover:
+      node_type: return
+      output:
+        probe:
+          route: recovered
+          child_thread_id: "${{state._outcome.child_thread_id}}"
+          status: "${{state._outcome.status}}"
+          outcome_kind: "${{state._outcome.outcome_kind}}"
+          outcome_dump: "${{state._outcome}}"
+"#
+    );
+    write_graph(project, signer, name, &body)
+}
+
+/// Run one `plant_turn_graph` graph to its end. `None` means the host cannot
+/// qualify process scopes and the case is skipped.
+async fn run_turn(
+    daemon: &mut DaemonHarness,
+    project: &Path,
+    name: &str,
+) -> Result<Option<Finished>> {
+    match run_graph(daemon, project, name, Duration::from_secs(120)).await? {
+        Run::Finished(finished) => Ok(Some(finished)),
+        Run::HostUnqualified => Ok(None),
+    }
+}
+
+/// Every upstream session id the thread's own events carry.
+fn upstream_session_ids(events: &[(String, String, Value)], thread_id: &str) -> Vec<String> {
+    let mut ids: Vec<String> = events
+        .iter()
+        .filter(|(thread, _, _)| thread == thread_id)
+        .filter_map(|(_, _, payload)| find_key(payload, "session_id"))
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The thread's `worker_continuation_admitted` events, as payloads.
+fn continuation_admissions(events: &[(String, String, Value)], thread_id: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|(thread, event, _)| thread == thread_id && event == "worker_continuation_admitted")
+        .map(|(_, _, payload)| payload.clone())
+        .collect()
+}
+
+/// Whether `needle` appears in the failed turn's outcome or in its thread.
+async fn failure_names(
+    daemon: &mut DaemonHarness,
+    project: &Path,
+    probe: &Value,
+    needle: &str,
+) -> Result<bool> {
+    if probe.to_string().contains(needle) {
+        return Ok(true);
+    }
+    let child = probe["child_thread_id"]
+        .as_str()
+        .context("the failed turn names no child thread")?;
+    let (status, thread) = daemon
+        .post_execute(
+            "service:threads/get",
+            project.to_str().context("project path is not UTF-8")?,
+            json!({ "thread_id": child }),
+        )
+        .await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "threads/get failed: {status} {thread:#}"
+    );
+    Ok(thread.to_string().contains(needle))
+}
+
+fn completed_stub() -> Value {
+    json!({"outcome": "completed", "text": ANSWER_TEXT})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_turn_continues_the_first_turns_upstream_conversation() -> Result<()> {
+    let (mut daemon, fixture) = start_node().await?;
+    let project = tempfile::tempdir()?;
+    let publisher = &fixture.publisher;
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "first",
+        TURN_ITEM,
+        Some(&json!({})),
+        None,
+        &completed_stub(),
+    )?;
+    let Some(first) = run_turn(&mut daemon, project.path(), "first").await? else {
+        return Ok(());
+    };
+    assert_eq!(
+        first.probe["outcome_kind"],
+        json!("completed"),
+        "{:#}",
+        first.probe
+    );
+    let first_child = first.probe["child_thread_id"]
+        .as_str()
+        .context("the first turn named no child")?
+        .to_owned();
+    let first_sessions = upstream_session_ids(&first.events, &first_child);
+    assert_eq!(
+        first_sessions.len(),
+        1,
+        "the first turn runs in exactly one upstream session: {first_sessions:?}"
+    );
+    assert!(
+        continuation_admissions(&first.events, &first_child).is_empty(),
+        "a fresh turn is not a continuation"
+    );
+
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "second",
+        CONTINUE_ITEM,
+        None,
+        Some(&first_child),
+        &json!({"outcome": "completed", "text": "second answer"}),
+    )?;
+    let Some(second) = run_turn(&mut daemon, project.path(), "second").await? else {
+        return Ok(());
+    };
+    let probe = &second.probe;
+    assert_eq!(probe["route"], json!("completed"), "{probe:#}");
+    assert_eq!(probe["outcome_kind"], json!("completed"), "{probe:#}");
+    assert_eq!(probe["text"], json!("second answer"), "{probe:#}");
+    let second_child = probe["child_thread_id"]
+        .as_str()
+        .context("the second turn named no child")?;
+    assert_ne!(
+        second_child, first_child,
+        "a continuation is its own thread"
+    );
+
+    // The same upstream session carried both turns, and the successor says so
+    // durably, once, naming its predecessor.
+    assert_eq!(
+        upstream_session_ids(&second.events, second_child),
+        first_sessions,
+        "the continuation must resume the predecessor's upstream session"
+    );
+    let admitted = continuation_admissions(&second.events, second_child);
+    assert_eq!(admitted.len(), 1, "{admitted:#?}");
+    assert_eq!(admitted[0]["predecessor_thread_id"], json!(first_child));
+    assert_eq!(admitted[0]["upstream_session_id"], json!(first_sessions[0]));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_predecessor_is_continued_at_most_once_and_must_exist() -> Result<()> {
+    let (mut daemon, fixture) = start_node().await?;
+    let project = tempfile::tempdir()?;
+    let publisher = &fixture.publisher;
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "first",
+        TURN_ITEM,
+        Some(&json!({})),
+        None,
+        &completed_stub(),
+    )?;
+    let Some(first) = run_turn(&mut daemon, project.path(), "first").await? else {
+        return Ok(());
+    };
+    let first_child = first.probe["child_thread_id"]
+        .as_str()
+        .context("the first turn named no child")?
+        .to_owned();
+
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "second",
+        CONTINUE_ITEM,
+        None,
+        Some(&first_child),
+        &completed_stub(),
+    )?;
+    let Some(second) = run_turn(&mut daemon, project.path(), "second").await? else {
+        return Ok(());
+    };
+    assert_eq!(
+        second.probe["route"],
+        json!("completed"),
+        "{:#}",
+        second.probe
+    );
+
+    // A second continuation of the same predecessor is refused before any
+    // worker exists.
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "again",
+        CONTINUE_ITEM,
+        None,
+        Some(&first_child),
+        &completed_stub(),
+    )?;
+    let Some(again) = run_turn(&mut daemon, project.path(), "again").await? else {
+        return Ok(());
+    };
+    assert_eq!(
+        again.probe["route"],
+        json!("recovered"),
+        "{:#}",
+        again.probe
+    );
+    assert_ne!(again.probe["outcome_kind"], json!("completed"));
+    assert!(
+        failure_names(
+            &mut daemon,
+            project.path(),
+            &again.probe,
+            "continuation_predecessor_already_continued"
+        )
+        .await?,
+        "the refusal must name its code: {:#}",
+        again.probe
+    );
+
+    // A predecessor that never existed is refused too.
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "unknown",
+        CONTINUE_ITEM,
+        None,
+        Some("T-no-such-predecessor"),
+        &completed_stub(),
+    )?;
+    let Some(unknown) = run_turn(&mut daemon, project.path(), "unknown").await? else {
+        return Ok(());
+    };
+    assert_eq!(
+        unknown.probe["route"],
+        json!("recovered"),
+        "{:#}",
+        unknown.probe
+    );
+    assert!(
+        failure_names(
+            &mut daemon,
+            project.path(),
+            &unknown.probe,
+            "continuation_predecessor_unknown"
+        )
+        .await?,
+        "the refusal must name its code: {:#}",
+        unknown.probe
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_conversation_settles_the_continuation_as_a_worker_failure() -> Result<()> {
+    let (mut daemon, fixture) = start_node().await?;
+    let project = tempfile::tempdir()?;
+    let publisher = &fixture.publisher;
+    // The first turn completes normally, but its upstream session can never
+    // be resumed by a later process.
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "first",
+        TURN_ITEM,
+        Some(&json!({"stub": {"resume": "lost"}})),
+        None,
+        &completed_stub(),
+    )?;
+    let Some(first) = run_turn(&mut daemon, project.path(), "first").await? else {
+        return Ok(());
+    };
+    assert_eq!(
+        first.probe["outcome_kind"],
+        json!("completed"),
+        "{:#}",
+        first.probe
+    );
+    let first_child = first.probe["child_thread_id"]
+        .as_str()
+        .context("the first turn named no child")?
+        .to_owned();
+
+    plant_turn_graph(
+        project.path(),
+        publisher,
+        "second",
+        CONTINUE_ITEM,
+        None,
+        Some(&first_child),
+        &completed_stub(),
+    )?;
+    let Some(second) = run_turn(&mut daemon, project.path(), "second").await? else {
+        return Ok(());
+    };
+    let probe = &second.probe;
+    assert_eq!(probe["route"], json!("recovered"), "{probe:#}");
+    assert_eq!(probe["outcome_kind"], json!("worker_failure"), "{probe:#}");
+    // No turn ran, and no fresh session stood in for the lost one.
+    let second_child = probe["child_thread_id"]
+        .as_str()
+        .context("the failed continuation named no child")?;
+    assert_eq!(
+        upstream_session_ids(&second.events, second_child)
+            .into_iter()
+            .filter(|id| !upstream_session_ids(&first.events, &first_child).contains(id))
+            .count(),
+        0,
+        "the continuation must not have started another session"
+    );
+    assert!(
+        failure_names(
+            &mut daemon,
+            project.path(),
+            probe,
+            "continuation_conversation_lost"
+        )
+        .await?,
+        "the failure must name its reason: {probe:#}"
     );
     Ok(())
 }

@@ -1422,6 +1422,29 @@ fn admitted_worker_execution_config(
         .ok_or_else(|| anyhow!("hosted root has no admitted worker-execution config"))
 }
 
+/// The one admitted value of a bounded-turn mode's `continuation` field.
+pub const CONTINUATION_COMPLETED_PREDECESSOR: &str = "completed_predecessor";
+
+/// Whether an admitted bounded mode continues a completed predecessor's
+/// upstream conversation instead of starting a session. Absent means a fresh
+/// turn; any value other than the admitted one is a contradictory mode.
+pub fn bounded_mode_is_continuation(worker_execution: &Value) -> Result<bool> {
+    let mode = worker_execution
+        .get("mode")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("hosted root has no admitted worker-execution mode"))?;
+    match mode.get("continuation") {
+        None => Ok(false),
+        Some(Value::String(kind)) if kind == CONTINUATION_COMPLETED_PREDECESSOR => {
+            if mode.contains_key("session_start_route") {
+                bail!("bounded continuation mode names a session-start route");
+            }
+            Ok(true)
+        }
+        Some(_) => bail!("bounded worker mode has an unknown continuation kind"),
+    }
+}
+
 fn admitted_bounded_command_step(
     worker_execution: &Value,
     parameters: &Value,
@@ -1553,6 +1576,7 @@ fn validate_bounded_command_admission(
         }
     }
     validate_next_bounded_attempt(
+        bounded_mode_is_continuation(config)?,
         step,
         attempt,
         command_sequence,
@@ -4878,6 +4902,7 @@ fn bounded_command_contact(
 }
 
 fn validate_next_bounded_attempt(
+    continuation: bool,
     step: &str,
     attempt: u32,
     command_sequence: Option<u64>,
@@ -4908,6 +4933,14 @@ fn validate_next_bounded_attempt(
                 bail!("bounded session start cannot follow a turn attempt");
             }
             (session_attempts.len(), session_contact)
+        }
+        "turn-start" if continuation => {
+            // A continuation resumes an existing upstream session and never
+            // starts one, so its ledger holds no session-start attempt.
+            if !session_attempts.is_empty() {
+                bail!("bounded continuation cannot carry a session-start attempt");
+            }
+            (turn_attempts.len(), turn_contact)
         }
         "turn-start" => {
             let (_, session_sequence) = session_settled
@@ -5791,7 +5824,16 @@ pub fn canonical_terminal_session_projection(
         canonical_bounded_attempts(&mut session_attempts)?;
     let (turn_attempts, turn_settled, turn_contact) =
         canonical_bounded_attempts(&mut turn_attempts)?;
-    if !turn_attempts.is_empty() && session_settled.is_none() {
+    let launch_capsule = state
+        .state_store
+        .admitted_launch_capsule(placement_thread_id)?
+        .ok_or_else(|| anyhow!("bounded worker admitted launch capsule disappeared"))?;
+    let continuation =
+        bounded_mode_is_continuation(admitted_worker_execution_config(&launch_capsule)?)?;
+    if continuation && !session_attempts.is_empty() {
+        bail!("bounded continuation carries a session-start attempt");
+    }
+    if !continuation && !turn_attempts.is_empty() && session_settled.is_none() {
         bail!("bounded turn was attempted before session start settled");
     }
     if let (Some((_, session_sequence)), Some((_, turn_sequence))) = (session_settled, turn_settled)
@@ -5829,10 +5871,6 @@ pub fn canonical_terminal_session_projection(
     } else {
         "no_command_contact"
     };
-    let launch_capsule = state
-        .state_store
-        .admitted_launch_capsule(placement_thread_id)?
-        .ok_or_else(|| anyhow!("bounded worker admitted launch capsule disappeared"))?;
     let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
         prepared_runtime_launch,
         ..
@@ -5903,8 +5941,12 @@ pub fn canonical_terminal_session_projection(
         {
             bail!("bounded retry exhaustion is not proved by its admitted attempt ledger")
         }
+        // A continuation whose predecessor conversation could not be resumed
+        // fails before any turn is contacted, so its ledger holds no attempt
+        // at all; that is the only worker failure without contact testimony.
         DedicatedSessionBoundedOutcomeKind::WorkerFailure
-            if terminal_contact != Some("contacted_failed") =>
+            if terminal_contact != Some("contacted_failed")
+                && !(continuation && terminal_contact.is_none()) =>
         {
             bail!("bounded worker failure has no exact failed-contact testimony")
         }
@@ -7137,16 +7179,70 @@ mod tests {
         );
     }
 
+    fn continuation_admission_config() -> Value {
+        json!({
+            "max_lifetime_seconds":60,
+            "mode":{
+                "kind":"bounded_turn",
+                "continuation":"completed_predecessor",
+                "turn_start_route":"turn.start",
+                "max_uncontacted_attempts":3,
+            },
+        })
+    }
+
     #[test]
-    fn bounded_contact_admission_requires_exact_uncontacted_predecessors() {
-        let session_start = || {
-            let mut record = bounded_command(1, 1, "completed");
-            record.idempotency_key = "bounded:T-placement:session-start:attempt:1".to_owned();
-            record.payload = json!({"route_id":"session.start","payload":{}});
-            vec![(1, record, "contacted_settled")]
-        };
+    fn continuation_mode_is_recognised_and_closed() {
+        assert!(!bounded_mode_is_continuation(&bounded_admission_config()).unwrap());
+        assert!(bounded_mode_is_continuation(&continuation_admission_config()).unwrap());
+        let mut with_session_start = continuation_admission_config();
+        with_session_start["mode"]["session_start_route"] = json!("session.start");
+        assert!(bounded_mode_is_continuation(&with_session_start).is_err());
+        let mut unknown = continuation_admission_config();
+        unknown["mode"]["continuation"] = json!("any_session");
+        assert!(bounded_mode_is_continuation(&unknown).is_err());
+        assert!(bounded_mode_is_continuation(&json!({})).is_err());
+    }
+
+    #[test]
+    fn a_continuation_admits_its_turn_start_and_never_a_session_start() {
+        let config = continuation_admission_config();
+        let parameters = json!({
+            "continue_from":"T-predecessor",
+            "goal":{"turn_start_payload":{"prompt":"go on"}},
+        });
+        let turn = json!({"route_id":"turn.start","payload":{"prompt":"go on"}});
+        assert_eq!(
+            admitted_bounded_command_step(
+                &config,
+                &parameters,
+                "T-placement",
+                "bounded:T-placement:turn-start:attempt:1",
+                "route",
+                &turn,
+            )
+            .unwrap(),
+            Some(("turn-start", 1)),
+        );
+        assert!(
+            admitted_bounded_command_step(
+                &config,
+                &parameters,
+                "T-placement",
+                "bounded:T-placement:session-start:attempt:1",
+                "route",
+                &json!({"route_id":"session.start","payload":{}}),
+            )
+            .is_err(),
+            "a continuation has no admitted session-start route"
+        );
+    }
+
+    #[test]
+    fn a_continuation_turn_needs_no_settled_session_start() {
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 1,
                 Some(1),
@@ -7157,6 +7253,53 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                true,
+                "turn-start",
+                1,
+                Some(1),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .is_ok()
+        );
+        let mut session_start = bounded_command(1, 1, "completed");
+        session_start.idempotency_key = "bounded:T-placement:session-start:attempt:1".to_owned();
+        assert!(
+            validate_next_bounded_attempt(
+                true,
+                "turn-start",
+                1,
+                Some(2),
+                &mut vec![(1, session_start, "contacted_settled")],
+                &mut Vec::new(),
+            )
+            .is_err(),
+            "a continuation ledger never holds a session-start attempt"
+        );
+    }
+
+    #[test]
+    fn bounded_contact_admission_requires_exact_uncontacted_predecessors() {
+        let session_start = || {
+            let mut record = bounded_command(1, 1, "completed");
+            record.idempotency_key = "bounded:T-placement:session-start:attempt:1".to_owned();
+            record.payload = json!({"route_id":"session.start","payload":{}});
+            vec![(1, record, "contacted_settled")]
+        };
+        assert!(
+            validate_next_bounded_attempt(
+                false,
+                "turn-start",
+                1,
+                Some(1),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 1,
                 Some(2),
@@ -7167,6 +7310,7 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "session-start",
                 2,
                 Some(2),
@@ -7184,6 +7328,7 @@ mod tests {
             let mut prior = vec![(1, bounded_command(1, 2, state), contact)];
             assert!(
                 validate_next_bounded_attempt(
+                    false,
                     "turn-start",
                     2,
                     Some(3),
@@ -7196,6 +7341,7 @@ mod tests {
         let mut uncontacted = vec![(1, bounded_command(1, 2, "failed"), "verified_uncontacted")];
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 2,
                 Some(3),
@@ -7206,6 +7352,7 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 3,
                 Some(3),
@@ -7216,6 +7363,7 @@ mod tests {
         );
         assert!(
             validate_next_bounded_attempt(
+                false,
                 "turn-start",
                 2,
                 Some(2),

@@ -2661,11 +2661,19 @@ mod tests {
         assert_eq!(admitted.baseline_destination, "settings.json");
         assert!(contract["credential_subject"].is_null());
         assert!(contract["portable_state"].is_null());
-        // Both route sets carry the recovery pair, and the bounded turn's
+        // Every route set carries the recovery pair (the continuation set
+        // carries nothing else that starts a session), and the bounded turn's
         // lifecycle is observed from the route and from its notifications.
         assert_eq!(
             contract["recovery"]["route_sets"],
-            json!(["read_only", "session"])
+            json!(["continue", "read_only", "session"])
+        );
+        assert!(
+            !contract["route_sets"]["continue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|route| route.as_str().unwrap().starts_with("session.start"))
         );
         let completed = contract["notifications"]
             .as_array()

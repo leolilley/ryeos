@@ -14,6 +14,9 @@ use serde::Deserialize;
 
 const DEPENDENCY_NAME: &str = "session_worker";
 const ENVIRONMENT_BINDING: &str = "environment";
+/// The one admitted value of a bounded-turn mode's `continuation` field: the
+/// execution resumes the upstream conversation of a completed predecessor.
+const CONTINUATION_COMPLETED_PREDECESSOR: &str = "completed_predecessor";
 const LARGE_CONTENT_MAX_TOTAL_BYTES: u64 = 17_179_869_184;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,30 +600,67 @@ fn validate_execution_mode(
         })?;
     match object.get("kind").and_then(serde_json::Value::as_str) {
         Some("session") if object.len() == 1 => Ok(WorkerExecutionMode::Session),
-        Some("bounded_turn")
-            if (object.len() == 4
-                || (object.len() == 5
-                    && object
-                        .get("require_post_completion_recovery")
-                        .is_some_and(serde_json::Value::is_boolean)))
-                && object.contains_key("session_start_route")
-                && object.contains_key("turn_start_route")
-                && object
-                    .get("max_uncontacted_attempts")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some_and(|attempts| (1..=8).contains(&attempts)) =>
-        {
-            let session_start_route = validate_route_id(
-                object.get("session_start_route"),
-                "bounded session-start route",
-            )?;
-            let turn_start_route =
-                validate_route_id(object.get("turn_start_route"), "bounded turn-start route")?;
-            if session_start_route == turn_start_route {
+        Some("bounded_turn") => {
+            // Two closed shapes. A fresh turn names its session-start route.
+            // A continuation names `continuation` instead and no
+            // session-start route at all: it resumes a completed
+            // predecessor's upstream conversation and never starts one.
+            let optional_recovery =
+                usize::from(object.contains_key("require_post_completion_recovery"));
+            if optional_recovery == 1
+                && !object
+                    .get("require_post_completion_recovery")
+                    .is_some_and(serde_json::Value::is_boolean)
+            {
                 return Err(wire_error(
                     "worker_execution_mode_invalid",
-                    "bounded session-start and turn-start routes must be distinct",
+                    "bounded post-completion recovery requirement must be a boolean",
                 ));
+            }
+            let continuation = object.contains_key("continuation");
+            let expected_len = 3 + optional_recovery + 1;
+            let attempts_valid = object
+                .get("max_uncontacted_attempts")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|attempts| (1..=8).contains(&attempts));
+            let shape_valid = object.len() == expected_len
+                && object.contains_key("turn_start_route")
+                && object.contains_key(if continuation {
+                    "continuation"
+                } else {
+                    "session_start_route"
+                })
+                && attempts_valid;
+            if !shape_valid {
+                return Err(wire_error(
+                    "worker_execution_mode_invalid",
+                    "worker execution mode is not an admitted session or bounded-turn contract",
+                ));
+            }
+            let turn_start_route =
+                validate_route_id(object.get("turn_start_route"), "bounded turn-start route")?;
+            if continuation {
+                if object
+                    .get("continuation")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(CONTINUATION_COMPLETED_PREDECESSOR)
+                {
+                    return Err(wire_error(
+                        "worker_execution_mode_invalid",
+                        "bounded continuation is not an admitted predecessor kind",
+                    ));
+                }
+            } else {
+                let session_start_route = validate_route_id(
+                    object.get("session_start_route"),
+                    "bounded session-start route",
+                )?;
+                if session_start_route == turn_start_route {
+                    return Err(wire_error(
+                        "worker_execution_mode_invalid",
+                        "bounded session-start and turn-start routes must be distinct",
+                    ));
+                }
             }
             Ok(WorkerExecutionMode::BoundedTurn)
         }
@@ -1698,6 +1738,57 @@ mod tests {
             assert_eq!(
                 validate_execution_config(&config).unwrap_err().code,
                 "worker_execution_policy_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_continuation_mode_is_a_closed_shape_without_a_session_start_route() {
+        let mut config = valid_config();
+        config["candidate_disposition"] = serde_json::json!("retained_for_review");
+        config["mode"] = serde_json::json!({
+            "kind":"bounded_turn",
+            "continuation":"completed_predecessor",
+            "turn_start_route":"turn.start",
+            "max_uncontacted_attempts":3
+        });
+        assert_eq!(
+            validate_execution_config(&config).unwrap(),
+            WorkerSelection::Direct("worker:fixture/hosted".to_owned())
+        );
+        config["mode"]["require_post_completion_recovery"] = serde_json::json!(true);
+        validate_execution_config(&config).unwrap();
+        config["mode"]
+            .as_object_mut()
+            .unwrap()
+            .remove("require_post_completion_recovery");
+
+        let mut with_session_start = config.clone();
+        with_session_start["mode"]["session_start_route"] = serde_json::json!("session.start");
+        let mut unknown_kind = config.clone();
+        unknown_kind["mode"]["continuation"] = serde_json::json!("any_session");
+        let mut non_text = config.clone();
+        non_text["mode"]["continuation"] = serde_json::json!(true);
+        let mut no_turn_route = config.clone();
+        no_turn_route["mode"]
+            .as_object_mut()
+            .unwrap()
+            .remove("turn_start_route");
+        let mut no_attempts = config.clone();
+        no_attempts["mode"]
+            .as_object_mut()
+            .unwrap()
+            .remove("max_uncontacted_attempts");
+        for invalid in [
+            with_session_start,
+            unknown_kind,
+            non_text,
+            no_turn_route,
+            no_attempts,
+        ] {
+            assert_eq!(
+                validate_execution_config(&invalid).unwrap_err().code,
+                "worker_execution_mode_invalid"
             );
         }
     }

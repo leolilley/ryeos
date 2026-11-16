@@ -59,6 +59,10 @@ pub const CHILD_THREAD_SPAWNED: &str = "child_thread_spawned";
 /// its follow, status, closed `outcome_kind`, a bounded result summary and
 /// cost. One per followed child, keyed by the child thread id.
 pub const CHILD_THREAD_SETTLED: &str = "child_thread_settled";
+/// Written to a worker placement admitted to continue a completed
+/// predecessor's upstream conversation: the predecessor placement and the
+/// upstream session id the successor was admitted with. One per successor.
+pub const WORKER_CONTINUATION_ADMITTED: &str = "worker_continuation_admitted";
 pub const CONTINUATION_REQUESTED: &str = "continuation_requested";
 pub const CONTINUATION_ACCEPTED: &str = "continuation_accepted";
 pub const COMMAND_SUBMITTED: &str = "command_submitted";
