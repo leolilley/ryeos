@@ -1,0 +1,72 @@
+# ryeos:signed:2026-11-16T03:55:17Z:272cb99735108bc67244309c1adcd30279f2414c84aec7f44d830dd8a7060229:OXR66TCR+Taphlsah/e2EV+ATnZ/qtE8s76fGTA7Ce4vSIPQAp7KctHG8SICFERnPPai428xfyDATIMs+rbAAA==:ae0ca349cdef0b514a7589669b7b5ff12ac666d38374eb657abd94b53aeccbfb
+version: "1.0.0"
+category: test
+description: A greeting, a foreach over names, a node that fails and retries, then a recovery node
+effects: recorded
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.test/anchor_chain
+      - ryeos.execute.tool.test/anchor_demo/anchor_demo
+      - ryeos.execute.tool.test/fail_demo/fail_demo
+config:
+  start: greet
+  max_steps: 20
+  on_error: fail
+  config_schema:
+    type: object
+    properties:
+      names: {type: array, items: {type: string}}
+    additionalProperties: false
+  nodes:
+    greet:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:test/anchor_demo/anchor_demo
+        ref_bindings: {}
+        params: {name: "graph"}
+        thread: inline
+      assign:
+        first: "${result.greeting}"
+      next: {type: unconditional, to: each}
+    each:
+      node_type: foreach
+      effects: live
+      over: "${inputs.names ?? ['one', 'two']}"
+      as: who
+      action:
+        item_id: tool:test/anchor_demo/anchor_demo
+        ref_bindings: {}
+        params: {name: "${who}"}
+        thread: inline
+      collect: greetings
+      next: {type: unconditional, to: flaky}
+    flaky:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:test/fail_demo/fail_demo
+        ref_bindings: {}
+        params: {}
+        thread: inline
+      retry: {attempts: 2, backoff_ms: 200}
+      on_error: recover
+      next: {type: unconditional, to: done}
+    recover:
+      node_type: action
+      effects: live
+      cache_result: false
+      action:
+        item_id: tool:test/anchor_demo/anchor_demo
+        ref_bindings: {}
+        params: {name: "recovered"}
+        thread: inline
+      assign:
+        recovered: "${result.greeting}"
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: {first: "${state.first}", greetings: "${state.greetings}", recovered: "${state.recovered ?? null}"}
