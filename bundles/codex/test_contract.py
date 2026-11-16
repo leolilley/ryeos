@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ryeos:signed:2026-11-13T06:51:31Z:99773a3dafe8026a380cc9a18779ca476078463a73fd0cc66e2318b1afad1b16:3lFThJhFgtenWuFJNWE32TvjsFcrRSTxzyYDAD7j70a0pD9N9hCmDkmCEV4r0xylg92A2iPPyi2WHyxgW8LcDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T01:40:06Z:cffb8a0c95b1aee27e34f41409045887b9c32e8d4c78efa0564dacd3fb3674cc:CtFSP+jwr7MZ6YlWpfQFlG6Qc3pA9ROmT6XSFQXlo8oA9yRzX6Y6K2CKyIP2CmUsHRfp5S0PcsafjShdFIN/AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Bundle-owned conformance tests for the pinned Codex integration data."""
 
 from __future__ import annotations
@@ -449,6 +449,45 @@ class CodexContractTests(unittest.TestCase):
         ):
             activation = yaml.safe_load((BUNDLE / f".ai/config/codex/{name}.yaml").read_text())
             self.assertEqual(activation["consumer_ref"], consumer)
+
+    def test_lease_and_guest_requirements_have_producers(self) -> None:
+        # A requirement entry may exist only if some producer can fail to provide it. The lease names a
+        # profile may require are the closed set the shared lease code derives from a provider spec; the
+        # guest names are what a guest can report. No guest fact is reported today, so that vocabulary is
+        # empty and `requires.guest` must be too.
+        facts = (
+            BUNDLE.parent.parent
+            / "crates/host-adapters/remote-lease-core/src/facts.rs"
+        ).read_text()
+        lease_core_names = set(
+            re.findall(
+                r'^pub const (?:LEASE|GUEST)_[A-Z_]+: &str = "([^"]+)";', facts, re.M
+            )
+        )
+        self.assertTrue(lease_core_names, "no lease-core names parsed from facts.rs")
+        guest_report_vocabulary: set[str] = set()
+
+        def names(entries) -> set[str]:
+            found: set[str] = set()
+            for entry in entries:
+                if isinstance(entry, str):
+                    found.add(entry)
+                elif "name" in entry:
+                    found.add(entry["name"])
+                else:
+                    found.update(entry["any_of"])
+            return found
+
+        checked = 0
+        for path in sorted(BUNDLE.parent.glob("*/.ai/workers/*/lib/hosted/*.profile.json")):
+            requires = json.loads(path.read_text()).get("requires")
+            if requires is None:
+                continue
+            checked += 1
+            with self.subTest(profile=str(path.relative_to(BUNDLE.parent))):
+                self.assertLessEqual(names(requires.get("lease", [])), lease_core_names)
+                self.assertLessEqual(names(requires.get("guest", [])), guest_report_vocabulary)
+        self.assertGreater(checked, 0)
 
     def test_controller_side_extensions_are_closed_in_config_and_immutable_argv(self) -> None:
         for name in ("structured-session.profile.json", "authoring.profile.json",
