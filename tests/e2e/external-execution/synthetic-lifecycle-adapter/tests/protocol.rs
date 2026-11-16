@@ -5473,6 +5473,17 @@ async fn run_production_tls_candidate(
             refusal.contains(UNDERIVED_LEASE_GUARANTEE),
             "the refusal does not name the unmet entry: {refusal}"
         );
+        // The refusal is raised by lease admission inside the held spawn,
+        // after the trusted launcher wrote its host-lifetime holding and
+        // before any process existed. The failed spawn must clear it.
+        assert!(
+            state
+                .state_store
+                .dedicated_worker_trusted_holding(&placement, worker_instance_id, 1)
+                .unwrap()
+                .is_none(),
+            "a spawn refused before any process existed left its trusted worker holding set"
+        );
         stop.store(true, Ordering::Release);
         controller.join().unwrap();
         close_test_composition_before_uds_stop(&uds_composition, state.clone(), &uds_server).await;
@@ -5487,6 +5498,17 @@ async fn run_production_tls_candidate(
         assert!(
             refusal.contains("the remote lease ends in 60s, and this session's deadline is "),
             "unexpected lease-fit refusal: {refusal}"
+        );
+        // The refusal is raised by lease admission inside the held spawn,
+        // after the trusted launcher wrote its host-lifetime holding and
+        // before any process existed. The failed spawn must clear it.
+        assert!(
+            state
+                .state_store
+                .dedicated_worker_trusted_holding(&placement, worker_instance_id, 1)
+                .unwrap()
+                .is_none(),
+            "a spawn refused before any process existed left its trusted worker holding set"
         );
         stop.store(true, Ordering::Release);
         controller.join().unwrap();

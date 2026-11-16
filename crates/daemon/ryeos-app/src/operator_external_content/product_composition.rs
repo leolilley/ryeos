@@ -1337,10 +1337,15 @@ mod tests {
         const REF: &str = "config:product-fixture/relationships";
         let sign = |path: &std::path::Path, source: &str, key: &SigningKey| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, lillux::signature::sign_content(source, key, "#", None)).unwrap();
+            std::fs::write(
+                path,
+                lillux::signature::sign_content(source, key, "#", None),
+            )
+            .unwrap();
         };
         let directory = tempfile::tempdir().unwrap();
-        let (_store_owner, mut state) = crate::state::test_support::build(directory.path()).unwrap();
+        let (_store_owner, mut state) =
+            crate::state::test_support::build(directory.path()).unwrap();
         let signer = SigningKey::from_bytes(&[53; 32]);
         let relationship_source = |marker: &str| {
             format!(
@@ -1380,26 +1385,35 @@ mod tests {
             ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &handlers).unwrap();
         let tagged = roots
             .iter()
-            .map(|root| (root.clone(), ryeos_engine::resolution::TrustClass::TrustedBundle))
+            .map(|root| {
+                (
+                    root.clone(),
+                    ryeos_engine::resolution::TrustClass::TrustedBundle,
+                )
+            })
             .collect::<Vec<_>>();
-        let protocols = ryeos_engine::protocols::ProtocolRegistry::load_base(&tagged, &trust).unwrap();
-        let validators = ryeos_engine::effective_validators::EffectiveValidatorRegistry::from_kinds(
-            &kinds,
-            &handlers,
-            state.isolation.clone(),
-            &roots,
-        )
-        .unwrap();
+        let protocols =
+            ryeos_engine::protocols::ProtocolRegistry::load_base(&tagged, &trust).unwrap();
+        let validators =
+            ryeos_engine::effective_validators::EffectiveValidatorRegistry::from_kinds(
+                &kinds,
+                &handlers,
+                state.isolation.clone(),
+                &roots,
+            )
+            .unwrap();
         // The installed bundle's name must differ from the relationship's
         // namespace: a project may not shadow a namespace named for a bundle.
         let registered = ["core", "product-bundle"]
             .into_iter()
             .zip(roots.iter())
-            .map(|(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
-                owned_namespaces: Vec::new(),
-                name: name.into(),
-                canonical_root: root.clone(),
-            })
+            .map(
+                |(name, root)| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    owned_namespaces: Vec::new(),
+                    name: name.into(),
+                    canonical_root: root.clone(),
+                },
+            )
             .collect();
         state.engine = Arc::new(
             ryeos_engine::engine::Engine::new(

@@ -2259,7 +2259,9 @@ mod workload_binding_tests {
             )
             .unwrap();
             let mut map = selections.into_inner();
-            let runtime = map.get_mut(&requirement.runtime_product_declaration_id).unwrap();
+            let runtime = map
+                .get_mut(&requirement.runtime_product_declaration_id)
+                .unwrap();
             runtime.relationship_raw_content_digest = relationship_digest.to_owned();
             runtime.relationship_project_dependent = false;
             runtime.consumer_source = ResolvedProductConsumerSource::InstalledBundle {
@@ -2277,7 +2279,8 @@ mod workload_binding_tests {
         let mut binding = document();
         match &mut binding.workload {
             ExternalWorkloadBinding::StructuredSession(session) => {
-                session.provider_declaration_id = original.requirement.provider_declaration_id.clone();
+                session.provider_declaration_id =
+                    original.requirement.provider_declaration_id.clone();
                 session.provider_configuration_destination = original
                     .requirement
                     .provider_configuration_destination
@@ -2293,7 +2296,10 @@ mod workload_binding_tests {
             changed.selection_identity_digest,
             original.selection_identity_digest
         );
-        assert_eq!(changed.runtime_manifest_hash, original.runtime_manifest_hash);
+        assert_eq!(
+            changed.runtime_manifest_hash,
+            original.runtime_manifest_hash
+        );
         assert!(
             check_program(&binding, &changed)
                 .unwrap_err()
