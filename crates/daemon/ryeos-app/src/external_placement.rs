@@ -2345,9 +2345,41 @@ fn require_qualified_launch_shape(
     evidence: &ryeos_state::external_content::products::qualification::ProductQualificationEvidence,
 ) -> Result<()> {
     match evidence.remote_consumer_launch_shape() {
-        Some(qualified) => compare_launch_shape(qualified, binding_launch_shape_kinds(contract)),
+        Some(qualified) => {
+            compare_launch_shape(qualified, binding_launch_shape_kinds(contract))?;
+            if let ryeos_state::external_execution::transport::ExternalControllerTransportSelection::HttpJson(http) =
+                &contract.controller_transport
+            {
+                compare_binding_network_input_sources(&http.network_inputs)?;
+            }
+            Ok(())
+        }
         None => Ok(()),
     }
+}
+
+/// The qualification verified the supervisor's observed network inputs
+/// against the sources `operator_network_inputs()` names, so a binding that
+/// captures any other source was not what was qualified.
+fn compare_binding_network_input_sources(
+    retained: &ryeos_state::external_execution::transport::ExternalNetworkInputPolicy,
+) -> Result<()> {
+    let expected = ryeos_external_execution_contract::operator_network_inputs();
+    ensure!(
+        retained.resolver.source == expected.resolver_source,
+        "launch shape differs from the qualified shape: launch_shape.network_inputs.resolver \
+         qualified {}, launch {}",
+        expected.resolver_source,
+        retained.resolver.source
+    );
+    ensure!(
+        retained.hosts.source == expected.hosts_source,
+        "launch shape differs from the qualified shape: launch_shape.network_inputs.hosts \
+         qualified {}, launch {}",
+        expected.hosts_source,
+        retained.hosts.source
+    );
+    Ok(())
 }
 
 /// Rejoin the session's CAS-owned guest-runtime proof to the exact signed
@@ -11183,6 +11215,51 @@ mod tests {
                 && policy.contains("allow_list")
                 && policy.contains("deny_all"),
             "{policy}"
+        );
+    }
+
+    #[test]
+    fn a_binding_that_captures_other_network_sources_than_the_contract_names_is_refused() {
+        use ryeos_state::external_execution::transport::{
+            ExternalNetworkInputPolicy, ExternalNetworkInputSelection,
+        };
+        let expected = ryeos_external_execution_contract::operator_network_inputs();
+        let selection = |source: &str| ExternalNetworkInputSelection {
+            source: source.to_owned(),
+            max_bytes: 4096,
+        };
+        compare_binding_network_input_sources(&ExternalNetworkInputPolicy {
+            resolver: selection(expected.resolver_source),
+            hosts: selection(expected.hosts_source),
+        })
+        .unwrap();
+        let resolver = format!(
+            "{:#}",
+            compare_binding_network_input_sources(&ExternalNetworkInputPolicy {
+                resolver: selection("/ryeos/activation/network-resolver"),
+                hosts: selection(expected.hosts_source),
+            })
+            .unwrap_err()
+        );
+        assert!(
+            resolver.contains("launch_shape.network_inputs.resolver")
+                && resolver.contains("/ryeos/activation/network-resolver")
+                && resolver.contains(expected.resolver_source),
+            "{resolver}"
+        );
+        let hosts = format!(
+            "{:#}",
+            compare_binding_network_input_sources(&ExternalNetworkInputPolicy {
+                resolver: selection(expected.resolver_source),
+                hosts: selection("/etc/other-hosts"),
+            })
+            .unwrap_err()
+        );
+        assert!(
+            hosts.contains("launch_shape.network_inputs.hosts")
+                && hosts.contains("/etc/other-hosts")
+                && hosts.contains(expected.hosts_source),
+            "{hosts}"
         );
     }
 
