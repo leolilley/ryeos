@@ -21,6 +21,9 @@ use ryeos_external_execution_contract::restored_runtime_measurement::{
     CONSUMER_INPUT_RECORD_NAME, ConsumerRuntimeChallenge, MAX_CONSUMER_INPUT_RECORD_BYTES,
     MAX_RESTORED_OWNER_CHALLENGE_BYTES, RemoteVerificationPurpose,
 };
+use ryeos_external_execution_contract::runtime_snapshot::{
+    LaunchControllerTransport, LaunchSandboxNetworkPolicy,
+};
 use ryeos_external_execution_contract::{
     EXTERNAL_CANDIDATE_LAUNCHER_SPEC_SCHEMA, EXTERNAL_GUEST_INPUT_PROJECTION_SCHEMA,
 };
@@ -134,12 +137,33 @@ pub struct ProbeRequest {
     pub attempt_deadline: lillux::time::MonotonicDeadline,
 }
 
+/// The launch shape the challenge declares. This verifier builds exactly one
+/// shape, https with a sandbox allow-list; any other declared shape is refused
+/// by name and nothing is built in its place.
+pub fn require_buildable_shape(challenge: &ConsumerRuntimeChallenge) -> Result<()> {
+    let RemoteVerificationPurpose::ConsumerRuntime { launch_shape, .. } =
+        &challenge.intent.purpose
+    else {
+        bail!("challenge is not a consumer runtime challenge");
+    };
+    ensure!(
+        launch_shape.controller_transport == LaunchControllerTransport::Https
+            && matches!(
+                launch_shape.sandbox_network_policy,
+                LaunchSandboxNetworkPolicy::AllowList { .. }
+            ),
+        "this verifier builds only the https allow_list launch shape; the challenge declares {launch_shape:?}"
+    );
+    Ok(())
+}
+
 /// Read the delivered record and members, then execute.
 pub fn run_probe(
     challenge: &ConsumerRuntimeChallenge,
     archive: &Path,
     attempt_deadline: lillux::time::MonotonicDeadline,
 ) -> Result<Vec<u8>> {
+    require_buildable_shape(challenge)?;
     let record = read_record(archive, challenge)?;
     let (member_digests, supervisor, launcher) = read_members(archive, &record)?;
     execute(&ProbeRequest {
@@ -472,4 +496,78 @@ pub fn run(encoded: &str) -> Result<()> {
         .write_all(b"\n", deadline)
         .context("evidence terminator delivery failed; no resend")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_external_execution_contract::restored_runtime_measurement::{
+        ConsumerArchiveBudget, ConsumerRuntimeVerificationCoordinate,
+        ConsumerRuntimeVerifierSelection, RestoredVerifierAttemptIntent,
+    };
+    use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+
+    fn challenge(shape: LaunchShape) -> ConsumerRuntimeChallenge {
+        let hash = "a".repeat(64);
+        let mut intent = RestoredVerifierAttemptIntent {
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
+            operation_id: String::new(),
+            qualification_operation_id: hash.clone(),
+            restored_occurrence_id: "sbx-probe".into(),
+            verifier_artifact_hash: hash.clone(),
+            upload_sha256: hash.clone(),
+            upload_bytes: 1,
+            attempt_deadline_ms: 100,
+            purpose: RemoteVerificationPurpose::ConsumerRuntime {
+                coordinate: ConsumerRuntimeVerificationCoordinate {
+                    schema: 1,
+                    accepted_root_id: "T-root".into(),
+                    accepted_capsule_hash: hash.clone(),
+                    qualification_purpose_digest: hash.clone(),
+                    scenario_id: "guest_wire".into(),
+                    scenario_source_digest: hash.clone(),
+                    subject_digest: hash.clone(),
+                    use_digest: hash.clone(),
+                    prerequisite_measurement_attempt_id: hash.clone(),
+                    prerequisite_measurement_observation_digest: hash.clone(),
+                },
+                nonce_hex: hash.clone(),
+                guest_runtime_manifest_hash: hash.clone(),
+                launch_shape: shape,
+            },
+        };
+        intent.operation_id = intent.derived_operation_id().unwrap();
+        ConsumerRuntimeChallenge {
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
+            intent,
+            selection: ConsumerRuntimeVerifierSelection {
+                scenario_source_digest: hash.clone(),
+                verifier_artifact_hash: hash,
+                archive_budget: ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_https_allow_list_shape_is_built() {
+        let shape = LaunchShape::https_allow_list(["controller.invalid".to_owned()]);
+        require_buildable_shape(&challenge(shape)).unwrap();
+    }
+
+    #[test]
+    fn another_declared_shape_is_refused_by_name_before_anything_is_built() {
+        let relay = challenge(LaunchShape::relay_deny_all());
+        let error = require_buildable_shape(&relay).unwrap_err().to_string();
+        assert!(
+            error.contains("Relay") && error.contains("DenyAll"),
+            "{error}"
+        );
+        // The refusal precedes reading the archive: a missing archive would
+        // otherwise be the error.
+        let missing = Path::new("/nonexistent-guest-wire-archive");
+        let deadline =
+            lillux::time::MonotonicDeadline::after(lillux::time::Duration::from_millis(1000));
+        let error = run_probe(&relay, missing, deadline).unwrap_err().to_string();
+        assert!(error.contains("launch shape") && error.contains("Relay"), "{error}");
+    }
 }
