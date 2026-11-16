@@ -67,6 +67,11 @@ use common::fast_fixture::FastFixture;
 const BUNDLE_NAME: &str = "claude-code";
 const TURN_ITEM: &str = "worker_execution:claude-code/bounded-turn";
 const CONTINUE_ITEM: &str = "worker_execution:claude-code/bounded-turn-continue";
+/// A synthetic test bundle holding one item: the bundle's bounded turn with
+/// an 8 second duration limit, so a long stub turn meets its deadline.
+const SHORT_TURN_BUNDLE: &str = "claude-code-short-turn-fixture";
+const SHORT_TURN_ITEM: &str = "worker_execution:claude-code-short-turn-fixture/bounded-turn";
+const SHORT_TURN_SECONDS: u64 = 8;
 const ENVIRONMENT_REF: &str = "config:claude-code/environments/trusted-lane";
 const CREDENTIAL_PROFILE_ID: &str = "credential:claude-code-follow-e2e";
 
@@ -177,11 +182,16 @@ const GRAPH_REQUIRES: &str = r#"requires:
 
 /// The follow node's action, with the stub goal substituted as flow-style JSON.
 fn follow_action(stub: &Value) -> String {
+    follow_action_of(TURN_ITEM, stub)
+}
+
+/// [`follow_action`] for a named worker execution item.
+fn follow_action_of(item: &str, stub: &Value) -> String {
     format!(
         r#"      node_type: action
       follow: true
       action:
-        item_id: "{TURN_ITEM}"
+        item_id: "{item}"
         ref_bindings:
           environment: "{ENVIRONMENT_REF}"
         params:
@@ -256,16 +266,14 @@ version: "1.0.0"
     write_graph(project, signer, "outcome", &body)
 }
 
-/// Failure-path graph under an `on_error` redirect. The graph's own duration
-/// limit is inherited by the followed child as its aggregate deadline, so a
-/// turn that outlives it ends as a `deadline` outcome.
+/// Failure-path graph under an `on_error` redirect. It follows the short
+/// fixture turn ([`SHORT_TURN_ITEM`]), whose duration limit is the child's
+/// deadline, so a turn that outlives it ends as a `deadline` outcome.
 fn plant_deadline_graph(project: &Path, signer: &SigningKey, stub: &Value) -> Result<()> {
     let body = format!(
         r#"category: test
 version: "1.0.0"
-{GRAPH_REQUIRES}limits:
-  duration_seconds: 8
-config:
+{GRAPH_REQUIRES}config:
   start: turn
   nodes:
     turn:
@@ -288,7 +296,7 @@ config:
         probe:
           route: unreached
 "#,
-        action = follow_action(stub),
+        action = follow_action_of(SHORT_TURN_ITEM, stub),
     );
     write_graph(project, signer, "deadline", &body)
 }
@@ -388,9 +396,12 @@ async fn run_graph(
                 "ref_bindings": {},
                 "project_path": project,
                 "parameters": {},
+                // A followed worker turn keeps its private candidate, so the
+                // graph asks for retained child results.
                 "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_pinned_capture(
                     ryeos_app::execution_policy::ExecutionResponse::Wait,
-                ),
+                )
+                .retain_child_results()?,
             }),
         )
         .await?;
@@ -505,10 +516,57 @@ fn parent_lineage_events(finished: &Finished) -> Result<(Value, Value)> {
     Ok((spawned[0].clone(), settled[0].clone()))
 }
 
+/// Install [`SHORT_TURN_ITEM`]: the claude-code bundle's bounded turn with
+/// its duration limit cut to [`SHORT_TURN_SECONDS`], in a synthetic bundle
+/// signed by the fixture publisher.
+fn plant_short_turn(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    let source = common::workspace_root()
+        .join("bundles")
+        .join(BUNDLE_NAME)
+        .join(".ai/worker-executions/claude-code/bounded-turn.yaml");
+    let body = lillux::signature::strip_signature_lines(&std::fs::read_to_string(&source)?);
+    let mut item: serde_yaml::Value = serde_yaml::from_str(&body)?;
+    item["category"] = serde_yaml::Value::from(SHORT_TURN_BUNDLE);
+    item["limits"]["duration_seconds"] = serde_yaml::Value::from(SHORT_TURN_SECONDS);
+    let bundle_root = state_path.join(".ai/bundles").join(SHORT_TURN_BUNDLE);
+    let path = bundle_root.join(format!(
+        ".ai/worker-executions/{SHORT_TURN_BUNDLE}/bounded-turn.yaml"
+    ));
+    std::fs::create_dir_all(path.parent().context("item path has no parent")?)?;
+    std::fs::write(
+        &path,
+        lillux::signature::sign_content_at(
+            &serde_yaml::to_string(&item)?,
+            &fixture.publisher,
+            "#",
+            None,
+            common::fast_fixture::FAST_FIXTURE_TIME,
+        ),
+    )?;
+    common::fast_fixture::register_fixture_bundle(
+        state_path,
+        SHORT_TURN_BUNDLE,
+        &bundle_root,
+        fixture,
+    )
+}
+
 async fn start_node() -> Result<(DaemonHarness, FastFixture)> {
     DaemonHarness::start_fast_development_with(
         |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             plant_claude_code(state_path, fixture)
+        },
+        |_| {},
+    )
+    .await
+}
+
+/// [`start_node`] plus the short-turn fixture bundle.
+async fn start_node_with_short_turn() -> Result<(DaemonHarness, FastFixture)> {
+    DaemonHarness::start_fast_development_with(
+        |state_path: &Path, _user: &Path, fixture: &FastFixture| {
+            plant_claude_code(state_path, fixture)?;
+            plant_short_turn(state_path, fixture)
         },
         |_| {},
     )
@@ -639,10 +697,10 @@ async fn a_stub_crash_fails_the_node_as_a_worker_failure() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_that_outlives_the_duration_limit_fails_the_node_as_a_deadline() -> Result<()> {
-    let (mut daemon, fixture) = start_node().await?;
+    let (mut daemon, fixture) = start_node_with_short_turn().await?;
     let project = tempfile::tempdir()?;
-    // The graph's 8 second limit is inherited by the child; the stub turn
-    // would run for two minutes.
+    // The short turn's 8 second duration limit is the child's deadline; the
+    // stub turn would run for two minutes.
     let stub = json!({
         "outcome": "completed",
         "duration_ms": 120_000,

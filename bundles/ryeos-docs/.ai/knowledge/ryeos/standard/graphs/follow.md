@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-16T10:06:19Z:a442f39f4ffbfc0ae521302ab744b68a5eccee9ecd62abc078af0e6b9a1dcfe9:kw6ExRS1LzUvzWOQMoXnjdRSLRgwnrc5O042V5EIUd/V9xZiky/DQC0qwLDQEdo0REY9DS+HBM7d0/y+qbS7BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T19:12:10Z:cc9278e6e3a2b4bcfab5920d25a4249024b4cee815f2466a9fb5802a387f075d:brB/7QbRejXtFpyqgSRdlCKigF/YQ4IfGxYdVEBFzom26Bd1xL9rwaA2tA6V9cnBlh/Pc5tFJ171BHskMW4mAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -168,6 +168,15 @@ turn (for a profile that reports text and usage, `result.result.text` and
 `result.result.usage`); it is `null` whenever no turn completed. `cost` is the
 shared runtime cost shape, present when the worker's result reports usage, so a
 graph can subtract it from a budget held in state.
+
+A worker turn that retains its private candidate (`required_terminal_publication:
+retain_result`) needs a parent launched with retained child results. Ordinary
+pinned children inherit a discarding copy-on-write realization, which such a
+worker refuses, so the graph is launched with the retained-child-results
+execution policy (`--retain-child-results` on the CLI,
+`ExecutionPolicy::retain_child_results` in code). Each followed worker child then gets its own private
+copy-on-write generation, retained for the owner and never published to the
+project head.
 
 On success the whole record is the value `assign` and `next` see:
 
