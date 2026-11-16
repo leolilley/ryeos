@@ -8,6 +8,7 @@
 /// Owner token carried by the secure temporaries this adapter publishes.
 const SYNTHETIC_TEMP_PURPOSE: lillux::TempPurpose = lillux::TempPurpose::new("synthetic");
 
+mod lease_lane;
 mod snapshot_lane;
 
 use std::collections::BTreeSet;
@@ -343,6 +344,8 @@ fn run() -> Result<()> {
     match operation.as_str() {
         "inspect" => inspect(&adapter),
         "operate" => operate(&adapter),
+        "admit-lease" => lease_lane::admit(),
+        "await-lease-ready" => lease_lane::await_ready(),
         "produce-snapshot" => snapshot_lane::produce_snapshot(&adapter),
         "produce-snapshot-upload" => snapshot_lane::produce_snapshot_upload(&adapter),
         "produce-snapshot-create" => snapshot_lane::produce_snapshot_create(&adapter),

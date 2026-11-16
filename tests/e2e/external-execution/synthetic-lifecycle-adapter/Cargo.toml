@@ -16,6 +16,7 @@ ryeos-external-execution-contract = { workspace = true }
 ryeos-codex-external-configuration = { path = "../../../../crates/tools/codex-external-configuration" }
 ryeos-codex-runtime-verifier = { path = "../../../../crates/tools/codex-runtime-verifier" }
 ryeos-project-capture = { workspace = true }
+ryeos-remote-lease-core = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
