@@ -214,10 +214,7 @@ fn entry_vm(entry: &Value) -> RyeOsTimelineEntryVm {
                 first_line(headline.or(detail).or(body).unwrap_or("marker")),
                 SUMMARY_MAX,
             ),
-            meta: join_meta(&[
-                if headline.is_some() { detail } else { None },
-                target,
-            ]),
+            meta: join_meta(&[if headline.is_some() { detail } else { None }, target]),
             tone,
             intent: None,
         },
@@ -692,7 +689,11 @@ impl RyeOsCore {
     /// other frame means the durable timeline may have changed: the live
     /// buffer is dropped and the sources that declare the `thread` refresh
     /// hint are refetched — the client never folds frames itself.
-    pub(crate) fn apply_thread_tail(&mut self, thread_id: &str, payload: &Value) -> Vec<RyeOsEffect> {
+    pub(crate) fn apply_thread_tail(
+        &mut self,
+        thread_id: &str,
+        payload: &Value,
+    ) -> Vec<RyeOsEffect> {
         if let Some(text) = live_text(event_payload(payload)) {
             if !text.is_empty() {
                 self.ingest_live_text(thread_id, text);
@@ -774,11 +775,23 @@ mod tests {
                 "exchange",
                 json!("x1"),
             ),
-            with(entry("p", "prose", json!({"body": "answer"})), "exchange", json!("x1")),
-            with(entry("t", "thought", json!({"body": "hmm"})), "exchange", json!("x1")),
+            with(
+                entry("p", "prose", json!({"body": "answer"})),
+                "exchange",
+                json!("x1"),
+            ),
+            with(
+                entry("t", "thought", json!({"body": "hmm"})),
+                "exchange",
+                json!("x1"),
+            ),
             with(
                 with(
-                    entry("a", "activity", json!({"headline": "read", "badge": "42 B"})),
+                    entry(
+                        "a",
+                        "activity",
+                        json!({"headline": "read", "badge": "42 B"}),
+                    ),
                     "state",
                     json!("done"),
                 ),
@@ -803,13 +816,20 @@ mod tests {
         let built = layout(items, 0).entries;
         assert_eq!(
             built[0],
-            RyeOsTimelineEntryVm::Separator { label: "do the thing".into() }
+            RyeOsTimelineEntryVm::Separator {
+                label: "do the thing".into()
+            }
         );
         assert_eq!(
             built[1],
-            RyeOsTimelineEntryVm::Block { text: "answer".into(), tone: RyeOsTone::Neutral }
+            RyeOsTimelineEntryVm::Block {
+                text: "answer".into(),
+                tone: RyeOsTone::Neutral
+            }
         );
-        assert!(matches!(&built[2], RyeOsTimelineEntryVm::Block { text, .. } if text.ends_with("hmm")));
+        assert!(
+            matches!(&built[2], RyeOsTimelineEntryVm::Block { text, .. } if text.ends_with("hmm"))
+        );
         assert_eq!(
             built[3],
             RyeOsTimelineEntryVm::Pair {
@@ -835,7 +855,11 @@ mod tests {
         let failed = with(
             with(
                 with(
-                    entry("o", "outcome", json!({"headline": "boom_code", "reason": "boom"})),
+                    entry(
+                        "o",
+                        "outcome",
+                        json!({"headline": "boom_code", "reason": "boom"}),
+                    ),
                     "state",
                     json!("failed"),
                 ),
@@ -847,7 +871,12 @@ mod tests {
         );
         let built = layout(vec![failed.clone()], 0).entries;
         match &built[0] {
-            RyeOsTimelineEntryVm::Line { primary, meta, tone, intent } => {
+            RyeOsTimelineEntryVm::Line {
+                primary,
+                meta,
+                tone,
+                intent,
+            } => {
                 assert_eq!(primary, "failed — boom");
                 assert_eq!(meta.as_deref(), Some("boom_code"));
                 assert_eq!(*tone, RyeOsTone::Danger);
@@ -859,7 +888,11 @@ mod tests {
             }
             other => panic!("expected a line, got {other:?}"),
         }
-        let done = with(entry("o2", "outcome", json!({"headline": "ok"})), "state", json!("completed"));
+        let done = with(
+            entry("o2", "outcome", json!({"headline": "ok"})),
+            "state",
+            json!("completed"),
+        );
         assert!(matches!(
             &layout(vec![done], 0).entries[0],
             RyeOsTimelineEntryVm::Line { primary, intent: None, .. } if primary == "completed"
@@ -868,7 +901,11 @@ mod tests {
 
     #[test]
     fn a_link_steps_into_its_child_thread() {
-        let link = entry("l", "link", json!({"headline": "study", "target": "T-child"}));
+        let link = entry(
+            "l",
+            "link",
+            json!({"headline": "study", "target": "T-child"}),
+        );
         assert_eq!(
             layout(vec![link], 0).entries[0],
             RyeOsTimelineEntryVm::Line {
@@ -888,8 +925,16 @@ mod tests {
     fn nested_entries_indent_under_their_parent() {
         let items = vec![
             entry("a1", "activity", json!({"headline": "step"})),
-            with(entry("l1", "link", json!({"headline": "child", "target": "T-2"})), "parent", json!("a1")),
-            with(entry("a2", "activity", json!({"headline": "inner"})), "parent", json!("l1")),
+            with(
+                entry("l1", "link", json!({"headline": "child", "target": "T-2"})),
+                "parent",
+                json!("a1"),
+            ),
+            with(
+                entry("a2", "activity", json!({"headline": "inner"})),
+                "parent",
+                json!("l1"),
+            ),
             entry("a3", "activity", json!({"headline": "sibling"})),
         ];
         assert_eq!(layout(items, 0).indents, vec![0, 1, 2, 0]);
@@ -905,9 +950,17 @@ mod tests {
             ]
         });
         let items = vec![
-            with(entry("m", "message", json!({"body": "go"})), "exchange", json!("x1")),
+            with(
+                entry("m", "message", json!({"body": "go"})),
+                "exchange",
+                json!("x1"),
+            ),
             cluster,
-            with(entry("p", "prose", json!({"body": "done"})), "exchange", json!("x1")),
+            with(
+                entry("p", "prose", json!({"body": "done"})),
+                "exchange",
+                json!("x1"),
+            ),
         ];
         let built = layout(items, 0);
         assert_eq!(built.entries.len(), 5);
@@ -942,7 +995,11 @@ mod tests {
     #[test]
     fn a_recap_is_a_summary_line_that_ends_its_exchange() {
         let items = vec![
-            with(entry("m", "message", json!({"body": "go"})), "exchange", json!("x1")),
+            with(
+                entry("m", "message", json!({"body": "go"})),
+                "exchange",
+                json!("x1"),
+            ),
             json!({"item": "recap", "id": "r1", "exchange": "x1", "work": 4, "duration_s": 75}),
             json!({"item": "recap", "id": "r2", "exchange": "x2", "work": 1, "duration_s": null}),
         ];

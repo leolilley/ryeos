@@ -14,7 +14,9 @@ fn candidate(entry: &Entry) -> bool {
     entry.counts_as.is_some()
         && match entry.kind {
             EntryKind::Activity => matches!(entry.state.as_deref(), Some("done" | "stopped")),
-            EntryKind::Link => matches!(entry.state.as_deref(), Some("done" | "stopped" | "unknown")),
+            EntryKind::Link => {
+                matches!(entry.state.as_deref(), Some("done" | "stopped" | "unknown"))
+            }
             _ => false,
         }
 }
@@ -66,7 +68,10 @@ fn headline(members: &[Entry], definition: &Definition) -> String {
     let mut parts = Vec::new();
     for noun in &definition.vocabulary {
         if let Some(n) = counts.remove(noun.key.as_str()) {
-            parts.push(format!("{n} {}", if n == 1 { &noun.one } else { &noun.many }));
+            parts.push(format!(
+                "{n} {}",
+                if n == 1 { &noun.one } else { &noun.many }
+            ));
         }
     }
     parts.extend(counts.into_iter().map(|(key, n)| format!("{n} {key}")));
@@ -105,9 +110,11 @@ fn recap(mut items: Vec<Item>) -> Vec<Item> {
         let members: Vec<usize> = (0..items.len())
             .filter(|&i| exchange(&items[i]) == Some(id.as_str()))
             .collect();
-        let first_work = members
-            .iter()
-            .position(|&i| entries_of(&items[i]).iter().any(|e| e.kind == EntryKind::Activity));
+        let first_work = members.iter().position(|&i| {
+            entries_of(&items[i])
+                .iter()
+                .any(|e| e.kind == EntryKind::Activity)
+        });
         let last_prose = members.iter().rposition(|&i| {
             matches!(&items[i], Item::Entry(e) if matches!(e.kind, EntryKind::Prose | EntryKind::Outcome))
         });
@@ -117,7 +124,10 @@ fn recap(mut items: Vec<Item>) -> Vec<Item> {
         if prose_at < work_at {
             continue;
         }
-        let all: Vec<&Entry> = members.iter().flat_map(|&i| entries_of(&items[i])).collect();
+        let all: Vec<&Entry> = members
+            .iter()
+            .flat_map(|&i| entries_of(&items[i]))
+            .collect();
         let work = all.iter().filter(|e| e.kind == EntryKind::Activity).count();
         let start = all.first().and_then(|e| epoch(&e.ts.0));
         let end = all.last().and_then(|e| epoch(&e.ts.1));

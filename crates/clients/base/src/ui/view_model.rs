@@ -16,7 +16,6 @@ mod execution;
 mod session;
 pub use dialogs::{RyeOsCommandChoice, RyeOsDialogVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm};
 pub use execution::RyeOsTimelineEntryVm;
-#[cfg(test)]
 use execution::{facet_backed_response, focused_timeline_entry};
 pub use session::{RyeOsSessionVm, RyeOsSurfaceChoiceVm};
 

@@ -17,7 +17,8 @@ fn definition() -> Definition {
 }
 
 fn events(name: &str) -> Vec<Value> {
-    let text = std::fs::read_to_string(dir().join("fixtures").join(format!("{name}.json"))).unwrap();
+    let text =
+        std::fs::read_to_string(dir().join("fixtures").join(format!("{name}.json"))).unwrap();
     let doc: Value = serde_json::from_str(&text).unwrap();
     doc["events"].as_array().unwrap().clone()
 }
@@ -79,7 +80,11 @@ fn entry_ids(timeline: &Timeline) -> Vec<(String, String)> {
     for item in &timeline.items {
         match item {
             Item::Entry(e) => ids.push((e.id.clone(), format!("{:?}", e.kind))),
-            Item::Cluster(c) => ids.extend(c.members.iter().map(|e| (e.id.clone(), format!("{:?}", e.kind)))),
+            Item::Cluster(c) => ids.extend(
+                c.members
+                    .iter()
+                    .map(|e| (e.id.clone(), format!("{:?}", e.kind))),
+            ),
             Item::Recap(_) => {}
         }
     }
@@ -115,20 +120,43 @@ fn synthetic(seq: i64, ts: &str, event_type: &str, payload: Value) -> Value {
 #[test]
 fn consecutive_finished_activities_cluster_and_a_failure_breaks_the_run() {
     let def = definition();
-    let mut evs = vec![synthetic(1, "2026-11-16T00:00:00Z", "cognition_in", json!({"content": "go"}))];
+    let mut evs = vec![synthetic(
+        1,
+        "2026-11-16T00:00:00Z",
+        "cognition_in",
+        json!({"content": "go"}),
+    )];
     let mut seq = 2;
-    for (i, truncated) in [None, None, Some("error_envelope"), None, None].into_iter().enumerate() {
+    for (i, truncated) in [None, None, Some("error_envelope"), None, None]
+        .into_iter()
+        .enumerate()
+    {
         let op = format!("{:064x}", i + 1);
-        evs.push(synthetic(seq, "2026-11-16T00:00:01Z", "tool_call_start", json!({"operation_id": op, "tool": "t"})));
+        evs.push(synthetic(
+            seq,
+            "2026-11-16T00:00:01Z",
+            "tool_call_start",
+            json!({"operation_id": op, "tool": "t"}),
+        ));
         seq += 1;
         let mut result = json!({"operation_id": op, "result_size_bytes": 10, "tool": "t"});
         if let Some(r) = truncated {
             result["truncated_reason"] = json!(r);
         }
-        evs.push(synthetic(seq, "2026-11-16T00:00:05Z", "tool_call_result", result));
+        evs.push(synthetic(
+            seq,
+            "2026-11-16T00:00:05Z",
+            "tool_call_result",
+            result,
+        ));
         seq += 1;
     }
-    evs.push(synthetic(seq, "2026-11-16T00:00:09Z", "cognition_out", json!({"content": "done"})));
+    evs.push(synthetic(
+        seq,
+        "2026-11-16T00:00:09Z",
+        "cognition_out",
+        json!({"content": "done"}),
+    ));
     let timeline = fold(&evs, &def).unwrap();
     let kinds: Vec<String> = timeline
         .items
@@ -173,19 +201,60 @@ fn an_adopted_in_chain_child_nests_and_draws_no_outcome() {
     let def = definition();
     let op = format!("{:064x}", 7);
     let evs = vec![
-        ev(1, "2026-11-16T00:00:00Z", "T-1", "cognition_in", json!({"content": "go"})),
-        ev(2, "2026-11-16T00:00:01Z", "T-1", "tool_call_start", json!({"operation_id": op, "tool": "t"})),
-        ev(3, "2026-11-16T00:00:01Z", "T-1", "child_thread_spawned",
-           json!({"child_thread_id": "T-2", "item_id": "service:x", "operation_id": op})),
-        ev(4, "2026-11-16T00:00:02Z", "T-2", "thread_completed", json!({"outcome_code": "success"})),
-        ev(5, "2026-11-16T00:00:03Z", "T-1", "tool_call_result", json!({"operation_id": op, "result_size_bytes": 3})),
-        ev(6, "2026-11-16T00:00:04Z", "T-1", "thread_completed", json!({"outcome_code": "success"})),
+        ev(
+            1,
+            "2026-11-16T00:00:00Z",
+            "T-1",
+            "cognition_in",
+            json!({"content": "go"}),
+        ),
+        ev(
+            2,
+            "2026-11-16T00:00:01Z",
+            "T-1",
+            "tool_call_start",
+            json!({"operation_id": op, "tool": "t"}),
+        ),
+        ev(
+            3,
+            "2026-11-16T00:00:01Z",
+            "T-1",
+            "child_thread_spawned",
+            json!({"child_thread_id": "T-2", "item_id": "service:x", "operation_id": op}),
+        ),
+        ev(
+            4,
+            "2026-11-16T00:00:02Z",
+            "T-2",
+            "thread_completed",
+            json!({"outcome_code": "success"}),
+        ),
+        ev(
+            5,
+            "2026-11-16T00:00:03Z",
+            "T-1",
+            "tool_call_result",
+            json!({"operation_id": op, "result_size_bytes": 3}),
+        ),
+        ev(
+            6,
+            "2026-11-16T00:00:04Z",
+            "T-1",
+            "thread_completed",
+            json!({"outcome_code": "success"}),
+        ),
     ];
     let timeline = fold(&evs, &def).unwrap();
     let link = find(&timeline, "lnk:T-2").expect("link");
     assert_eq!(link.parent.as_deref(), Some(format!("act:{op}").as_str()));
-    assert!(find(&timeline, "out:T-2").is_none(), "child terminal must not draw an outcome");
-    assert!(find(&timeline, "out:T-1").is_some(), "spine terminal draws one");
+    assert!(
+        find(&timeline, "out:T-2").is_none(),
+        "child terminal must not draw an outcome"
+    );
+    assert!(
+        find(&timeline, "out:T-1").is_some(),
+        "spine terminal draws one"
+    );
 }
 
 /// A thread joined to the spine by a continuation edge draws its own outcome.
@@ -193,10 +262,34 @@ fn an_adopted_in_chain_child_nests_and_draws_no_outcome() {
 fn a_continuation_successor_is_on_the_spine() {
     let def = definition();
     let evs = vec![
-        ev(1, "2026-11-16T00:00:00Z", "T-1", "cognition_in", json!({"content": "go"})),
-        ev(2, "2026-11-16T00:00:01Z", "T-1", "thread_continued", json!({"successor_thread_id": "T-2", "reason": "context_window"})),
-        ev(3, "2026-11-16T00:00:02Z", "T-2", "thread_created", json!({"continuation_from": "T-1"})),
-        ev(4, "2026-11-16T00:00:03Z", "T-2", "thread_completed", json!({"outcome_code": "success"})),
+        ev(
+            1,
+            "2026-11-16T00:00:00Z",
+            "T-1",
+            "cognition_in",
+            json!({"content": "go"}),
+        ),
+        ev(
+            2,
+            "2026-11-16T00:00:01Z",
+            "T-1",
+            "thread_continued",
+            json!({"successor_thread_id": "T-2", "reason": "context_window"}),
+        ),
+        ev(
+            3,
+            "2026-11-16T00:00:02Z",
+            "T-2",
+            "thread_created",
+            json!({"continuation_from": "T-1"}),
+        ),
+        ev(
+            4,
+            "2026-11-16T00:00:03Z",
+            "T-2",
+            "thread_completed",
+            json!({"outcome_code": "success"}),
+        ),
     ];
     let timeline = fold(&evs, &def).unwrap();
     assert!(find(&timeline, "out:T-2").is_some());
@@ -215,13 +308,37 @@ fn retry_is_state_and_the_next_completion_clears_it() {
         }
         p
     };
-    let mut evs = vec![ev(1, "2026-11-16T00:00:00Z", "T-1", "graph_step_started", step.clone())];
-    evs.push(ev(2, "2026-11-16T00:00:01Z", "T-1", "graph_node_retry", with(json!({"attempt": 1, "attempts": 2}))));
+    let mut evs = vec![ev(
+        1,
+        "2026-11-16T00:00:00Z",
+        "T-1",
+        "graph_step_started",
+        step.clone(),
+    )];
+    evs.push(ev(
+        2,
+        "2026-11-16T00:00:01Z",
+        "T-1",
+        "graph_node_retry",
+        with(json!({"attempt": 1, "attempts": 2})),
+    ));
     let mid = fold(&evs, &def).unwrap();
-    assert_eq!(find(&mid, "act:flaky/2").unwrap().state.as_deref(), Some("retrying"));
-    evs.push(ev(3, "2026-11-16T00:00:02Z", "T-1", "graph_step_completed", with(json!({"status": "ok"}))));
+    assert_eq!(
+        find(&mid, "act:flaky/2").unwrap().state.as_deref(),
+        Some("retrying")
+    );
+    evs.push(ev(
+        3,
+        "2026-11-16T00:00:02Z",
+        "T-1",
+        "graph_step_completed",
+        with(json!({"status": "ok"})),
+    ));
     let end = fold(&evs, &def).unwrap();
-    assert_eq!(find(&end, "act:flaky/2").unwrap().state.as_deref(), Some("done"));
+    assert_eq!(
+        find(&end, "act:flaky/2").unwrap().state.as_deref(),
+        Some("done")
+    );
 }
 
 /// Order of the flattened entries is also stable, not only their presence.
@@ -238,7 +355,10 @@ fn entry_order_is_stable_across_every_prefix() {
                 .collect();
             let kept: Vec<&String> = current.iter().filter(|id| previous.contains(id)).collect();
             let before: Vec<&String> = previous.iter().collect();
-            assert_eq!(kept, before, "{name}: order of existing entries changed at prefix {n}");
+            assert_eq!(
+                kept, before,
+                "{name}: order of existing entries changed at prefix {n}"
+            );
             previous = current;
         }
     }
@@ -286,6 +406,9 @@ events:
         })
         .collect();
     assert_eq!(ids, ["pro:4/0", "act:T-1/3/1", "act:T-1/3/2", "pro:4/3"]);
-    assert_eq!(find(&timeline, "act:T-1/3/2").unwrap().slots["headline"], "grep");
+    assert_eq!(
+        find(&timeline, "act:T-1/3/2").unwrap().slots["headline"],
+        "grep"
+    );
     assert_eq!(find(&timeline, "pro:4/3").unwrap().slots["body"], "done");
 }

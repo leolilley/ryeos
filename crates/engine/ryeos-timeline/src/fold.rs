@@ -88,7 +88,8 @@ fn spine(events: &[Value], definition: &Definition) -> HashSet<String> {
             continue;
         };
         for edge in definition.spine.iter().filter(|e| e.event == event_type) {
-            if let (Some(from), Some(to)) = (path::get(event, &edge.from), path::get(event, &edge.to))
+            if let (Some(from), Some(to)) =
+                (path::get(event, &edge.from), path::get(event, &edge.to))
             {
                 let (from, to) = (path::text(from), path::text(to));
                 links.entry(from.clone()).or_default().push(to.clone());

@@ -91,7 +91,11 @@ pub(crate) fn slot(slot: &Slot, event: &Value, cx: &Context) -> Option<String> {
                         format,
                         prefix,
                     } => get(event, path).map(|v| {
-                        format!("{}{}", prefix.as_deref().unwrap_or(""), format_value(v, *format))
+                        format!(
+                            "{}{}",
+                            prefix.as_deref().unwrap_or(""),
+                            format_value(v, *format)
+                        )
                     }),
                 })
                 .collect();

@@ -5430,6 +5430,7 @@ dependencies = [
  "ryeos-scheduler",
  "ryeos-scheduler-service",
  "ryeos-state",
+ "ryeos-timeline",
  "ryeos-ui",
  "ryeos-ui-presentation-contract",
  "serde",

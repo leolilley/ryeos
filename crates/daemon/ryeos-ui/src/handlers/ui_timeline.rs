@@ -40,9 +40,8 @@ struct TimelineRequest {
 /// Top-level item count requested: absent is the default; a number or a
 /// numeric string within `1..=MAX_LIMIT` is accepted.
 fn parse_limit(raw: Option<&Value>) -> Result<usize, HandlerError> {
-    let invalid = || {
-        HandlerError::BadRequest(format!("limit must be an integer from 1 to {MAX_LIMIT}"))
-    };
+    let invalid =
+        || HandlerError::BadRequest(format!("limit must be an integer from 1 to {MAX_LIMIT}"));
     let parsed = match raw {
         None | Some(Value::Null) => return Ok(DEFAULT_LIMIT),
         Some(Value::Number(number)) => number.as_u64().ok_or_else(invalid)?,
@@ -96,7 +95,9 @@ fn load_definition(state: &AppState, definition_ref: &str) -> Result<(Definition
         &layer.path,
         &load_context,
     )
-    .map_err(|error| HandlerError::Internal(format!("timeline definition is untrusted: {error}")))?;
+    .map_err(|error| {
+        HandlerError::Internal(format!("timeline definition is untrusted: {error}"))
+    })?;
     let digest = lillux::sha256_hex(&serde_json::to_vec(&value)?);
     let definition = Definition::from_value(value).map_err(HandlerError::Internal)?;
     Ok((definition, digest))
