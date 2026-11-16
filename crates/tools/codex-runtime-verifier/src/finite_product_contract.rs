@@ -8,22 +8,8 @@ use ryeos_state::objects::thread_snapshot::validate_canonical_hash;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The Worker variants this contract may target: the contained Worker
-/// (captured filesystem authority) and the trusted-lane Worker (node-policy
-/// authority). The consumer policy selected by the guarantees the node holds
-/// names exactly one, and the contract's target must equal it.
-/// Each Worker variant settles its session by a different mechanism, so the
-/// settlement the checker root must reach is per variant.
-const ACCEPTED_WORKERS: [(&str, &str); 2] = [
-    (
-        "worker:codex/external-hosted-authoring",
-        "containment_empty",
-    ),
-    (
-        "worker:codex/external-hosted-authoring-trusted-lane",
-        "trusted_process_group_absent",
-    ),
-];
+/// The one Worker this contract may target.
+const ACCEPTED_WORKER: &str = "worker:codex/external-hosted-authoring";
 
 pub const MAX_FINITE_PRODUCT_CONTRACT_BYTES: usize = 8 * 1024;
 const HELPER_IDS: [&str; 5] = [
@@ -59,7 +45,6 @@ pub(crate) struct CheckerProgramSelector {
     pub(crate) code: CheckerCodeSelection,
     pub(crate) max_header_bytes: u64,
     pub(crate) max_response_bytes: u64,
-    pub(crate) required_root_settlement: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,12 +85,8 @@ impl CheckerProgramSelector {
             "unsupported checker program/wire"
         );
         ensure!(
-            self.max_header_bytes == 2 * 1024 * 1024
-                && self.max_response_bytes == 64 * 1024
-                && ACCEPTED_WORKERS
-                    .iter()
-                    .any(|(_, settlement)| *settlement == self.required_root_settlement),
-            "checker safety bounds or required settlement changed"
+            self.max_header_bytes == 2 * 1024 * 1024 && self.max_response_bytes == 64 * 1024,
+            "checker safety bounds changed"
         );
         for id in [&self.runtime.id, &self.code.id] {
             ensure!(
@@ -250,11 +231,8 @@ impl FiniteProductContract {
             "unsupported finite product audit_edition"
         );
         ensure!(
-            ACCEPTED_WORKERS.iter().any(|(worker, settlement)| {
-                *worker == self.target.worker_ref
-                    && *settlement == self.semantic_checker.required_root_settlement
-            }),
-            "unsupported finite product target.worker_ref or a checker settlement its variant does not reach"
+            self.target.worker_ref == ACCEPTED_WORKER,
+            "unsupported finite product target.worker_ref"
         );
         validate_canonical_hash(
             "finite product target.profile_hash",
@@ -310,7 +288,7 @@ impl FiniteProductContract {
             "unsupported finite product setup.sandbox"
         );
         ensure!(
-            self.setup.permission_profile == "danger-full-access",
+            self.setup.permission_profile == ":danger-full-access",
             "unsupported finite product setup.permission_profile"
         );
         ensure!(
@@ -489,7 +467,7 @@ mod tests {
               "library_path":"lib", "prefix_path":"python"},
             "code":{"id":"checker-code", "manifest_hash":"c".repeat(64),
               "script":{"path":"checker.py", "sha256":"7817bcd3937a3661ec8cff90e0fb7d2569ce04ba05af42047be3d4708837e56b", "bytes":29534}},
-            "max_header_bytes":2097152, "max_response_bytes":65536, "required_root_settlement":"containment_empty"
+            "max_header_bytes":2097152, "max_response_bytes":65536
           },
           "permitted_controller_services": [
             "auth-model-config",
@@ -524,7 +502,7 @@ mod tests {
             "approval_policy": "never",
             "approvals_reviewer": "user",
             "sandbox": "dangerFullAccess",
-            "permission_profile": "danger-full-access",
+            "permission_profile": ":danger-full-access",
             "model_selection": "compare-only-explicit-signed-selection"
           },
           "families": {
@@ -598,7 +576,8 @@ mod tests {
                     changed["semantic_checker"]["runtime"]["loader"]["path"] = json!("../loader");
                 }
                 "weaken" => {
-                    changed["semantic_checker"]["required_root_settlement"] = json!("group_absent");
+                    changed["semantic_checker"]["required_root_settlement"] =
+                        json!("containment_empty");
                 }
                 "unknown" => {
                     changed["semantic_checker"]["trusted"] = json!(true);
@@ -615,21 +594,16 @@ mod tests {
     }
 
     #[test]
-    fn each_variant_worker_is_a_valid_target_and_others_are_refused() {
-        let mut variant = value();
-        variant["target"]["worker_ref"] =
-            json!("worker:codex/external-hosted-authoring-trusted-lane");
-        // The contained settlement does not reach the trusted Worker's variant.
-        assert!(FiniteProductContract::parse(&bytes(&variant)).is_err());
-        variant["semantic_checker"]["required_root_settlement"] =
-            json!("trusted_process_group_absent");
-        assert!(FiniteProductContract::parse(&bytes(&variant)).is_ok());
-        // ... and the trusted settlement does not reach the contained Worker.
-        variant["target"]["worker_ref"] = json!("worker:codex/external-hosted-authoring");
-        assert!(FiniteProductContract::parse(&bytes(&variant)).is_err());
-        let mut other = value();
-        other["target"]["worker_ref"] = json!("worker:codex/hosted-authoring");
-        assert!(FiniteProductContract::parse(&bytes(&other)).is_err());
+    fn only_the_one_worker_is_a_valid_target() {
+        assert!(FiniteProductContract::parse(&bytes(&value())).is_ok());
+        for other_ref in [
+            "worker:codex/external-hosted-authoring-trusted-lane",
+            "worker:codex/hosted-authoring",
+        ] {
+            let mut other = value();
+            other["target"]["worker_ref"] = json!(other_ref);
+            assert!(FiniteProductContract::parse(&bytes(&other)).is_err());
+        }
     }
 
     #[test]

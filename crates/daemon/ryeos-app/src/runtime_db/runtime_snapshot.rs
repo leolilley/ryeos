@@ -608,10 +608,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: "7".repeat(64),
             owner_executable_sha256: "8".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])
-            ),
             upload_sha256: "9".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,

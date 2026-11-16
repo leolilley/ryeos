@@ -1971,9 +1971,15 @@ impl ExternalPlacementBackendRegistry {
         let effective = backend.lifecycle_capabilities();
         if require_activation {
             match runtime_basis {
+                // Current guest mechanism testimony is mandatory for every
+                // ordinary start (admit_current_runtime_qualification), so a
+                // binding always carries a runtime qualification. An adapter
+                // that itself requires independent guest runtime admission
+                // can never run without one; an adapter that does not require
+                // it still starts only on the binding's qualification.
                 RuntimeAdmissionBasis::OrdinarySignedRelationship => ensure!(
                     contract.runtime_qualification.is_some()
-                        == effective
+                        || !effective
                             .contains(&LifecycleCapability::IndependentGuestRuntimeAdmission),
                     "external runtime qualification relationship differs from installed adapter admission"
                 ),
@@ -2393,6 +2399,7 @@ fn admit_current_runtime_qualification(
             state,
             qualification,
             &contract.guest_runtime_manifest_hash,
+            None,
         )?;
         (witness.attestation_hash, witness.evidence, None)
     };
@@ -2408,19 +2415,7 @@ fn admit_current_runtime_qualification(
     };
     retained.validate()?;
     let source = verify_retained_runtime_proof(state, &retained)?;
-    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
-        state,
-        &retained.proof,
-        &source,
-        &contract.backend,
-        &retained.owner_principal,
-    )?;
-    state.external_placement_backends.verify_runtime_probe(
-        contract,
-        &RuntimeProbeInput::from_product(&retained.proof),
-        &source,
-        binding_hash,
-    )?;
+    verify_retained_runtime_probe(state, contract, &retained, &source, binding_hash)?;
     Ok(Some(retained))
 }
 
@@ -2467,18 +2462,44 @@ fn require_retained_session_runtime_qualification(
         return Ok(());
     };
     let source = verify_retained_runtime_proof(state, retained)?;
-    crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
+    verify_retained_runtime_probe(state, &contract, retained, &source, binding.digest())
+}
+
+/// Judge the retained qualification's probe evidence against the exact placement.
+///
+/// A probe that names a snapshot locator was produced on this node's own
+/// provider: its locator is rejoined to this node's journal and the backend's
+/// adapter then interprets it against the exact adapter, settings and binding.
+/// A remote qualification testimony cannot carry a locator, because the
+/// attesting node's journal is not this node's; its evidence was already
+/// authenticated against the accepted testimony, so no adapter interprets it.
+/// Locator-less evidence with no testimony is refused rather than skipped.
+fn verify_retained_runtime_probe(
+    state: &AppState,
+    contract: &ExternalPlacementBackendContract,
+    retained: &ryeos_state::objects::RetainedExternalRuntimeQualification,
+    source: &ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity,
+    binding_hash: &str,
+) -> Result<()> {
+    let locator = crate::operator_runtime_snapshot::verify_probe_snapshot_locator(
         state,
         &retained.proof,
-        &source,
+        source,
         &contract.backend,
         &retained.owner_principal,
     )?;
+    if locator.is_none() {
+        ensure!(
+            retained.remote_testimony.is_some(),
+            "runtime qualification probe names no snapshot locator and carries no remote testimony"
+        );
+        return Ok(());
+    }
     state.external_placement_backends.verify_runtime_probe(
-        &contract,
+        contract,
         &RuntimeProbeInput::from_product(&retained.proof),
-        &source,
-        binding.digest(),
+        source,
+        binding_hash,
     )
 }
 
@@ -2684,7 +2705,6 @@ fn verify_retained_runtime_proof(
     )?;
     let source = ryeos_external_execution::guest_runtime_product::derive_guest_owner_runtime_manifest_identity(
         &manifest,
-        state.identity.verifying_key(),
     )?;
     ensure!(
         source.manifest_hash == *manifest_hash
@@ -11932,9 +11952,9 @@ mod tests {
             ryeos_node_runtime::identity::NodeIdentity::load(&root.join("node-key.pem")).unwrap();
         let verified = ryeos_external_execution::guest_import_authorization::verify_signed_guest_occurrence_assignment(
             signed.clone(),
-            identity.verifying_key(),
         )
         .unwrap();
+        assert_eq!(verified.controller_key(), identity.verifying_key());
         assert_eq!(
             verified.assignment().occurrence_id,
             occurrence.occurrence_id
@@ -12791,8 +12811,6 @@ mod tests {
             ryeos_external_execution::guest_runtime_product::GuestOwnerRuntimeManifestIdentity {
                 manifest_hash: contract.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: "7".repeat(64),
-                controller_root_blob_sha256: "8".repeat(64),
-                controller_public_root: format!("ed25519:{}", "A".repeat(44)),
             };
         assert!(
             ExternalPlacementBackendRegistry::default()
@@ -12847,15 +12865,15 @@ mod tests {
                 remote_testimony: None,
             },
         );
-        assert!(
-            registry
-                .qualify(
-                    &unverified,
-                    &credential,
-                    &AdmittedExternalExecutionProgram::StructuredSession(program()),
-                )
-                .is_err()
-        );
+        // An adapter that does not itself require independent guest runtime
+        // admission still starts on the binding's mandatory qualification.
+        registry
+            .qualify(
+                &unverified,
+                &credential,
+                &AdmittedExternalExecutionProgram::StructuredSession(program()),
+            )
+            .unwrap();
         let qualified_backend = Arc::new(FaultBackend {
             capabilities: BTreeSet::from([
                 LifecycleCapability::SupervisorActivation,
@@ -14557,6 +14575,7 @@ mod tests {
                     owner_public_key_hex: hex::encode(
                         authority.owner_signing_key().verifying_key().to_bytes(),
                     ),
+                    controller_public_key_hex: hex::encode(root.verifying_key().to_bytes()),
                     attachment_deadline_ms: assignment.attachment_deadline_ms,
                 },
                 &root,
@@ -14567,7 +14586,6 @@ mod tests {
             ryeos_external_execution_contract::canonical_json(&signed_assignment).unwrap();
         ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
             &import_bytes,
-            &root.verifying_key(),
             assignment.guest_runtime_manifest_hash,
             &assignment_bytes,
         )
@@ -14582,7 +14600,6 @@ mod tests {
         let verified_delivery =
             ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
                 &delivered,
-                &root.verifying_key(),
                 assignment.guest_runtime_manifest_hash,
                 &assignment_bytes,
             )
@@ -14625,7 +14642,6 @@ mod tests {
         assert!(
             ryeos_external_execution::guest_import_authorization::verify_guest_import_documents(
                 &import_bytes,
-                &root.verifying_key(),
                 &"7".repeat(64),
                 &assignment_bytes,
             )

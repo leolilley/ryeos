@@ -1,7 +1,10 @@
 //! Guest role: runs inside a restored sandbox as the administrator. It
-//! re-measures the subject, produces an equivalent owner product under an
-//! ephemeral key, overlays it in a private mount namespace, serves a loopback
-//! controller, runs the owner exactly as shipped, and reports what happened.
+//! re-measures the subject, reproduces it manifest-identically from its own
+//! owner bytes, binds that copy in a private mount namespace,
+//! serves a loopback controller whose ephemeral key signs the occurrence
+//! assignment, runs the subject's owner exactly as shipped, and reports what
+//! happened. The product carries no controller key, so what runs is
+//! byte-for-byte the subject's owner product.
 
 pub mod controller;
 pub mod fixture;
@@ -144,7 +147,6 @@ pub fn run_probe(
         expected_subject: SubjectEvidence {
             owner_executable_sha256: record.prerequisite.owner_executable_sha256.clone(),
             manifest_hash: record.prerequisite.manifest_hash.clone(),
-            controller_public_root: record.prerequisite.controller_public_root.clone(),
         },
         member_digests,
         supervisor,
@@ -165,7 +167,6 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     let subject = SubjectEvidence {
         owner_executable_sha256: identity.owner_executable_sha256.clone(),
         manifest_hash: identity.manifest_hash.clone(),
-        controller_public_root: identity.controller_public_root.clone(),
     };
     ensure!(
         subject == request.expected_subject,
@@ -184,7 +185,12 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     let root_key = lillux::crypto::generate_signing_key();
     let controller_key = lillux::crypto::generate_signing_key();
 
-    // 3. Same owner bytes and profile, ephemeral controller root.
+    // 3. Reproduce the subject owner product from its own owner bytes and
+    // profile. The product carries no controller key, so the reproduction
+    // must be manifest-identical to the subject; the private mount namespace
+    // needs a distinct tree to overlay at the runtime root (a directory bound
+    // onto itself does not replace it).
+    let profile = subject_runtime.profile().clone();
     let bin = runtime_root
         .open_child_directory(OsStr::new("bin"))?
         .context("subject has no bin directory")?;
@@ -194,24 +200,46 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
     let owner_bytes = owner_file.observation()?.size();
     let owner_authority = owner_file.inherited_descriptor_authority()?;
     let parent = work.create_child(OsStr::new("runtime-parent"), 0o700)?;
-    let profile = subject_runtime.profile().clone();
     let product = produce_guest_owner_runtime(
         &parent,
         OsStr::new("probe-runtime"),
         &owner_authority,
         owner_bytes,
         &subject.owner_executable_sha256,
-        &root_key.verifying_key(),
         &profile,
     )?;
     let probe_identity =
         ObservedGuestRuntime::observe(product.root())?.measure_exact_owner_product()?;
     ensure!(
         probe_identity.owner_executable_sha256 == subject.owner_executable_sha256
-            && probe_identity.controller_public_root
-                == encode_public_root(&root_key.verifying_key())
-            && probe_identity.manifest_hash == product.manifest_hash(),
-        "probe product differs from the subject owner or its ephemeral root"
+            && probe_identity.manifest_hash == subject.manifest_hash
+            && product.manifest_hash() == subject.manifest_hash,
+        "probe product differs from the subject owner product"
+    );
+    // A restored guest holds the product as the snapshot archive installs it
+    // (bin 0755, owner 0755, profile 0644), not in the node-private storage
+    // form the producer writes; the owner reads it as its unprivileged
+    // account after the account transition, so the copy takes the guest form.
+    let copy_bin = product
+        .root()
+        .open_child_directory(OsStr::new("bin"))?
+        .context("probe product has no bin directory")?;
+    copy_bin.set_mode(0o755)?;
+    copy_bin
+        .open_pinned_regular(OsStr::new(OWNER_NAME), false)?
+        .context("probe product has no owner executable")?
+        .set_mode(0o755)?;
+    product
+        .root()
+        .open_pinned_regular(OsStr::new("guest-owner-profile.json"), false)?
+        .context("probe product has no owner profile")?
+        .set_mode(0o644)?;
+    ensure!(
+        ObservedGuestRuntime::observe(product.root())?
+            .measure_exact_owner_product()?
+            .manifest_hash
+            == subject.manifest_hash,
+        "probe product in guest form differs from the subject owner product"
     );
 
     // 4. Loopback controller identity and the controller-side fixtures.
@@ -221,7 +249,7 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         work: &work,
         root_key: &root_key,
         controller_key: &controller_key,
-        probe_manifest_hash: product.manifest_hash(),
+        probe_manifest_hash: &subject.manifest_hash,
         supervisor,
         launcher,
         tls_root_der: pki.root_der(),
@@ -243,10 +271,14 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         inodes: 1 << 16,
     };
     lillux::sandbox::enter_root_overlay_namespace(&[
+        // Writable, as a restored guest's runtime root is: before dropping to
+        // its account the owner grants that account read-only traversal of the
+        // root, which changes the root directory's permissions. The tree is
+        // this probe's private copy, so the subject is never touched.
         lillux::sandbox::RootOverlay::Bind {
             source: product.root(),
             target: Path::new(RUNTIME_ROOT),
-            read_only: true,
+            read_only: false,
         },
         lillux::sandbox::RootOverlay::Tmpfs {
             target: Path::new(ACTIVATION_ROOT),
@@ -330,10 +362,31 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
         Err(_) => bail!("loopback controller thread panicked"),
     }
     let outcome = controller.outcome()?;
-    ensure!(
-        outcome.command_terminated,
-        "the exchange ended before the direct command's terminal acknowledgement"
-    );
+    if !outcome.command_terminated {
+        // Everything here is fixture-local (ephemeral keys, loopback
+        // controller), so the owner's own diagnostics may travel with the
+        // refusal; without them a failed exchange cannot be told apart.
+        let stderr = owner_result.stderr.trim();
+        let start = (stderr.len().saturating_sub(1200)..=stderr.len())
+            .find(|index| stderr.is_char_boundary(*index))
+            .unwrap_or(stderr.len());
+        let tail = &stderr[start..];
+        bail!(
+            "the exchange ended before the direct command's terminal acknowledgement \
+             (frames {}, receipt {}, program {}, launcher spec {}, launcher occurrence {}; \
+             owner exit_code {} timed_out {}; controller dropped connections {:?}; \
+             owner stderr tail: {})",
+            outcome.frame_count,
+            outcome.applied_launch_receipt_digest.is_some(),
+            outcome.candidate_program_digest.is_some(),
+            outcome.launcher_spec_digest.is_some(),
+            outcome.launcher_occurrence_digest.is_some(),
+            owner_result.exit_code,
+            owner_result.timed_out,
+            server.dropped_connections(),
+            tail
+        );
+    }
     let owner_exit = OwnerExit {
         success: owner_result.success && !owner_result.timed_out && owner_result.exit_code == 0,
         detail: format!(
@@ -348,13 +401,14 @@ pub fn execute(request: &ProbeRequest) -> Result<Vec<u8>> {
             owner_result.stderr.trim()
         );
     }
+    let probe_manifest_hash = subject.manifest_hash.clone();
     let evidence = GuestWireEvidence {
         schema: EVIDENCE_SCHEMA.into(),
         challenge_digest: request.challenge_digest.clone(),
         euid,
         subject,
         probe: ProbeEvidence {
-            manifest_hash: product.manifest_hash().to_owned(),
+            manifest_hash: probe_manifest_hash,
             public_key: encode_public_root(&root_key.verifying_key()),
         },
         projection: SchemaDigest {

@@ -23,9 +23,9 @@
 //! activation name is therefore rebound at every use, not taken on the
 //! attester's word.
 //!
-//! Acceptance evidence v4 records that contract. An acceptance recorded under
+//! Acceptance evidence v5 records that contract. An acceptance recorded under
 //! an earlier evidence schema stated a different contract and is refused with
-//! [`RemoteQualificationAcceptanceSuperseded`], never reinterpreted. v4
+//! [`RemoteQualificationAcceptanceSuperseded`], never reinterpreted. v5
 //! acceptances publish their heads in their own namespace, so the same
 //! testimony can be accepted again without contradicting a predecessor head.
 
@@ -34,8 +34,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::qualification::{
-    ProductQualificationEvidence, ProductQualificationPolicySource, ProductQualificationResult,
-    ProductQualificationVerifier, bounded, exact_coordinate, validate_claims,
+    OriginHolding, ProductQualificationEvidence, ProductQualificationPolicySource,
+    ProductQualificationResult, ProductQualificationVerifier, bounded, exact_coordinate,
+    validate_claims,
 };
 use super::qualification_publication::QualificationCoordinate;
 use super::transfer::ProductWitnessSource;
@@ -52,24 +53,27 @@ pub const REMOTE_QUALIFICATION_ACCEPTANCE_CLAIM: &str = "qualification_testimony
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY: &str = "ryeos.remote_qualification_acceptance.v1";
 const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA_PREFIX: &str =
     "ryeos.remote_qualification_acceptance_evidence.v";
-pub const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_VERSION: u32 = 4;
+pub const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_VERSION: u32 = 5;
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_SCHEMA: &str =
-    "ryeos.remote_qualification_acceptance_evidence.v4";
+    "ryeos.remote_qualification_acceptance_evidence.v5";
 pub const REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_SCHEMA: &str =
-    "ryeos.remote_qualification_acceptance_policy.v2";
-/// Head namespace of current (v4) acceptances, keyed by coordinate.
+    "ryeos.remote_qualification_acceptance_policy.v3";
+/// Head namespace of current (v5) acceptances, keyed by coordinate.
 pub const REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACE: &str =
-    "remote-qualification-acceptances-v4";
+    "remote-qualification-acceptances-v5";
 /// Namespaces that held heads of superseded acceptance evidence. Nothing
 /// resolves an acceptance through them; they are read only to name what an
 /// operator must accept again.
-pub const RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES: &[&str] =
-    &["remote-qualification-testimonies"];
+pub const RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES: &[&str] = &[
+    "remote-qualification-testimonies",
+    "remote-qualification-acceptances-v4",
+];
 pub const MAX_REMOTE_QUALIFICATION_TESTIMONY_BODY_BYTES: usize = 128 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_EVIDENCE_BYTES: usize = 256 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_BYTES: usize = 16 * 1024;
 pub const MAX_REMOTE_QUALIFICATION_TRUSTED_ATTESTERS: usize = 16;
 pub const MAX_REMOTE_QUALIFICATION_ACCEPTED_DIGESTS: usize = 32;
+pub const MAX_REMOTE_QUALIFICATION_ACCEPTED_ORIGIN_HOLDINGS: usize = 8;
 pub const MAX_REMOTE_QUALIFICATION_TESTIMONY_AGE_SECONDS: u64 = 31 * 24 * 60 * 60;
 pub const MAX_REMOTE_QUALIFICATION_CLOCK_SKEW_SECONDS: u64 = 60 * 60;
 
@@ -712,6 +716,11 @@ pub struct RemoteQualificationAcceptancePolicy {
     pub allowed_claims: Vec<String>,
     pub accepted_verifier_definition_digests: Vec<String>,
     pub accepted_verifier_artifact_digests: Vec<String>,
+    /// Holdings (protocol, filesystem authority, observed settlement) an
+    /// origin node may have run its qualified processes under. A product
+    /// testimony whose Worker or verifier holding is absent here is refused.
+    /// Required: an absent field fails to decode rather than accepting any.
+    pub accepted_origin_holdings: Vec<OriginHolding>,
     /// Lanes this receiver accepts testimony for. A lane absent here is
     /// refused however well the testimony verifies.
     pub allowed_lanes: Vec<QualificationLane>,
@@ -784,6 +793,19 @@ impl RemoteQualificationAcceptancePolicy {
             "accepted verifier artifact digest",
             &self.accepted_verifier_artifact_digests,
         )?;
+        if self.accepted_origin_holdings.is_empty()
+            || self.accepted_origin_holdings.len()
+                > MAX_REMOTE_QUALIFICATION_ACCEPTED_ORIGIN_HOLDINGS
+            || self
+                .accepted_origin_holdings
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            bail!("accepted origin holdings must be a non-empty bounded sorted unique set");
+        }
+        for holding in &self.accepted_origin_holdings {
+            holding.validate()?;
+        }
         if self.allowed_lanes.is_empty()
             || self.allowed_lanes.windows(2).any(|pair| pair[0] >= pair[1])
         {
@@ -914,6 +936,21 @@ pub fn admit(
         bail!("remote qualification carries a stale verifier identity");
     }
 
+    // 4b. The origin's own holdings are named by policy. This is an audit and
+    //     policy fact about the origin, never compared with this node's own.
+    if body.lane == QualificationLane::Product {
+        let holdings = &evidence.product()?.origin_holdings;
+        let accepted = |holding: &OriginHolding| {
+            policy
+                .accepted_origin_holdings
+                .binary_search(holding)
+                .is_ok()
+        };
+        if !accepted(&holdings.verifier) || holdings.worker.as_ref().is_some_and(|w| !accepted(w)) {
+            bail!("origin holding is not accepted by this site policy");
+        }
+    }
+
     // 5. Age, clock skew and expiry of both the testimony and the
     //    qualification it carries.
     let now_seconds = epoch_seconds("admission time", now)?;
@@ -969,6 +1006,7 @@ fn require_issue_time_within_policy(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::super::qualification::VerifierProcessSettlementAuthority;
     use super::*;
     use serde_json::json;
 
@@ -1076,6 +1114,7 @@ pub(crate) mod tests {
                 evidence.verifier.effective_definition_digest.clone(),
             ],
             accepted_verifier_artifact_digests: vec![artifact_digest],
+            accepted_origin_holdings: vec![evidence.origin_holdings.verifier.clone()],
             allowed_lanes: vec![QualificationLane::Product],
             max_testimony_age_seconds: 30 * 24 * 60 * 60,
             max_clock_skew_seconds: 300,
@@ -1269,6 +1308,74 @@ pub(crate) mod tests {
         let mut not_config = value;
         not_config["qualification_policy_ref"] = json!("tool:fixtures/qualification");
         assert!(RemoteQualificationAcceptancePolicy::from_value(&not_config).is_err());
+    }
+
+    #[test]
+    fn accepted_origin_holdings_are_required_non_empty_sorted_unique_and_bounded() {
+        let f = fixture();
+        let value = serde_json::to_value(&f.policy).unwrap();
+        let mut absent = value.clone();
+        absent
+            .as_object_mut()
+            .unwrap()
+            .remove("accepted_origin_holdings");
+        assert!(RemoteQualificationAcceptancePolicy::from_value(&absent).is_err());
+        let mut empty = f.policy.clone();
+        empty.accepted_origin_holdings.clear();
+        assert!(empty.validate().is_err());
+
+        let holding = |protocol: &str| OriginHolding {
+            execution_protocol: protocol.into(),
+            filesystem_authority: "node_policy".into(),
+            process_settlement_authority: VerifierProcessSettlementAuthority::ScopeEmpty,
+        };
+        let mut sorted = f.policy.clone();
+        sorted.accepted_origin_holdings = vec![
+            holding("protocol:fixtures/a"),
+            holding("protocol:fixtures/b"),
+        ];
+        sorted.validate().unwrap();
+        let mut unsorted = sorted.clone();
+        unsorted.accepted_origin_holdings.reverse();
+        assert!(unsorted.validate().is_err());
+        let mut duplicate = sorted.clone();
+        duplicate.accepted_origin_holdings = vec![
+            holding("protocol:fixtures/a"),
+            holding("protocol:fixtures/a"),
+        ];
+        assert!(duplicate.validate().is_err());
+        let mut too_many = sorted.clone();
+        too_many.accepted_origin_holdings = (0..=MAX_REMOTE_QUALIFICATION_ACCEPTED_ORIGIN_HOLDINGS)
+            .map(|index| holding(&format!("protocol:fixtures/p{index}")))
+            .collect();
+        assert!(too_many.validate().is_err());
+        let mut malformed = sorted;
+        malformed.accepted_origin_holdings[0].filesystem_authority = "Node Policy".into();
+        assert!(malformed.validate().is_err());
+    }
+
+    #[test]
+    fn admission_requires_every_origin_holding_in_the_product_testimony_to_be_accepted() {
+        let f = fixture();
+        admit_default(&f, &f.policy, NOW).unwrap();
+
+        let mut other_protocol = f.policy.clone();
+        other_protocol.accepted_origin_holdings[0].execution_protocol =
+            "protocol:fixtures/elsewhere".into();
+        let error = admit_default(&f, &other_protocol, NOW).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("origin holding is not accepted by this site policy")
+        );
+        let mut other_settlement = f.policy.clone();
+        other_settlement.accepted_origin_holdings[0].process_settlement_authority =
+            VerifierProcessSettlementAuthority::ContainmentEmpty;
+        assert!(admit_default(&f, &other_settlement, NOW).is_err());
+        let mut other_authority = f.policy.clone();
+        other_authority.accepted_origin_holdings[0].filesystem_authority =
+            "captured_execution".into();
+        assert!(admit_default(&f, &other_authority, NOW).is_err());
     }
 
     #[test]
@@ -1504,6 +1611,11 @@ pub(crate) mod tests {
                 evidence.verifier.effective_definition_digest.clone(),
             ],
             accepted_verifier_artifact_digests: vec![artifact_digest],
+            accepted_origin_holdings: vec![OriginHolding {
+                execution_protocol: "protocol:fixtures/qualified".into(),
+                filesystem_authority: "node_policy".into(),
+                process_settlement_authority: VerifierProcessSettlementAuthority::ScopeEmpty,
+            }],
             allowed_lanes: vec![QualificationLane::Content],
             max_testimony_age_seconds: 30 * 24 * 60 * 60,
             max_clock_skew_seconds: 300,
@@ -1667,6 +1779,7 @@ pub(crate) mod tests {
                 "ryeos.remote_qualification_acceptance_evidence.v1",
                 "ryeos.remote_qualification_acceptance_evidence.v2",
                 "ryeos.remote_qualification_acceptance_evidence.v3",
+                "ryeos.remote_qualification_acceptance_evidence.v4",
             ] {
                 let mut old = current.clone();
                 old.schema = predecessor.into();
@@ -1693,7 +1806,7 @@ pub(crate) mod tests {
                 }
             }
             for unknown in [
-                "ryeos.remote_qualification_acceptance_evidence.v5",
+                "ryeos.remote_qualification_acceptance_evidence.v6",
                 "ryeos.remote_qualification_acceptance_evidence.v03",
                 "ryeos.remote_qualification_acceptance_evidence",
                 "other",
@@ -1725,7 +1838,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             REMOTE_QUALIFICATION_ACCEPTANCE_POLICY_SCHEMA,
-            "ryeos.remote_qualification_acceptance_policy.v2"
+            "ryeos.remote_qualification_acceptance_policy.v3"
         );
         assert_eq!(PRODUCT_LANE_ASSERTIONS, ["verifier_realization"]);
         assert_eq!(CONTENT_LANE_ASSERTIONS, ["verifier_realization"]);
@@ -1749,6 +1862,10 @@ pub(crate) mod tests {
                 "origin_policy",
                 "subject_manifest",
             ]
+        );
+        assert!(
+            RETIRED_REMOTE_QUALIFICATION_TESTIMONY_HEAD_NAMESPACES
+                .contains(&"remote-qualification-acceptances-v4")
         );
         // Current heads never share a namespace with a superseded one.
         assert!(

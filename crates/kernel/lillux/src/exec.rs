@@ -13333,6 +13333,20 @@ fn install_no_process_creation_filter() -> std::io::Result<()> {
     const JEQ_K: u16 = 0x15;
     const JSET_K: u16 = 0x45;
     const RET_K: u16 = 0x06;
+    const ALU_AND_K: u16 = 0x54;
+    // Offset of the first syscall argument (low word, little endian) in `struct seccomp_data`.
+    const ARG0_LOW: u32 = 16;
+    // A thread needs all three of these flags; none of the flags below may be present. The kernel already rejects
+    // several combinations (for example CLONE_THREAD with a new PID namespace); the filter does not rely on that.
+    const THREAD_REQUIRED: u32 = (libc::CLONE_THREAD | libc::CLONE_VM | libc::CLONE_SIGHAND) as u32;
+    const THREAD_FORBIDDEN: u32 = (libc::CLONE_PARENT
+        | libc::CLONE_NEWNS
+        | libc::CLONE_NEWCGROUP
+        | libc::CLONE_NEWUTS
+        | libc::CLONE_NEWIPC
+        | libc::CLONE_NEWUSER
+        | libc::CLONE_NEWPID
+        | libc::CLONE_NEWNET) as u32;
     const KILL_PROCESS: u32 = 0x8000_0000;
     const ERRNO: u32 = 0x0005_0000;
     const ALLOW: u32 = 0x7fff_0000;
@@ -13346,16 +13360,28 @@ fn install_no_process_creation_filter() -> std::io::Result<()> {
     }
     // The architecture check also rejects foreign syscall-number tables.
     // x86_64 explicitly refuses the x32 ABI before comparing syscall IDs.
+    // A new PROCESS is refused; a new THREAD of the calling process is not. `clone` is allowed only when its
+    // first argument (the flags) carries CLONE_THREAD: such a task shares the caller's process, so it cannot
+    // outlive it or leave a descendant behind. Every other clone (a fork-like one) is refused. `clone3` keeps
+    // returning ENOSYS because its flags sit behind a pointer the filter cannot read; libc falls back to `clone`.
     #[cfg(target_arch = "x86_64")]
-    const FILTER: [libc::sock_filter; 14] = [
+    const FILTER: [libc::sock_filter; 22] = [
         filter(LD_W_ABS, 0, 0, 4),
         filter(JEQ_K, 1, 0, AUDIT_ARCH),
         filter(RET_K, 0, 0, KILL_PROCESS),
         filter(LD_W_ABS, 0, 0, 0),
         filter(JSET_K, 0, 1, 0x4000_0000),
         filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
-        filter(JEQ_K, 0, 1, libc::SYS_clone as u32),
+        filter(JEQ_K, 0, 9, libc::SYS_clone as u32),
+        filter(LD_W_ABS, 0, 0, ARG0_LOW),
+        filter(ALU_AND_K, 0, 0, THREAD_REQUIRED),
+        filter(JEQ_K, 1, 0, THREAD_REQUIRED),
         filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(LD_W_ABS, 0, 0, ARG0_LOW),
+        filter(ALU_AND_K, 0, 0, THREAD_FORBIDDEN),
+        filter(JEQ_K, 1, 0, 0),
+        filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(RET_K, 0, 0, ALLOW),
         filter(JEQ_K, 0, 1, libc::SYS_clone3 as u32),
         filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
         filter(JEQ_K, 0, 1, libc::SYS_fork as u32),
@@ -13364,13 +13390,21 @@ fn install_no_process_creation_filter() -> std::io::Result<()> {
         filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
     ];
     #[cfg(target_arch = "aarch64")]
-    const FILTER: [libc::sock_filter; 8] = [
+    const FILTER: [libc::sock_filter; 16] = [
         filter(LD_W_ABS, 0, 0, 4),
         filter(JEQ_K, 1, 0, AUDIT_ARCH),
         filter(RET_K, 0, 0, KILL_PROCESS),
         filter(LD_W_ABS, 0, 0, 0),
-        filter(JEQ_K, 0, 1, libc::SYS_clone as u32),
+        filter(JEQ_K, 0, 9, libc::SYS_clone as u32),
+        filter(LD_W_ABS, 0, 0, ARG0_LOW),
+        filter(ALU_AND_K, 0, 0, THREAD_REQUIRED),
+        filter(JEQ_K, 1, 0, THREAD_REQUIRED),
         filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(LD_W_ABS, 0, 0, ARG0_LOW),
+        filter(ALU_AND_K, 0, 0, THREAD_FORBIDDEN),
+        filter(JEQ_K, 1, 0, 0),
+        filter(RET_K, 0, 0, ERRNO | libc::EPERM as u32),
+        filter(RET_K, 0, 0, ALLOW),
         filter(JEQ_K, 0, 1, libc::SYS_clone3 as u32),
         filter(RET_K, 0, 0, ERRNO | libc::ENOSYS as u32),
     ];
@@ -13437,6 +13471,81 @@ mod no_process_creation_tests {
         assert_ne!(denied.exit_code, 41, "{}", denied.stderr);
         let replaced = lib_run(request("exec /bin/true", true));
         assert!(replaced.success, "{}", replaced.stderr);
+    }
+
+    // Raw `clone`/`clone3` through libc `syscall`, so the kernel's own verdict (EINVAL for a combination it rejects)
+    // is distinguishable from the filter's (EPERM / ENOSYS). A process-creating flag set must come back EPERM:
+    // had the filter let it through, the kernel would answer something else or create the process.
+    fn clone_errno_script(call: &str) -> String {
+        format!(
+            "exec /usr/bin/env python3 -c 'import ctypes, sys; libc = ctypes.CDLL(None, use_errno=True); {call}; \
+             sys.exit(ctypes.get_errno())'"
+        )
+    }
+
+    #[test]
+    fn no_process_creation_filter_allows_threads_of_the_process_but_not_new_processes() {
+        // glibc pthread_create (python threads) works under the filter: clone3 answers ENOSYS and libc falls back
+        // to a CLONE_THREAD clone. The same interpreter cannot fork.
+        let threaded = lib_run(request(
+            "exec /usr/bin/env python3 -c 'import threading; t = threading.Thread(target=lambda: None); t.start(); t.join()'",
+            true,
+        ));
+        assert!(threaded.success, "{}", threaded.stderr);
+        let forked = lib_run(request(
+            "exec /usr/bin/env python3 -c 'import os; os.fork()'",
+            true,
+        ));
+        assert!(!forked.success, "{}", forked.stderr);
+    }
+
+    #[test]
+    fn no_process_creation_filter_refuses_every_process_creating_clone_with_eperm() {
+        #[cfg(target_arch = "x86_64")]
+        const SYS_CLONE: i64 = 56;
+        #[cfg(target_arch = "aarch64")]
+        const SYS_CLONE: i64 = 220;
+        let thread = libc::CLONE_THREAD | libc::CLONE_VM | libc::CLONE_SIGHAND;
+        let cases = [
+            ("a fork-like clone", libc::SIGCHLD as i64),
+            (
+                "a thread flag set missing VM and SIGHAND",
+                libc::CLONE_THREAD as i64,
+            ),
+            (
+                "a thread in a new PID namespace",
+                (thread | libc::CLONE_NEWPID) as i64,
+            ),
+            (
+                "a thread in a new user namespace",
+                (thread | libc::CLONE_NEWUSER) as i64,
+            ),
+            (
+                "a thread in a new mount namespace",
+                (thread | libc::CLONE_NEWNS) as i64,
+            ),
+            (
+                "a thread with CLONE_PARENT",
+                (thread | libc::CLONE_PARENT) as i64,
+            ),
+        ];
+        for (what, flags) in cases {
+            let outcome = lib_run(request(
+                &clone_errno_script(&format!("libc.syscall({SYS_CLONE}, {flags}, 0, 0, 0, 0)")),
+                true,
+            ));
+            assert_eq!(outcome.exit_code, libc::EPERM, "{what}: {}", outcome.stderr);
+        }
+    }
+
+    #[test]
+    fn no_process_creation_filter_keeps_clone3_at_enosys() {
+        // glibc falls back to clone only on ENOSYS; EPERM would make every thread creation fail.
+        let outcome = lib_run(request(
+            &clone_errno_script("libc.syscall(435, 0, 0)"),
+            true,
+        ));
+        assert_eq!(outcome.exit_code, libc::ENOSYS, "{}", outcome.stderr);
     }
 
     #[test]

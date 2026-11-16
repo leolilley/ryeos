@@ -415,7 +415,7 @@ pub enum DispatchError {
         PROCESS_CREATION_BUSY_RETRY_AFTER_MS
     )]
     ProcessCreationBusy { detail: String },
-    #[error("internal: {0}")]
+    #[error("internal: {0:#}")]
     Internal(#[from] anyhow::Error),
 }
 

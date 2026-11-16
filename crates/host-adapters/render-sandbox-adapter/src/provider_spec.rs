@@ -24,6 +24,16 @@ pub(crate) use ryeos_remote_lease_core::{
 /// the spec by it.
 pub(crate) const SPEC_EVIDENCE_PROVIDER: &str = "render_sandbox_v1";
 
+/// A remote Codex lease exports its candidate only after the lease is
+/// observed terminated, over the authenticated controller-relayed channel the
+/// controller freezes the candidate from. Attested only where both are
+/// implemented, never named by the signed data.
+pub(crate) const EXPORT_FROZEN_CANDIDATE: &str = "export.frozen_candidate";
+/// The signed spec implements every operation a remote lease on this provider
+/// needs: bound create, bounded lifetime, controller-only network policy,
+/// observed termination, and an authenticated guest Ready.
+pub(crate) const REMOTE_LEASE: &str = "remote_lease:render-sandbox";
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -743,6 +753,21 @@ impl ProviderSpec {
         };
         if channel_implemented && self.one_shot_activation_enabled() {
             guarantees.insert(GUEST_READY_AUTHENTICATED);
+        }
+        if channel_implemented && guarantees.contains(LEASE_TERMINATE_OBSERVED) {
+            guarantees.insert(EXPORT_FROZEN_CANDIDATE);
+        }
+        if [
+            LEASE_CREATE_BOUND,
+            LEASE_LIFETIME_BOUND,
+            LEASE_NETWORK_POLICY,
+            LEASE_TERMINATE_OBSERVED,
+            GUEST_READY_AUTHENTICATED,
+        ]
+        .iter()
+        .all(|guarantee| guarantees.contains(guarantee))
+        {
+            guarantees.insert(REMOTE_LEASE);
         }
         guarantees
     }
@@ -1812,10 +1837,13 @@ mod tests {
                 LEASE_NETWORK_POLICY,
                 LEASE_TERMINATE_OBSERVED,
                 GUEST_READY_AUTHENTICATED,
+                EXPORT_FROZEN_CANDIDATE,
+                REMOTE_LEASE,
             ])
         );
 
         // The pending slot attests no Ready.
+
         let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         value["operations"]["guest_channel"] = serde_json::json!({"kind": "unsupported_pending"});
         let pending =
@@ -1830,6 +1858,10 @@ mod tests {
                 .lease_guarantees()
                 .contains(GUEST_READY_AUTHENTICATED)
         );
+        // Neither the export nor the remote lease is attested without a
+        // channel to freeze the candidate from.
+        assert!(!pending.lease_guarantees().contains(EXPORT_FROZEN_CANDIDATE));
+        assert!(!pending.lease_guarantees().contains(REMOTE_LEASE));
 
         // The relayed transport needs a guest activated one-shot with its
         // per-lease key; without that activation the spec is refused.

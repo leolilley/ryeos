@@ -1,7 +1,7 @@
 //! Operator-owned, one-attempt production of an unqualified provider locator.
 //!
 //! The upload is staged from current CAS authority by the executor. This
-//! owner independently rejoins its manifest and controller root to the current
+//! owner independently rejoins its manifest and owner executable to the current
 //! product witness before claiming the durable contact attempt. A locator is
 //! not an installed-runtime qualification or placement grant.
 
@@ -154,8 +154,7 @@ fn current_captured_product_source(
         &witness.evidence.manifest_hash,
         limits.max_object_bytes,
     )?;
-    let identity =
-        derive_guest_owner_runtime_manifest_identity(&manifest, state.identity.verifying_key())?;
+    let identity = derive_guest_owner_runtime_manifest_identity(&manifest)?;
     ensure!(
         identity.manifest_hash == witness.evidence.manifest_hash
             && witness.attestation_hash == witness_hash,
@@ -916,8 +915,7 @@ fn create_qualification_occurrence_checked(
             current.source.materialization_binding_digest == *materialization_binding_digest
                 && current.identity.manifest_hash == source.intent.guest_runtime_manifest_hash
                 && current.identity.owner_executable_sha256
-                    == source.intent.owner_executable_sha256
-                && current.identity.controller_public_root == source.intent.controller_public_root,
+                    == source.intent.owner_executable_sha256,
             "materialized qualification differs from current exact runtime source"
         );
     }
@@ -926,6 +924,28 @@ fn create_qualification_occurrence_checked(
     state
         .external_placement_backends
         .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
+    // The publish below hashes the payload closure several times, so it runs before the contact deadline is
+    // taken: the deadline then bounds the provider contact, not the node's own escrow work.
+    // Retain the exact generation this occurrence is made under: both signed
+    // bindings and the producer's lifecycle closure. Its termination resolves
+    // through them, so a later recompose or bundle replacement cannot strand
+    // the occurrence. The shared guard keeps the published closure from a
+    // CAS sweep until the journal roots it.
+    let retention_authority = state.state_store.pinned_state_authority()?;
+    let retention_guard = retention_authority.acquire_shared_guard()?;
+    let lifecycle_capture = state
+        .external_placement_backends
+        .lifecycle_escrow_capture(producer)?;
+    let published_lifecycle = crate::external_artifacts::publish_retained_lifecycle_artifacts(
+        &state.state_store,
+        &context.fingerprint,
+        &lifecycle_capture,
+    )?;
+    let generation = RetainedQualificationGeneration {
+        production: producer.retained_generation()?,
+        qualification: qualification.retained_generation()?,
+        lifecycle_root_hash: published_lifecycle.root_hash().to_owned(),
+    };
     let now = lillux::time::timestamp_millis();
     let mut intent = RuntimeSnapshotQualificationIntent {
         schema: RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
@@ -958,26 +978,6 @@ fn create_qualification_occurrence_checked(
         );
     }
     intent.validate_for(&source.intent, &locator)?;
-    // Retain the exact generation this occurrence is made under: both signed
-    // bindings and the producer's lifecycle closure. Its termination resolves
-    // through them, so a later recompose or bundle replacement cannot strand
-    // the occurrence. The shared guard keeps the published closure from a
-    // CAS sweep until the journal roots it.
-    let retention_authority = state.state_store.pinned_state_authority()?;
-    let retention_guard = retention_authority.acquire_shared_guard()?;
-    let lifecycle_capture = state
-        .external_placement_backends
-        .lifecycle_escrow_capture(producer)?;
-    let published_lifecycle = crate::external_artifacts::publish_retained_lifecycle_artifacts(
-        &state.state_store,
-        &context.fingerprint,
-        &lifecycle_capture,
-    )?;
-    let generation = RetainedQualificationGeneration {
-        production: producer.retained_generation()?,
-        qualification: qualification.retained_generation()?,
-        lifecycle_root_hash: published_lifecycle.root_hash().to_owned(),
-    };
     let reserved = state
         .state_store
         .reserve_snapshot_qualification(&intent, &generation)?;
@@ -2484,7 +2484,6 @@ fn verify_probe_restored_verifier_record(
             && snapshot.intent.owner_principal == owner_principal
             && observation.measurement.manifest_hash == source.manifest_hash
             && observation.measurement.owner_executable_sha256 == source.owner_executable_sha256
-            && observation.measurement.controller_public_root == source.controller_public_root
             && lillux::sha256_hex(&ryeos_external_execution_contract::canonical_json(
                 observation
             )?) == observation_hash,
@@ -2573,8 +2572,7 @@ fn validate_probe_snapshot_record(
                     product_witness_hash: proof.evidence.product_witness_hash.clone(),
                 }
             && record.intent.guest_runtime_manifest_hash == source.manifest_hash
-            && record.intent.owner_executable_sha256 == source.owner_executable_sha256
-            && record.intent.controller_public_root == source.controller_public_root,
+            && record.intent.owner_executable_sha256 == source.owner_executable_sha256,
         "runtime probe locator differs from its exact bound product and provider attempt"
     );
     named.validate_for(&record.intent)?;
@@ -2604,7 +2602,6 @@ fn verify_materialized_restoration_journal(
             && snapshot.intent.provider_id == provider_id
             && snapshot.intent.guest_runtime_manifest_hash == identity.manifest_hash
             && snapshot.intent.owner_executable_sha256 == identity.owner_executable_sha256
-            && snapshot.intent.controller_public_root == identity.controller_public_root
             && snapshot.phase == RuntimeSnapshotPhase::Bound
             && snapshot.runner_deadline_exceeded == Some(false)
             && snapshot
@@ -3060,7 +3057,6 @@ fn produce_checked(
         source,
         guest_runtime_manifest_hash: exact_identity.manifest_hash,
         owner_executable_sha256: exact_identity.owner_executable_sha256,
-        controller_public_root: exact_identity.controller_public_root,
         upload_sha256: upload.sha256().to_owned(),
         upload_bytes: upload.bytes(),
         attempt_deadline_ms,
@@ -3423,8 +3419,7 @@ pub fn continue_staged_create(
     ensure!(
         retained.source.materialization_binding_digest == *materialization_binding_digest
             && retained.identity.manifest_hash == parent.intent.guest_runtime_manifest_hash
-            && retained.identity.owner_executable_sha256 == parent.intent.owner_executable_sha256
-            && retained.identity.controller_public_root == parent.intent.controller_public_root,
+            && retained.identity.owner_executable_sha256 == parent.intent.owner_executable_sha256,
         "snapshot continuation changed its retained materialized runtime"
     );
     let binding = state
@@ -3519,7 +3514,6 @@ mod tests {
     }
 
     use super::*;
-    use base64::Engine as _;
     use ryeos_external_execution_contract::restored_runtime_measurement::{
         ConsumerVerifierAdapterObservation, RestoredOwnerMeasurement,
         RestoredVerifierAdapterObservation, RestoredVerifierObservation,
@@ -3567,19 +3561,9 @@ mod tests {
     #[test]
     fn materialized_restoration_requires_exact_complete_journals() {
         let owner = format!("fp:{}", "1".repeat(64));
-        let root = format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(
-                lillux::crypto::SigningKey::from_bytes(&[3; 32])
-                    .verifying_key()
-                    .to_bytes()
-            )
-        );
         let identity = GuestOwnerRuntimeManifestIdentity {
             manifest_hash: "2".repeat(64),
             owner_executable_sha256: "3".repeat(64),
-            controller_root_blob_sha256: "4".repeat(64),
-            controller_public_root: root.clone(),
         };
         let source = RuntimeSnapshotSource::BundleMaterialization {
             materialization_attestation_hash: "5".repeat(64),
@@ -3603,7 +3587,6 @@ mod tests {
             source: source.clone(),
             guest_runtime_manifest_hash: identity.manifest_hash.clone(),
             owner_executable_sha256: identity.owner_executable_sha256.clone(),
-            controller_public_root: root,
             upload_sha256: "d".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: 1_000_000,
@@ -3708,7 +3691,6 @@ mod tests {
                 challenge_digest: challenge.digest().unwrap(),
                 manifest_hash: identity.manifest_hash.clone(),
                 owner_executable_sha256: identity.owner_executable_sha256.clone(),
-                controller_public_root: identity.controller_public_root.clone(),
             },
             contact_deadline_exceeded: false,
         };
@@ -3844,15 +3826,9 @@ mod tests {
             .as_ref()
             .unwrap();
         let owner = proof.evidence.product_coordinate.owner_principal.clone();
-        let root_key = lillux::crypto::SigningKey::from_bytes(&[3u8; 32]).verifying_key();
         let source = GuestOwnerRuntimeManifestIdentity {
             manifest_hash: manifest_hash.clone(),
             owner_executable_sha256: "8".repeat(64),
-            controller_root_blob_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::engine::general_purpose::STANDARD.encode(root_key.to_bytes())
-            ),
         };
         let now = lillux::time::timestamp_millis();
         let mut intent = RuntimeSnapshotIntent {
@@ -3874,7 +3850,6 @@ mod tests {
             },
             guest_runtime_manifest_hash: manifest_hash,
             owner_executable_sha256: source.owner_executable_sha256.clone(),
-            controller_public_root: source.controller_public_root.clone(),
             upload_sha256: "a".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,

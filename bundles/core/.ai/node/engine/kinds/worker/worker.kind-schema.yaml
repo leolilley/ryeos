@@ -1,6 +1,6 @@
-# ryeos:signed:2026-11-04T00:01:30Z:83aa127d1de89ba0a27aca159bf3f97684ba1107c8a04cbc48b6944f367c8f96:Utv7RRBM3NPUZHGb+M6l+azxrtMOFRp7XW2BLXYZpIyUS2zO7SbmbdJtjEN/OS+o5KO8FF7ZzhfnxAg10nl9Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-14T12:59:02Z:024474f9ee6af7d39c46e0a5edec4b11ed7126b9435bfdbf382103c72ef3528e:l2UGBgKFaFk/fG9Tb0zsQcAqp0JFDZIHkZQfu7Auxo4YknzHMWW/KGXJk3bb5uwhtNd6R40WfcIMrPyOGSc1AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/worker"
-version: "1.3.0"
+version: "1.4.0"
 location:
   directory: workers
   excluded_directories: [lib]
@@ -28,6 +28,7 @@ execution:
     kind: subprocess
     protocol:
       from_composed: [execution_protocol]
+      from_composed_set: [execution_protocols]
       allowed:
         - protocol:ryeos/core/persistent_session
         - protocol:ryeos/core/structured_session
@@ -84,12 +85,16 @@ composed_value_contract:
     config: {type: single, prim: mapping}
     external_content: {type: single, prim: sequence}
     external_product_slots: {type: single, prim: sequence}
-    execution_protocol: {type: single, prim: string}
     source: {type: single, prim: mapping}
     supported_target: {type: single, prim: mapping}
   optional:
     description: {type: single, prim: string}
     session_resources: {type: single, prim: mapping}
+    # A worker states its subprocess protocol either as the single
+    # `execution_protocol` or as the `execution_protocols` list of admissible
+    # protocols, never both; the node picks the one whose holding it meets.
+    execution_protocol: {type: single, prim: string}
+    execution_protocols: {type: single, prim: sequence}
     filesystem_authority: {type: single, prim: string}
     resource_authority: {type: single, prim: string}
 runtime:
@@ -104,6 +109,7 @@ runtime:
     - description
     - executor_id
     - execution_protocol
+    - execution_protocols
     - external_content
     - external_product_slots
     - source

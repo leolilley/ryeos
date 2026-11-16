@@ -487,10 +487,11 @@ pub(crate) mod tests {
             verifier_ref: "tool:fixtures/qualify_runtime".into(),
             subject_declaration_id: "runtime".into(),
             allowed_claims: vec!["command_probe".into(), "extension_probe".into()],
-            minimum_verifier_process_settlement: VerifierProcessSettlementAuthority::ScopeEmpty,
+            minimum_verifier_process_settlement: Some(
+                VerifierProcessSettlementAuthority::ScopeEmpty,
+            ),
             verifier_parameters: json!({"scope":"bounded_fixture"}),
             consumer_execution_context: None,
-            requires_guarantees: Vec::new(),
             producer_scenarios: BTreeMap::new(),
         }
     }
@@ -538,6 +539,10 @@ pub(crate) mod tests {
             environment_binding: "environment".into(),
         };
         purpose.policy_source.policy.consumer_execution_context = Some(context.clone());
+        purpose
+            .policy_source
+            .policy
+            .minimum_verifier_process_settlement = None;
         purpose.policy_source.policy.producer_scenarios.insert(
             "direct_codex".into(),
             ProductQualificationProducerScenario {
@@ -765,6 +770,7 @@ pub(crate) mod tests {
             .policy
             .consumer_execution_context
             .clone();
+        policy.policy.minimum_verifier_process_settlement = None;
         policy.policy.allowed_claims = vec![
             "independent_candidate_diagnostic".into(),
             "qualification_worker_command".into(),

@@ -653,10 +653,6 @@ pub(crate) mod tests {
             },
             guest_runtime_manifest_hash: "8".repeat(64),
             owner_executable_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])
-            ),
             upload_sha256: "a".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,
@@ -800,7 +796,6 @@ pub(crate) mod tests {
                 challenge_digest: verifier.owner_challenge().unwrap().digest().unwrap(),
                 manifest_hash: source.guest_runtime_manifest_hash.clone(),
                 owner_executable_sha256: source.owner_executable_sha256.clone(),
-                controller_public_root: source.controller_public_root.clone(),
             },
             contact_deadline_exceeded: false,
         };
@@ -854,10 +849,6 @@ pub(crate) mod tests {
             },
             guest_runtime_manifest_hash: "8".repeat(64),
             owner_executable_sha256: "9".repeat(64),
-            controller_public_root: format!(
-                "ed25519:{}",
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32])
-            ),
             upload_sha256: "a".repeat(64),
             upload_bytes: 1024,
             attempt_deadline_ms: now + 60_000,

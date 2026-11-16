@@ -58,10 +58,9 @@ use super::content_qualification::{
     PreparedContentQualificationSource, load_current_qualified_content, prepare_receiver_source,
 };
 use super::product_qualification::{
-    CurrentVerifierContent, CurrentVerifierContext, load_current_qualification,
-    require_current_consumer_content_for_remote_selection, require_unguarded_resolution,
+    QualificationOrigin, load_current_qualification,
+    require_current_consumer_content_for_selection, require_unguarded_resolution,
     resolve_consumer_definition_in_generation, resolve_current_bundle_qualification_policy,
-    resolve_current_bundle_verifier_identity_against_admitted,
     verify_current_external_runtime_qualification, verify_current_product_qualification_for_export,
     with_state_guard,
 };
@@ -324,6 +323,7 @@ pub fn export_testimony_blocking(
     qualification_hash: &str,
     acceptance_policy_ref: &str,
     now: &str,
+    project_context_resolver: &dyn super::product_qualification::QualificationProjectContextResolver,
 ) -> anyhow::Result<TestimonyExport> {
     require_unguarded_resolution("remote qualification testimony export")?;
     ensure!(
@@ -358,7 +358,12 @@ pub fn export_testimony_blocking(
             context.fingerprint == owner_principal,
             "product qualification testimony export requires the configured operator"
         );
-        verify_current_product_qualification_for_export(state, context, &witness)?
+        verify_current_product_qualification_for_export(
+            state,
+            context,
+            &witness,
+            project_context_resolver,
+        )?
     } else {
         let binding = ExternalRuntimeQualificationBinding {
             attestation_hash: qualification_hash.to_owned(),
@@ -373,6 +378,7 @@ pub fn export_testimony_blocking(
             state,
             &binding,
             &witness.evidence.result.subject_manifest_hash,
+            Some(project_context_resolver),
         )?
     };
     ensure!(
@@ -380,11 +386,7 @@ pub fn export_testimony_blocking(
             && current.evidence == witness.evidence,
         "qualification changed while the origin re-verified it"
     );
-    let expires_at = witness
-        .attestation
-        .expires_at
-        .clone()
-        .context("a qualification without an expiry cannot be testified")?;
+    let expires_at = testimony_expiry(&witness.attestation, now)?;
     let body = RemoteQualificationTestimonyBody::new_product(
         witness.attestation.clone(),
         state.threads.site_id().to_owned(),
@@ -458,7 +460,7 @@ pub fn export_content_testimony_blocking(
             && published.evidence.purpose.owner_fingerprint == owner_principal,
         "published content qualification differs from the requested coordinate or operator"
     );
-    let expires_at = content_testimony_expiry(&published.attestation, now)?;
+    let expires_at = testimony_expiry(&published.attestation, now)?;
     let body = RemoteQualificationTestimonyBody::new_content(
         published.attestation.clone(),
         state.threads.site_id().to_owned(),
@@ -479,7 +481,10 @@ pub fn export_content_testimony_blocking(
     })
 }
 
-fn content_testimony_expiry(qualification: &Attestation, now: &str) -> anyhow::Result<String> {
+/// Testimony expires at the qualification's own expiry or the maximum
+/// testimony age after export, whichever is sooner. A local qualification
+/// carries no expiry of its own; the testimony bound is what limits it.
+fn testimony_expiry(qualification: &Attestation, now: &str) -> anyhow::Result<String> {
     let parse = |label: &str, value: &str| {
         chrono::DateTime::parse_from_rfc3339(value)
             .map(|time| time.with_timezone(&chrono::Utc))
@@ -868,34 +873,15 @@ pub(crate) fn verify_current_remote_selection_testimony(
         consumer_context.validate_relationship_consumer(&relationship.consumer)?;
     }
     relationship.validate_compatible_product_evidence(&product.evidence)?;
-    // The verifier is resolved, never run: the digests the origin recorded
-    // must be what this node's installed signed verifier resolves to.
-    // Resolved without the origin's sealed launch capsule, which this node
-    // never holds: the verifier Tool is resolved from the installed signed
-    // bundle by ref and parameters alone, as a content qualification does.
-    let current_verifier = resolve_current_bundle_verifier_identity_against_admitted(
-        state,
-        authority,
-        context,
-        &origin_policy.policy.verifier_ref,
-        &origin_policy.policy.verifier_parameters,
-        CurrentVerifierContext {
-            content: CurrentVerifierContent::Root(None),
-            logical_project_root: None,
-            binding_subject_authority: None,
-            sealed_request: None,
-            project_context_resolver: None,
-            pinned_admission: None,
-        },
-        None,
-    )?;
-    ensure!(
-        current_verifier.artifact_identity == evidence.verifier.artifact_identity
-            && current_verifier.effective_definition_digest
-                == evidence.verifier.effective_definition_digest,
-        "remote product testimony names a verifier this node does not resolve"
-    );
-    require_current_consumer_content_for_remote_selection(
+    // The verifier ran on the origin, never here. Which verifier this node
+    // trusts is the operator's signed acceptance policy: `admit` above requires
+    // the evidence's verifier definition and artifact digests to be listed in
+    // it, and `require_origin_policy` pins the verifier ref and parameters
+    // through the byte-identical signed qualification policy. Re-deriving the
+    // origin's artifact identity here is not possible: it binds the origin's
+    // own product selections and pinned project snapshot, which a controller
+    // never holds.
+    require_current_consumer_content_for_selection(
         state,
         authority,
         limits,
@@ -903,6 +889,7 @@ pub(crate) fn verify_current_remote_selection_testimony(
         relationship,
         evidence,
         &product.evidence.manifest_hash,
+        QualificationOrigin::Remote,
     )?;
     // The acceptance and its product must still be the same after the
     // unguarded resolution above.
@@ -1826,15 +1813,15 @@ mod tests {
     }
 
     #[test]
-    fn a_content_testimony_expires_with_the_qualification_or_the_maximum_age() {
+    fn a_testimony_expires_with_the_qualification_or_the_maximum_age() {
         let fixture = fixture();
         let mut unbounded = fixture.testimony.clone();
         unbounded.expires_at = None;
-        let expiry = content_testimony_expiry(&unbounded, "2026-10-21T00:00:00Z").unwrap();
+        let expiry = testimony_expiry(&unbounded, "2026-10-21T00:00:00Z").unwrap();
         assert_eq!(expiry, "2026-11-21T00:00:00Z");
         let mut sooner = fixture.testimony;
         sooner.expires_at = Some("2026-10-25T00:00:00Z".into());
-        let expiry = content_testimony_expiry(&sooner, "2026-10-21T00:00:00Z").unwrap();
+        let expiry = testimony_expiry(&sooner, "2026-10-21T00:00:00Z").unwrap();
         assert_eq!(expiry, "2026-10-25T00:00:00Z");
     }
 

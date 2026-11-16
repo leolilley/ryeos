@@ -280,6 +280,13 @@ fn write_acceptance_policy(bundle_root: &Path, release: &Release, origin: &Origi
             "allowed_claims": allowed,
             "accepted_verifier_definition_digests": [origin.verifier_definition_digest],
             "accepted_verifier_artifact_digests": [origin.verifier_artifact_digest],
+            // The content lane carries no origin holding; the policy still
+            // names the finite set it would accept for a product testimony.
+            "accepted_origin_holdings": [{
+                "execution_protocol": "protocol:ryeos/core/contained_structured_session",
+                "filesystem_authority": "captured_execution",
+                "process_settlement_authority": "containment_empty",
+            }],
             "allowed_lanes": ["content"],
             "max_testimony_age_seconds": 86400,
             "max_clock_skew_seconds": 300,

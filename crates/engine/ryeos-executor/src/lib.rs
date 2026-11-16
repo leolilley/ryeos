@@ -239,8 +239,11 @@ pub mod test_support {
             worker_execution_ref,
             Some("worker_execution"),
         )?;
-        let applicability =
-            crate::dispatch::launch_contract_applicability(worker_execution_ref, &context)?;
+        let applicability = crate::dispatch::launch_contract_applicability(
+            worker_execution_ref,
+            &context,
+            state.isolation.as_ref(),
+        )?;
         let ref_bindings = environment
             .map(|(reference, _)| {
                 BTreeMap::from([("environment".to_owned(), reference.to_owned())])

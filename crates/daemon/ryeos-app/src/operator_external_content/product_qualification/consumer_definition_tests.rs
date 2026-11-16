@@ -36,7 +36,6 @@ product_qualification_policy:
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
-  minimum_verifier_process_settlement: scope_empty
   verifier_parameters: {}
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring
@@ -401,7 +400,6 @@ product_qualification_policy:
   verifier_ref: tool:fixtures/qualify_runtime
   subject_declaration_id: guest-runtime
   allowed_claims: [runtime_qualified]
-  minimum_verifier_process_settlement: scope_empty
   verifier_parameters: {}
   consumer_execution_context:
     worker_ref: worker:codex/external-hosted-authoring

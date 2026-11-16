@@ -47,6 +47,19 @@ pub fn retained_session_protocol(
     engine: &ryeos_engine::engine::Engine,
     capsule: &AdmittedPersistentSessionCapsule,
 ) -> Result<ryeos_engine::protocols::descriptor::PersistentSessionProtocol> {
+    let descriptor = retained_session_descriptor(engine, capsule)?;
+    Ok(validate_persistent_session_protocol(&descriptor)
+        .map_err(|error| anyhow!(error))?
+        .clone())
+}
+
+/// The retained signed protocol descriptor of an admitted session capsule,
+/// verified against the capsule's recorded identity. Recovery reads the
+/// protocol the capsule pinned at admission and never selects one again.
+pub fn retained_session_descriptor(
+    engine: &ryeos_engine::engine::Engine,
+    capsule: &AdmittedPersistentSessionCapsule,
+) -> Result<ryeos_engine::protocols::ProtocolDescriptor> {
     let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
         protocol_ref,
         protocol_content_hash,
@@ -89,7 +102,7 @@ pub fn retained_session_protocol(
     {
         bail!("persistent-session plan widens its retained protocol ceilings");
     }
-    Ok(session.clone())
+    Ok(descriptor)
 }
 
 fn verify_and_decode_retained_protocol_document(

@@ -2670,7 +2670,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 135: `runtime_snapshot_qualification_authority` retains the signed
 // generation and lifecycle closure each qualification occurrence was created
 // under; an epoch-134 store lacks the table and refuses.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 135;
+// Epoch 136: `external_qualification_worker_process` retains the protocol the
+// node selected for the Q Worker and its holding's filesystem authority; an
+// epoch-135 store lacks the columns and refuses.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 136;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -4678,6 +4681,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "provider_configuration_json",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "selected_protocol_ref",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "selected_filesystem_authority",
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,

@@ -705,6 +705,10 @@ pub struct CapacityPolicyAmendmentReport {
     /// Digest of the canonical JSON of the policy now in force.
     pub policy_digest: String,
     pub already_applied: bool,
+    /// The dead incarnation whose debit was settled before the amendment,
+    /// exactly as the next start would have settled it; absent when none was
+    /// owed.
+    pub settled_incarnation: Option<String>,
 }
 
 /// One line of the bounded policy-amendment evidence log.
@@ -797,7 +801,9 @@ pub enum CapacityPolicyAmendmentCheck {
     /// The policy is already the one in force; there is nothing to amend.
     AlreadyApplied,
     /// The account admits the amendment: no incarnation debit is
-    /// outstanding and its current image fits the new policy.
+    /// outstanding, or only a provably dead incarnation's (which the
+    /// amendment settles first, as a start would), and its image fits the
+    /// new policy.
     Needed,
 }
 
@@ -893,13 +899,19 @@ fn require_policy_amendment_log(state: &PinnedDirectory) -> Result<()> {
 }
 
 /// Refuse, before any write, an amendment the account cannot take: one with
-/// an incarnation debit outstanding, or whose current image does not fit the
-/// new policy. Returns where the account stands for the signed document.
+/// a live or unproved incarnation debit outstanding, or whose current image
+/// does not fit the new policy. Returns where the account stands for the
+/// signed document, or `None` when the account first owes the cold
+/// settlement a start would perform: a dead incarnation's debit (a host that
+/// kills the daemon instead of stopping it always leaves one, and a new
+/// binary cannot start under the old generation to settle it) or an image a
+/// published redo has not reached. The settled image, recovery charge
+/// included, must fit the new policy as well.
 fn admit_policy_amendment(
     places: &AmendmentPlaces,
     prior: &NativeCapacityAccountBinding,
     policy: &NodeNativeCapacityPolicy,
-) -> Result<AccountPosition> {
+) -> Result<Option<AccountPosition>> {
     let issuance = prior.issuance_digest()?;
     ensure!(
         places.directory.identity()? == prior.account_directory_identity,
@@ -913,7 +925,6 @@ fn admit_policy_amendment(
         issuance,
         &prior.policy,
     )?;
-    let position = owner.require_no_outstanding_debit(&prior.policy)?;
     // Every later start validates the account's current image under the
     // generation's policy, so the image must already fit the new one.
     let mut fit = StoppedCapacityAccount::open(
@@ -924,11 +935,19 @@ fn admit_policy_amendment(
         issuance,
         policy,
     )?;
+    if owner.owes_cold_settlement(&prior.policy)? {
+        fit.owes_cold_settlement(policy).context(
+            "the capacity account, once its dead incarnation is settled, does not fit the new \
+             policy; open a fresh epoch with `ryeos node capacity reissue` first, then apply the policy",
+        )?;
+        return Ok(None);
+    }
+    let position = owner.require_no_outstanding_debit(&prior.policy)?;
     fit.require_no_outstanding_debit(policy).context(
         "the capacity account's current image does not fit the new policy; open a fresh epoch \
          with `ryeos node capacity reissue` first, then apply the policy",
     )?;
-    Ok(position)
+    Ok(Some(position))
 }
 
 /// [`amend_capacity_policy`] below the app-root plumbing: `prior` is the
@@ -985,10 +1004,27 @@ pub(super) fn amend_policy_at(
             prior_binding_digest: None,
             policy_digest,
             already_applied: true,
+            settled_incarnation: None,
         });
     }
-    let position = admit_policy_amendment(&places, prior, policy)?;
     let issuance = prior.issuance_digest()?;
+    // A dead incarnation's debit is settled first, exactly as the next start
+    // would; the document then names the settled anchor. A run interrupted
+    // anywhere in the settlement converges on rerun.
+    let settled_incarnation = match admit_policy_amendment(&places, prior, policy)? {
+        Some(_) => None,
+        None => StoppedCapacityAccount::open(
+            places.directory.try_clone()?,
+            prior.account_identity,
+            places.onboarding.try_clone()?,
+            places.state.try_clone()?,
+            issuance,
+            &prior.policy,
+        )?
+        .settle_cold(&prior.policy)?,
+    };
+    let position = admit_policy_amendment(&places, prior, policy)?
+        .context("the capacity account still owes a settlement after its cold settlement")?;
     let prior_binding_digest = prior.binding_digest()?;
     let body = ReanchorBody {
         schema: REANCHOR_SCHEMA.to_owned(),
@@ -1029,6 +1065,7 @@ pub(super) fn amend_policy_at(
         prior_binding_digest: Some(prior_binding_digest),
         policy_digest,
         already_applied: false,
+        settled_incarnation,
     })
 }
 

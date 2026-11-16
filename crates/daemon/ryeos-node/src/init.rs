@@ -4427,6 +4427,110 @@ mod tests {
         assert_eq!(bound_capacity_policy(&state), as_capacity_policy(&issued));
     }
 
+    /// A node whose operator applied a capacity body the profile does not
+    /// carry, so a reset replacement amends the issuance, with an
+    /// incarnation debit left outstanding by `process`, as a start that
+    /// never released (a host that kills the daemon) leaves it.
+    fn node_owing_a_debit(
+        state: &Path,
+        lock: &ryeos_node_runtime::state_lock::StateLock,
+        process: &lillux::process_control::ExactProcessIdentity,
+    ) -> serde_json::Value {
+        let issued = installed_native_capacity(state);
+        let operator_body = operator_capacity_body(&issued);
+        operator_applies_native_capacity(state, lock, operator_body.clone());
+        let in_force = crate::native_capacity::load_existing_capacity_binding(
+            state,
+            &ryeos_node_runtime::identity::node_identity_fingerprint(state).unwrap(),
+            &as_capacity_policy(&operator_body),
+        )
+        .expect("the binding in force");
+        crate::native_capacity::leave_outstanding_debit(state, &in_force, process).unwrap();
+        issued
+    }
+
+    #[test]
+    fn a_replacement_over_a_live_incarnation_debit_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        let live = lillux::process_control::capture_current_process_identity().unwrap();
+        node_owing_a_debit(&state, &lock, &live);
+        let before = verify_init_completion(&state).unwrap().unwrap();
+
+        let error = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+        )
+        .expect_err("a live incarnation's debit refuses the amendment");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("refused before any change"), "{rendered}");
+        assert!(rendered.contains("remains live or unproved"), "{rendered}");
+        let after = verify_init_completion(&state).unwrap().unwrap();
+        assert_eq!(
+            after.policy_generation_digest,
+            before.policy_generation_digest
+        );
+    }
+
+    #[test]
+    fn a_replacement_settles_a_dead_incarnation_before_amending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        run_init(&make_opts(&state, &user)).expect("initial generation");
+        let lock = ryeos_node_runtime::state_lock::StateLock::acquire(
+            &ryeos_node_runtime::state_lock::default_lock_path(&state),
+        )
+        .unwrap();
+        // A process this test owned and reaped: its death is the kernel's.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("read x")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let dead =
+            lillux::process_control::capture_exact_process_identity(child.id(), None).unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(dead.has_ended().unwrap());
+        let issued = node_owing_a_debit(&state, &lock, &dead);
+
+        let report = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+        )
+        .expect("the replacement settles the dead incarnation and amends");
+        let amendment = report.capacity_amendment.expect("the amendment");
+        assert!(!amendment.already_applied);
+        assert_eq!(
+            amendment.settled_incarnation.as_deref(),
+            Some(dead.incarnation_digest().unwrap().as_str())
+        );
+        assert_eq!(bound_capacity_policy(&state), as_capacity_policy(&issued));
+
+        invalidate_init_completion(&state).unwrap();
+        let rerun = run_init_under_lock(
+            &capacity_replacement(&state, &["native_capacity"]),
+            &lock,
+            None,
+        )
+        .expect("rerun converges");
+        let again = rerun.capacity_amendment.expect("the rerun names it");
+        assert!(again.already_applied);
+        assert_eq!(again.settled_incarnation, None);
+    }
+
     #[test]
     fn explicit_policy_cut_reconciles_the_profiles_exact_bundle_inventory() {
         let tmp = tempfile::tempdir().unwrap();

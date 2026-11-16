@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-03T00:21:38Z:c3f5d95118e61fffe164334d48acab89f02f621b910a5ded049997846bd1200c:otNlEe1l3r/zfdfDaVD/FwncvwYJhVXBSx7/nVfgXOB3j2tpynYPiZldkA5HbN0+BBXrqEsimxJj7MJf5+PLAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-11T23:13:09Z:535d751a5c736549821fd004602923b6f205f9ffcfa86e86db499e40387c4306:lowVI84pWmbf49droSRyfWTPD+vBtb/IgA4LrNk2Nl1Jq5qyxmf6+H33Z6QnV1imL7GgmXZ7x5Ccr8bCbD3oBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex/guest-runtime
 version: "1.0.0"
 description: Produce a credential-free guest occurrence owner from this bundle's signed executable
@@ -25,7 +25,5 @@ config:
   timeout_secs: 300
 config_schema:
   type: object
-  properties:
-    controller_public_key: {type: string}
-  required: [controller_public_key]
+  properties: {}
   additionalProperties: false

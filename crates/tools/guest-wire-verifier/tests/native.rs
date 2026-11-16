@@ -34,7 +34,6 @@ fn main() {
     let subject = SubjectEvidence {
         owner_executable_sha256: identity.owner_executable_sha256,
         manifest_hash: identity.manifest_hash,
-        controller_public_root: identity.controller_public_root,
     };
     let member_digests = BTreeMap::from([
         (

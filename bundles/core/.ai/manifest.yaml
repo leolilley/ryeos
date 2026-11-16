@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-13T01:44:23Z:80d6bbf48b4df126d3f2ba464aca6072b4d3c5bad32c42c0845023cf8f6654b9:L4P48j/YWGERs3jO0WrNfwPZx4nBkEo712bE3G7Hcfye4VDfPk8y0Pic57w2+FrVW8gsvzjpm5AH2hZ9WgWuCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-13T12:53:22Z:c82e65e56af297b662ad76d80d7aedab1127ca5fd7c7513e7614248b90d5d54e:imc5n9PC5Wx88IqVrX97BB3SuqS7Zoy4MHtRUsOXMcMrG9CkkDKT3+jUMfIjg/3MJb3rdx5mukV0NTecAp1yDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -21,6 +21,8 @@ runtime_authority:
   - log
   - show
   - create
+owns_namespaces:
+- ryeos/core
 isolation_backends:
 - id: linux-lillux
   protocol: ryeos.isolation-adapter/v15

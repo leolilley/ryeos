@@ -39,7 +39,7 @@ class GuestWireProbeSourceTests(unittest.TestCase):
         self.assertEqual(tool["external_product_slots"], [{
             "id": "subject",
             "relationship_ref": "config:codex/guest-owner-runtime-products",
-            "relationship": "owner_to_guest_wire_verifier",
+            "relationship": "owner_to_guest_wire_verifier_subject",
             "kind": "tree",
             "mount_root": "execution_runtime",
             "mount": "guest-owner-runtime",
@@ -93,22 +93,23 @@ class GuestWireProbeSourceTests(unittest.TestCase):
     def test_relationship_names_the_graph_slot_bounds_and_claim(self):
         products = load(CODEX / "config/codex/guest-owner-runtime-products.yaml")
         relationships = products["product_relationships"]["relationships"]
-        self.assertEqual([r["name"] for r in relationships], ["owner_to_guest_wire_verifier"])
-        relationship = relationships[0]
+        self.assertEqual([r["name"] for r in relationships],
+                         ["owner_to_guest_wire_verifier_subject", "owner_to_guest_wire_verifier"])
+        # The verifier's slot inspects an unqualified owner through its own edge;
+        # the evidence-gated edge differs from it only in its qualification.
+        subject, relationship = relationships
+        self.assertEqual({k: v for k, v in subject.items() if k not in ("name", "qualification")},
+                         {k: v for k, v in relationship.items() if k not in ("name", "qualification")})
+        self.assertEqual(subject["qualification"], {"policy_ref": None, "required_claims": []})
         self.assertEqual(relationship["producer"]["canonical_ref"],
-                         "graph:codex/guest-owner-runtime-production-for-controller")
+                         "graph:codex/guest-owner-runtime-production")
         self.assertEqual(relationship["producer"]["recipe_binding"], "product_recipe")
         self.assertEqual(relationship["producer"]["product_name"], "runtime")
-        self.assertEqual(set(relationship["producer"]["parameters"]), {"controller_public_key"})
-        self.assertRegex(relationship["producer"]["parameters"]["controller_public_key"],
-                         r"^ed25519:[A-Za-z0-9+/]{43}=$")
-        # The shipped file carries the RFC 8032 placeholder and says it must be
-        # replaced per controller before signing; the verifier refuses it.
-        self.assertEqual(relationship["producer"]["parameters"]["controller_public_key"],
-                         "ed25519:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=")
+        # The product names no controller: one manifest serves every
+        # controller, whose key travels in the signed occurrence assignment.
+        self.assertEqual(relationship["producer"]["parameters"], {})
         text = (CODEX / "config/codex/guest-owner-runtime-products.yaml").read_text()
-        self.assertIn("replaced per hosted", text)
-        self.assertIn("controller before signing", text)
+        self.assertNotIn("controller_public_key", text)
         self.assertEqual(relationship["consumer"], {
             "canonical_ref": "tool:codex/qualification/guest-wire-verifier",
             "declaration_id": "subject",

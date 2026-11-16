@@ -267,7 +267,8 @@ impl NodeCapabilityReport {
                 .pid_namespace,
         );
         // What a workload may declare it needs of this node's isolation and
-        // node policy; qualification variants are selected against these names.
+        // node policy; a protocol's required guarantees are matched against
+        // these names when the node selects the one it launches under.
         inputs.isolation.add_policy_guarantees(
             inputs.isolation.mode == ryeos_engine::isolation::IsolationMode::Enforce,
             &ryeos_engine::isolation::GuaranteeHost {

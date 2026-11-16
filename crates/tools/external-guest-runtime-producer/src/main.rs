@@ -1,15 +1,14 @@
 //! Produce a retained, credential-free guest-owner runtime from one exact
 //! RyeOS realization. The signed Tool pins the owner binary and supplies only
-//! the node's public root and an authored profile; this command never reads
-//! an installed Bundle pathname or qualifies a provider snapshot.
+//! an authored profile. The product names no controller: the placing
+//! controller's key travels in its signed occurrence assignment. This command
+//! never reads an installed Bundle pathname or qualifies a provider snapshot.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use lillux::crypto::VerifyingKey;
 use ryeos_external_execution::guest_import_authorization::GuestOwnerRuntimeProfile;
 use ryeos_external_execution::guest_runtime_product::produce_guest_owner_runtime;
 
@@ -21,15 +20,11 @@ const MAX_OWNER_BYTES: u64 = 256 * 1024 * 1024;
 
 struct Arguments {
     project_path: OsString,
-    controller_root: VerifyingKey,
     profile: GuestOwnerRuntimeProfile,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-struct ProducerInput {
-    controller_public_key: String,
-}
+/// The producer takes no parameters; its input is exactly the empty object.
+const PRODUCER_INPUT: &[u8] = b"{}";
 
 fn parse_arguments(args: impl IntoIterator<Item = OsString>, input: &[u8]) -> Result<Arguments> {
     let mut args = args.into_iter();
@@ -38,28 +33,9 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>, input: &[u8]) -> Re
         "producer requires --project-path"
     );
     let project_path = args.next().context("producer project path is absent")?;
-    ensure!(input.len() <= 512, "producer input exceeds bound");
-    let request: ProducerInput = serde_json::from_slice(input)?;
     ensure!(
-        lillux::canonical_json(&serde_json::to_value(&request)?)?.as_bytes() == input,
-        "producer input is noncanonical"
-    );
-    let public_key = request.controller_public_key.as_str();
-    let encoded = public_key
-        .strip_prefix("ed25519:")
-        .context("producer controller root is not an Ed25519 public key")?;
-    let root_bytes = STANDARD.decode(encoded)?;
-    ensure!(
-        STANDARD.encode(&root_bytes) == encoded,
-        "producer controller root is not canonical base64"
-    );
-    let root_bytes: [u8; 32] = root_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("producer controller root changed length"))?;
-    let controller_root = VerifyingKey::from_bytes(&root_bytes)?;
-    ensure!(
-        !controller_root.is_weak(),
-        "producer controller root is weak"
+        input == PRODUCER_INPUT,
+        "producer input must be the empty object"
     );
     ensure!(
         args.next().as_deref() == Some(OsStr::new("--profile-json")),
@@ -81,7 +57,6 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>, input: &[u8]) -> Re
     ensure!(args.next().is_none(), "producer received extra arguments");
     Ok(Arguments {
         project_path,
-        controller_root,
         profile,
     })
 }
@@ -89,7 +64,6 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>, input: &[u8]) -> Re
 fn produce(
     source_root: &lillux::PinnedDirectory,
     project_root: &lillux::PinnedDirectory,
-    controller_root: &VerifyingKey,
     profile: &GuestOwnerRuntimeProfile,
 ) -> Result<(String, String)> {
     let source = source_root
@@ -111,7 +85,6 @@ fn produce(
         &authority,
         observation.size(),
         &digest,
-        controller_root,
         profile,
     )?;
     Ok((product.manifest_hash().to_owned(), digest))
@@ -125,12 +98,7 @@ fn main() -> Result<()> {
         .context("admitted realization root is absent")?;
     let project_root = lillux::PinnedDirectory::open(Path::new(&arguments.project_path))?
         .context("admitted private project workspace is absent")?;
-    let (manifest_hash, owner_sha256) = produce(
-        &source_root,
-        &project_root,
-        &arguments.controller_root,
-        &arguments.profile,
-    )?;
+    let (manifest_hash, owner_sha256) = produce(&source_root, &project_root, &arguments.profile)?;
     println!(
         "{}",
         serde_json::json!({
@@ -146,7 +114,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::SigningKey;
     use std::os::unix::fs::PermissionsExt as _;
 
     fn profile() -> GuestOwnerRuntimeProfile {
@@ -176,11 +143,10 @@ mod tests {
         let project = lillux::PinnedDirectory::open(project.path())
             .unwrap()
             .unwrap();
-        let root = SigningKey::from_bytes(&[29; 32]).verifying_key();
-        let (manifest, digest) = produce(&source, &project, &root, &profile()).unwrap();
+        let (manifest, digest) = produce(&source, &project, &profile()).unwrap();
         assert_eq!(digest, lillux::sha256_hex(b"exact-owner-fixture"));
         assert!(lillux::valid_hash(&manifest));
-        assert!(produce(&source, &project, &root, &profile()).is_err());
+        assert!(produce(&source, &project, &profile()).is_err());
         let output = project.path().join(
             "products/external-guest-owner-runtime/bin/ryeos-external-guest-occurrence-owner",
         );
@@ -198,11 +164,7 @@ mod tests {
 
     #[test]
     fn malformed_profile_and_nonexecutable_source_refuse() {
-        let root = SigningKey::from_bytes(&[29; 32]).verifying_key();
-        let input = format!(
-            "{{\"controller_public_key\":\"ed25519:{}\"}}",
-            STANDARD.encode(root.to_bytes())
-        );
+        let input = "{}";
         let arguments = vec![
             "--project-path".into(),
             "/private".into(),
@@ -210,10 +172,6 @@ mod tests {
             "{\"schema\":1}".into(),
         ];
         assert!(parse_arguments(arguments, input.as_bytes()).is_err());
-        let wrong_key = format!(
-            "{{\"controller_public_key\":\"ed25519:{} \"}}",
-            STANDARD.encode(root.to_bytes())
-        );
         let canonical_profile =
             lillux::canonical_json(&serde_json::to_value(profile()).unwrap()).unwrap();
         let valid = vec![
@@ -222,34 +180,17 @@ mod tests {
             "--profile-json".into(),
             canonical_profile.into(),
         ];
-        assert!(parse_arguments(valid.clone(), wrong_key.as_bytes()).is_err());
-        assert!(
-            parse_arguments(
-                valid.clone(),
-                format!(
-                    "{{\"controller_public_key\":\"ed25519:{}\",\"extra\":1}}",
-                    STANDARD.encode(root.to_bytes())
-                )
-                .as_bytes()
-            )
-            .is_err()
-        );
-        assert!(
-            parse_arguments(
-                valid.clone(),
-                format!(
-                    "{{ \"controller_public_key\":\"ed25519:{}\"}}",
-                    STANDARD.encode(root.to_bytes())
-                )
-                .as_bytes()
-            )
-            .is_err()
-        );
+        for refused in [
+            "{ }",
+            "{\"extra\":1}",
+            "{\"controller_public_key\":\"ed25519:AAAA\"}",
+            "",
+        ] {
+            assert!(parse_arguments(valid.clone(), refused.as_bytes()).is_err());
+        }
         assert_eq!(
-            parse_arguments(valid, input.as_bytes())
-                .unwrap()
-                .controller_root,
-            root
+            parse_arguments(valid, input.as_bytes()).unwrap().profile,
+            profile()
         );
         let source = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -263,7 +204,7 @@ mod tests {
         let project = lillux::PinnedDirectory::open(project.path())
             .unwrap()
             .unwrap();
-        assert!(produce(&source, &project, &root, &profile()).is_err());
+        assert!(produce(&source, &project, &profile()).is_err());
         assert!(!project.path().join(PRODUCTS_NAME).exists());
     }
 }

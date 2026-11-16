@@ -164,19 +164,24 @@ fn with_selected_for_original_owner<T>(
             .get("worker")
             .and_then(|schema| schema.execution.as_ref())
             .context("Q Worker request has no signed execution schema")?;
-        let protocol_ref = match execution
+        match execution
             .terminator
             .as_ref()
             .context("Q Worker request has no signed terminator")?
         {
-            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { protocol } => protocol
-                .resolve(&resolution.composed.composed)
-                .map_err(anyhow::Error::msg)?,
+            ryeos_engine::kind_registry::TerminatorDecl::Subprocess { .. } => {}
             ryeos_engine::kind_registry::TerminatorDecl::InProcess { .. } => {
                 bail!("Q Worker request has no subprocess protocol")
             }
-        };
-        let verified_protocol = state.engine.protocols.require(&protocol_ref)?;
+        }
+        let verified_protocol = ryeos_engine::protocols::select_subprocess_protocol(
+            execution,
+            &resolution.composed.composed,
+            &state.engine.protocols,
+            state.isolation.as_ref(),
+        )?
+        .context("Q Worker request has no subprocess protocol")?
+        .protocol;
         let session = ryeos_engine::protocols::validate_persistent_session_protocol(
             &verified_protocol.descriptor,
         )

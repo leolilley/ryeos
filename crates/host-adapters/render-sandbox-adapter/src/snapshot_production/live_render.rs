@@ -20,7 +20,6 @@ use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt as _;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use base64::Engine as _;
 use lillux::network::{NetworkCancellation, NetworkContext};
 use lillux::time::{Duration, MonotonicDeadline, MonotonicTimer};
 use ryeos_external_execution_contract::runtime_snapshot::{
@@ -58,7 +57,7 @@ const RESTORE_LIFETIME_SECONDS: u32 = 900;
 /// per-socket idle timeout is exercised against a body of this size.
 const OWNER_EXECUTABLE_BYTES: usize = 12 * 1024 * 1024;
 const RUN_COMMAND: &str = "ls -l /ryeos/guest-runtime";
-const RUN_MARKER: &str = "controller-root.hex";
+const RUN_MARKER: &str = "guest-owner-profile.json";
 const RUN_WIRE_BYTES: usize = 64 * 1024;
 const RUN_EVENT_BYTES: usize = 16 * 1024;
 const RUN_EVENTS: u64 = 32;
@@ -313,7 +312,7 @@ fn append_tar_entry(
     Ok(())
 }
 
-/// The adapter's four-entry guest package shape, with an owner executable of
+/// The adapter's three-entry guest package shape, with an owner executable of
 /// the size the real package has. The filler is pseudo-random so no hop on the
 /// path can shrink it.
 fn guest_package_tar() -> Result<Vec<u8>> {
@@ -335,7 +334,6 @@ fn guest_package_tar() -> Result<Vec<u8>> {
         &owner,
         false,
     )?;
-    append_tar_entry(&mut tar, "controller-root.hex", 0o644, &[b'a'; 64], false)?;
     append_tar_entry(&mut tar, "guest-owner-profile.json", 0o644, b"{}\n", false)?;
     tar.resize(tar.len() + 1024, 0);
     Ok(tar)
@@ -382,17 +380,7 @@ fn run_command(contact: &RenderContact<'_>, command: &str) -> Result<String> {
         RESPONSE_BYTES,
     )?;
     ensure!(
-        response.status == 200
-            && response
-                .headers
-                .iter()
-                .filter(|header| header.name.eq_ignore_ascii_case("content-type"))
-                .count()
-                == 1
-            && response.headers.iter().any(|header| {
-                header.name.eq_ignore_ascii_case("content-type")
-                    && header.value() == b"text/event-stream"
-            }),
+        response.status == 200 && crate::has_event_stream_content_type(&response.headers),
         "run did not return an exact event stream (status {})",
         response.status
     );
@@ -595,7 +583,6 @@ fn run_chain(live: &Live, guard: &Guard<'_>) -> Result<()> {
         .open_pinned_regular(OsStr::new("package"), false)?
         .context("package file vanished")?
         .inherited_descriptor_authority()?;
-    let controller_key = lillux::crypto::SigningKey::from_bytes(&[43; 32]).verifying_key();
     let mut intent = RuntimeSnapshotIntent {
         schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
         operation_id: String::new(),
@@ -615,10 +602,6 @@ fn run_chain(live: &Live, guard: &Guard<'_>) -> Result<()> {
         },
         guest_runtime_manifest_hash: "2".repeat(64),
         owner_executable_sha256: "3".repeat(64),
-        controller_public_root: format!(
-            "ed25519:{}",
-            base64::engine::general_purpose::STANDARD.encode(controller_key.to_bytes())
-        ),
         upload_sha256: lillux::sha256_hex(&tar),
         upload_bytes: tar.len() as u64,
         attempt_deadline_ms: lillux::time::timestamp_millis() + 3_600_000,

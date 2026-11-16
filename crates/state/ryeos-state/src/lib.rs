@@ -24,6 +24,7 @@ pub mod ignore;
 pub mod immutable_testimony;
 pub mod large_object_store;
 pub mod locators;
+pub mod node_guarantees;
 pub mod object_closure;
 pub mod objects;
 pub mod operational;

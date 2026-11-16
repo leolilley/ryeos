@@ -32,6 +32,10 @@ pub(crate) enum FailClass {
     RelayResponse,
     RelayInput,
     RelayBody,
+    CancellationInstall,
+    LeaseAdmissionInput,
+    EgressPolicy,
+    ExecutableAuthority,
     Other,
 }
 
@@ -62,6 +66,10 @@ impl FailClass {
             Self::RelayResponse => 23,
             Self::RelayInput => 24,
             Self::RelayBody => 25,
+            Self::CancellationInstall => 26,
+            Self::LeaseAdmissionInput => 27,
+            Self::EgressPolicy => 28,
+            Self::ExecutableAuthority => 29,
         }
     }
 
@@ -91,6 +99,10 @@ impl FailClass {
             Self::RelayResponse => "relay_response",
             Self::RelayInput => "relay_input",
             Self::RelayBody => "relay_body",
+            Self::CancellationInstall => "cancellation_install",
+            Self::LeaseAdmissionInput => "lease_admission_input",
+            Self::EgressPolicy => "egress_policy",
+            Self::ExecutableAuthority => "executable_authority",
         }
     }
 
@@ -107,6 +119,22 @@ impl fmt::Display for FailClass {
 }
 
 impl std::error::Error for FailClass {}
+
+/// The exit code of an error no step classified: one stable code per lifecycle
+/// invocation, so an unclassified failure still says which invocation failed.
+/// Distinct from every class code; 2 is any invocation not listed.
+pub(crate) fn unclassified_exit_code(invocation: Option<&str>) -> i32 {
+    match invocation {
+        Some("operate") => 32,
+        Some("inspect") => 33,
+        Some("admit-lease") => 34,
+        Some("await-lease-ready") => 35,
+        Some("relay-file") => 36,
+        Some("verify-runtime-probe") => 37,
+        Some("list-provider-resources") => 38,
+        _ => 2,
+    }
+}
 
 /// Attach a class to a failing step. An error already classified where it
 /// was created keeps that class.
@@ -166,6 +194,10 @@ mod tests {
             FailClass::RelayResponse,
             FailClass::RelayInput,
             FailClass::RelayBody,
+            FailClass::CancellationInstall,
+            FailClass::LeaseAdmissionInput,
+            FailClass::EgressPolicy,
+            FailClass::ExecutableAuthority,
             FailClass::Other,
         ];
         let mut codes: Vec<i32> = all.iter().map(|class| class.exit_code()).collect();

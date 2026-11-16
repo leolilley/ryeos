@@ -1,7 +1,8 @@
 //! Dedicated, one-shot owner below the existing external Worker workflow.
 //!
 //! A qualified guest snapshot must install this executable and the exact
-//! controller-root/profile tree. Until a lifecycle adapter has qualified that
+//! profile tree; the controller key arrives inside the signed assignment.
+//! Until a lifecycle adapter has qualified that
 //! snapshot and proved this process survives a lost run stream, it must
 //! remain fail-closed.
 //!

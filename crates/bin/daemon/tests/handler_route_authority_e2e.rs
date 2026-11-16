@@ -192,6 +192,7 @@ fn anonymous_route_principal_is_denied_at_build_plan() {
         &ctx.execution_hints,
         None,
         ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+        None,
     );
 
     let _ = fs::remove_dir_all(&project_dir);
@@ -239,6 +240,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             &ctx.execution_hints,
             None,
             ryeos_engine::isolation::IsolationFilesystemAuthorityCeiling::NodePolicy,
+            None,
         )
         .expect("build_plan must succeed under fixed route-handler authority");
 

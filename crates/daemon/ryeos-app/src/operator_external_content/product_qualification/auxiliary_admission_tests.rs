@@ -388,6 +388,7 @@ fn seed_auxiliary_qualification_in_context(
     let protocol = crate::thread_lifecycle::resolve_direct_terminator_protocol(
         &fixture.state.engine,
         &request,
+        &fixture.state.isolation,
     )
     .context("resolve auxiliary direct protocol")?;
     let artifact = prepared.admitted_artifact_identity(&request, protocol)?;
@@ -549,6 +550,15 @@ fn seed_auxiliary_qualification_in_context(
             result_digest: result.digest()?,
         },
         policy_source,
+        origin_holdings: ProductQualificationOriginHoldings {
+            verifier: OriginHolding {
+                execution_protocol: protocol_ref.clone(),
+                filesystem_authority: "node_policy".into(),
+                process_settlement_authority:
+                    VerifierProcessSettlementAuthority::TrustedProcessGroupAbsent,
+            },
+            worker: None,
+        },
         consumer_content: None,
         qualification_worker_transcript_manifest_hash: None,
         verifier_root_selections: root_selections,
@@ -1228,15 +1238,33 @@ fn shared_admission_check_admits_the_published_proof_and_refuses_another_product
     );
     // The export check serves only policies with a consumer context; this
     // policy has none, so the runtime-snapshot route owns it.
-    let error =
-        verify_current_product_qualification_for_export(&fixture.state, &fixture.context, &proof)
-            .unwrap_err();
+    let error = verify_current_product_qualification_for_export(
+        &fixture.state,
+        &fixture.context,
+        &proof,
+        &NoSnapshotResolver,
+    )
+    .unwrap_err();
     assert!(
         error
             .to_string()
             .contains("requires a consumer execution context")
     );
     Ok(())
+}
+
+/// A resolver for checks that refuse before any pinned verifier resolves.
+struct NoSnapshotResolver;
+
+impl QualificationProjectContextResolver for NoSnapshotResolver {
+    fn resolve_read_only_snapshot(
+        &self,
+        _: &str,
+        _: &Path,
+        _: &str,
+    ) -> Result<Box<dyn QualificationProjectContextLease>> {
+        anyhow::bail!("this check resolves no pinned snapshot")
+    }
 }
 
 #[derive(Clone)]

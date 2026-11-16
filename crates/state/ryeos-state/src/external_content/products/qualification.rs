@@ -30,11 +30,11 @@ pub const PRODUCT_QUALIFICATION_POLICY_SCHEMA: &str = "ryeos.product_qualificati
 pub const PRODUCT_QUALIFICATION_CONSUMER_WORKER_REQUEST_SCHEMA: &str =
     "ryeos.qualification_worker_request.v5";
 pub const PRODUCT_QUALIFICATION_RESULT_SCHEMA: &str = "ryeos.product_qualification_result.v1";
-// Current-only cut: an immutable v12 qualification head at the same
-// coordinate cannot be replaced by v14. Reissuance requires a fresh
+// Current-only cut: an immutable v14 qualification head at the same
+// coordinate cannot be replaced by v15. Reissuance requires a fresh
 // coordinate or separately recovered node state; this decoder does not adopt
 // predecessor testimony.
-pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v14";
+pub const PRODUCT_QUALIFICATION_EVIDENCE_SCHEMA: &str = "ryeos.product_qualification_evidence.v15";
 pub const PRODUCT_QUALIFICATION_ATTESTATION_POLICY: &str = "ryeos.product_qualification.v1";
 pub const PRODUCT_QUALIFICATION_CLAIM: &str = "retained_product_qualified";
 pub const MAX_PRODUCT_QUALIFICATION_CLAIMS: usize = 32;
@@ -52,7 +52,7 @@ const MAX_PROBE_VALUE_BYTES: usize = 8 * 1024;
 /// was reaped. A trusted process group is not whole-descendant containment:
 /// a child may create another session. Signed policy must explicitly allow
 /// that weaker controller lane; hard claims require a scoped observation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifierProcessSettlementAuthority {
     ScopeEmpty,
@@ -86,7 +86,12 @@ pub struct ProductQualificationPolicy {
     pub verifier_ref: String,
     pub subject_declaration_id: String,
     pub allowed_claims: Vec<String>,
-    pub minimum_verifier_process_settlement: VerifierProcessSettlementAuthority,
+    /// Weakest settlement a direct verifier may record. Required exactly when
+    /// the policy has no consumer context; a consumer policy takes its
+    /// settlement requirement from the holding of the protocol the node
+    /// selects for the verifier, so it names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_verifier_process_settlement: Option<VerifierProcessSettlementAuthority>,
     pub verifier_parameters: Value,
     /// Signed consumer closure that a runtime-qualification verifier must
     /// exercise. This declaration is not itself evidence of admission: the
@@ -94,11 +99,6 @@ pub struct ProductQualificationPolicy {
     /// Bundle generation and join them to the selected relationship.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_execution_context: Option<ProductQualificationConsumerExecutionContext>,
-    /// Guarantees a node must hold, under the capability names it reports,
-    /// to prove or launch this policy. A node lacking one refuses; empty asks
-    /// nothing of the node.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub requires_guarantees: Vec<lillux::process_control::CapabilityRequirement>,
     /// Finite signed alternatives for one selected producer attempt per
     /// admitted verifier root. A ref is only source identity, not permission
     /// to launch: the daemon must resolve and admit a typed Bundle recipe.
@@ -872,8 +872,21 @@ impl ProductQualificationPolicy {
         if let Some(context) = &self.consumer_execution_context {
             context.validate()?;
         }
-        if !self.requires_guarantees.is_empty() {
-            super::qualification_variants::validate_required_guarantees(&self.requires_guarantees)?;
+        match (
+            &self.consumer_execution_context,
+            &self.minimum_verifier_process_settlement,
+        ) {
+            (None, Some(_)) | (Some(_), None) => {}
+            (None, None) => {
+                bail!(
+                    "qualification policy without a consumer context requires a minimum verifier settlement"
+                )
+            }
+            (Some(_), Some(_)) => {
+                bail!(
+                    "qualification policy with a consumer context takes its verifier settlement from the selected protocol and names no minimum"
+                )
+            }
         }
         if self.producer_scenarios.len() > MAX_PRODUCT_QUALIFICATION_PRODUCER_SCENARIOS {
             bail!("qualification producer scenario count exceeds bound");
@@ -1502,6 +1515,47 @@ impl ProductQualificationExecutionProof {
     }
 }
 
+/// The holding an origin node ran one qualified process under: the protocol
+/// it executed through, the filesystem authority that protocol granted, and
+/// the settlement the node observed for the process root. The protocol and
+/// the filesystem authority are named by string because this crate cannot name
+/// the engine's types; only their shape is checked here.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginHolding {
+    pub execution_protocol: String,
+    pub filesystem_authority: String,
+    pub process_settlement_authority: VerifierProcessSettlementAuthority,
+}
+
+impl OriginHolding {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_canonical_unsuffixed_ref("origin holding protocol", &self.execution_protocol)?;
+        validate_name(&self.filesystem_authority).context("origin holding filesystem authority")?;
+        Ok(())
+    }
+}
+
+/// Origin holdings recorded by a product qualification: the verifier always,
+/// and the consumer Worker exactly when the qualification ran one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductQualificationOriginHoldings {
+    pub verifier: OriginHolding,
+    #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
+    pub worker: Option<OriginHolding>,
+}
+
+impl ProductQualificationOriginHoldings {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.verifier.validate()?;
+        if let Some(worker) = &self.worker {
+            worker.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductQualificationEvidence {
@@ -1520,6 +1574,10 @@ pub struct ProductQualificationEvidence {
     #[serde(deserialize_with = "crate::objects::deserialize_required_nullable")]
     pub qualification_worker_transcript_manifest_hash: Option<String>,
     pub verifier: ProductQualificationVerifier,
+    /// The holdings the origin node ran the verifier and, for a consumer
+    /// qualification, the Worker under. An audit and site-policy fact about
+    /// the origin; never compared with the receiving node's own posture.
+    pub origin_holdings: ProductQualificationOriginHoldings,
     pub execution_proof: ProductQualificationExecutionProof,
     /// Exact root product selections retained from the admitted verifier.
     /// `None` is the literal-pin lane. Missing is never an alias for null.
@@ -1593,6 +1651,7 @@ impl ProductQualificationEvidence {
                 bail!("qualification Worker transcript has no admitted consumer content")
             }
         }
+        self.validate_origin_holdings()?;
         validate_qualification_execution(
             &self.policy_source,
             &self.verifier,
@@ -1618,6 +1677,48 @@ impl ProductQualificationEvidence {
             MAX_PRODUCT_QUALIFICATION_EVIDENCE_BYTES,
             "qualification evidence",
         )
+    }
+
+    fn validate_origin_holdings(&self) -> anyhow::Result<()> {
+        self.origin_holdings.validate()?;
+        let verifier = &self.origin_holdings.verifier;
+        let (AdmittedLaunchArtifactIdentity::DirectItemExecutor { protocol_ref, .. }
+        | AdmittedLaunchArtifactIdentity::ManagedRuntime { protocol_ref, .. }) =
+            &self.verifier.artifact_identity;
+        if *protocol_ref != verifier.execution_protocol {
+            bail!(
+                "qualification origin holding protocol differs from the verifier's admitted protocol"
+            );
+        }
+        match self.verifier.process_settlement_authority {
+            Some(settlement) => {
+                if settlement != verifier.process_settlement_authority {
+                    bail!(
+                        "qualification origin holding settlement differs from the verifier's settlement"
+                    );
+                }
+            }
+            // A managed verifier has no direct process of its own: its holding
+            // may claim no more than its direct participants proved.
+            None => {
+                for participant in &self.execution_proof.participants {
+                    if let Some(settlement) = participant.verifier.process_settlement_authority
+                        && !settlement.satisfies(verifier.process_settlement_authority)
+                    {
+                        bail!(
+                            "qualification origin holding settlement is stronger than a participant's"
+                        );
+                    }
+                }
+            }
+        }
+        match (&self.consumer_content, &self.origin_holdings.worker) {
+            (Some(_), Some(_)) | (None, None) => Ok(()),
+            (Some(_), None) => {
+                bail!("qualification consumer evidence has no Worker origin holding")
+            }
+            (None, Some(_)) => bail!("qualification Worker origin holding has no consumer content"),
+        }
     }
 
     fn validate_verifier_root_selections(&self) -> anyhow::Result<()> {
@@ -1697,6 +1798,7 @@ impl ProductQualificationEvidence {
             consumer_content,
             qualification_worker_transcript_manifest_hash,
             verifier,
+            origin_holdings,
             execution_proof,
             verifier_root_selections,
             result,
@@ -1710,6 +1812,7 @@ impl ProductQualificationEvidence {
             consumer_content: &'a Option<ProductQualificationConsumerContentIdentity>,
             qualification_worker_transcript_manifest_hash: &'a Option<String>,
             verifier: &'a ProductQualificationVerifier,
+            origin_holdings: &'a ProductQualificationOriginHoldings,
             execution_proof: &'a ProductQualificationExecutionProof,
             verifier_root_selections: Option<Value>,
             result: &'a ProductQualificationResult,
@@ -1726,6 +1829,7 @@ impl ProductQualificationEvidence {
             consumer_content,
             qualification_worker_transcript_manifest_hash,
             verifier,
+            origin_holdings,
             execution_proof,
             verifier_root_selections,
             result,
@@ -1918,8 +2022,13 @@ pub(crate) fn validate_qualification_execution(
             .iter()
             .map(|participant| &participant.verifier),
     ) {
-        if let Some(actual) = occurrence.process_settlement_authority
-            && !actual.satisfies(policy.policy.minimum_verifier_process_settlement)
+        // A consumer policy names no minimum: its verifier's settlement is
+        // held to the selected protocol's holding, which this crate cannot
+        // read; the app checks it against the retained descriptor.
+        if let (Some(actual), Some(minimum)) = (
+            occurrence.process_settlement_authority,
+            policy.policy.minimum_verifier_process_settlement,
+        ) && !actual.satisfies(minimum)
         {
             bail!("qualification verifier settlement is weaker than signed policy");
         }
