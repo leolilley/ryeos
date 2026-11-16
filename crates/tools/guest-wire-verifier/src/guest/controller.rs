@@ -633,6 +633,7 @@ mod tests {
                         boot_id: "123e4567-e89b-12d3-a456-426614174000".into(),
                         verified_input_digests: inputs.clone(),
                         ready_at_ms: binding.issued_at_ms,
+                        network_inputs: Vec::new(),
                     }),
                 },
             };

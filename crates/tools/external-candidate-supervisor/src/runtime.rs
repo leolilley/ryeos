@@ -41,7 +41,7 @@ use ryeos_state::external_execution::transport::{
     ExternalSupervisorBootstrap, ExternalSupervisorNativeEnvelope,
 };
 use ryeos_state::external_execution::{
-    ExecutionChannelBinding, ExecutionChannelPayload, SignedExecutionFrame,
+    ExecutionChannelBinding, ExecutionChannelPayload, ObservedNetworkInput, SignedExecutionFrame,
 };
 use ryeos_state::operational::{CarriedOwners, RetainTerminal};
 use serde::{Deserialize, Serialize};
@@ -1070,6 +1070,26 @@ fn capture_network_inputs(
     ExternalCapturedNetworkInputs::from_bytes(policy, resolver.bytes(), hosts.bytes())
 }
 
+/// The network inputs this supervisor resolves names with, as it holds them
+/// in its own mount namespace: each policy source with the byte length and
+/// sha256 of the bytes captured from it at boot. Reported in Ready so the
+/// controller compares what was mounted, not what was requested.
+fn observe_network_inputs(
+    policy: &ExternalNetworkInputPolicy,
+    captured: &ExternalCapturedNetworkInputs,
+) -> Result<Vec<ObservedNetworkInput>> {
+    captured.validate_for(policy)?;
+    let observe = |selection: &ExternalNetworkInputSelection, bytes: Vec<u8>| ObservedNetworkInput {
+        source: selection.source.clone(),
+        bytes: bytes.len() as u64,
+        sha256: lillux::sha256_hex(&bytes),
+    };
+    Ok(vec![
+        observe(&policy.resolver, captured.resolver_bytes()?),
+        observe(&policy.hosts, captured.hosts_bytes()?),
+    ])
+}
+
 fn adopt_relay_mailbox(
     bootstrap: &ExternalSupervisorBootstrap,
     capture: &ryeos_state::external_execution::supervisor_journal::ExternalRelayMailboxCapture,
@@ -1268,7 +1288,15 @@ impl LiveExternalCandidateSupervisor {
         let spec_digest = spec.digest()?;
         let signing_key = attached.supervisor_signing_key().clone();
         let lease_ready = ready_boot_inputs
-            .map(ryeos_external_execution::supervisor::LeaseReadyPlan::observe)
+            .map(|verified_inputs| {
+                ryeos_external_execution::supervisor::LeaseReadyPlan::observe(
+                    verified_inputs,
+                    observe_network_inputs(
+                        &attached.bootstrap().controller.http()?.network_inputs,
+                        attached.captured_network_inputs()?,
+                    )?,
+                )
+            })
             .transpose()?;
         let reserved = PreparedGuestJournal::reserve(
             state.guest_directory.try_clone()?,
@@ -1865,6 +1893,49 @@ mod tests {
             max_frames: bootstrap.binding_max_frames().unwrap(),
             max_bytes: bootstrap.channel_max_bytes,
         }
+    }
+
+    #[test]
+    fn ready_network_inputs_are_the_bytes_the_supervisor_captured_from_its_mounts() {
+        let root = tempfile::tempdir().unwrap();
+        let resolver = root.path().join("resolv.conf");
+        let hosts = root.path().join("hosts");
+        std::fs::write(&resolver, b"nameserver 10.1.2.3\n").unwrap();
+        std::fs::write(&hosts, b"127.0.0.1 localhost\n10.9.9.9 controller\n").unwrap();
+        let policy = ExternalNetworkInputPolicy {
+            resolver: ExternalNetworkInputSelection {
+                source: resolver.to_str().unwrap().into(),
+                max_bytes: 4096,
+            },
+            hosts: ExternalNetworkInputSelection {
+                source: hosts.to_str().unwrap().into(),
+                max_bytes: 4096,
+            },
+        };
+        let captured = capture_network_inputs(&policy).unwrap();
+        let observed = observe_network_inputs(&policy, &captured).unwrap();
+        assert_eq!(
+            observed,
+            vec![
+                ObservedNetworkInput {
+                    source: policy.resolver.source.clone(),
+                    bytes: 20,
+                    sha256: lillux::sha256_hex(b"nameserver 10.1.2.3\n"),
+                },
+                ObservedNetworkInput {
+                    source: policy.hosts.source.clone(),
+                    bytes: 40,
+                    sha256: lillux::sha256_hex(b"127.0.0.1 localhost\n10.9.9.9 controller\n"),
+                },
+            ]
+        );
+        // A different mounted file reports a different digest: the report
+        // follows the mount, not the policy.
+        std::fs::write(&resolver, b"nameserver 10.1.2.4\n").unwrap();
+        let again =
+            observe_network_inputs(&policy, &capture_network_inputs(&policy).unwrap()).unwrap();
+        assert_ne!(again[0].sha256, observed[0].sha256);
+        assert_eq!(again[1], observed[1]);
     }
 
     fn state_authority() -> (tempfile::TempDir, ryeos_state::PinnedStateAuthority) {
@@ -3248,6 +3319,7 @@ mod tests {
                     boot_id: boot_id.clone(),
                     verified_input_digests: vec!["1".repeat(64), "2".repeat(64), "3".repeat(64)],
                     ready_at_ms: lillux::time::timestamp_millis(),
+                    network_inputs: Vec::new(),
                 }),
             },
         );
