@@ -126,7 +126,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -137,7 +137,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -171,7 +171,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -665,6 +665,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1019,7 +1025,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1162,7 +1168,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1502,6 +1508,16 @@ dependencies = [
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
+]
+
+[[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
 ]
 
 [[package]]
@@ -2036,12 +2052,25 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "tiff",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -2640,7 +2669,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3187,7 +3216,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.48.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3258,8 +3287,7 @@ checksum = "9c4482d912d7671a7cd2089794f90ef3bb5f5f8c738230fb0fcd50fa020f0ed3"
 [[package]]
 name = "parley_engine"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b74c0d373e462e504ad4436710a39f099e18e848e1ee711f70cd2dcd5a69b290"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 dependencies = [
  "fontique",
  "harfrust",
@@ -4026,7 +4054,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 dependencies = [
  "accesskit",
  "arboard",
@@ -4037,6 +4065,8 @@ dependencies = [
  "console_error_panic_hook",
  "fontique",
  "half",
+ "icu_properties",
+ "icu_segmenter",
  "image",
  "js-sys",
  "libc",
@@ -4048,12 +4078,14 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-media",
+ "objc2-core-text",
  "objc2-core-video",
  "objc2-foundation 0.2.2",
  "objc2-foundation 0.3.2",
  "objc2-io-surface",
  "objc2-metal 0.3.2",
  "parley",
+ "parley_engine",
  "png",
  "pollster",
  "portable-atomic",
@@ -4065,8 +4097,11 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "skrifa",
+ "spellbook",
  "swash",
  "taffy",
+ "tiny-skia-path 0.11.4 (git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e)",
  "unicode-segmentation",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4080,6 +4115,7 @@ dependencies = [
  "wgpu-core",
  "wgpu-hal",
  "windows",
+ "windows-core",
  "windows-sys 0.59.0",
  "winit",
  "x11rb",
@@ -4090,12 +4126,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 dependencies = [
  "wgpu",
 ]
@@ -4103,7 +4139,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/leolilley/rune?rev=69e0539869e329b7c277f5d8a99f1ca7396a39bc#69e0539869e329b7c277f5d8a99f1ca7396a39bc"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 dependencies = [
  "taffy",
 ]
@@ -4172,7 +4208,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5879,7 +5915,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "spellbook"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d204abcbdf8e88729306a8d0ca01a79d8a49969fe1f84696909d6dbc4321c1a"
+dependencies = [
+ "foldhash 0.2.0",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -5917,7 +5963,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6080,7 +6126,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6190,7 +6236,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
- "tiny-skia-path",
+ "tiny-skia-path 0.11.4 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -6198,6 +6244,16 @@ name = "tiny-skia-path"
 version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c9e7fc0c2e86a30b117d0462aa261b72b7a99b7ebd7deb3a14ceda95c5bdc93"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "strict-num",
+]
+
+[[package]]
+name = "tiny-skia-path"
+version = "0.11.4"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 dependencies = [
  "arrayref",
  "bytemuck",
@@ -7076,8 +7132,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "30.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b7fb58561a792bc237628ba0792e332de418fefe145f13b5ed8201e6d52f58"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 dependencies = [
  "android_system_properties",
  "arrayvec",
@@ -7183,7 +7238,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7547,8 +7602,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d"
+source = "git+https://github.com/leolilley/rune?rev=cc754dd38d85f0fe577d900013d4ae5e21dd649e#cc754dd38d85f0fe577d900013d4ae5e21dd649e"
 dependencies = [
  "ahash",
  "android-activity",
