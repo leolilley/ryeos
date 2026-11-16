@@ -4413,34 +4413,62 @@ pub fn start_exclusive_capsule(
             Some(allocation),
         )
     } else {
+        // The trusted process group has no scope to reserve. Record, before
+        // the spawn, the host lifetime the launcher starts under so a later
+        // boot can prove an unattached launcher gone. A lifetime Lillux cannot
+        // capture refuses the launch here.
+        state.state_store.reserve_dedicated_worker_trusted_holding(
+            &identity.placement_thread_id,
+            &identity.worker_instance_id,
+            identity.boot_epoch,
+        )?;
         (None, None, None)
     };
-    let mut held = spawn_capsule_process_held(
-        state,
-        capsule_hash,
-        &capsule,
-        &exact,
-        workspace,
-        workspace_view.as_ref(),
-        external_workspace_authority,
-        &session_protocol,
-        state_root,
-        &runtime_environment,
-        extra_target_channels,
-        identity.accounting_scope.as_ref(),
-        &identity.boot_identity_hash,
-        "dedicated_worker",
-        &identity.worker_instance_id,
-        scope_allocation.as_ref(),
-        scope,
-        Some(&identity.placement_thread_id),
-        None,
-    )
-    .map_err(|error| {
-        // Preparation itself can fail after reservation but before spawn.
-        // Settle the recorded scope even on that path. An empty scope does
-        // not erase an independent unproved wrapper/reap obligation.
-        let error = if let Some((scope_recovery, control_timeout)) = scope_cleanup.as_ref() {
+    let trusted_holding_written = scope_cleanup.is_none() && scope_allocation.is_none();
+    let mut held =
+        spawn_capsule_process_held(
+            state,
+            capsule_hash,
+            &capsule,
+            &exact,
+            workspace,
+            workspace_view.as_ref(),
+            external_workspace_authority,
+            &session_protocol,
+            state_root,
+            &runtime_environment,
+            extra_target_channels,
+            identity.accounting_scope.as_ref(),
+            &identity.boot_identity_hash,
+            "dedicated_worker",
+            &identity.worker_instance_id,
+            scope_allocation.as_ref(),
+            scope,
+            Some(&identity.placement_thread_id),
+            None,
+        )
+        .map_err(|error| {
+            // Preparation itself can fail after reservation but before spawn.
+            // Settle the recorded scope even on that path. An empty scope does
+            // not erase an independent unproved wrapper/reap obligation.
+            let error = if trusted_holding_written
+            && error
+                .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()
+                .is_none()
+        {
+            // The spawn failed before any process existed: the holding it
+            // wrote goes with it. An unproved cleanup keeps the holding.
+            match state.state_store.retire_dedicated_worker_trusted_holding(
+                &identity.placement_thread_id,
+                &identity.worker_instance_id,
+                identity.boot_epoch,
+            ) {
+                Ok(()) => error,
+                Err(retirement) => error
+                    .context(format!("trusted worker holding retirement failed: {retirement:#}"))
+                    .context(ExclusiveWorkerCleanupUnproved),
+            }
+        } else if let Some((scope_recovery, control_timeout)) = scope_cleanup.as_ref() {
             match scope_recovery.terminate_and_wait(*control_timeout) {
                 Ok(()) => error,
                 Err(cleanup) => {
@@ -4454,15 +4482,15 @@ pub fn start_exclusive_capsule(
         } else {
             error
         };
-        if error
-            .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()
-            .is_some()
-        {
-            error.context(ExclusiveWorkerCleanupUnproved)
-        } else {
-            error
-        }
-    })?;
+            if error
+                .downcast_ref::<ryeos_app::persistent_session::PersistentSessionCleanupUnproved>()
+                .is_some()
+            {
+                error.context(ExclusiveWorkerCleanupUnproved)
+            } else {
+                error
+            }
+        })?;
     held.lifelines.push(Box::new(workspace_lifeline));
     let now = lillux::time::timestamp_millis() as i64;
     let record = WorkerProcessRecord {

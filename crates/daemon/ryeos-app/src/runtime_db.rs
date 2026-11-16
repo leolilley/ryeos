@@ -778,7 +778,7 @@ fn clear_scope_lifetime_fence_if_settled(conn: &Connection) -> Result<()> {
           + (SELECT COUNT(*) FROM process_resource_owner
                WHERE cleanup_state='owned' OR runtime_custody IS NOT NULL)
           + (SELECT COUNT(*) FROM dedicated_session s
-               WHERE (s.worker_scope IS NOT NULL OR EXISTS (
+               WHERE (s.worker_scope IS NOT NULL OR s.worker_trusted_holding IS NOT NULL OR EXISTS (
                  SELECT 1 FROM worker_process w
                   WHERE w.placement_thread_id=s.placement_thread_id
                     AND json_type(w.process_identity, '$.process_scope') IS NOT 'null'))
@@ -2486,6 +2486,7 @@ CREATE TABLE IF NOT EXISTS dedicated_session (
     worker_boot_epoch INTEGER,
     worker_scope TEXT,
     scope_retirement TEXT,
+    worker_trusted_holding TEXT,
     workspace_id TEXT NOT NULL,
     candidate_required INTEGER NOT NULL CHECK (candidate_required IN (0, 1)),
     candidate_disposition TEXT NOT NULL CHECK (candidate_disposition IN ('owner_decision', 'retained_for_review')),
@@ -2528,6 +2529,7 @@ CREATE TABLE IF NOT EXISTS dedicated_session (
             AND completion_turn_id IS NOT NULL
             AND completion_operation_id IS NOT NULL)
     ),
+    CHECK (worker_trusted_holding IS NULL OR worker_scope IS NULL),
     CHECK (candidate_disposition = 'owner_decision' OR candidate_required = 1),
     CHECK (bounded_outcome_json IS NULL OR candidate_disposition = 'retained_for_review'),
     CHECK ((candidate_evaluation_hash IS NULL) = (candidate_evaluation_json IS NULL)),
@@ -2673,7 +2675,10 @@ const RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK: u32 = 0x0000_00ff;
 // Epoch 136: `external_qualification_worker_process` retains the protocol the
 // node selected for the Q Worker and its holding's filesystem authority; an
 // epoch-135 store lacks the columns and refuses.
-const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 136;
+// Epoch 137: `dedicated_session.worker_trusted_holding` records the host
+// lifetime a trusted-process-group Worker was launched under before it is
+// spawned; an epoch-136 store lacks the column and refuses.
+const RUNTIME_OPERATOR_SCHEMA_EPOCH: u32 = 137;
 const _: () = assert!(
     RUNTIME_OPERATOR_SCHEMA_EPOCH > 0
         && RUNTIME_OPERATOR_SCHEMA_EPOCH <= RUNTIME_OPERATOR_SCHEMA_EPOCH_MASK
@@ -5961,6 +5966,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: false,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "worker_trusted_holding",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "workspace_id",
                         col_type: "TEXT",
                         pk: false,
@@ -7114,6 +7125,38 @@ fn unreadable_lifetime_fence_refusal(reason: &str) -> anyhow::Error {
     )
 }
 
+fn read_dedicated_worker_trusted_holding(
+    conn: &Connection,
+    placement_thread_id: &str,
+    worker_instance_id: &str,
+    boot_epoch: u64,
+) -> Result<Option<DedicatedWorkerTrustedHolding>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT worker_trusted_holding FROM dedicated_session
+          WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3",
+            params![
+                placement_thread_id,
+                worker_instance_id,
+                i64::try_from(boot_epoch)?
+            ],
+            |row| row.get(0),
+        )
+        .context("trusted worker holding lookup lost its exact session attempt")?;
+    raw.map(|raw| {
+        let holding: DedicatedWorkerTrustedHolding = serde_json::from_str(&raw)?;
+        if holding.worker_instance_id != worker_instance_id
+            || holding.boot_epoch != boot_epoch
+            || holding.daemon_generation_id.is_empty()
+            || lillux::canonical_json(&serde_json::to_value(&holding)?)? != raw
+        {
+            bail!("retained trusted worker holding is not canonical");
+        }
+        Ok(holding)
+    })
+    .transpose()
+}
+
 fn read_scope_lifetime_fence(conn: &Connection) -> Result<Option<lillux::ProcessHostLifetime>> {
     match classify_scope_lifetime_fence(conn)? {
         ScopeLifetimeFenceReading::Current(lifetime) => Ok(lifetime),
@@ -7784,6 +7827,33 @@ impl DedicatedWorkerScopeReservation {
         }
         Ok(())
     }
+}
+
+/// Pre-spawn holding of a Worker the node launches as a trusted process
+/// group, where there is no scope to reserve. It is the other closed form of
+/// the session's holding record: it carries the host lifetime the launch
+/// happened under, so a later boot can prove the unattached launcher gone.
+/// A process scope and this holding are mutually exclusive on one session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DedicatedWorkerTrustedHolding {
+    pub worker_instance_id: String,
+    pub boot_epoch: u64,
+    pub daemon_generation_id: String,
+    pub host_lifetime: lillux::ProcessHostLifetime,
+}
+
+/// What the recorded host lifetime of an unattached trusted Worker proves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnattachedTrustedHoldingProof {
+    /// No holding was recorded: nothing is inferred.
+    Absent,
+    /// The recorded host lifetime has ended, so the launcher is gone.
+    Ended,
+    /// The recorded host lifetime is still the current one.
+    NotEnded,
+    /// Lillux cannot decide the lifetime; carries its reason.
+    Undecided(String),
 }
 
 /// Removal intent on the existing closed session owner, not a new process
@@ -9788,9 +9858,20 @@ impl RuntimeDb {
             } else {
                 "outcome_unknown"
             };
+            let had_trusted_holding: bool = tx
+                .query_row(
+                    "SELECT worker_trusted_holding IS NOT NULL FROM dedicated_session
+                  WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3",
+                    params![placement_thread_id, worker_instance_id, epoch],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .unwrap_or(false);
             let changed = tx.execute(
                 "UPDATE dedicated_session
                 SET state=?5, terminal_reason=?3,
+                    worker_trusted_holding=CASE WHEN ?5='terminal' THEN NULL
+                      ELSE worker_trusted_holding END,
                     worker_instance_id=CASE WHEN ?5='terminal' AND NOT EXISTS(
                       SELECT 1 FROM worker_process WHERE worker_instance_id=?2)
                       THEN NULL ELSE worker_instance_id END,
@@ -9817,6 +9898,12 @@ impl RuntimeDb {
                          WHERE worker_instance_id=?2 AND cleanup_state='reaped'))",
                     params![placement_thread_id, worker_instance_id, now],
                 )?;
+                if had_trusted_holding {
+                    // The holding retires in the commit that settles the
+                    // session. The fence stays while any other holding is
+                    // unsettled, including a newer lifetime's.
+                    clear_scope_lifetime_fence_if_settled(&tx)?;
+                }
             }
             tx.commit()?;
             Ok(())
@@ -9973,7 +10060,8 @@ impl RuntimeDb {
                     workspace_id=?5, worker_instance_id=?4, worker_boot_epoch=?6
               WHERE placement_thread_id=?1 AND state='recovering'
                 AND worker_instance_id IS NULL AND worker_boot_epoch IS NULL
-                AND worker_scope IS NULL AND scope_retirement IS NULL
+                AND worker_scope IS NULL AND worker_trusted_holding IS NULL
+                AND scope_retirement IS NULL
                 AND send_boundary='none'
                 AND EXISTS(SELECT 1 FROM credential_profile
                   WHERE profile_id=dedicated_session.credential_profile_id
@@ -14221,6 +14309,149 @@ impl RuntimeDb {
         })
     }
 
+    /// Record, before any process exists, the host lifetime a trusted-process-
+    /// group Worker is about to be spawned under. It is the same pre-contact
+    /// CAS and the same execution-lifetime fence write as a scope reservation;
+    /// the lifetime comes from Lillux. If it cannot be captured the launch is
+    /// refused here, before a spawn. Not an upsert: replay grants no second
+    /// launch.
+    pub fn reserve_dedicated_worker_trusted_holding(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<()> {
+        self.conn.with_sql(|conn| {
+            if boot_epoch == 0 {
+                bail!("trusted worker holding requires a positive epoch");
+            }
+            let lifetime =
+                lillux::ProcessHostLifetime::capture_current().map_err(anyhow::Error::msg)?;
+            let holding = DedicatedWorkerTrustedHolding {
+                worker_instance_id: worker_instance_id.to_owned(),
+                boot_epoch,
+                daemon_generation_id: daemon_generation_id().to_owned(),
+                host_lifetime: lifetime.clone(),
+            };
+            let holding_json = lillux::canonical_json(&serde_json::to_value(&holding)?)?;
+            let tx = conn.unchecked_transaction()?;
+            if let Some(incumbent) = read_scope_lifetime_fence(&tx)?
+                && incumbent != lifetime
+                && !incumbent.has_ended().map_err(anyhow::Error::msg)?
+            {
+                bail!(
+                    "trusted worker holding requires retirement of the previous host-lifetime fence"
+                );
+            }
+            let encoded_lifetime = lillux::canonical_json(&serde_json::to_value(&lifetime)?)?;
+            tx.execute(
+                "UPDATE execution_lifetime_fence SET host_lifetime=?1 WHERE singleton=1",
+                [&encoded_lifetime],
+            )?;
+            let changed = tx.execute(
+                "UPDATE dedicated_session SET worker_trusted_holding=?4, updated_at_ms=?5
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND state='admitted' AND worker_scope IS NULL AND worker_trusted_holding IS NULL
+                AND scope_retirement IS NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process WHERE worker_instance_id=?2)
+                AND NOT EXISTS(SELECT 1 FROM runtime_action_intent
+                  WHERE chain_root_id=dedicated_session.chain_root_id AND workspace_id IS NOT NULL
+                    AND workspace_operation_phase!='released')
+                AND EXISTS(SELECT 1 FROM credential_profile
+                  WHERE profile_id=dedicated_session.credential_profile_id
+                    AND credential_generation=dedicated_session.credential_generation
+                    AND lock_owner=?2
+                    AND state IN ('unauthenticated','enrolling','confirming','active'))",
+                params![
+                    placement_thread_id,
+                    worker_instance_id,
+                    i64::try_from(boot_epoch)?,
+                    holding_json,
+                    lillux::time::timestamp_millis() as i64
+                ],
+            )?;
+            if changed != 1 {
+                bail!("trusted worker holding lost its uncontacted session/credential fence");
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Retire the holding of a spawn that failed before any process existed.
+    /// The same transaction clears the fence if nothing else keeps it.
+    pub fn retire_dedicated_worker_trusted_holding(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<()> {
+        self.conn.with_sql(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute(
+                "UPDATE dedicated_session SET worker_trusted_holding=NULL, updated_at_ms=?4
+              WHERE placement_thread_id=?1 AND worker_instance_id=?2 AND worker_boot_epoch=?3
+                AND worker_trusted_holding IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM worker_process WHERE worker_instance_id=?2)",
+                params![
+                    placement_thread_id,
+                    worker_instance_id,
+                    i64::try_from(boot_epoch)?,
+                    lillux::time::timestamp_millis() as i64
+                ],
+            )?;
+            if changed != 1 {
+                bail!("trusted worker holding retirement lost its exact unattached holding");
+            }
+            clear_scope_lifetime_fence_if_settled(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    /// Exact trusted holding lookup for one attempt; `None` means none was
+    /// recorded, which is never read as proof of anything.
+    pub fn dedicated_worker_trusted_holding(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<Option<DedicatedWorkerTrustedHolding>> {
+        self.conn.with_sql(|conn| {
+            read_dedicated_worker_trusted_holding(
+                conn,
+                placement_thread_id,
+                worker_instance_id,
+                boot_epoch,
+            )
+        })
+    }
+
+    /// What the attempt's recorded host lifetime proves about an unattached
+    /// trusted launcher. The caller must hold the node state lock (the
+    /// daemon does), which proves the recording node has exited. An
+    /// undecidable lifetime is a result, not an error: it quarantines.
+    pub fn unattached_trusted_holding_proof(
+        &self,
+        placement_thread_id: &str,
+        worker_instance_id: &str,
+        boot_epoch: u64,
+    ) -> Result<UnattachedTrustedHoldingProof> {
+        let Some(holding) = self.dedicated_worker_trusted_holding(
+            placement_thread_id,
+            worker_instance_id,
+            boot_epoch,
+        )?
+        else {
+            return Ok(UnattachedTrustedHoldingProof::Absent);
+        };
+        Ok(match holding.host_lifetime.has_ended() {
+            Ok(true) => UnattachedTrustedHoldingProof::Ended,
+            Ok(false) => UnattachedTrustedHoldingProof::NotEnded,
+            Err(reason) => UnattachedTrustedHoldingProof::Undecided(reason),
+        })
+    }
+
     /// Atomically publish the operational owner of one held exclusive process
     /// and activate its already-constructed workspace. The caller may release
     /// the held child only after this transaction commits.
@@ -14246,6 +14477,17 @@ impl RuntimeDb {
                 })
             {
                 bail!("held worker scope differs from its pre-contact reservation");
+            }
+            let trusted_holding = read_dedicated_worker_trusted_holding(
+                &tx,
+                &record.placement_thread_id,
+                &record.worker_instance_id,
+                record.boot_epoch,
+            )?;
+            if trusted_holding.as_ref().is_some_and(|holding| {
+                reserved_scope.is_some() || holding.daemon_generation_id != record.daemon_generation_id
+            }) {
+                bail!("held worker differs from its pre-contact trusted holding");
             }
             let session: Option<(String, String, String, String, i64, String)> = tx
                 .query_row(
@@ -14382,6 +14624,7 @@ impl RuntimeDb {
             let session_changed = tx.execute(
                 "UPDATE dedicated_session
              SET worker_instance_id = ?2, worker_boot_epoch = ?3,
+                 worker_trusted_holding = NULL,
                  state = 'binding', updated_at_ms = ?4
              WHERE placement_thread_id = ?1 AND state = 'admitted'
                AND worker_instance_id = ?2 AND worker_boot_epoch = ?3",
@@ -14395,6 +14638,11 @@ impl RuntimeDb {
             )?;
             if workspace_changed != 1 || session_changed != 1 {
                 bail!("dedicated worker atomic attachment lost its workspace/session CAS");
+            }
+            if trusted_holding.is_some() {
+                // The worker row is now the durable owner; the holding is
+                // retired in this same commit and the fence follows it.
+                clear_scope_lifetime_fence_if_settled(&tx)?;
             }
             tx.commit()?;
             Ok(())
@@ -18730,7 +18978,7 @@ impl RuntimeDb {
                 &format!(
                     "SELECT COUNT(*) FROM dedicated_session s
              WHERE {selection}
-               AND (s.worker_scope IS NOT NULL OR EXISTS (
+               AND (s.worker_scope IS NOT NULL OR s.worker_trusted_holding IS NOT NULL OR EXISTS (
                  SELECT 1 FROM worker_process w
                  WHERE w.placement_thread_id=s.placement_thread_id
                    AND json_type(w.process_identity, '$.process_scope') IS NOT 'null'))
@@ -24777,6 +25025,339 @@ mod tests {
             .unwrap();
         assert!(
             db.unreadable_lifetime_fence_decision(UnreadableLifetimeFence::Refuse)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// One admitted session ready for a trusted-process-group launch: a ready
+    /// workspace, a locked credential profile and the admission row.
+    fn admit_trusted_fixture(db: &RuntimeDb, suffix: &str) -> (String, String, String) {
+        let placement = format!("T-{suffix}");
+        let workspace = format!("W-{suffix}");
+        let worker = format!("worker-{suffix}");
+        let profile = format!("P-{suffix}");
+        create_locked_profile(db, &profile, &worker);
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "INSERT INTO execution_workspace (
+                    workspace_id, thread_id, launch_owner, backend_id,
+                    base_snapshot, root_path, state, created_at_ms, updated_at_ms
+                 ) VALUES (?1, ?2, 'dedicated_worker_session', 'fixture',
+                           'a', '/fixture/workspace', 'ready', 1, 1)",
+                    params![workspace, placement],
+                )?)
+            })
+            .unwrap();
+        db.admit_dedicated_session(NewDedicatedSession {
+            placement_thread_id: &placement,
+            chain_root_id: &placement,
+            owner_principal: "fp:operator",
+            admitted_capsule_hash: &"a".repeat(64),
+            workspace_id: &workspace,
+            candidate_required: false,
+            candidate_disposition: DedicatedCandidateDisposition::OwnerDecision,
+            credential_profile_id: &profile,
+            credential_generation: 1,
+            credential_lock_owner: &worker,
+        })
+        .unwrap();
+        (placement, workspace, worker)
+    }
+
+    /// Rewrite the recorded host lifetime of a stored trusted holding, keeping
+    /// the stored text canonical so only the lifetime differs.
+    #[cfg(target_os = "linux")]
+    fn rewrite_trusted_holding_lifetime(
+        db: &RuntimeDb,
+        placement: &str,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) {
+        let raw: String = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT worker_trusted_holding FROM dedicated_session WHERE placement_thread_id=?1",
+                    [placement],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        edit(&mut value["host_lifetime"]);
+        let rewritten = lillux::canonical_json(&value).unwrap();
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE dedicated_session SET worker_trusted_holding=?2 WHERE placement_thread_id=?1",
+                    params![placement, rewritten],
+                )?)
+            })
+            .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_holding_is_recorded_once_and_its_proof_follows_the_recorded_lifetime() {
+        let (_tmp, db) = fresh_db();
+        let (placement, _workspace, worker) = admit_trusted_fixture(&db, "one");
+        assert_eq!(
+            db.unattached_trusted_holding_proof(&placement, &worker, 1)
+                .unwrap(),
+            UnattachedTrustedHoldingProof::Absent,
+            "no record is never inferred into a proof"
+        );
+        db.reserve_dedicated_worker_trusted_holding(&placement, &worker, 1)
+            .unwrap();
+        assert!(
+            db.reserve_dedicated_worker_trusted_holding(&placement, &worker, 1)
+                .is_err(),
+            "replay must not grant a second launch"
+        );
+        assert!(
+            db.conn
+                .with_sql(read_scope_lifetime_fence)
+                .unwrap()
+                .is_some()
+        );
+        let holding = db
+            .dedicated_worker_trusted_holding(&placement, &worker, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(holding.daemon_generation_id, daemon_generation_id());
+        assert_eq!(
+            db.unattached_trusted_holding_proof(&placement, &worker, 1)
+                .unwrap(),
+            UnattachedTrustedHoldingProof::NotEnded
+        );
+        rewrite_trusted_holding_lifetime(&db, &placement, |lifetime| {
+            lifetime["backend"]["boot_id"] = "00000000-0000-4000-8000-000000000000".into();
+        });
+        assert_eq!(
+            db.unattached_trusted_holding_proof(&placement, &worker, 1)
+                .unwrap(),
+            UnattachedTrustedHoldingProof::Ended
+        );
+        rewrite_trusted_holding_lifetime(&db, &placement, |lifetime| {
+            lifetime["version"] = 0.into();
+        });
+        assert!(matches!(
+            db.unattached_trusted_holding_proof(&placement, &worker, 1)
+                .unwrap(),
+            UnattachedTrustedHoldingProof::Undecided(_)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ended_trusted_holding_settles_the_session_releases_the_lock_and_clears_the_fence() {
+        let (_tmp, db) = fresh_db();
+        let (placement, _workspace, worker) = admit_trusted_fixture(&db, "ended");
+        db.reserve_dedicated_worker_trusted_holding(&placement, &worker, 1)
+            .unwrap();
+        // The daemon died between holding and attachment: the boot quarantine
+        // keeps the session and the lock.
+        assert_eq!(
+            db.reconcile_unattached_credential_profile_locks()
+                .unwrap()
+                .1,
+            0
+        );
+        assert_eq!(
+            db.dedicated_session(&placement).unwrap().unwrap().state,
+            "outcome_unknown"
+        );
+        rewrite_trusted_holding_lifetime(&db, &placement, |lifetime| {
+            lifetime["backend"]["boot_id"] = "00000000-0000-4000-8000-000000000000".into();
+        });
+        assert_eq!(
+            db.unattached_trusted_holding_proof(&placement, &worker, 1)
+                .unwrap(),
+            UnattachedTrustedHoldingProof::Ended
+        );
+        db.fail_dedicated_session_start(
+            &placement,
+            &worker,
+            1,
+            "unattached trusted process group and launcher belonged to an ended host lifetime",
+            true,
+        )
+        .unwrap();
+        let session = db.dedicated_session(&placement).unwrap().unwrap();
+        assert_eq!(session.state, "terminal");
+        assert!(session.worker_instance_id.is_none());
+        assert!(
+            db.credential_profile("P-ended")
+                .unwrap()
+                .unwrap()
+                .lock_owner
+                .is_none()
+        );
+        let retained: Option<String> = db
+            .conn
+            .with_sql(|connection| {
+                Ok(connection.query_row(
+                    "SELECT worker_trusted_holding FROM dedicated_session WHERE placement_thread_id=?1",
+                    [&placement],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(retained.is_none());
+        assert!(
+            db.conn
+                .with_sql(read_scope_lifetime_fence)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unproved_failed_start_keeps_the_trusted_holding_and_the_fence() {
+        let (_tmp, db) = fresh_db();
+        let (placement, _workspace, worker) = admit_trusted_fixture(&db, "kept");
+        db.reserve_dedicated_worker_trusted_holding(&placement, &worker, 1)
+            .unwrap();
+        db.fail_dedicated_session_start(&placement, &worker, 1, "cleanup unproved", false)
+            .unwrap();
+        assert!(
+            db.dedicated_worker_trusted_holding(&placement, &worker, 1)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.conn
+                .with_sql(read_scope_lifetime_fence)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_spawn_that_failed_before_any_process_leaves_no_holding() {
+        let (_tmp, db) = fresh_db();
+        let (placement, _workspace, worker) = admit_trusted_fixture(&db, "failed");
+        assert!(
+            db.retire_dedicated_worker_trusted_holding(&placement, &worker, 1)
+                .is_err(),
+            "nothing to retire before a holding exists"
+        );
+        db.reserve_dedicated_worker_trusted_holding(&placement, &worker, 1)
+            .unwrap();
+        db.retire_dedicated_worker_trusted_holding(&placement, &worker, 1)
+            .unwrap();
+        assert!(
+            db.dedicated_worker_trusted_holding(&placement, &worker, 1)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.conn
+                .with_sql(read_scope_lifetime_fence)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attachment_retires_the_trusted_holding_in_its_own_commit() {
+        let (_tmp, db) = fresh_db();
+        let (placement, _workspace, worker) = admit_trusted_fixture(&db, "attach");
+        db.reserve_dedicated_worker_trusted_holding(&placement, &worker, 1)
+            .unwrap();
+        let record = |generation: &str| WorkerProcessRecord {
+            worker_instance_id: worker.clone(),
+            boot_identity_hash: "b".repeat(64),
+            session_capsule_hash: "a".repeat(64),
+            boot_epoch: 1,
+            lifecycle_generation: 1,
+            process_identity: fake_process_identity(155, 155),
+            control_channel_identity: "fd:attach".to_owned(),
+            state: WorkerProcessState::Attached,
+            daemon_generation_id: generation.to_owned(),
+            placement_thread_id: placement.clone(),
+            cleanup_state: "owned".to_owned(),
+            created_at_ms: 2,
+            updated_at_ms: 2,
+        };
+        assert!(
+            db.attach_worker_process(&record("daemon-other")).is_err(),
+            "a different daemon generation does not own the holding"
+        );
+        assert!(
+            db.dedicated_worker_trusted_holding(&placement, &worker, 1)
+                .unwrap()
+                .is_some()
+        );
+        db.attach_worker_process(&record(daemon_generation_id()))
+            .unwrap();
+        assert!(
+            db.dedicated_worker_trusted_holding(&placement, &worker, 1)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.conn
+                .with_sql(read_scope_lifetime_fence)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_trusted_orphan_keeps_the_fence_when_the_last_scope_session_retires() {
+        let (_tmp, db) = fresh_db();
+        let (scoped, scoped_workspace, scoped_worker) = admit_trusted_fixture(&db, "scoped");
+        let allocation: lillux::ProcessScopeAllocation =
+            serde_json::from_value(serde_json::json!({
+                "version": 3, "control_timeout": {"secs": 1, "nanos": 0},
+                "configuration": {"version": 3, "backend": {
+                    "implementation": "linux_cgroup_v2", "parent": "/fixture/delegation"
+                }},
+                "backend": {"implementation": "linux_cgroup_v2",
+                    "boot_id": "00000000-0000-4000-8000-000000000000",
+                    "parent": {"filesystem": {"device": 1}, "inode": 2}, "name": scoped_worker}
+            }))
+            .unwrap();
+        db.reserve_dedicated_worker_scope(&scoped, &scoped_worker, 1, &allocation)
+            .unwrap();
+        db.fail_dedicated_session_start(&scoped, &scoped_worker, 1, "fixture unlaunched", true)
+            .unwrap();
+        db.conn
+            .with_sql(|connection| {
+                Ok(connection.execute(
+                    "UPDATE execution_workspace SET state='closed' WHERE workspace_id=?1",
+                    [&scoped_workspace],
+                )?)
+            })
+            .unwrap();
+        let (retiring, reserved) = db
+            .reserve_closed_worker_scope_retirement(&scoped_workspace)
+            .unwrap()
+            .unwrap();
+        // The scope session's lifetime ended, so a trusted launch may take the fence.
+        let (orphan, _workspace, orphan_worker) = admit_trusted_fixture(&db, "orphan");
+        db.reserve_dedicated_worker_trusted_holding(&orphan, &orphan_worker, 1)
+            .unwrap();
+        db.complete_closed_worker_scope_retirement(&retiring, &reserved)
+            .unwrap();
+        assert!(
+            db.conn
+                .with_sql(read_scope_lifetime_fence)
+                .unwrap()
+                .is_some(),
+            "the last scope session retiring must not clear a fence a trusted orphan still needs"
+        );
+        db.fail_dedicated_session_start(&orphan, &orphan_worker, 1, "proved gone", true)
+            .unwrap();
+        assert!(
+            db.conn
+                .with_sql(read_scope_lifetime_fence)
                 .unwrap()
                 .is_none()
         );
