@@ -690,8 +690,10 @@ impl Loopback {
             ryeos_node_runtime::identity::NodeIdentity::load(&root.path().join("node-key.pem"))
                 .unwrap();
         let (store_owner, store, lifetime) = open_store(root.path(), &identity);
-        // The app's own identity keys are minted afresh for the new app.
+        // The app's own identity keys, and the operator key its fixture plays the CLI
+        // with, are minted afresh for the new app.
         std::fs::remove_dir_all(root.path().join("identity")).unwrap();
+        std::fs::remove_dir_all(root.path().join(".ai/node/operator")).unwrap();
         let state = compose_app(root.path(), store, lifetime, vault, &script);
         (root, store_owner, state)
     }

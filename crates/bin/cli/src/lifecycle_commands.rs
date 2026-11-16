@@ -5792,6 +5792,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let lock_path = ryeos_node_runtime::state_lock::default_lock_path(root.path());
         let held = ryeos_node_runtime::state_lock::StateLock::acquire(&lock_path).unwrap();
+        // The operator signs in this process, so the key on the operator's
+        // volume is read before the library reaches the lock; the node itself
+        // stays uninitialized.
+        lillux::crypto::create_signing_key(
+            &ryeos_engine::roots::RuntimeRoot::new(root.path().to_path_buf())
+                .operator_signing_key_path(),
+        )
+        .unwrap();
         let console = crate::tty::Console::new(crate::tty::TerminalCapabilities::plain(80));
         let argv: Vec<String> = [
             "--app-root",
@@ -5804,7 +5812,7 @@ mod tests {
         .map(String::from)
         .collect();
         // What a running daemon holds is exactly this lock: the command refuses
-        // before it reads a key or opens the account.
+        // before it opens the account.
         let error = run_node_capacity_reissue_command(&argv, &console).unwrap_err();
         assert!(
             format!("{error:#}").contains("state lock is held"),

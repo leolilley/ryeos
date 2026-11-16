@@ -34,6 +34,9 @@ struct StoppedNode {
     identity: NodeIdentity,
     /// The operator's command-line tool holds this key; the test plays it.
     operator: SigningKey,
+    /// Key events the fixture itself wrote pinning the operator, which the
+    /// tests do not count as their own.
+    fixture_events: usize,
 }
 
 impl StoppedNode {
@@ -53,11 +56,14 @@ impl StoppedNode {
             &operator,
         );
         std::fs::create_dir_all(runtime.state()).expect("state directory");
-        Self {
+        let mut node = Self {
             root,
             identity,
             operator,
-        }
+            fixture_events: 0,
+        };
+        node.fixture_events = node.event_count();
+        node
     }
 
     fn path(&self) -> &Path {
@@ -111,10 +117,12 @@ impl StoppedNode {
         TrustStore::load_node_registry(self.path()).expect("registry loads and verifies")
     }
 
+    /// Key events the operations under test wrote.
     fn event_count(&self) -> usize {
         std::fs::read_dir(RuntimeRoot::new(self.path().to_path_buf()).trust_events_dir())
             .map(|entries| entries.count())
             .unwrap_or(0)
+            - self.fixture_events
     }
 }
 
