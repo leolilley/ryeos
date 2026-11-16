@@ -1402,6 +1402,49 @@ mod tests {
     }
 
     #[test]
+    fn the_older_affordance_widens_the_timeline_window_and_refetches_its_source() {
+        let mut core = authored_affordance_core(&[(
+            "view:test/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "sources": { "default": {
+                    "ref": "service:test/timeline",
+                    "params": { "limit": "@facet:timeline.window.limit|200" },
+                    "collection": "items"
+                } },
+                "selection": { "activate": "older" },
+                "affordances": [{
+                    "id": "older",
+                    "invoke": {
+                        "plane": "ui",
+                        "facet": "timeline.window",
+                        "value": { "limit": "{record.next_limit}" }
+                    }
+                }]
+            }),
+        )]);
+        let timeline = mount_affordance_view(&mut core, "view:test/timeline");
+        let source_key =
+            crate::ui::source_key::RyeOsSourceInstanceKey::named(timeline.clone(), "default")
+                .encode();
+        let effects = core.dispatch(RyeOsEvent::Ui {
+            event: RyeOsUiEvent::Activate {
+                intent: RyeOsUiIntent::InvokeAffordance {
+                    instance_key: timeline,
+                    view_ref: "view:test/timeline".to_string(),
+                    affordance_id: "older".to_string(),
+                    record: serde_json::json!({ "older": 40, "next_limit": 400 }),
+                },
+            },
+        });
+        assert!(matches!(
+            effects.first().and_then(source_request),
+            Some((fetched_tile, "view:test/timeline", "default", params))
+                if fetched_tile == source_key && params["limit"] == 400
+        ));
+    }
+
+    #[test]
     fn delayed_affordance_from_inactive_view_set_is_rejected() {
         let mut core = authored_affordance_core(&[(
             "view:test/list",

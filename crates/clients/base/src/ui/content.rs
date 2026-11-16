@@ -69,9 +69,10 @@ pub struct ViewBinding {
     pub facet: Option<String>,
     #[serde(default)]
     pub projections: Value,
-    /// Row-activation binding intrinsic to the `rows` widget:
+    /// Row-activation binding for the `rows` and `table` widgets:
     /// `selection.activate: <affordance_id>`. Explicit — there is no
-    /// implicit "first affordance" activation.
+    /// implicit "first affordance" activation. A `timeline` view names the
+    /// affordance its "N older" line fires, handed `{older, next_limit}`.
     #[serde(default)]
     pub selection: Option<SelectionBinding>,
     /// The one new optional capability: a singular transient input buffer

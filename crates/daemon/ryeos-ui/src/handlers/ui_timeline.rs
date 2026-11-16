@@ -15,6 +15,7 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::config_loading::{ConfigLoadContext, ConfigSpec, ResolveMode};
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::queries::ThreadUsageTotals;
 use ryeos_timeline::{Definition, Timeline, fold};
 
 use crate::state::{TimelineCache, TimelineCacheKey};
@@ -57,6 +58,27 @@ fn parse_limit(raw: Option<&Value>) -> Result<usize, HandlerError> {
 /// The window is a suffix of the top-level items: how many precede it.
 fn older_count(total: usize, limit: usize) -> usize {
     total.saturating_sub(limit)
+}
+
+/// The limit that would reveal more of the chain: one default page wider, up
+/// to the cap. `None` when nothing is older than the window or the window is
+/// already as wide as it may get.
+fn next_limit(older: usize, limit: usize) -> Option<usize> {
+    let wider = limit.saturating_add(DEFAULT_LIMIT).min(MAX_LIMIT);
+    (older > 0 && wider > limit).then_some(wider)
+}
+
+/// The chain's header: the root thread's status and the chain-wide usage
+/// totals. Computed on every request, never cached with the fold, so the
+/// status stays current.
+fn chain_summary(status: &str, totals: &ThreadUsageTotals) -> Value {
+    json!({
+        "status": status,
+        "input_tokens": totals.input_tokens,
+        "output_tokens": totals.output_tokens,
+        "spend_usd": totals.spend_usd,
+        "turns": totals.completed_turns,
+    })
 }
 
 /// Resolve the definition config item and parse it. The digest is the sha256
@@ -152,6 +174,7 @@ fn window_response(
     definition_ref: &str,
     definition_digest: &str,
     highest_chain_seq: i64,
+    summary: Value,
     timeline: &Timeline,
     limit: usize,
 ) -> Result<Value> {
@@ -162,6 +185,8 @@ fn window_response(
         "definition_digest": definition_digest,
         "highest_chain_seq": highest_chain_seq,
         "older": older,
+        "next_limit": next_limit(older, limit),
+        "summary": summary,
         "items": serde_json::to_value(&timeline.items[older..])?,
         "undeclared": serde_json::to_value(&timeline.undeclared)?,
     }))
@@ -218,11 +243,16 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
             Ok((highest, timeline))
         },
     )?;
+    let totals = state
+        .state_store
+        .chain_usage_totals(&chain_root_id)
+        .map_err(|error| HandlerError::Internal(format!("{error:#}")))?;
     window_response(
         &chain_root_id,
         &definition_ref,
         &definition_digest,
         highest,
+        chain_summary(subject.status.as_str(), &totals),
         &timeline,
         limit,
     )
@@ -288,13 +318,75 @@ mod tests {
         assert_eq!(older_count(10, 3), 7);
         assert_eq!(older_count(3, 3), 0);
         assert_eq!(older_count(2, 200), 0);
-        let value = window_response("c", "config:x", "d", 9, &timeline(5), 2).unwrap();
+        let summary = chain_summary("running", &ThreadUsageTotals::default());
+        let value = window_response("c", "config:x", "d", 9, summary, &timeline(5), 2).unwrap();
         assert_eq!(value["older"], 3);
         assert_eq!(value["highest_chain_seq"], 9);
         let items = value["items"].as_array().unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["id"], "item-3");
         assert_eq!(items[1]["id"], "item-4");
+    }
+
+    #[test]
+    fn the_response_carries_the_chain_summary_beside_the_window() {
+        let totals = ThreadUsageTotals {
+            thread_count: 2,
+            completed_turns: 3,
+            input_tokens: 1200,
+            output_tokens: 340,
+            spend_usd: 0.0421,
+        };
+        let value = window_response(
+            "c",
+            "config:x",
+            "d",
+            9,
+            chain_summary("running", &totals),
+            &timeline(1),
+            200,
+        )
+        .unwrap();
+        assert_eq!(
+            value["summary"],
+            json!({
+                "status": "running",
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "spend_usd": 0.0421,
+                "turns": 3,
+            })
+        );
+    }
+
+    #[test]
+    fn next_limit_widens_by_a_page_until_the_cap_and_only_when_older_remains() {
+        assert_eq!(next_limit(5, 200), Some(400));
+        assert_eq!(next_limit(5, 1900), Some(MAX_LIMIT));
+        assert_eq!(next_limit(5, MAX_LIMIT), None, "already at the cap");
+        assert_eq!(next_limit(0, 200), None, "nothing older to reveal");
+        let value = window_response(
+            "c",
+            "config:x",
+            "d",
+            9,
+            chain_summary("running", &ThreadUsageTotals::default()),
+            &timeline(500),
+            200,
+        )
+        .unwrap();
+        assert_eq!(value["next_limit"], 400);
+        let value = window_response(
+            "c",
+            "config:x",
+            "d",
+            9,
+            chain_summary("running", &ThreadUsageTotals::default()),
+            &timeline(5),
+            200,
+        )
+        .unwrap();
+        assert!(value["next_limit"].is_null());
     }
 
     #[test]
