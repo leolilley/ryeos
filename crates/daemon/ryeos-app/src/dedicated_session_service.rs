@@ -5628,11 +5628,11 @@ fn completion_worker_result(state: &AppState, session: &DedicatedSessionRecord) 
         .unwrap_or(Value::Null))
 }
 
-/// Where the admitted profile says the result payload reports its usage: the
-/// `result_cost` pointers of the result-marked notification, or `Null` when the
-/// profile marks no result or declares none. Runtime cost mapping applies them
-/// to the result payload and assumes no payload shape of its own.
-fn result_cost_declaration(state: &AppState, capsule_hash: &str) -> Result<Value> {
+/// One declaration of the result-marked notification in the admitted profile
+/// (`result_cost` or `result_status`), or `Null` when the profile marks no
+/// result or declares none. Runtime mapping applies it to the result payload
+/// and assumes no payload shape of its own.
+fn result_declaration(state: &AppState, capsule_hash: &str, field: &str) -> Result<Value> {
     let profile = admitted_structured_protocol(state, capsule_hash)?;
     Ok(profile
         .contract
@@ -5641,9 +5641,53 @@ fn result_cost_declaration(state: &AppState, capsule_hash: &str) -> Result<Value
         .into_iter()
         .flatten()
         .find(|rule| rule.get("result").and_then(Value::as_bool) == Some(true))
-        .and_then(|rule| rule.get("result_cost"))
+        .and_then(|rule| rule.get(field))
         .cloned()
         .unwrap_or(Value::Null))
+}
+
+/// Where the admitted profile says the result payload reports its usage.
+fn result_cost_declaration(state: &AppState, capsule_hash: &str) -> Result<Value> {
+    result_declaration(state, capsule_hash, "result_cost")
+}
+
+/// Which value of the result payload the admitted profile says reports a
+/// failed workload turn: `{pointer, failure_values}` or `Null`.
+fn result_status_declaration(state: &AppState, capsule_hash: &str) -> Result<Value> {
+    result_declaration(state, capsule_hash, "result_status")
+}
+
+/// A turn that completed in the protocol sense (`completed`) but whose result
+/// payload carries a declared failure value is a `worker_failure`. Any other
+/// kind, an absent declaration, or a pointer that selects anything other than
+/// a declared string leaves the kind unchanged.
+fn apply_result_status(
+    outcome_kind: &'static str,
+    worker_result: &Value,
+    declared: &Value,
+) -> &'static str {
+    if outcome_kind != "completed" {
+        return outcome_kind;
+    }
+    let reported = declared
+        .get("pointer")
+        .and_then(Value::as_str)
+        .and_then(|pointer| worker_result.pointer(pointer))
+        .and_then(Value::as_str);
+    let failed = match (
+        reported,
+        declared.get("failure_values").and_then(Value::as_array),
+    ) {
+        (Some(reported), Some(values)) => {
+            values.iter().any(|value| value.as_str() == Some(reported))
+        }
+        _ => false,
+    };
+    if failed {
+        "worker_failure"
+    } else {
+        outcome_kind
+    }
 }
 
 /// Pick the result payload for `turn_id` from one canonical batch. One
@@ -5689,9 +5733,14 @@ pub fn canonical_terminal_session_projection(
     // fields cannot disturb it.
     let worker_result = completion_worker_result(state, &session)?;
     let worker_result_cost = result_cost_declaration(state, &session.admitted_capsule_hash)?;
-    let outcome_kind = terminal_outcome_kind(
-        session.terminal_reason.as_deref(),
-        session.bounded_outcome.as_ref(),
+    let worker_result_status = result_status_declaration(state, &session.admitted_capsule_hash)?;
+    let outcome_kind = apply_result_status(
+        terminal_outcome_kind(
+            session.terminal_reason.as_deref(),
+            session.bounded_outcome.as_ref(),
+        ),
+        &worker_result,
+        &worker_result_status,
     );
     {
         let object = result
@@ -6724,6 +6773,54 @@ mod tests {
             "failed"
         );
         assert_eq!(terminal_outcome_kind(None, None), "failed");
+    }
+
+    #[test]
+    fn a_declared_failure_value_turns_a_completed_turn_into_worker_failure() {
+        let declared = json!({"pointer": "/status", "failure_values": ["crashed", "failed"]});
+        for (status, expected) in [
+            ("crashed", "worker_failure"),
+            ("failed", "worker_failure"),
+            ("completed", "completed"),
+            ("interrupted", "completed"),
+        ] {
+            assert_eq!(
+                apply_result_status("completed", &json!({"status": status}), &declared),
+                expected,
+                "{status}"
+            );
+        }
+        // No declaration, an absent or non-string value: unchanged.
+        for result in [
+            json!({"status": "crashed"}),
+            json!({}),
+            json!({"status": 1}),
+            Value::Null,
+        ] {
+            assert_eq!(
+                apply_result_status("completed", &result, &Value::Null),
+                "completed"
+            );
+        }
+        for result in [json!({}), json!({"status": ["failed"]}), Value::Null] {
+            assert_eq!(
+                apply_result_status("completed", &result, &declared),
+                "completed"
+            );
+        }
+        // Only a completed turn is reclassified; other outcomes stand.
+        for kind in [
+            "deadline",
+            "budget",
+            "cancelled",
+            "failed",
+            "approval_required",
+        ] {
+            assert_eq!(
+                apply_result_status(kind, &json!({"status": "crashed"}), &declared),
+                kind
+            );
+        }
     }
 
     #[test]

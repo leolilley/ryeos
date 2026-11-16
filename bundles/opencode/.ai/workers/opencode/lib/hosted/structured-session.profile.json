@@ -358,7 +358,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.idle",
@@ -400,7 +401,8 @@
       ],
       "ceremony_clear": false,
       "result": true,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.next.prompted",
@@ -445,7 +447,8 @@
       ],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.next.text.delta",
@@ -469,7 +472,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.next.tool.called",
@@ -495,7 +499,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "session.error",
@@ -514,7 +519,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "installation.update-available",
@@ -533,7 +539,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     }
   ],
   "ignored_notifications": {

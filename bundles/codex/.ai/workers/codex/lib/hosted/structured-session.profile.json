@@ -831,7 +831,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/login/completed",
@@ -879,7 +880,8 @@
       ],
       "ceremony_clear": true,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/rateLimits/updated",
@@ -898,7 +900,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "account/updated",
@@ -917,7 +920,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "turn/completed",
@@ -974,7 +978,8 @@
       ],
       "ceremony_clear": false,
       "result": true,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/agentMessage/delta",
@@ -1009,7 +1014,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/commandExecution/outputDelta",
@@ -1043,7 +1049,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/fileChange/outputDelta",
@@ -1077,7 +1084,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/fileChange/patchUpdated",
@@ -1111,7 +1119,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/started",
@@ -1131,7 +1140,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/status/changed",
@@ -1156,7 +1166,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "turn/started",
@@ -1181,7 +1192,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "configWarning",
@@ -1200,7 +1212,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "deprecationNotice",
@@ -1219,7 +1232,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "error",
@@ -1238,7 +1252,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "warning",
@@ -1257,7 +1272,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/summaryPartAdded",
@@ -1271,7 +1287,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/summaryTextDelta",
@@ -1285,7 +1302,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "item/reasoning/textDelta",
@@ -1299,7 +1317,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/environment/connected",
@@ -1318,7 +1337,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/environment/disconnected",
@@ -1337,7 +1357,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "thread/compacted",
@@ -1356,7 +1377,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     },
     {
       "method": "guardianWarning",
@@ -1375,7 +1397,8 @@
       "observations": [],
       "ceremony_clear": false,
       "result": false,
-      "result_cost": null
+      "result_cost": null,
+      "result_status": null
     }
   ],
   "ignored_notifications": {

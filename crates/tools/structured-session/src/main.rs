@@ -542,6 +542,11 @@ struct NotificationRule {
     #[serde(default)]
     #[allow(dead_code)]
     result_cost: Option<serde_json::Value>,
+    /// Which result value marks a failed turn. The daemon applies it when
+    /// settling the execution; the bridge only accepts the field.
+    #[serde(default)]
+    #[allow(dead_code)]
+    result_status: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

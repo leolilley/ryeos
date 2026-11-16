@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T10:32:11Z:d61fa3151f64c99c0166a1de03a379a60cc324679475ad121960d176b0b8dec3:eJLZirpv/PGiHKD3KjKk2WKZv6v/PjY/DIMTQz4N/Uh5CVVcLolGzW/UdKhEM5ne9xof+3B6Dvm75UWpx81eBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T11:40:02Z:dbba439dc7ff550bfa5881a25a8e793c8c32f549634319269295c2d7f0e11511:OZCa7AViPxVT4FkufMTYFyMlA7yHEEpbAH8TSLiejanXzjzWotyTIXhl2Ls3ji0Oeg0CMqpel95FSCiI9BR9Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "claude-code"
 version: "0.1.0"
 executor_id: "@subprocess"
@@ -19,7 +19,7 @@ session_resources:
 source:
   root: "lib/hosted"
   entry: "structured-session.profile.json"
-  digest: "a3570813b56275ac8a7249f0b953f2400a887a3bb0a18c4e951b927afbd32421"
+  digest: "0e96be2f70d07dd5117ce2ad15937c0987a5f9baf617bd68f1cfb5c08eca4008"
 
 # The workload executable is this bundle's own signed binary, captured at
 # admission. It is mounted in the execution runtime namespace so it never

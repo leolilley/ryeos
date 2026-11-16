@@ -636,6 +636,35 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_failure_child_follows_as_a_failure_with_its_partial_result() {
+        let worker_result =
+            json!({"turn_id": "t1", "status": "crashed", "result": {"text": "partial"}});
+        let envelope = compact(
+            &worker_waiter(),
+            &candidate(
+                "failed",
+                json!({"session": {
+                    "state": "terminal", "outcome_kind": "worker_failure",
+                    "worker_result": worker_result,
+                }}),
+                Value::Null,
+            ),
+        );
+        let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(&envelope).unwrap();
+        assert!(!decoded.success);
+        assert_eq!(
+            decoded.result,
+            json!({
+                "child_thread_id": "T-child",
+                "status": "failed",
+                "outcome_kind": "worker_failure",
+                "result": worker_result,
+                "cost": null,
+            })
+        );
+    }
+
+    #[test]
     fn a_non_worker_child_keeps_its_kind_defined_projection() {
         let mut waiter = worker_waiter();
         waiter.children[0].item_ref = "tool:test/one".to_string();

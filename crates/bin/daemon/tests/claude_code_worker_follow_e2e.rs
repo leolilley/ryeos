@@ -17,10 +17,11 @@
 //!    thread carries exactly one `child_thread_settled` event whose
 //!    `child_thread_id` equals the one in its `child_thread_spawned`.
 //! 2. A stub `crash`. The adapter still ends the turn with a completion
-//!    notification, carrying the worker's own status `crashed`. The bounded
-//!    controller classifies only the session mechanics (the turn completed), so
-//!    the follow succeeds with `outcome_kind: completed` and the worker status
-//!    visible inside `result`. The case asserts exactly that mapping.
+//!    notification, carrying the worker's own status `crashed`. The signed
+//!    profile declares `crashed` a failure value, so the turn settles with
+//!    `outcome_kind: worker_failure`; the worker node fails, the graph's
+//!    `on_error` redirect reads `state._outcome` with the partial result, and
+//!    the settled event carries the same kind.
 //! 3. A turn that outlives the graph's duration limit. The bounded controller
 //!    ends it with `outcome_kind: deadline`; the worker node fails, the graph's
 //!    `on_error` redirect reads `state._outcome`, and the settled event carries
@@ -287,6 +288,40 @@ config:
     write_graph(project, signer, "deadline", &body)
 }
 
+/// Failure-path graph for a turn the workload reports as crashed: the node's
+/// `on_error` redirect reads the outcome and the partial result.
+fn plant_crash_graph(project: &Path, signer: &SigningKey, stub: &Value) -> Result<()> {
+    let body = format!(
+        r#"category: test
+version: "1.0.0"
+{GRAPH_REQUIRES}config:
+  start: turn
+  nodes:
+    turn:
+{action}      on_error: recover
+      next:
+        type: unconditional
+        to: unreached
+    recover:
+      node_type: return
+      output:
+        probe:
+          route: recovered
+          outcome_kind: "${{state._outcome.outcome_kind}}"
+          status: "${{state._outcome.status}}"
+          worker_status: "${{state._outcome.result.status}}"
+          text: "${{state._outcome.result.result.text}}"
+    unreached:
+      node_type: return
+      output:
+        probe:
+          route: unreached
+"#,
+        action = follow_action(stub),
+    );
+    write_graph(project, signer, "crash", &body)
+}
+
 fn write_graph(project: &Path, signer: &SigningKey, name: &str, body: &str) -> Result<()> {
     let graphs = project.join(".ai/graphs");
     std::fs::create_dir_all(&graphs)?;
@@ -516,17 +551,17 @@ async fn a_completed_turn_flows_result_outcome_and_cost_into_the_graph() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_stub_crash_is_a_completed_turn_whose_worker_status_is_crashed() -> Result<()> {
+async fn a_stub_crash_fails_the_node_as_a_worker_failure() -> Result<()> {
     let (mut daemon, fixture) = start_node().await?;
     let project = tempfile::tempdir()?;
     // No text: the stub then reports its default crash sentence.
     let stub = json!({"outcome": "crash", "structured_output": null});
-    plant_outcome_graph(project.path(), &fixture.publisher, &stub)?;
+    plant_crash_graph(project.path(), &fixture.publisher, &stub)?;
 
     let Run::Finished(finished) = run_graph(
         &mut daemon,
         project.path(),
-        "outcome",
+        "crash",
         Duration::from_secs(120),
     )
     .await?
@@ -534,14 +569,13 @@ async fn a_stub_crash_is_a_completed_turn_whose_worker_status_is_crashed() -> Re
         return Ok(());
     };
 
-    // The turn-completion notification carries the worker's own status, which
-    // the substrate does not interpret: the bounded outcome is `completed`, no
-    // node fails and no `_outcome` is written. The crash is visible only in
-    // the worker's result.
+    // The profile declares the worker's `crashed` status a failure value, so
+    // the worker node fails and the `on_error` redirect reads the outcome with
+    // the partial result still attached.
     let probe = &finished.probe;
-    assert_eq!(probe["route"], json!("completed"), "{probe:#}");
-    assert_eq!(probe["status"], json!("completed"), "{probe:#}");
-    assert_eq!(probe["outcome_kind"], json!("completed"), "{probe:#}");
+    assert_eq!(probe["route"], json!("recovered"), "{probe:#}");
+    assert_eq!(probe["outcome_kind"], json!("worker_failure"), "{probe:#}");
+    assert_eq!(probe["status"], json!("failed"), "{probe:#}");
     assert_eq!(probe["worker_status"], json!("crashed"), "{probe:#}");
     assert_eq!(
         probe["text"],
@@ -554,7 +588,11 @@ async fn a_stub_crash_is_a_completed_turn_whose_worker_status_is_crashed() -> Re
         settled["child_thread_id"], spawned["child_thread_id"],
         "settled must name the spawned child"
     );
-    assert_eq!(settled["outcome_kind"], json!("completed"), "{settled:#}");
+    assert_eq!(
+        settled["outcome_kind"],
+        json!("worker_failure"),
+        "{settled:#}"
+    );
     Ok(())
 }
 

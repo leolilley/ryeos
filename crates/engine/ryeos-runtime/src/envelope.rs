@@ -34,12 +34,23 @@ pub fn dedicated_session_terminal_result(
     )
     .then(|| session.get("reason").and_then(serde_json::Value::as_str))
     .flatten();
-    let status = match persisted_reason.or(callback_reason) {
+    let mut status = match persisted_reason.or(callback_reason) {
         Some("completed") => RuntimeResultStatus::Completed,
         Some("cancelled") => RuntimeResultStatus::Cancelled,
         Some("credential_revoked") => RuntimeResultStatus::Failed,
         _ => RuntimeResultStatus::Failed,
     };
+    // A turn the workload reported as failed settled the session normally but
+    // is not a success: the projection names it `worker_failure`, and the
+    // child settles failed with its partial result still attached.
+    if status == RuntimeResultStatus::Completed
+        && session
+            .get("outcome_kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("worker_failure")
+    {
+        status = RuntimeResultStatus::Failed;
+    }
     let cost = worker_result_cost(&session);
     RuntimeResult {
         success: status.is_success(),
@@ -860,6 +871,29 @@ mod tests {
         ] {
             assert!(worker_result_cost(&session).is_none(), "{session}");
         }
+    }
+
+    #[test]
+    fn a_worker_failure_outcome_settles_failed_with_its_result_attached() {
+        let failed = dedicated_session_terminal_result(
+            "T-crashed".to_owned(),
+            json!({"state":"terminal", "terminal_reason":"completed",
+                   "outcome_kind":"worker_failure",
+                   "worker_result":{"status":"crashed"}}),
+        );
+        assert_eq!(failed.status, RuntimeResultStatus::Failed);
+        assert!(!failed.success);
+        assert_eq!(
+            failed.result.unwrap()["session"]["worker_result"]["status"],
+            "crashed"
+        );
+        let good = dedicated_session_terminal_result(
+            "T-good".to_owned(),
+            json!({"state":"terminal", "terminal_reason":"completed",
+                   "outcome_kind":"completed"}),
+        );
+        assert_eq!(good.status, RuntimeResultStatus::Completed);
+        assert!(good.success);
     }
 
     #[test]

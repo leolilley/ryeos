@@ -457,6 +457,13 @@
         "output_tokens": "/result/usage/output_tokens",
         "cost_micro_usd": "/result/usage/cost_micro_usd"
       },
+      "result_status": {
+        "pointer": "/status",
+        "failure_values": [
+          "crashed",
+          "failed"
+        ]
+      },
       "upstream_session_pointer": "/message/params/session_id"
     },
     {
@@ -509,6 +516,7 @@
       "ceremony_clear": false,
       "result": false,
       "result_cost": null,
+      "result_status": null,
       "upstream_session_pointer": "/message/params/session_id"
     }
   ],
