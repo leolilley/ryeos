@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-11-13T01:36:23Z:ea59c34f59561a829c9871187da48fe761ea6d20ac6074bf80a8022b1fa0d092:dSd1PV94cn+Bn/xg9dklObpN0GCuEeWu9fYdBNtLbur7SzLhxFwJHhfKPgoxEbWgalbAmJr4/AAA/+K/TIffCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T04:15:12Z:d6979f2f55fcd4f96237f937ad9c6166e2977a3f82fd425b2f545f1366187790:wwfydoD7z2Wd0s7fef1d4ILBjbvEm6btzzheklz8RSN8DKwnJGcixQ3PSR+jjMpr9zQ1DyUL5+onCWkvmy99BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
@@ -103,6 +103,12 @@ reconstruction authority, be idempotent across repeated recovery launches, and
 never treat process memory or a callback transport error as proof that an
 effect did not happen. RyeOS does not manufacture an empty checkpoint merely
 to make a runtime resume-eligible.
+
+A machine continuation (a successor thread after a limit or context-window
+cut-off) defaults to resuming from the predecessor's checkpoint and fails if
+none exists. A runtime that rebuilds from the event braid declares
+`replay_continuation: true`; its successor then cold-starts, with no
+checkpoint copy and no `RYEOS_RESUME=1`, and replays its predecessor chain.
 
 ### Nonterminal process control
 

@@ -123,6 +123,14 @@ pub struct RuntimeYaml {
         deserialize_with = "deserialize_native_resume"
     )]
     pub native_resume: Option<NativeResumeSpec>,
+    /// `true` => a machine continuation successor of this runtime rebuilds its
+    /// state by replaying the retained chain events, so it neither copies a
+    /// predecessor checkpoint nor receives `RYEOS_RESUME=1` (which means
+    /// same-thread crash recovery). `native_resume` still gives the runtime a
+    /// checkpoint dir and daemon-restart respawn. Default `false`: the
+    /// runtime writes a native checkpoint and the successor resumes from it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_continuation: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1648,6 +1656,7 @@ mod tests {
         RuntimeYaml {
             kind: "runtime".to_owned(),
             serves: "test_kind".to_owned(),
+            replay_continuation: false,
             default: None,
             binary_ref: "bin/x86_64-unknown-linux-gnu/test-runtime".to_owned(),
             abi_version: SUPPORTED_RUNTIME_ABI_VERSION.to_owned(),
