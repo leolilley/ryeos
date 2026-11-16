@@ -155,6 +155,7 @@ ryeos-client-runtime = { path = "crates/clients/runtime" }
 ryeos-client-transport = { path = "crates/clients/transport" }
 ryeos-directive-definition = { path = "crates/kinds/directive-definition" }
 ryeos-expression = { path = "crates/engine/ryeos-expression" }
+ryeos-timeline = { path = "crates/engine/ryeos-timeline" }
 ryeos-graph-definition = { path = "crates/kinds/graph-definition" }
 ryeos-engine = { path = "crates/engine/ryeos-engine" }
 ryeos-executor = { path = "crates/engine/ryeos-executor" }

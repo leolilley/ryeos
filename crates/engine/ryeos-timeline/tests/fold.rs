@@ -8,7 +8,11 @@ fn dir() -> PathBuf {
 }
 
 fn definition() -> Definition {
-    let text = std::fs::read_to_string(dir().join("definitions/thread.yaml")).unwrap();
+    let text = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles/ryeos-ui/.ai/config/ryeos/ui/timeline/thread.yaml"),
+    )
+    .unwrap();
     Definition::from_yaml(&text).unwrap()
 }
 

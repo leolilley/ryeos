@@ -6,10 +6,11 @@ description: Event braid timeline for the input route's conversation chain
 widget: timeline
 sources:
   default:
-    ref: service:events/chain_replay
+    ref: service:ui/ryeos-ui/timeline/thread
     params:
       chain_root_id: "@facet:input.route.chain_root"
-    collection: events
+      limit: "200"
+    collection: items
 projections:
   expand:
     fields:

@@ -47,6 +47,10 @@ impl Definition {
     pub fn from_yaml(text: &str) -> Result<Self, String> {
         serde_yaml::from_str(text).map_err(|error| format!("invalid definition: {error}"))
     }
+
+    pub fn from_value(value: Value) -> Result<Self, String> {
+        serde_json::from_value(value).map_err(|error| format!("invalid definition: {error}"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

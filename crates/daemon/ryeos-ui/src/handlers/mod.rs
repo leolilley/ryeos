@@ -28,6 +28,7 @@ pub mod ui_session_end;
 pub mod ui_sessions_admin;
 pub mod ui_thread_tree;
 pub mod ui_threads;
+pub mod ui_timeline;
 pub mod ui_work;
 
 pub const ALL: &[ServiceDescriptor] = &[
@@ -56,6 +57,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_work::APPROVAL_HISTORY_DESCRIPTOR,
     ui_work::CANDIDATE_DESCRIPTOR,
     ui_thread_tree::DESCRIPTOR,
+    ui_timeline::DESCRIPTOR,
     ui_node::ACTIVITY_DESCRIPTOR,
     #[cfg(feature = "scheduling")]
     ui_schedules::DESCRIPTOR,

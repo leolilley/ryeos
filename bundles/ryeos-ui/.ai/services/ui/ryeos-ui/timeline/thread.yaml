@@ -1,0 +1,9 @@
+kind: service
+name: ryeos-ui/timeline/thread
+version: "1.0.0"
+description: A chain's events folded into timeline items by a signed definition, windowed to the most recent items for an authorized chain.
+endpoint: ui.ryeos.timeline.thread
+ui_read_only: true
+state_access: read_only_existing
+record_thread: false
+availability: daemon_only

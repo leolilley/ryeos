@@ -1,3 +1,5 @@
+# Thread timeline definition: how a chain's events fold into timeline items.
+# Declarative data read by the timeline service; the fold engine names no event type itself.
 vocabulary:
   - {key: other, one: operation, many: operations}
   - {key: child, one: child run, many: child runs}
