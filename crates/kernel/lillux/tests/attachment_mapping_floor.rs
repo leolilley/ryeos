@@ -59,3 +59,54 @@ fn mapped_targets_at_the_lowest_free_descriptors_leave_attachment_control_intact
         .wait();
     assert!(result.success, "stderr: {}", result.stderr);
 }
+
+#[test]
+fn a_second_launch_may_map_onto_an_earlier_held_childs_control_descriptors() {
+    use std::os::fd::AsRawFd as _;
+
+    // A held supervisor keeps an earlier pending child while it starts the
+    // next. That child's control pipes sit just above its own mapped targets;
+    // the next launch maps a dense range over those numbers. The new child
+    // closes the earlier child's descriptors before installing its mappings,
+    // so the launch must succeed, and both children must still release.
+    let first_count = 16_u32;
+    let first_sources: Vec<_> = (0..first_count)
+        .map(|_| lillux::sealed_memfd(c"ryeos-first-probe", b"first").expect("sealed memfd"))
+        .collect();
+    let probe = std::fs::File::open("/dev/null").expect("probe descriptor");
+    let lowest = u32::try_from(probe.as_raw_fd()).unwrap().max(3);
+    drop(probe);
+    let mut first = shell("exit 0".to_string());
+    for (offset, source) in (0..first_count).zip(&first_sources) {
+        source
+            .bind_to_subprocess_request(&mut first, lowest + offset)
+            .expect("bind first mapping");
+    }
+    drop(first_sources);
+    let first = spawn_awaiting_attachment(first).expect("first child held");
+
+    let second_count = 48_u32;
+    let second_lowest = lowest + first_count;
+    let second_sources: Vec<_> = (0..second_count)
+        .map(|_| lillux::sealed_memfd(c"ryeos-second-probe", b"second").expect("sealed memfd"))
+        .collect();
+    let last = second_lowest + second_count - 1;
+    let mut second = shell(format!(
+        "[ -e /proc/self/fd/{second_lowest} ] && [ -e /proc/self/fd/{last} ]"
+    ));
+    for (offset, source) in (0..second_count).zip(&second_sources) {
+        source
+            .bind_to_subprocess_request(&mut second, second_lowest + offset)
+            .expect("bind second mapping");
+    }
+    drop(second_sources);
+    let second = spawn_awaiting_attachment(second).expect("second child held over the first");
+
+    let second_result = second
+        .release_after_attachment()
+        .expect("release second")
+        .wait();
+    assert!(second_result.success, "stderr: {}", second_result.stderr);
+    let first_result = first.release_after_attachment().expect("release first").wait();
+    assert!(first_result.success, "stderr: {}", first_result.stderr);
+}

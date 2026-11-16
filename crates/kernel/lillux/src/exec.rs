@@ -9441,7 +9441,13 @@ fn inherited_mapping_control_descriptors(
         if let Some(directory) = gate.cwd_directory {
             descriptors.insert(directory);
         }
-        descriptors.extend(gate.inherited_child_close_fds.iter().copied());
+        // Not `gate.inherited_child_close_fds`: those are other held
+        // children's control descriptors, which this child closes in its
+        // FIRST pre-exec hook, registered before the hook that installs the
+        // mappings with dup3. A target equal to one of those numbers lands on
+        // a slot already closed in this child; the parent's descriptor of the
+        // other child is untouched. Forbidding them refused a launch whenever
+        // an earlier held child's control pipe occupied a mapped target.
     }
     if let Some(status) = supervised_status {
         match &status.state {
