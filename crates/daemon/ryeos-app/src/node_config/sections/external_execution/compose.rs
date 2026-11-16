@@ -2287,6 +2287,91 @@ pub(crate) mod tests {
         );
     }
 
+    /// A lease guarantee the provider's spec does not derive from its
+    /// operation kinds is refused at compose, and launch's judgment of the
+    /// same inputs is the same refusal.
+    #[test]
+    fn compose_and_launch_refuse_a_lease_guarantee_the_spec_does_not_derive() {
+        use installed::{DerivedLeaseSpec, SpecOperation};
+        const UNDERIVED: &str = "lease.fenced_exclusive";
+
+        let spec = DerivedLeaseSpec::new(vec![
+            SpecOperation::CreateOnceBoundToReservation,
+            SpecOperation::ObserveExactOccurrence,
+        ]);
+        assert!(
+            !spec.derived_guarantees().contains(UNDERIVED),
+            "the spec must not derive {UNDERIVED}"
+        );
+        let backend = installed::CoordinateOnlyBackend::shared_with_lease_spec(
+            TEST_BACKEND_ID,
+            &"d".repeat(64),
+            SETTINGS_SCHEMA,
+            &"1".repeat(64),
+            &"e".repeat(64),
+            full_capabilities(),
+            spec,
+        );
+        let attested = |name: &str| -> lillux::process_control::CapabilityRequirement {
+            serde_json::from_value(
+                serde_json::json!({"name": name, "accept": ["provider_attested"]}),
+            )
+            .unwrap()
+        };
+        let mut program = program();
+        program.placement.lease = vec![attested("lease.create_bound"), attested(UNDERIVED)];
+        let mut derived_program = program.clone();
+        derived_program.placement.lease = vec![attested("lease.create_bound")];
+
+        // The same program composes when the guarantee is one the spec derives.
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = derived_program.clone();
+        let (result, published) = compose_over(&node, request, backend.clone());
+        result.unwrap();
+        assert!(published);
+
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = program.clone();
+        let (result, published) = compose_over(&node, request, backend.clone());
+        let compose_error = format!("{:#}", refusal(result));
+        assert!(compose_error.contains(UNDERIVED), "{compose_error}");
+        assert!(!published);
+
+        // Launch's judgment: the binding as an unrefused compose publishes it,
+        // read back through the loader's own admission.
+        let node = stopped_node();
+        let mut request = compose_request(&node, TEST_BACKEND_ID);
+        request.program = derived_program;
+        let (compose_ok, _) = compose_over(&node, request, backend.clone());
+        compose_ok.unwrap();
+        let identity = ryeos_node_runtime::identity::NodeIdentity::load(
+            &node.root.path().join(".ai/node/identity/private_key.pem"),
+        )
+        .unwrap();
+        let signed = std::fs::read_to_string(binding_path(&node)).unwrap();
+        let contract = admit_signed_binding(node.root.path(), BINDING_ID, &signed, &identity)
+            .unwrap()
+            .backend_contract();
+        let launch_error = format!(
+            "{:#}",
+            crate::external_placement::judge_placement(
+                &program,
+                &contract,
+                backend.as_ref(),
+                &node.policy,
+                Some(|| Ok(Some(lillux::time::timestamp_millis() + 10_000))),
+            )
+            .unwrap_err()
+        );
+        assert!(launch_error.contains(UNDERIVED), "{launch_error}");
+        assert!(
+            compose_error.ends_with(&launch_error),
+            "compose `{compose_error}` is not launch's `{launch_error}`"
+        );
+    }
+
     #[test]
     fn composed_binding_takes_its_artifact_facts_from_the_installed_registries() {
         let node = stopped_node();

@@ -18,6 +18,106 @@ pub(crate) struct CoordinateOnlyBackend {
     capabilities: BTreeSet<LifecycleCapability>,
     /// Whether the adapter admits a lease. A refusing one says it admits none.
     admits_leases: bool,
+    /// When set, `admit_lease` runs the shared provider-neutral judge over
+    /// these facts instead of answering `admits_leases`.
+    lease_spec: Option<DerivedLeaseSpec>,
+}
+
+/// One operation kind of a provider spec, as far as lease guarantees are
+/// concerned.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SpecOperation {
+    /// Creates the lease bound to its reservation, taking the provider
+    /// timeout from the reserved lifetime and the guest network from the
+    /// lease's allow list.
+    CreateOnceBoundToReservation,
+    /// Observes the exact terminal state of an occurrence.
+    ObserveExactOccurrence,
+}
+
+/// Provider facts whose attested guarantees are derived from the spec's
+/// operation kinds alone, the way an adapter derives them: a guarantee is
+/// never named directly.
+#[derive(Debug)]
+pub(crate) struct DerivedLeaseSpec {
+    operations: Vec<SpecOperation>,
+    network_policy: ryeos_remote_lease_core::NetworkPolicyCapability,
+}
+
+impl DerivedLeaseSpec {
+    pub(crate) fn new(operations: Vec<SpecOperation>) -> Self {
+        use ryeos_remote_lease_core::*;
+        Self {
+            operations,
+            network_policy: NetworkPolicyCapability {
+                creatable_types: vec![NetworkPolicyType::DenyAll, NetworkPolicyType::AllowList],
+                allow_list: Some(AllowListCapability {
+                    rule_protocol: EgressProtocol::Https,
+                    max_rules: 4,
+                    host_syntax: EgressHostSyntax::ExactDnsName,
+                }),
+            },
+        }
+    }
+
+    /// The guarantees these operation kinds derive.
+    pub(crate) fn derived_guarantees(&self) -> BTreeSet<&'static str> {
+        use ryeos_remote_lease_core::*;
+        let mut guarantees = BTreeSet::new();
+        for operation in &self.operations {
+            match operation {
+                SpecOperation::CreateOnceBoundToReservation => {
+                    guarantees.extend([
+                        LEASE_CREATE_BOUND,
+                        LEASE_LIFETIME_BOUND,
+                        LEASE_NETWORK_POLICY,
+                    ]);
+                }
+                SpecOperation::ObserveExactOccurrence => {
+                    guarantees.insert(LEASE_TERMINATE_OBSERVED);
+                }
+            }
+        }
+        guarantees
+    }
+}
+
+impl ryeos_remote_lease_core::LeaseProviderFacts for DerivedLeaseSpec {
+    fn evidence_provider(&self) -> &str {
+        "derived_fixture_provider_v1"
+    }
+
+    fn maximum_lease_seconds(&self) -> u32 {
+        24 * 60 * 60
+    }
+
+    fn budget_weight(&self) -> u32 {
+        1
+    }
+
+    fn attested_lease_guarantees(&self) -> BTreeSet<&'static str> {
+        self.derived_guarantees()
+    }
+
+    fn guest_channel_profile(&self) -> Result<ryeos_remote_lease_core::GuestChannelProfile> {
+        Ok(ryeos_remote_lease_core::GuestChannelProfile::ControllerRelayedFrames)
+    }
+
+    fn guest_activation_declared(&self) -> bool {
+        true
+    }
+
+    fn network_policy_capability(&self) -> &ryeos_remote_lease_core::NetworkPolicyCapability {
+        &self.network_policy
+    }
+
+    fn egress_evidence_basis(&self, policy: &ryeos_remote_lease_core::EgressPolicy) -> String {
+        format!("fixture provider creates exactly [{}]", policy.rules_text())
+    }
+
+    fn valid_lease_id(&self, id: &str) -> bool {
+        id.starts_with("lease-")
+    }
 }
 
 impl CoordinateOnlyBackend {
@@ -62,6 +162,31 @@ impl CoordinateOnlyBackend {
             relay_scope_setting: Some("owner_id".to_owned()),
             capabilities,
             admits_leases,
+            lease_spec: None,
+        })
+    }
+
+    /// A generation whose lease admission is the shared judge over `spec`'s
+    /// derived guarantees.
+    pub(crate) fn shared_with_lease_spec(
+        backend_id: &str,
+        artifact_hash: &str,
+        settings_schema_digest: &str,
+        supervisor_hash: &str,
+        launcher_hash: &str,
+        capabilities: BTreeSet<LifecycleCapability>,
+        spec: DerivedLeaseSpec,
+    ) -> Arc<dyn ExternalPlacementBackend> {
+        Arc::new(Self {
+            backend_id: backend_id.to_owned(),
+            artifact_hash: artifact_hash.to_owned(),
+            settings_schema_digest: settings_schema_digest.to_owned(),
+            supervisor_hash: supervisor_hash.to_owned(),
+            launcher_hash: launcher_hash.to_owned(),
+            relay_scope_setting: Some("owner_id".to_owned()),
+            capabilities,
+            admits_leases: false,
+            lease_spec: Some(spec),
         })
     }
 }
@@ -73,9 +198,33 @@ impl ExternalPlacementBackend for CoordinateOnlyBackend {
 
     fn admit_lease(
         &self,
-        _inputs: &crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs,
+        inputs: &crate::external_lifecycle_adapter::lease_admission::LeaseAdmissionInputs,
         _deadline: lillux::time::MonotonicDeadline,
     ) -> Result<crate::external_lifecycle_adapter::lease_admission::AdmittedLease> {
+        use crate::external_lifecycle_adapter::lease_admission as admission;
+        if let Some(spec) = &self.lease_spec {
+            let adapter_id = "remote-lease-fixture";
+            let spec_digest = lillux::sha256_hex(b"derived lease fixture spec");
+            let request = admission::canonical_request(adapter_id, &spec_digest, inputs)?;
+            let parsed: ryeos_remote_lease_core::LeaseAdmissionRequest =
+                ryeos_external_execution_contract::from_json_slice_strict(
+                    &request,
+                    ryeos_external_execution_contract::MAX_LEASE_ADMISSION_BYTES,
+                )?;
+            let verdict = ryeos_external_execution_contract::canonical_json(
+                &ryeos_remote_lease_core::admit_before_spend(
+                    spec,
+                    &parsed,
+                    &lillux::sha256_hex(&request),
+                ),
+            )?;
+            let budget_weight =
+                admission::require_admitted(&verdict, &request, &spec_digest, adapter_id)?;
+            return Ok(admission::AdmittedLease {
+                request,
+                budget_weight,
+            });
+        }
         ensure!(
             self.admits_leases,
             "lease admission refused: external placement backend `{}` admits no leases",
