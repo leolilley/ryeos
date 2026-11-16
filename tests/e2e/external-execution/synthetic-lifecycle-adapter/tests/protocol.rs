@@ -93,6 +93,19 @@ fn admit_external_worker_evidence(
     evidence
 }
 
+/// The placement the real admission derives for the test Worker: its
+/// profile's `requires` and the Worker kind's readiness budget.
+fn admitted_placement(
+    state: &ryeos_app::state::AppState,
+) -> ryeos_state::external_execution::admission::ExternalProgramPlacement {
+    let evidence = admit_external_worker_evidence(state);
+    ryeos_engine::structured_session_profile::external_program_placement(
+        &evidence.profile.contract,
+        ryeos_app::source_closure_admission::worker_ready_timeout_ms(&state.engine).unwrap(),
+    )
+    .unwrap()
+}
+
 fn fixture_qualification_use(
     provider_runtime_manifest_hash: &str,
     evidence: &admitted_worker_evidence::AdmittedWorkerEvidence,
@@ -1204,7 +1217,7 @@ async fn prepare_external_worker_program_and_binding(
         "selection must retain the original verifier artifact and execution substrate"
     );
     let program = requirement
-        .resolve_for_use(Some(&selected), &qualification_use)
+        .resolve_for_use(Some(&selected), &qualification_use, admitted_placement(&state))
         .unwrap();
     let consumer = ryeos_app::external_content_admission::derive_consumer_authority_for_test(
         &resolution,
@@ -1644,6 +1657,7 @@ fn run_signed_worker_admission_on(
         return;
     }
     let selections = selections.unwrap();
+    let placement = admitted_placement(&state);
     let admission = ryeos_executor::test_support::admit_worker_session_with_selected_products(
         &mut state,
         "worker_execution:test/external-candidate",
@@ -1652,6 +1666,7 @@ fn run_signed_worker_admission_on(
         selections,
         joined_external_candidate_requirement(),
         qualification_use.clone(),
+        placement,
         &placement_qualification,
     );
     if case == SignedAdmissionCase::ContainedConnectorDescendants {
@@ -4766,6 +4781,7 @@ async fn run_production_tls_candidate(
         &qualification_use,
     )
     .unwrap();
+    let placement = admitted_placement(&state);
     let admission =
         ryeos_executor::test_support::admit_worker_session_with_selected_products_and_placement(
             &mut state,
@@ -4789,6 +4805,7 @@ async fn run_production_tls_candidate(
             },
             if codex.is_some() { real_codex_requirement() } else { joined_external_candidate_requirement() },
             qualification_use.clone(),
+            placement,
             controller_contract,
             roots,
             settings,
