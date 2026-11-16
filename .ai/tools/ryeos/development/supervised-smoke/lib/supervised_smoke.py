@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T07:32:54Z:f62fd0882762815a79e1bdab08bec6a8ab2e727a2f8435618d61d0bb2d289ba0:dLv3obJ8gF44PSJIMitsH5H6Mp2Zq3pwUx1jB0LCVgUMDtXT3kpuRGnlFjKZkRiszzQ/sswcf8mrSFKUP+erBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T08:10:46Z:9c88daace1f3ff2519f559fbcd30b799c2f7c55e53d151bcf196690e457ced45:rUzH7XLPR/MhyL5NZXmbWb0c3nyhYHtgmc608b3bsSVwblBARZOzEmIcx83t4LczCwd6n6LB+1Yw3rtKUjELCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 """Supervised-node smoke: read-mostly checks against a RUNNING supervised node.
 
 CI never runs a supervised node (host-setup, runit, enforced isolation, an
@@ -371,13 +371,32 @@ class Smoke:
             raise RuntimeError(f"ryeos sign of the manual-directives items failed rc={rc}: {redact(err or out)}")
         return project
 
+    def graph_events_text(self) -> str:
+        """The step notes live in the graph thread's events, not in the execute result: replay
+        the newest anchor_chain thread's events."""
+        rc, out, _ = self.ryeos("--no-project", "thread", "list", "--sort", "newest", "--limit", "20",
+                               timeout=60)
+        if rc != 0:
+            return ""
+        try:
+            listing = json.loads(out)
+        except ValueError:
+            return ""
+        threads = listing.get("threads", listing) if isinstance(listing, dict) else listing
+        for thread in threads if isinstance(threads, list) else []:
+            if "graph:test/anchor_chain" in json.dumps(thread) and thread.get("thread_id"):
+                rc, events, _ = self.ryeos("--no-project", "events", "replay", thread["thread_id"],
+                                           timeout=120)
+                return events if rc == 0 else ""
+        return ""
+
     def graph_check(self, manual: Path):
         rc, out, err = self.ryeos("execute", "graph:test/anchor_chain", "--project", str(manual),
                                   cwd=manual, timeout=300)
         text = (out or "") + "\n" + (err or "")
         if rc != 0:
             return FAIL, f"rc={rc} {redact(text)}"
-        if "retry not attempted" not in text:
+        if "retry not attempted" not in text and "retry not attempted" not in self.graph_events_text():
             return FAIL, "graph completed but the flaky step carries no 'retry not attempted' note"
         if "completed" not in text.lower():
             return FAIL, "no completed status in the graph result"
