@@ -544,7 +544,6 @@ fi
     # main runs the step after init and before the daemon exec.
     main_body="$(declare -f main)"
     [[ "${main_body%%prestart_bundle_set_update*}" != "$main_body" ]]
-    [[ "${main_body%%prestart_bundle_set_update*}" != *'exec ryeosd "${DAEMON_ARGS[@]}"'*'exec ryeosd'* ]]
     [[ "${main_body#*prestart_bundle_set_update}" == *'exec ryeosd "${DAEMON_ARGS[@]}"'* ]]
 
     # A mount nested under the app root is refused before anything changes.
