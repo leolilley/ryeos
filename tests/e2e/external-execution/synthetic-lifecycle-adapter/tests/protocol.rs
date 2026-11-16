@@ -1291,14 +1291,16 @@ async fn prepare_external_worker_program_and_binding(
     else {
         panic!("external worker composition requires the exact pinned consumer generation")
     };
+    // A bundle consumer whose selection uses a bundle-owned relationship does
+    // not depend on the project: it keeps installed-bundle authority under a
+    // pinned generation, and its selection identity is pinned by the admitted
+    // program instead.
     assert!(
         matches!(
             &consumer,
-            ryeos_state::objects::ExternalContentConsumerAuthority::PinnedProject {
-                project_snapshot_hash, ..
-            } if project_snapshot_hash == snapshot_hash
+            ryeos_state::objects::ExternalContentConsumerAuthority::InstalledBundle { .. }
         ),
-        "selected external worker consumer must retain the exact base generation"
+        "selected bundle consumer with a bundle-owned relationship keeps installed-bundle authority"
     );
     let maximum_bytes = state.node_policy
         .require::<ryeos_node_runtime::node_policy::sections::external_content::ExternalContentImportPolicyRecord>()
