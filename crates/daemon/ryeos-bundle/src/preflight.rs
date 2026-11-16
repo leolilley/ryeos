@@ -1934,7 +1934,6 @@ description: "fixed parser handler for preflight tests"
             &layout.source,
             "test-bundle",
             &ts,
-            true,
         )
         .unwrap_err();
         let msg = err.to_string();
