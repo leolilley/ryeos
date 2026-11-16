@@ -1,15 +1,15 @@
-<!-- ryeos:signed:2026-08-04T08:52:12Z:ea81ade1c8adf6bde92cbef10cbc6f5ec74eebe3266665c972bfd09b84fdec4d:rRDVSneIsw54M6ppvLoxqPRArrlqm1z8R/3YpP0hIPea8ovaC6dJSrRyaaCzhpXKEIvdXFPa79o4dAhnxxLpAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-11-16T03:26:52Z:5b4f43072d9198c01cae98c89f97bc2c116765529319fcb151d6b81fc8e925f1:iKeg7JUS2OgktKq80FAP7FzqfnaM70GznRgH/KDaGiXno3GVX7MezHmxqJpvIIjip34CP3MuKoYou3kyDQmJDQ==:ae0ca349cdef0b514a7589669b7b5ff12ac666d38374eb657abd94b53aeccbfb -->
 ---
-description: "E2E directive that intentionally crosses a tiny local continuation threshold and invokes a continuation summary hook."
+description: "E2E directive that intentionally crosses a tiny local continuation threshold, so the thread continues as a successor."
 version: "1.0.0"
 model:
-  provider: zen
-  name: gpt-5.4-nano
+  provider: deepseek
+  name: deepseek-v4-flash
   context_window: 500
 limits:
   turns: 4
   tokens: 80000
-  spend_usd: 0.05
+  spend_usd: "0.05"
   depth: 2
 continuation:
   carry_turns: 1
@@ -17,24 +17,9 @@ requires:
   capabilities:
     declared:
       - ryeos.execute.tool.test/anchor_demo/anchor_demo
-      - ryeos.execute.directive.test/continuation/summarize_hook
-hooks:
-  - id: e2e-summarize-before-continuing
-    event: continuation
-    result: control
-    action:
-      item_id: directive:test/continuation/summarize_hook
-      thread: inline
-      params:
-        reason: ${event.reason}
-        live_messages: ${event.messages}
-        usage: ${event.usage}
-        budget_remaining: ${event.budget_remaining}
-        declared_outputs: ${event.declared_outputs}
-        max_summary_tokens: 120
 ---
 
-# E2E Force Continuation With Hook
+# E2E Force Continuation
 
 First call `tool:test/anchor_demo/anchor_demo` with `{"name":"continuation","style":"friendly"}`.
 

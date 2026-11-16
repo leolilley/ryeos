@@ -1,10 +1,10 @@
-# ryeos:signed:2026-06-07T05:42:18Z:a353d4bb5f0e0547cc2922f3b731f5f68b2603528759d145338c9cd55fd17c9d:g6pja547e7jlLkltoc78S0W/u7JTNRQGD1yvQrxH4B4zsm2TCv0yeya/xChlGj0CZ8FFauZbo0eT6zTgtT4ZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T03:24:11Z:a9d75147e2e53bffd399c6f58688135ebcb7502e53f2fe853f7498ab52f09c0c:q1hVoS1dSs0MCoIZ2yEm35+00TQpYrRsSHArbSLCg1rYl3vIyzS9QuZm+IK9i0wwrL+oQZ8IQlTCzCUTq+1ACA==:ae0ca349cdef0b514a7589669b7b5ff12ac666d38374eb657abd94b53aeccbfb
 # ryeos-tool:
 #   category: test/anchor_demo
 #   version: "1.0.0"
-#   tool_type: python
-#   executor_id: ryeos/core/runtimes/python/function
-#   tool_description: "Helper module for anchor demo"
+#   executor_id: "tool:ryeos/core/runtimes/python/function"
+#   execution_protocol: "protocol:ryeos/core/tool_callback"
+#   description: "Helper module for anchor demo"
 """Helper module for anchor demo tool.
 
 Tests that PYTHONPATH injection via anchor system allows
