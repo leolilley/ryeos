@@ -79,6 +79,10 @@ class GuestWireProbeSourceTests(unittest.TestCase):
             SUPERVISOR: "bin:codex/" + SUPERVISOR,
             LAUNCHER: "bin:codex/" + LAUNCHER,
         })
+        self.assertEqual(scenario["launch_shape"], {
+            "controller_transport": "https",
+            "sandbox_network_policy": {"kind": "allow_list", "hosts": ["controller.invalid"]},
+        })
         self.assertEqual(scenario["remote_probe_input"], {
             "schema": "ryeos.guest_wire_probe_input.v1",
             "guest_inputs_schema": 5,

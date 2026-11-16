@@ -1212,7 +1212,7 @@ mod tests {
             RuntimeSnapshotQualificationReadinessRequest,
         };
         let mut intent = RuntimeSnapshotQualificationIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
             operation_id: String::new(),
             owner_principal: format!("fp:{}", "a".repeat(64)),
             snapshot_operation_id: "b".repeat(64),
@@ -1226,8 +1226,7 @@ mod tests {
             settings_digest: "1".repeat(64),
             verifier_artifact_hash: "2".repeat(64),
             maximum_lifetime_seconds: 900,
-            attempt_deadline_ms: 42,
-        };
+            attempt_deadline_ms: 42, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
         intent.operation_id = intent.derived_operation_id().unwrap();
         let request = RuntimeSnapshotQualificationReadinessRequest {
             protocol: RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL.into(),
@@ -1277,7 +1276,7 @@ mod tests {
         let upload = lillux::sealed_memfd(c"verifier-upload-test", b"tar-fixture").unwrap();
         let upload_sha256 = lillux::sha256_hex(b"tar-fixture");
         let mut qualification_intent = RuntimeSnapshotQualificationIntent {
-            schema: 1,
+            schema: ryeos_external_execution_contract::runtime_snapshot::RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA,
             operation_id: String::new(),
             owner_principal: source_intent.owner_principal.clone(),
             snapshot_operation_id: source_intent.operation_id.clone(),
@@ -1291,8 +1290,7 @@ mod tests {
             settings_digest: "1".repeat(64),
             verifier_artifact_hash: "2".repeat(64),
             maximum_lifetime_seconds: 900,
-            attempt_deadline_ms: 42,
-        };
+            attempt_deadline_ms: 42, launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), };
         qualification_intent.operation_id = qualification_intent.derived_operation_id().unwrap();
         let occurrence = RuntimeSnapshotQualificationOccurrence {
             schema: 1,
@@ -1302,7 +1300,7 @@ mod tests {
             contact_deadline_exceeded: false,
         };
         let mut attempt = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: qualification_intent.operation_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),
@@ -1401,6 +1399,8 @@ mod tests {
             coordinate,
             nonce_hex: "8".repeat(64),
             guest_runtime_manifest_hash: consumer.source_intent.guest_runtime_manifest_hash.clone(),
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
         };
         consumer.intent.operation_id = consumer.intent.derived_operation_id().unwrap();
         consumer.validate().unwrap();

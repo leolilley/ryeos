@@ -1448,6 +1448,8 @@ mod tests {
             verifier_artifact_hash: verifier_sha256.into(),
             maximum_lifetime_seconds: 900,
             attempt_deadline_ms: source.attempt_deadline_ms - 100,
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
         };
         qualification.operation_id = qualification.derived_operation_id().unwrap();
         let bound = qualify_create_core(
@@ -1477,7 +1479,7 @@ mod tests {
 
     fn owner_request(staged: &Staged, archive: &[u8]) -> RestoredVerifierAdapterRequest {
         let mut intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: staged.qualification.operation_id.clone(),
             restored_occurrence_id: staged.occurrence.occurrence_id.clone(),
@@ -1523,7 +1525,7 @@ mod tests {
             archive_budget: ConsumerArchiveBudget::new(16, 4096, 8192).unwrap(),
         };
         let mut intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: staged.qualification.operation_id.clone(),
             restored_occurrence_id: staged.occurrence.occurrence_id.clone(),
@@ -1533,8 +1535,7 @@ mod tests {
             purpose: RemoteVerificationPurpose::ConsumerRuntime {
                 coordinate,
                 nonce_hex: "9".repeat(64),
-                guest_runtime_manifest_hash: staged.source.guest_runtime_manifest_hash.clone(),
-            },
+                guest_runtime_manifest_hash: staged.source.guest_runtime_manifest_hash.clone(), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
             attempt_deadline_ms: staged.source.attempt_deadline_ms - 200,
         };
         intent.operation_id = intent.derived_operation_id().unwrap();

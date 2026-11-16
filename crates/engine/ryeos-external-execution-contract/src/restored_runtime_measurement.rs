@@ -10,9 +10,10 @@ use sha2::{Digest as _, Sha256};
 
 use crate::canonical_json;
 use crate::runtime_snapshot::{
-    RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotIntent, RuntimeSnapshotLocator,
-    RuntimeSnapshotQualificationIntent, RuntimeSnapshotQualificationOccurrence,
-    RuntimeSnapshotReadinessObservation, RuntimeSnapshotReadinessRequest,
+    LaunchShape, RUNTIME_SNAPSHOT_READINESS_PROTOCOL, RuntimeSnapshotIntent,
+    RuntimeSnapshotLocator, RuntimeSnapshotQualificationIntent,
+    RuntimeSnapshotQualificationOccurrence, RuntimeSnapshotReadinessObservation,
+    RuntimeSnapshotReadinessRequest,
 };
 
 pub const RESTORED_OWNER_MEASUREMENT_PROTOCOL: &str = "ryeos.restored-owner-measurement.v2";
@@ -26,6 +27,10 @@ pub const MAX_CONSUMER_INPUT_RECORD_BYTES: usize = 96 * 1024;
 pub const MAX_RESTORATION_VERIFIER_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_RESTORED_OWNER_CHALLENGE_BYTES: usize = 4096;
 pub const MAX_RESTORED_OWNER_RESULT_BYTES: usize = 4096;
+/// Schema of a retained verifier attempt intent.
+pub const RESTORED_VERIFIER_ATTEMPT_SCHEMA: u32 = 3;
+/// Schema of the consumer runtime challenge handed to the guest.
+pub const CONSUMER_RUNTIME_CHALLENGE_SCHEMA: u32 = 2;
 pub const RESTORED_VERIFIER_ADAPTER_PROTOCOL: &str = "ryeos.restored-verifier-adapter.v4";
 pub const MAX_RESTORED_VERIFIER_ADAPTER_REQUEST_BYTES: usize = 32 * 1024;
 // Complete canonical product-verifier evidence, not decoded transcript size.
@@ -447,7 +452,10 @@ pub struct ConsumerRuntimeChallenge {
 
 impl ConsumerRuntimeChallenge {
     pub fn validate(&self) -> Result<()> {
-        ensure!(self.schema == 1, "unsupported consumer runtime challenge");
+        ensure!(
+            self.schema == CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
+            "unsupported consumer runtime challenge"
+        );
         let RemoteVerificationPurpose::ConsumerRuntime { coordinate, .. } = &self.intent.purpose
         else {
             anyhow::bail!("owner measurement cannot use consumer runtime challenge");
@@ -503,7 +511,7 @@ impl RestoredVerifierAdapterRequest {
     pub fn consumer_challenge(&self) -> Result<ConsumerRuntimeChallenge> {
         self.validate()?;
         let challenge = ConsumerRuntimeChallenge {
-            schema: 1,
+            schema: CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
             intent: self.intent.clone(),
             selection: self
                 .consumer_selection
@@ -768,6 +776,10 @@ pub enum RemoteVerificationPurpose {
         /// Exact installed owner runtime, selected from the retained snapshot
         /// source. Its manifest commits the account profile used at startup.
         guest_runtime_manifest_hash: String,
+        /// The launch shape the occurrence was created under, copied from
+        /// its retained qualification intent. The scenario's declared shape
+        /// must equal it before this attempt exists.
+        launch_shape: LaunchShape,
     },
 }
 
@@ -784,6 +796,7 @@ impl RemoteVerificationPurpose {
                 coordinate,
                 nonce_hex,
                 guest_runtime_manifest_hash,
+                ..
             } => {
                 require_hash(nonce_hex, "consumer challenge nonce")?;
                 return consumer_verification_purpose_digest(
@@ -876,25 +889,29 @@ impl RestoredVerifierAttemptIntent {
             coordinate,
             nonce_hex,
             guest_runtime_manifest_hash,
+            launch_shape,
         } = &self.purpose
         else {
             anyhow::bail!("owner measurement has no consumer challenge");
         };
         coordinate.validate()?;
+        launch_shape.validate()?;
         require_hash(nonce_hex, "consumer challenge nonce")?;
         require_hash(guest_runtime_manifest_hash, "consumer owner runtime")?;
         require_hash(&self.verifier_artifact_hash, "consumer verifier artifact")?;
         ensure!(
-            self.schema == 2 && self.operation_id == self.derived_operation_id()?,
+            self.schema == RESTORED_VERIFIER_ATTEMPT_SCHEMA
+                && self.operation_id == self.derived_operation_id()?,
             "consumer challenge has no exact retained attempt identity"
         );
         Ok(hex::encode(Sha256::digest(canonical_json(&(
-            "ryeos.consumer-runtime-challenge.v2",
+            "ryeos.consumer-runtime-challenge.v3",
             &self.operation_id,
             &self.verifier_artifact_hash,
             coordinate,
             nonce_hex,
             guest_runtime_manifest_hash,
+            launch_shape,
         ))?)))
     }
 
@@ -917,16 +934,22 @@ impl RestoredVerifierAttemptIntent {
             coordinate,
             nonce_hex,
             guest_runtime_manifest_hash,
+            launch_shape,
         } = &self.purpose
         else {
             anyhow::bail!("owner measurement cannot use consumer verification admission");
         };
+        launch_shape.validate()?;
+        ensure!(
+            *launch_shape == qualification.launch_shape,
+            "consumer verifier attempt launch shape differs from its qualification occurrence"
+        );
         require_hash(nonce_hex, "consumer challenge nonce")?;
         require_hash(&self.upload_sha256, "consumer upload")?;
         ensure!(
             coordinate == expected_coordinate
                 && guest_runtime_manifest_hash == &source.guest_runtime_manifest_hash
-                && self.schema == 2
+                && self.schema == RESTORED_VERIFIER_ATTEMPT_SCHEMA
                 && self.qualification_operation_id == qualification.operation_id
                 && self.restored_occurrence_id == occurrence.occurrence_id
                 && self.verifier_artifact_hash == selection.verifier_artifact_hash
@@ -968,7 +991,7 @@ impl RestoredVerifierAttemptIntent {
         let challenge = self.owner_challenge()?;
         challenge.validate_for(source, locator)?;
         ensure!(
-            self.schema == 2
+            self.schema == RESTORED_VERIFIER_ATTEMPT_SCHEMA
                 && self.qualification_operation_id == qualification.operation_id
                 && self.restored_occurrence_id == occurrence.occurrence_id
                 && challenge.restored_occurrence_id == occurrence.occurrence_id
@@ -1226,7 +1249,7 @@ mod tests {
     #[test]
     fn verifier_attempt_identity_cannot_be_reminted_by_nonce_or_deadline() {
         let mut attempt = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: "1".repeat(64),
             restored_occurrence_id: "sbx-exact".into(),
@@ -1273,6 +1296,11 @@ mod tests {
             coordinate,
             nonce_hex: "2".repeat(64),
             guest_runtime_manifest_hash: "7".repeat(64),
+            launch_shape: LaunchShape {
+                controller_transport: crate::runtime_snapshot::LaunchControllerTransport::Https,
+                sandbox_network_policy:
+                    crate::runtime_snapshot::LaunchSandboxNetworkPolicy::DenyAll,
+            },
         };
         let consumer_identity = attempt.derived_operation_id().unwrap();
         let RemoteVerificationPurpose::ConsumerRuntime {
@@ -1296,7 +1324,7 @@ mod tests {
         );
         attempt.operation_id = consumer_identity.clone();
         let challenge = ConsumerRuntimeChallenge {
-            schema: 1,
+            schema: CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
             intent: attempt.clone(),
             selection: ConsumerRuntimeVerifierSelection {
                 scenario_source_digest: "c".repeat(64),

@@ -4,6 +4,8 @@
 //! only an attempt result; restored bytes and runtime behavior require an
 //! independent qualification rooted in the retained source testimony.
 
+use std::collections::BTreeSet;
+
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -14,9 +16,9 @@ pub const RUNTIME_SNAPSHOT_INTENT_SCHEMA: u32 = 5;
 pub const RUNTIME_SNAPSHOT_RESULT_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_ADAPTER_PROTOCOL: &str = "ryeos.runtime-snapshot-adapter.v6";
 pub const RUNTIME_SNAPSHOT_READINESS_PROTOCOL: &str = "ryeos.runtime-snapshot-readiness.v1";
-pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 1;
+pub const RUNTIME_SNAPSHOT_QUALIFICATION_SCHEMA: u32 = 2;
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_ADAPTER_PROTOCOL: &str =
-    "ryeos.runtime-snapshot-qualification-adapter.v1";
+    "ryeos.runtime-snapshot-qualification-adapter.v2";
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_TERMINATION_PROTOCOL: &str =
     "ryeos.runtime-snapshot-qualification-termination.v1";
 pub const RUNTIME_SNAPSHOT_QUALIFICATION_READINESS_PROTOCOL: &str =
@@ -30,6 +32,108 @@ pub const RUNTIME_SNAPSHOT_UPLOAD_ADAPTER_PROTOCOL: &str =
 pub const RUNTIME_SNAPSHOT_CREATE_ADAPTER_PROTOCOL: &str =
     "ryeos.runtime-snapshot-create-adapter.v1";
 pub const RUNTIME_SNAPSHOT_CREATE_RESULT_SCHEMA: u32 = 1;
+
+/// How the guest's controller connection is carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchControllerTransport {
+    Https,
+    Relay,
+}
+
+/// The network policy a provider sandbox is created under: deny-all, or an
+/// allow-list of exact egress hosts.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LaunchSandboxNetworkPolicy {
+    DenyAll,
+    AllowList { hosts: BTreeSet<String> },
+}
+
+impl LaunchSandboxNetworkPolicy {
+    pub const MAX_ALLOW_LIST_HOSTS: usize = 8;
+
+    /// The policy kind, without its hosts.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::DenyAll => "deny_all",
+            Self::AllowList { .. } => "allow_list",
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Self::AllowList { hosts } = self {
+            ensure!(
+                (1..=Self::MAX_ALLOW_LIST_HOSTS).contains(&hosts.len())
+                    && hosts.iter().all(|host| {
+                        !host.is_empty()
+                            && host.len() <= 253
+                            && host.bytes().all(|byte| {
+                                byte.is_ascii_lowercase()
+                                    || byte.is_ascii_digit()
+                                    || matches!(byte, b'.' | b'-')
+                            })
+                    }),
+                "launch shape allow-list hosts are invalid"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The launch shape a qualification occurrence is created under and a
+/// verifier runs under: how the controller is reached and what the sandbox may
+/// reach. Declared as signed data, retained in typed intents, observed by the
+/// guest, and compared with the shape a lease will launch under.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchShape {
+    pub controller_transport: LaunchControllerTransport,
+    pub sandbox_network_policy: LaunchSandboxNetworkPolicy,
+}
+
+impl LaunchShape {
+    /// The consumer-relay shape: controller reached through the relay, sandbox
+    /// network denied.
+    pub fn relay_deny_all() -> Self {
+        Self {
+            controller_transport: LaunchControllerTransport::Relay,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::DenyAll,
+        }
+    }
+
+    /// The lease shape: controller reached over https, sandbox allowed to
+    /// reach exactly `hosts`.
+    pub fn https_allow_list(hosts: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            controller_transport: LaunchControllerTransport::Https,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
+                hosts: hosts.into_iter().collect(),
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.sandbox_network_policy.validate()
+    }
+
+    /// The first field that differs from `other`, with both values, or none.
+    pub fn first_difference(&self, other: &Self) -> Option<String> {
+        if self.controller_transport != other.controller_transport {
+            return Some(format!(
+                "launch_shape.controller_transport: {:?} versus {:?}",
+                self.controller_transport, other.controller_transport
+            ));
+        }
+        if self.sandbox_network_policy != other.sandbox_network_policy {
+            return Some(format!(
+                "launch_shape.sandbox_network_policy: {:?} versus {:?}",
+                self.sandbox_network_policy, other.sandbox_network_policy
+            ));
+        }
+        None
+    }
+}
 
 /// Provenance of an exact owner-runtime tree. Neither variant alone qualifies
 /// the restored provider snapshot or grants a worker execution.
@@ -602,6 +706,9 @@ pub struct RuntimeSnapshotQualificationIntent {
     pub settings_digest: String,
     pub verifier_artifact_hash: String,
     pub maximum_lifetime_seconds: u32,
+    /// The shape the sandbox is created under, copied from the signed
+    /// qualification binding.
+    pub launch_shape: LaunchShape,
     pub attempt_deadline_ms: i64,
 }
 
@@ -624,6 +731,7 @@ impl RuntimeSnapshotQualificationIntent {
                 && (1..=3600).contains(&self.maximum_lifetime_seconds),
             "snapshot qualification intent differs from retained snapshot authority"
         );
+        self.launch_shape.validate()?;
         for (label, hash) in [
             ("qualification profile", &self.qualification_profile_digest),
             ("qualification adapter", &self.adapter_artifact_hash),
@@ -647,7 +755,7 @@ impl RuntimeSnapshotQualificationIntent {
     /// Deadline changes cannot mint a fresh non-idempotent create opportunity.
     pub fn derived_operation_id(&self) -> Result<String> {
         let coordinates = (
-            "ryeos.runtime-snapshot-qualification.v1",
+            "ryeos.runtime-snapshot-qualification.v2",
             &self.owner_principal,
             &self.snapshot_operation_id,
             &self.snapshot_intent_digest,
@@ -660,6 +768,7 @@ impl RuntimeSnapshotQualificationIntent {
             &self.settings_digest,
             &self.verifier_artifact_hash,
             self.maximum_lifetime_seconds,
+            &self.launch_shape,
         );
         Ok(hex::encode(Sha256::digest(canonical_json(&coordinates)?)))
     }
@@ -1126,6 +1235,54 @@ fn require_bounded_text(value: &str, maximum: usize, label: &str) -> Result<()> 
 mod tests {
     use super::*;
 
+    fn test_launch_shape() -> LaunchShape {
+        LaunchShape {
+            controller_transport: LaunchControllerTransport::Https,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::AllowList {
+                hosts: BTreeSet::from(["controller.invalid".to_owned()]),
+            },
+        }
+    }
+
+    #[test]
+    fn launch_shape_is_bounded_and_names_its_first_difference() {
+        let shape = test_launch_shape();
+        shape.validate().unwrap();
+        assert!(shape.first_difference(&shape).is_none());
+        let relay = LaunchShape {
+            controller_transport: LaunchControllerTransport::Relay,
+            sandbox_network_policy: LaunchSandboxNetworkPolicy::DenyAll,
+        };
+        let text = shape.first_difference(&relay).unwrap();
+        assert!(
+            text.contains("controller_transport")
+                && text.contains("Https")
+                && text.contains("Relay")
+        );
+        let mut other = shape.clone();
+        other.sandbox_network_policy = LaunchSandboxNetworkPolicy::DenyAll;
+        let text = shape.first_difference(&other).unwrap();
+        assert!(text.contains("sandbox_network_policy") && text.contains("DenyAll"));
+        for hosts in [
+            BTreeSet::new(),
+            BTreeSet::from(["Upper.example".to_owned()]),
+        ] {
+            assert!(
+                LaunchSandboxNetworkPolicy::AllowList { hosts }
+                    .validate()
+                    .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<LaunchShape>(serde_json::json!({
+                "controller_transport": "https",
+                "sandbox_network_policy": {"kind": "deny_all"},
+                "extra": 1
+            }))
+            .is_err()
+        );
+    }
+
     fn intent() -> RuntimeSnapshotIntent {
         let mut intent = RuntimeSnapshotIntent {
             schema: RUNTIME_SNAPSHOT_INTENT_SCHEMA,
@@ -1565,6 +1722,7 @@ mod tests {
             settings_digest: "4".repeat(64),
             verifier_artifact_hash: "5".repeat(64),
             maximum_lifetime_seconds: 900,
+            launch_shape: test_launch_shape(),
             attempt_deadline_ms: source.attempt_deadline_ms + 1,
         };
         qualification.operation_id = qualification.derived_operation_id().unwrap();

@@ -91,7 +91,7 @@ fn main() -> Result<()> {
             .context("write re-sealed record")?;
     }
     let challenge = ConsumerRuntimeChallenge {
-        schema: 1,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
         intent,
         selection,
     };

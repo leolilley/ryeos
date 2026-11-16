@@ -141,6 +141,9 @@ mod tests {
             }),
             consumer_worker_request: None,
             remote_probe_input: Some(json!({"controller":{"scenario":"probe"}})),
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         }
     }
 

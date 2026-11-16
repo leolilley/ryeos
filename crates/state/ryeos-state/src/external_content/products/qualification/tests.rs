@@ -182,6 +182,7 @@ fn consumer_launch_purpose_fixture() -> QualificationLaunchPurpose {
             recipe_ref: Some("config:codex/direct-probe".into()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     purpose.producer_recipe_sources.insert(
@@ -704,6 +705,7 @@ fn launch_purpose_pins_every_signed_producer_recipe_source() {
             recipe_ref: Some(recipe_ref.clone()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     assert!(purpose.validate().is_err());
@@ -1047,6 +1049,7 @@ fn scoped_attempt_proof_is_exact_distinct_and_bound_to_signed_scenario() {
             recipe_ref: Some(source.canonical_ref.clone()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     let scoped = ProductQualificationScopedAttemptProof {
@@ -1843,15 +1846,14 @@ fn purpose_owns_the_exact_signed_remote_verifier_inventory() {
         scenario_input: json!({}),
     };
     let mut attempt = ryeos_external_execution_contract::restored_runtime_measurement::RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: "a".repeat(64),
         restored_occurrence_id: "fixture-occurrence".into(),
         verifier_artifact_hash: selection.verifier_artifact_hash.clone(),
         upload_sha256: "e".repeat(64), upload_bytes: 1,
         purpose: ryeos_external_execution_contract::restored_runtime_measurement::RemoteVerificationPurpose::ConsumerRuntime {
-            coordinate: coordinate.clone(), nonce_hex: "f".repeat(64), guest_runtime_manifest_hash: "e".repeat(64),
-        },
+            coordinate: coordinate.clone(), nonce_hex: "f".repeat(64), guest_runtime_manifest_hash: "e".repeat(64), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
         attempt_deadline_ms: 1000,
     };
     attempt.operation_id = attempt.derived_operation_id().unwrap();
@@ -1958,7 +1960,7 @@ fn remote_subordinate_proof_fixture() -> ProductQualificationRemoteConsumerProof
     };
     let root = evidence().verifier;
     let mut intent = RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: "1".repeat(64),
         restored_occurrence_id: "fixture-occurrence".into(),
@@ -1980,8 +1982,7 @@ fn remote_subordinate_proof_fixture() -> ProductQualificationRemoteConsumerProof
                 prerequisite_measurement_observation_digest: "9".repeat(64),
             },
             nonce_hex: "a".repeat(64),
-            guest_runtime_manifest_hash: "b".repeat(64),
-        },
+            guest_runtime_manifest_hash: "b".repeat(64), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
     };
     intent.operation_id = intent.derived_operation_id().unwrap();
     let observation = ConsumerVerifierAdapterObservation {
@@ -2080,6 +2081,9 @@ fn remote_verifier_selection_is_signed_distinct_and_source_committed() {
             archive_members: Default::default(),
         }),
         consumer_worker_request: Some(test_worker_request("first")),
+        launch_shape: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        ),
     };
     value
         .producer_scenarios
@@ -2225,6 +2229,9 @@ fn scenario_worker_request_is_bounded_signed_data_distinct_from_verifier_source(
             archive_members: Default::default(),
         }),
         consumer_worker_request: Some(test_worker_request("initial")),
+        launch_shape: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        ),
     };
     let source = ProductProducerRecipeSourceIdentity {
         bundle_generation_identity: "generation-1".into(),
@@ -2468,6 +2475,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
             recipe_ref: Some("config:fixtures/independent-runtime/native-codex-producer".into()),
             remote_verifier: None,
             consumer_worker_request: None,
+            launch_shape: None,
         },
     );
     assert!(value.validate().is_ok());
@@ -2487,6 +2495,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
                 recipe_ref: Some("config:fixtures/recipe".into()),
                 remote_verifier: None,
                 consumer_worker_request: None,
+                launch_shape: None,
             },
         );
         assert!(invalid.validate().is_err(), "accepted scenario {name:?}");
@@ -2515,6 +2524,7 @@ fn producer_scenarios_are_finite_canonical_signed_config_refs_only() {
                 recipe_ref: Some("config:fixtures/recipe".into()),
                 remote_verifier: None,
                 consumer_worker_request: None,
+                launch_shape: None,
             },
         );
     }
@@ -2728,6 +2738,9 @@ fn consumer_q_evidence_fixture() -> ProductQualificationEvidence {
                 session_setup: json!({"route":"session.start","body":{}}),
                 body: json!({"route":"turn.start","body":{"prompt":"bounded"}}),
             }),
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         },
     );
     let remote = remote_subordinate_proof_fixture();
@@ -2942,6 +2955,9 @@ fn probe_scenario() -> ProductQualificationProducerScenario {
         remote_verifier: Some(probe_selection()),
         consumer_worker_request: None,
         remote_probe_input: Some(json!({"controller":{"scenario":"probe"}})),
+        launch_shape: Some(
+            ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+        ),
     }
 }
 
@@ -3243,5 +3259,34 @@ fn origin_holdings_are_required_exact_and_part_of_the_semantic_identity() {
     assert_ne!(
         valid.semantic_identity_value().unwrap(),
         changed_holding.semantic_identity_value().unwrap()
+    );
+}
+
+#[test]
+fn remote_verifier_scenario_requires_its_launch_shape_and_commits_it() {
+    use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
+    let scenario = ProductQualificationProducerScenario {
+        remote_probe_input: Some(json!({"probe": "a"})),
+        recipe_ref: None,
+        remote_verifier: Some(probe_selection()),
+        consumer_worker_request: None,
+        launch_shape: Some(LaunchShape::relay_deny_all()),
+    };
+    scenario.validate().unwrap();
+    let mut undeclared = scenario.clone();
+    undeclared.launch_shape = None;
+    assert!(undeclared.validate().is_err());
+    let mut orphan = scenario.clone();
+    orphan.remote_verifier = None;
+    orphan.remote_probe_input = None;
+    orphan.recipe_ref = Some("config:fixtures/recipe".into());
+    assert!(orphan.validate().is_err());
+    let mut changed = scenario.clone();
+    changed.launch_shape = Some(LaunchShape::https_allow_list([
+        "controller.invalid".to_owned()
+    ]));
+    assert_ne!(
+        scenario.remote_verifier_source_digest(None).unwrap(),
+        changed.remote_verifier_source_digest(None).unwrap()
     );
 }

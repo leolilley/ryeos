@@ -1180,6 +1180,11 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
         .get("consumer_verifiers")
         .map(|bytes| read_json::<Value>(bytes, "consumer verifiers"))
         .transpose()?;
+    let launch_shape = ctx
+        .inputs
+        .get("launch_shape")
+        .map(|bytes| read_json::<Value>(bytes, "launch shape"))
+        .transpose()?;
     let report = compose_runtime_snapshot_qualification_binding(QualificationComposeRequest {
         app_root: ctx.app_root,
         state_lock: ctx.state_lock,
@@ -1188,6 +1193,7 @@ pub(super) fn snapshot_qualification_compose(ctx: &HandlerContext<'_>) -> Result
         provider_spec: ctx.inputs.require("provider_spec")?.to_vec(),
         verifier_artifact_hash: arguments.verifier.clone(),
         consumer_verifiers,
+        launch_shape,
         limits: QualificationLimits {
             contact_timeout_seconds: arguments
                 .contact_timeout_seconds

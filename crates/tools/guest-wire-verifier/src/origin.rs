@@ -306,7 +306,7 @@ fn check_observation(
                 "evidence bytes differ from the adapter observation"
             );
             let challenge = ConsumerRuntimeChallenge {
-                schema: 1,
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
                 intent: attempt.intent,
                 selection: record.selection.clone(),
             };
@@ -526,7 +526,7 @@ mod tests {
         };
         let hash = "a".repeat(64);
         let mut intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: hash.clone(),
             restored_occurrence_id: "sbx-probe".into(),
@@ -548,13 +548,12 @@ mod tests {
                     prerequisite_measurement_observation_digest: hash.clone(),
                 },
                 nonce_hex: hash.clone(),
-                guest_runtime_manifest_hash: hash.clone(),
-            },
+                guest_runtime_manifest_hash: hash.clone(), launch_shape: ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(), },
         };
         intent.operation_id = intent.derived_operation_id().unwrap();
         let observed = ObservedAttempt {
             challenge: ConsumerRuntimeChallenge {
-                schema: 1,
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
                 intent,
                 selection: ConsumerRuntimeVerifierSelection {
                     scenario_source_digest: hash.clone(),

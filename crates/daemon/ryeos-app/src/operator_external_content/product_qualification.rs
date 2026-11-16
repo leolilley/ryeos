@@ -3969,6 +3969,10 @@ impl PreparedRemoteConsumerVerifier {
             recipe_resolution_blob_hash,
             scenario_source_digest: self.scenario_source_digest.clone(), producer_source: self.producer_source.clone(),
             remote_probe_input: scenario.remote_probe_input.clone(),
+            launch_shape: scenario
+                .launch_shape
+                .clone()
+                .context("remote verifier scenario declares no launch shape")?,
             archive_member_digests,
             selection: selection.clone(), payload_bytes: self.payload.bytes, payload_mode,
             signed_items, signed_bundle_manifests,

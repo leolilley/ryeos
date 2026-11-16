@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-16T01:39:25Z:14f3f968ab703fdc56ec440bad3e1ac89dd9e4d13393602d6ade5abeb3e3e2a4:0yK3rUHYnfRmi7t02dEQAM0D/3/xBhyayBlNpzbrbQEwewrkTA/pMcKC3oMza1kpARmVh7INN7ePQKt9QcdDCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T11:52:14Z:7912142936f011195e00ddf69ae241d6b8f7f7699ca33341047e29a528b2bc35:0aHSGxY4cznuondLnx8akNO47c4o6By4F2PJht4gkgA5miMksdEi4CtRNsf4enK661y+Fl6Kx/ixUH+cRA96AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Independent consumer qualification of the exact Codex guest runtime.
@@ -68,6 +68,10 @@ product_qualification_policy:
       remote_verifier:
         binary_ref: bin:codex/codex-runtime-verifier
         guest_target_triple: x86_64-unknown-linux-gnu
+      launch_shape:
+        controller_transport: relay
+        sandbox_network_policy:
+          kind: deny_all
       consumer_worker_request:
         schema: ryeos.qualification_worker_request.v5
         credential_profile_id: codex-main

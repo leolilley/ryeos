@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeVerifierSelection;
+use ryeos_external_execution_contract::runtime_snapshot::LaunchShape;
 use serde::{Deserialize, Serialize};
 
 use super::{QualificationDocument, RuntimeSnapshotQualificationSection, SECTION_NAME};
@@ -26,7 +27,7 @@ use crate::node_config::sections::runtime_snapshot_production::compose::installe
 pub const MAX_PROVIDER_SPEC_BYTES: usize = 64 * 1024;
 
 /// Protocol of the qualification document this composer emits.
-const QUALIFICATION_PROTOCOL: &str = "ryeos.runtime-snapshot-qualification.v4";
+const QUALIFICATION_PROTOCOL: &str = "ryeos.runtime-snapshot-qualification.v5";
 
 /// Budgets of one qualification attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,9 @@ pub struct QualificationComposeRequest<'a> {
     /// Consumer verifier selections keyed by scenario id, as a JSON object;
     /// absent means none.
     pub consumer_verifiers: Option<serde_json::Value>,
+    /// The launch shape every occurrence under this binding is created with,
+    /// as a JSON object; absent means the relay shape with a deny-all sandbox.
+    pub launch_shape: Option<serde_json::Value>,
     pub limits: QualificationLimits,
 }
 
@@ -102,13 +106,17 @@ pub fn compose_runtime_snapshot_qualification_binding(
             Some(value) => serde_json::from_value(value).context("invalid consumer verifiers")?,
             None => BTreeMap::new(),
         };
+    let launch_shape: LaunchShape = match request.launch_shape {
+        Some(value) => serde_json::from_value(value).context("invalid launch shape")?,
+        None => LaunchShape::relay_deny_all(),
+    };
     let identity = load_node_identity(request.app_root)?;
     let producer =
         installed_production_binding(request.app_root, &request.snapshot_binding_id, &identity)?;
     let settings = producer.settings().clone();
     let document = QualificationDocument {
         kind: "node".into(),
-        schema: 4,
+        schema: 5,
         protocol: QUALIFICATION_PROTOCOL.into(),
         production_binding_id: producer.id().to_owned(),
         production_binding_digest: producer.digest().to_owned(),
@@ -117,6 +125,7 @@ pub fn compose_runtime_snapshot_qualification_binding(
         settings,
         verifier_artifact_hash: request.verifier_artifact_hash,
         consumer_verifiers,
+        launch_shape,
         contact_timeout_seconds: request.limits.contact_timeout_seconds,
         delivery_timeout_seconds: request.limits.delivery_timeout_seconds,
         maximum_lifetime_seconds: request.limits.maximum_lifetime_seconds,
@@ -264,6 +273,7 @@ mod tests {
             provider_spec: PROVIDER_SPEC.to_vec(),
             verifier_artifact_hash: "3".repeat(64),
             consumer_verifiers: None,
+            launch_shape: None,
             limits: QualificationLimits::default(),
         }
     }

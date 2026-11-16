@@ -962,6 +962,7 @@ fn create_qualification_occurrence_checked(
         settings_digest: qualification.settings_digest().to_owned(),
         verifier_artifact_hash: qualification.verifier_artifact_hash().to_owned(),
         maximum_lifetime_seconds: qualification.maximum_lifetime_seconds(),
+        launch_shape: qualification.launch_shape().clone(),
         attempt_deadline_ms: now
             .checked_add(i64::from(qualification.contact_timeout_seconds()) * 1_000)
             .context("qualification create deadline overflow")?,
@@ -1332,7 +1333,7 @@ fn verify_qualification_occurrence_under_contact_gate(
         .preflight_snapshot_qualification_create(producer, qualification, &credential)?;
     let now = lillux::time::timestamp_millis();
     let mut intent = RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: qualified.intent.operation_id.clone(),
         restored_occurrence_id: occurrence.occurrence_id.clone(),
@@ -1556,8 +1557,19 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
         .iter()
         .find(|profile| profile.digest() == qualification.intent.qualification_profile_digest)
         .context("consumer challenge protected profile disappeared")?;
+    let declared_shape = &admitted
+        .purpose()
+        .remote_verifier_sources
+        .get(&admitted.coordinate().scenario_id)
+        .context("consumer challenge has no retained verifier source")?
+        .launch_shape;
+    if let Some(difference) = declared_shape.first_difference(&qualification.intent.launch_shape) {
+        anyhow::bail!(
+            "the qualified occurrence was created under a launch shape the scenario does not declare: {difference} (scenario first, occurrence second)"
+        );
+    }
     let mut intent = RestoredVerifierAttemptIntent {
-        schema: 2,
+        schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
         operation_id: String::new(),
         qualification_operation_id: qualification_operation_id.into(),
         restored_occurrence_id: occurrence.occurrence_id.clone(),
@@ -1569,6 +1581,7 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
             coordinate: admitted.coordinate().clone(),
             nonce_hex: hex::encode(lillux::crypto::generate_random_bytes::<32>()),
             guest_runtime_manifest_hash: source.intent.guest_runtime_manifest_hash.clone(),
+            launch_shape: qualification.intent.launch_shape.clone(),
         },
         // The first contact delivers the consumer archive, which outlasts a
         // plain provider round trip; the profile's delivery budget bounds it.
@@ -1587,16 +1600,19 @@ pub fn prepare_consumer_verifier_attempt_for_callback(
                     coordinate,
                     nonce_hex,
                     guest_runtime_manifest_hash,
+                    launch_shape,
                 },
                 RemoteVerificationPurpose::ConsumerRuntime {
                     coordinate: retained_coordinate,
                     nonce_hex: retained_nonce,
                     guest_runtime_manifest_hash: retained_manifest,
+                    launch_shape: retained_shape,
                 },
             ) => {
                 ensure!(
                     coordinate == retained_coordinate
-                        && guest_runtime_manifest_hash == retained_manifest,
+                        && guest_runtime_manifest_hash == retained_manifest
+                        && launch_shape == retained_shape,
                     "consumer challenge replay changed accepted coordinate or owner runtime"
                 );
                 *nonce_hex = retained_nonce.clone();
@@ -1948,7 +1964,7 @@ fn verify_consumer_occurrence_with_callback(
                 })
                 .context("consumer signed producer absent")?;
             let challenge = ryeos_external_execution_contract::restored_runtime_measurement::ConsumerRuntimeChallenge {
-                schema: 1, intent: intent.clone(), selection: selection.clone(),
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA, intent: intent.clone(), selection: selection.clone(),
             };
             let upload = archive.delivery_descriptor_for_challenge(&challenge)?;
             let request = RestoredVerifierAdapterRequest {
@@ -3489,6 +3505,8 @@ mod tests {
             settings_digest: "4".repeat(64),
             verifier_artifact_hash: "5".repeat(64),
             maximum_lifetime_seconds: 900,
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
             attempt_deadline_ms: 1_100_000,
         };
         qualification_intent.operation_id = qualification_intent.derived_operation_id().unwrap();
@@ -3515,7 +3533,7 @@ mod tests {
             nonce_hex: "7".repeat(64),
         };
         let mut verifier_intent = RestoredVerifierAttemptIntent {
-            schema: 2,
+            schema: ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA,
             operation_id: String::new(),
             qualification_operation_id: qualification.intent.operation_id.clone(),
             restored_occurrence_id: occurrence.occurrence_id.clone(),

@@ -424,7 +424,7 @@ pub fn check_observation_response(
                 evidence.ok_or_else(|| anyhow::anyhow!("consumer evidence bytes are absent"))?;
             let bytes = ryeos_external_execution_contract::canonical_json(&evidence)?;
             let challenge = ConsumerRuntimeChallenge {
-                schema: 1,
+                schema: ryeos_external_execution_contract::restored_runtime_measurement::CONSUMER_RUNTIME_CHALLENGE_SCHEMA,
                 intent: attempt.intent,
                 selection: original.selection.clone(),
             };
@@ -550,6 +550,7 @@ pub(crate) mod tests {
                 remote_probe_input: None,
                 remote_verifier: None,
                 consumer_worker_request: None,
+                launch_shape: None,
             },
         );
         purpose.producer_recipe_sources.insert(
@@ -687,6 +688,9 @@ pub(crate) mod tests {
             remote_probe_input: None,
             remote_verifier: Some(selection.clone()),
             consumer_worker_request: None,
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         };
         let source = QualificationRemoteVerifierSource {
             policy_resolution_blob_hash: "1".repeat(64),
@@ -750,6 +754,8 @@ pub(crate) mod tests {
                 payload_blob_hash: "6".repeat(64),
             },
             archive_member_digests: BTreeMap::new(),
+            launch_shape:
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
         };
         policy
             .policy

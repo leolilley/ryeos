@@ -543,6 +543,10 @@ pub struct ProductQualificationProducerScenario {
     /// never interprets it. Exclusive with `consumer_worker_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_probe_input: Option<Value>,
+    /// The launch shape a remote verifier scenario requires of its qualified
+    /// occurrence. Present exactly when `remote_verifier` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_shape: Option<ryeos_external_execution_contract::runtime_snapshot::LaunchShape>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -777,6 +781,16 @@ impl ProductQualificationProducerScenario {
         if let Some(input) = &self.remote_probe_input {
             bounded_object(input, "qualification remote probe input")?;
         }
+        match (&self.remote_verifier, &self.launch_shape) {
+            (Some(_), Some(shape)) => shape.validate()?,
+            (None, None) => {}
+            (Some(_), None) => {
+                bail!("qualification remote verifier scenario declares no launch shape")
+            }
+            (None, Some(_)) => {
+                bail!("qualification scenario declares a launch shape without a remote verifier")
+            }
+        }
         if let Some(verifier) = &self.remote_verifier {
             verifier.validate()?;
             if let Some(recipe_ref) = &self.recipe_ref {
@@ -834,11 +848,12 @@ impl ProductQualificationProducerScenario {
         // members, the recipe and the probe input. The full signed policy and
         // accepted purpose separately commit the optional Worker Request.
         canonical_value_digest(&serde_json::json!({
-            "domain": "ryeos.remote-consumer-verifier-source.v3",
+            "domain": "ryeos.remote-consumer-verifier-source.v4",
             "scenario": {
                 "recipe_ref": self.recipe_ref,
                 "remote_verifier": verifier,
                 "remote_probe_input": self.remote_probe_input,
+                "launch_shape": self.launch_shape,
             },
             "producer_source": source.map(ProductProducerRecipeSourceIdentity::content_identity),
         }))
@@ -1373,16 +1388,19 @@ impl ProductQualificationRemoteConsumerProof {
             coordinate,
             nonce_hex,
             guest_runtime_manifest_hash,
+            launch_shape,
         } = &self.intent.purpose
         else {
             bail!("remote consumer proof cannot use an owner measurement");
         };
         coordinate.validate()?;
+        launch_shape.validate()?;
         self.selection.validate_coordinate(coordinate)?;
         validate_hash("remote consumer nonce", nonce_hex)?;
         validate_hash("remote consumer runtime", guest_runtime_manifest_hash)?;
         validate_hash("remote consumer upload", &self.intent.upload_sha256)?;
-        if self.intent.schema != 2
+        if self.intent.schema
+            != ryeos_external_execution_contract::restored_runtime_measurement::RESTORED_VERIFIER_ATTEMPT_SCHEMA
             || self.intent.operation_id != self.intent.derived_operation_id()?
             || self.intent.attempt_deadline_ms <= 0
             || self.intent.upload_bytes == 0

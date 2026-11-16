@@ -609,6 +609,9 @@ mod tests {
             remote_verifier: Some(remote_selection()),
             consumer_worker_request: None,
             remote_probe_input: Some(json!({"probe": "a"})),
+            launch_shape: Some(
+                ryeos_external_execution_contract::runtime_snapshot::LaunchShape::relay_deny_all(),
+            ),
         }
     }
 
@@ -618,6 +621,7 @@ mod tests {
             remote_verifier: None,
             consumer_worker_request: None,
             remote_probe_input: None,
+            launch_shape: None,
         }
     }
 

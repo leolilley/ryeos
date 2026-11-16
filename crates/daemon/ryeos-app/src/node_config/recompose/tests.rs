@@ -83,6 +83,7 @@ fn install_qualification(node: &StoppedNode, consumer: Option<char>) {
             )]))
             .unwrap()
         }),
+        launch_shape: None,
         limits: QualificationLimits::default(),
     })
     .unwrap();

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-10-23T00:49:35Z:ce36a794223a6af3badfa11438c36d49a9b80408c99f0e48b7f445295e2e3532:AD3uM3iRBcZcXm7foKPHvo+WyuUQ2yriBkYcxCbD4l+8z/lmi/ysGxPmMdqdvhs+WbFUxPpTvHcyx21prBt7AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T11:52:14Z:65bc7a7dd8b1513355b749393fdb3df62264dcbff52aeee21566eb41baaeb8f5:1cpFx5+SEn77cym3mvT+Bfh/1gBcXfP/QgD1rLwUjINPAKBcrOu0xxV3iVF9XLg6nVZS4koq7MFgAoNovDrpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: codex
 version: 1.0.0
 description: Restored-guest qualification of the guest owner wire; the claim binds the subject's owner executable digest and manifest hash, proved under an ephemeral key in a restored guest. The measured owner, supervisor and launcher executables performed the exchange under an ephemeral controller key and test configuration; operation under the real controller key, connection and credentials is proved by a live session, not by this claim.
@@ -26,6 +26,12 @@ product_qualification_policy:
         archive_members:
           ryeos-external-candidate-supervisor: bin:codex/ryeos-external-candidate-supervisor
           ryeos-external-candidate-launcher: bin:codex/ryeos-external-candidate-launcher
+      launch_shape:
+        controller_transport: https
+        sandbox_network_policy:
+          kind: allow_list
+          hosts:
+          - controller.invalid
       remote_probe_input:
         schema: ryeos.guest_wire_probe_input.v1
         guest_inputs_schema: 5
