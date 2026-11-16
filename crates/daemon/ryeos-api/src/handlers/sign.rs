@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use ryeos_app::handler_error::HandlerError;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -56,25 +57,53 @@ pub async fn handle(
     .context("sign authoring worker stopped")??;
 
     if !report.is_total_success() {
-        let failures = report
-            .failed
-            .iter()
-            .map(|item| {
-                format!(
-                    "{}: {}",
-                    item.item_ref,
-                    item.error.as_deref().unwrap_or("signing failed")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        bail!(
-            "{}/{} items failed validation or signing: {failures}",
-            report.failed.len(),
-            report.total()
-        );
+        return Err(validation_refused(&report).into());
     }
     serde_json::to_value(report).map_err(Into::into)
+}
+
+/// Stable code for a batch in which the node refused caller-supplied items
+/// (validation, path anchoring, unsignable content). Node-side signing or IO
+/// failures abort the batch as plain errors and stay 500.
+pub const SIGN_VALIDATION_REFUSED: &str = "sign_validation_refused";
+
+fn validation_refused(report: &ryeos_core_tools::actions::sign::BatchReport) -> HandlerError {
+    let failures = report
+        .failed
+        .iter()
+        .map(|item| {
+            format!(
+                "{}: {}",
+                item.item_ref,
+                item.error.as_deref().unwrap_or("signing failed")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let message = format!(
+        "{}/{} items failed validation or signing: {failures}",
+        report.failed.len(),
+        report.total()
+    );
+    let items: Vec<Value> = report
+        .failed
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "item_ref": item.item_ref,
+                "error": item.error.as_deref().unwrap_or("signing failed"),
+            })
+        })
+        .collect();
+    HandlerError::Structured {
+        code: SIGN_VALIDATION_REFUSED.to_owned(),
+        status: 400,
+        body: serde_json::json!({
+            "code": SIGN_VALIDATION_REFUSED,
+            "error": message,
+            "failed": items,
+        }),
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -109,6 +138,39 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(many.item_refs, ["graph:one", "tool:two"]);
+    }
+
+    #[test]
+    fn refused_items_are_a_typed_client_error_keeping_item_detail() {
+        use ryeos_core_tools::actions::sign::{BatchReport, ItemOutcome};
+        let mut report = BatchReport::default();
+        report.failed.push(ItemOutcome {
+            item_ref: "tool:sweep/py_basic/py_basic".to_owned(),
+            signature: None,
+            error: Some(
+                "path-anchoring validator refused x: metadata field `category` does not match path"
+                    .to_owned(),
+            ),
+            warnings: Vec::new(),
+            source_unit_files_signed: 0,
+        });
+        match validation_refused(&report) {
+            HandlerError::Structured { code, status, body } => {
+                assert_eq!(code, SIGN_VALIDATION_REFUSED);
+                assert_eq!(status, 400);
+                assert_eq!(
+                    body["failed"][0]["item_ref"],
+                    "tool:sweep/py_basic/py_basic"
+                );
+                assert!(
+                    body["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("does not match path")
+                );
+            }
+            other => panic!("expected structured refusal, got {other:?}"),
+        }
     }
 
     #[test]

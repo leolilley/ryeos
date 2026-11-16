@@ -1035,12 +1035,44 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             "Log a Codex credential profile in with a device code: open the login session, show the code, wait for the account, end the session, and confirm",
             "ryeos codex login device <profile-id> [--create] [--trusted] [--yes] [--json]",
         ),
+        "node policy-apply" => (
+            "ryeos node policy-apply",
+            "Validate and atomically install an operator-authored node policy on a stopped node",
+            "ryeos node policy-apply <section> <source.yaml> [--json] [--app-root <DIR>]",
+        ),
         "identity" => (
             "ryeos identity",
             "Print the local node public identity",
             "ryeos identity [--json] [--app-root <DIR>]",
         ),
         _ => {
+            if let Some(descriptor) = crate::lifecycle_commands::local_command_descriptors()
+                .iter()
+                .find(|descriptor| {
+                    descriptor.tokens.len() == command_tokens.len()
+                        && descriptor
+                            .tokens
+                            .iter()
+                            .zip(command_tokens)
+                            .all(|(expected, actual)| *expected == actual)
+                })
+            {
+                // A registered lifecycle command without a hand-written entry
+                // still gets its registered summary and a generic usage line.
+                let title = format!("ryeos {command}");
+                let mut document = crate::tty::Document::titled(title.clone());
+                let mut overview = crate::tty::Section::named("overview");
+                overview
+                    .rows
+                    .push(crate::tty::Row::text(descriptor.summary));
+                document.sections.push(overview);
+                let mut usage_section = crate::tty::Section::named("usage");
+                usage_section
+                    .rows
+                    .push(crate::tty::Row::text(format!("{title} [OPTIONS]")));
+                document.sections.push(usage_section);
+                return document;
+            }
             let mut document =
                 crate::tty::Document::titled(format!("no local help available for '{command}'"));
             document.hints.push(crate::tty::Hint::new(
@@ -1203,6 +1235,22 @@ mod tests {
         assert_eq!(setup.title.as_deref(), Some(expected));
         let init = build_lifecycle_command_help(&["init".to_owned()]);
         assert_eq!(init.title.as_deref(), Some("ryeos init"));
+    }
+
+    #[test]
+    fn every_lifecycle_command_has_local_help() {
+        for descriptor in crate::lifecycle_commands::local_command_descriptors() {
+            let tokens: Vec<String> = descriptor.tokens.iter().map(|t| (*t).to_owned()).collect();
+            let document = build_lifecycle_command_help(&tokens);
+            let title = document.title.as_deref().unwrap_or_default();
+            assert!(
+                !title.starts_with("no local help"),
+                "no help for {:?}",
+                descriptor.tokens
+            );
+        }
+        let apply = build_lifecycle_command_help(&["node".to_owned(), "policy-apply".to_owned()]);
+        assert_eq!(apply.title.as_deref(), Some("ryeos node policy-apply"));
     }
 
     use ryeos_app::node_config::NodeConfigSnapshot;

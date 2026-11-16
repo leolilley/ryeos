@@ -3,6 +3,7 @@
 //! Supports owner filtering: verified callers see only their schedules, and
 //! anonymous/unverified callers see none.
 
+use std::ops::Not;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -45,11 +46,15 @@ pub async fn handle(
     let scheduler = crate::api_state::selected_scheduler(state.as_ref())?;
     let _read_guard = scheduler.acquire_read().await?;
     let db = scheduler.scheduler_db();
-    let specs = db.list_specs_filtered(
+    let sees_node_owned = operator_sees_node_owned(state.as_ref(), &ctx);
+    let mut specs = db.list_specs_filtered(
         req.enabled_only,
         req.schedule_type.as_deref(),
-        Some(filter_requester),
+        sees_node_owned.not().then_some(filter_requester),
     )?;
+    if sees_node_owned {
+        specs.retain(|spec| visible_to(&spec.execution.authority, filter_requester, true));
+    }
 
     // Batch-load last fires to avoid N+1 queries
     let schedule_ids: Vec<String> = specs.iter().map(|s| s.schedule_id.clone()).collect();
@@ -113,6 +118,7 @@ pub async fn handle(
     let mut response = serde_json::json!({
         "schedules": schedules,
         "identity_filtered": true,
+        "node_owned_included": sees_node_owned,
         "your_fingerprint": filter_requester,
     });
     if response["schedules"]
@@ -127,6 +133,29 @@ pub async fn handle(
         ));
     }
     Ok(response)
+}
+
+/// The configured local operator may read node-owned schedules (read-only:
+/// every mutating handler keeps its own owner check).
+pub(super) fn operator_sees_node_owned(
+    state: &AppState,
+    ctx: &crate::handler_context::HandlerContext,
+) -> bool {
+    ryeos_app::operator_authority::require_local_configured_operator(state, ctx).is_ok()
+}
+
+/// Whether a schedule with this execution authority is visible to `requester`.
+pub(super) fn visible_to(
+    authority: &ryeos_scheduler_contract::ScheduleExecutionAuthority,
+    requester: &str,
+    sees_node_owned: bool,
+) -> bool {
+    authority.principal_id() == requester
+        || (sees_node_owned
+            && matches!(
+                authority,
+                ryeos_scheduler_contract::ScheduleExecutionAuthority::Node { .. }
+            ))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -157,6 +186,21 @@ fn load_fire_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node_authority() -> ryeos_scheduler_contract::ScheduleExecutionAuthority {
+        ryeos_scheduler_contract::ScheduleExecutionAuthority::Node {
+            principal_id: "fp:node".to_owned(),
+            effective_origin_site_id: "site:local".to_owned(),
+        }
+    }
+
+    #[test]
+    fn local_operator_sees_node_owned_schedules_others_do_not() {
+        let authority = node_authority();
+        assert!(visible_to(&authority, "fp:operator", true));
+        assert!(!visible_to(&authority, "fp:operator", false));
+        assert!(visible_to(&authority, "fp:node", false));
+    }
 
     #[test]
     fn fire_counts_are_loaded_for_every_schedule() {

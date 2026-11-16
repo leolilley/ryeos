@@ -120,8 +120,8 @@ pub fn compile_command_invocation(
     {
         tail = strip_project_control_flags(&tail);
     }
-    let mut controls =
-        strip_declared_control_flags(&mut tail, &command.control_flags).map_err(Invalid)?;
+    let control_flags = control_flags_with_implicit_json(command);
+    let mut controls = strip_declared_control_flags(&mut tail, &control_flags).map_err(Invalid)?;
     let mut overlay = arguments.clone();
     let direct_execute = matches!(
         command.dispatch,
@@ -464,6 +464,33 @@ pub fn bind_command_input(
         );
     }
     ryeos_runtime::arg_binder::bind_argv_with_command_and_overlay(&residual, Some(command), overlay)
+}
+
+/// `--json` selects buffered output on every command. A command that does not
+/// declare a `json` flag (or alias) and has no `json` parameter field gets the
+/// buffered-output binding implicitly, so the flag never reaches the service
+/// as an unknown field.
+pub fn control_flags_with_implicit_json(command: &CommandDef) -> Vec<CommandControlFlag> {
+    let mut flags = command.control_flags.clone();
+    let declared = flags
+        .iter()
+        .any(|f| f.flag == "json" || f.aliases.iter().any(|a| a == "json"));
+    let is_field = command
+        .forms
+        .iter()
+        .flat_map(|form| form.slots.iter())
+        .any(|slot| slot.field == "json")
+        || command.defaults.contains_key("json");
+    if !declared && !is_field {
+        flags.push(CommandControlFlag {
+            flag: "json".to_owned(),
+            help: "Print the buffered JSON result".to_owned(),
+            binding: ControlFlagBinding::StreamOff,
+            ref_binding_name: None,
+            aliases: Vec::new(),
+        });
+    }
+    flags
 }
 
 pub fn strip_declared_control_flags(
@@ -898,6 +925,38 @@ mod tests {
             source_file: PathBuf::new(),
             provenance: Default::default(),
         }
+    }
+
+    #[test]
+    fn json_is_an_implicit_control_flag_that_never_reaches_parameters() {
+        let definition = command();
+        let compiled = compile_command_invocation(
+            &definition,
+            &["--json".to_owned()],
+            &Value::Null,
+            None,
+            None,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(compiled.controls.stream, Some(false));
+        assert!(
+            compiled.parameters.get("json").is_none(),
+            "{:?}",
+            compiled.parameters
+        );
+    }
+
+    #[test]
+    fn json_stays_a_parameter_when_the_command_declares_the_field() {
+        let mut definition = command();
+        definition
+            .defaults
+            .insert("json".to_owned(), Value::Bool(false));
+        assert_eq!(
+            control_flags_with_implicit_json(&definition),
+            definition.control_flags
+        );
     }
 
     #[test]
