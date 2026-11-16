@@ -194,7 +194,7 @@ declared_roots = {}
 if archive_root:
     declared_roots["local-inference-archives"] = {"path": archive_root}
 external = {
-    "schema": 1,
+    "schema": 2,
     "roots": {},
     "declared_roots": declared_roots,
     "limits": {

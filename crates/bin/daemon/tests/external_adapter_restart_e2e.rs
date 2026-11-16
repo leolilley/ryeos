@@ -915,6 +915,7 @@ fn admit_independent_verifier_input_root(
         ExternalContentImportRoot {
             path: input_root.to_path_buf(),
             root_identity,
+            in_place: None,
         },
     );
     policy.validate()?;

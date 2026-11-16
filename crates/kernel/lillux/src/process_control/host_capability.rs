@@ -1313,6 +1313,269 @@ pub fn decide_private_directory(facts: &PrivateDirectoryFacts) -> Result<String,
     ))
 }
 
+/// Capability bits of `CapEff` and `CapPrm` that let a process alter bytes
+/// it has no write permission on, or lift a read-only mount.
+const CAP_CHOWN: u64 = 1 << 0;
+const CAP_DAC_OVERRIDE: u64 = 1 << 1;
+const CAP_FOWNER: u64 = 1 << 3;
+const CAP_SYS_ADMIN: u64 = 1 << 21;
+
+/// Name a policy-declared in-place import root's proof is admitted under:
+/// this process cannot alter the bytes under the root. Roots are named by
+/// policy data, so no per-root capability name exists; this one names the
+/// claim, and a root's `accept` list says which grades meet it.
+pub const STORAGE_IMMUTABLE_ROOT: &str = "storage:immutable_root";
+
+/// The floor entry a root's declared `accept` grades make: absent grades
+/// admit only a measured proof, exactly like a capability floor entry.
+pub fn immutable_root_requirement(accept: &[String]) -> CapabilityRequirement {
+    CapabilityRequirement::Spec(CapabilityRequirementSpec {
+        name: Some(STORAGE_IMMUTABLE_ROOT.to_owned()),
+        any_of: Vec::new(),
+        accept: accept.to_vec(),
+        providers: Vec::new(),
+    })
+}
+
+/// Whether `evidence` for a root meets the grades `accept` lists. The error
+/// names the grade the proof carries against the grades accepted.
+pub fn admit_immutable_root_proof(
+    accept: &[String],
+    evidence: &CapabilityEvidence,
+) -> Result<(), String> {
+    let requirement = immutable_root_requirement(accept);
+    if let Some(refusal) = requirement.spec_refusal() {
+        return Err(refusal);
+    }
+    satisfies(&requirement, STORAGE_IMMUTABLE_ROOT, evidence)
+}
+
+/// Most regular files one root measurement visits before it gives up.
+pub const MAX_IMMUTABLE_ROOT_FILES: u64 = 200_000;
+/// Deepest directory nesting one root measurement walks.
+pub const MAX_IMMUTABLE_ROOT_DEPTH: usize = 64;
+
+/// The account the observing process acts as, as the kernel reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessCredentialFacts {
+    /// Effective uid.
+    pub uid: u32,
+    /// Effective capability mask (`CapEff`).
+    pub effective_caps: u64,
+    /// Permitted capability mask (`CapPrm`): what the process can raise.
+    pub permitted_caps: u64,
+}
+
+impl ProcessCredentialFacts {
+    fn holds(&self, bit: u64) -> bool {
+        (self.effective_caps | self.permitted_caps) & bit != 0
+    }
+}
+
+/// Regular files under a root that share one owner, group and permission
+/// bits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileClassFacts {
+    pub owner_uid: u32,
+    pub owner_gid: u32,
+    /// Permission bits, including the set-id and sticky bits.
+    pub mode: u32,
+    /// How many files fall in the class.
+    pub files: u64,
+    /// One file of the class, relative to the root, for a refusal to name.
+    pub example: String,
+}
+
+/// Whether this process can alter the bytes of the regular files under one
+/// directory root, as it sees them. Every field is a measurement, or the
+/// reason it could not be taken.
+///
+/// The walk opens no file, follows no symbolic link, and refuses a root
+/// that holds another mount, because that mount's own state would decide
+/// the bytes beneath it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImmutableRootFacts {
+    /// The path observed.
+    pub path: String,
+    pub mount_id: Option<u64>,
+    pub mount_point: Option<String>,
+    pub filesystem: Option<String>,
+    /// Whether the mount carries the `ro` option.
+    pub mount_read_only: Option<bool>,
+    /// Whether the filesystem's superblock is read-only.
+    pub superblock_read_only: Option<bool>,
+    pub credentials: Option<ProcessCredentialFacts>,
+    /// Regular files grouped by owner, group and mode.
+    pub file_classes: Vec<FileClassFacts>,
+    pub files_measured: u64,
+    /// Why the walk stopped before it measured every file.
+    pub walk_refusal: Option<String>,
+    /// `native` or `gvisor`, as in [`HostFacts::kernel_kind`].
+    pub kernel_kind: String,
+}
+
+impl ImmutableRootFacts {
+    /// Observe the directory `path` and the regular files under it, without
+    /// changing anything. Never fails: what cannot be measured is recorded
+    /// as `None` or in `walk_refusal`.
+    pub fn observe(path: &std::path::Path) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            linux::observe_immutable_root(path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self {
+                path: path.display().to_string(),
+                mount_id: None,
+                mount_point: None,
+                filesystem: None,
+                mount_read_only: None,
+                superblock_read_only: None,
+                credentials: None,
+                file_classes: Vec::new(),
+                files_measured: 0,
+                walk_refusal: Some("root observation is unavailable on this OS".to_owned()),
+                kernel_kind: "unknown".to_owned(),
+            }
+        }
+    }
+}
+
+/// Whether this process cannot alter the bytes of any regular file under
+/// the root `facts` describe, and on what basis.
+///
+/// Two routes prove it. The mount is read-only and the process holds no
+/// capability to remount it (`CAP_SYS_ADMIN`). Or no file can be written by
+/// this process: none is owned by its uid, because an owner can restore its
+/// own write permission, and none has a group or other write bit, because a
+/// group the process belongs to, or an access list the mode bits do not
+/// show, could grant it; and the process holds none of `CAP_DAC_OVERRIDE`,
+/// `CAP_FOWNER`, `CAP_CHOWN` and `CAP_SYS_ADMIN`, each of which lets it
+/// write or take the permission regardless. The first route that holds
+/// decides; when neither does the reason names both.
+///
+/// The decision concerns this process's credentials only. A setuid helper
+/// the process could run, a writable block device node, or another mount
+/// of the same filesystem elsewhere are not measured. Under gVisor every
+/// answer is emulated, so a finding is provider-attested.
+pub fn decide_immutable_root(facts: &ImmutableRootFacts) -> Result<CapabilityEvidence, String> {
+    let path = &facts.path;
+    let credentials = facts
+        .credentials
+        .as_ref()
+        .ok_or_else(|| format!("this process's uid and capabilities are unreadable, so whether it can alter {path} is undecided"))?;
+    let attested = |basis: String| CapabilityEvidence {
+        source: if facts.kernel_kind == "gvisor" {
+            ProofSource::ProviderAttested
+        } else {
+            ProofSource::Measured
+        },
+        provider: HOST_PROVIDER.to_owned(),
+        basis: if facts.kernel_kind == "gvisor" {
+            format!("{basis} (observed under gVisor emulation)")
+        } else {
+            basis
+        },
+    };
+    let read_only = facts.mount_read_only == Some(true) || facts.superblock_read_only == Some(true);
+    let mount = format!(
+        "{} mounted at {}",
+        facts
+            .filesystem
+            .as_deref()
+            .unwrap_or("an unnamed filesystem"),
+        facts
+            .mount_point
+            .as_deref()
+            .unwrap_or("an unreadable mount point")
+    );
+    let mount_reason = if read_only {
+        if credentials.holds(CAP_SYS_ADMIN) {
+            format!(
+                "{path} is on a read-only mount but this process holds CAP_SYS_ADMIN, which can remount it"
+            )
+        } else {
+            return Ok(attested(format!(
+                "{path} is on a read-only mount ({mount}) and this process holds no \
+                 CAP_SYS_ADMIN to remount it"
+            )));
+        }
+    } else if facts.mount_read_only.is_none() && facts.superblock_read_only.is_none() {
+        format!("whether {path} is on a read-only mount is unreadable")
+    } else {
+        format!("{path} is on a writable mount ({mount})")
+    };
+    let permission_reason = decide_unwritable_files(facts, credentials);
+    match permission_reason {
+        Ok(basis) => Ok(attested(basis)),
+        Err(reason) => Err(format!("{mount_reason}; {reason}")),
+    }
+}
+
+fn decide_unwritable_files(
+    facts: &ImmutableRootFacts,
+    credentials: &ProcessCredentialFacts,
+) -> Result<String, String> {
+    let path = &facts.path;
+    if let Some(refusal) = &facts.walk_refusal {
+        return Err(format!(
+            "the files under {path} were not all measured: {refusal}"
+        ));
+    }
+    for (bit, name, effect) in [
+        (CAP_DAC_OVERRIDE, "CAP_DAC_OVERRIDE", "write any file"),
+        (
+            CAP_FOWNER,
+            "CAP_FOWNER",
+            "restore write permission on any file",
+        ),
+        (
+            CAP_CHOWN,
+            "CAP_CHOWN",
+            "take ownership of any file and then write it",
+        ),
+        (
+            CAP_SYS_ADMIN,
+            "CAP_SYS_ADMIN",
+            "override file permission by remounting or re-owning",
+        ),
+    ] {
+        if credentials.holds(bit) {
+            return Err(format!("this process holds {name}, which can {effect}"));
+        }
+    }
+    if facts.files_measured == 0 || facts.file_classes.is_empty() {
+        return Err(format!("{path} holds no regular file to measure"));
+    }
+    for class in &facts.file_classes {
+        if class.owner_uid == credentials.uid {
+            return Err(format!(
+                "{} under {path} is owned by this process's uid {}, and an owner can restore its \
+                 own write permission",
+                class.example, credentials.uid
+            ));
+        }
+        if class.mode & 0o022 != 0 {
+            return Err(format!(
+                "{} under {path} has mode {:04o}: writable by group or other, which this process \
+                 may belong to or be granted by an access list",
+                class.example,
+                class.mode & 0o7777
+            ));
+        }
+    }
+    Ok(format!(
+        "none of the {} regular files under {path} is owned by uid {} or writable by group or \
+         other, and this process holds none of CAP_DAC_OVERRIDE, CAP_FOWNER, CAP_CHOWN or \
+         CAP_SYS_ADMIN",
+        facts.files_measured, credentials.uid
+    ))
+}
+
 /// Raw host observations. Every field is a measurement as this process sees
 /// it, or the reason it could not be measured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2776,6 +3039,161 @@ mod linux {
         }
     }
 
+    /// The mount options and superblock options of mount `mount_id` in
+    /// `mountinfo`: whether each names `ro`.
+    pub(super) fn mount_read_only(mountinfo: &str, mount_id: u64) -> Option<(bool, bool)> {
+        mountinfo.lines().find_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let fields: Vec<&str> = left.split_whitespace().collect();
+            if fields.first()?.parse::<u64>().ok()? != mount_id {
+                return None;
+            }
+            let has_ro = |options: &str| options.split(',').any(|option| option == "ro");
+            let super_options = right.split_whitespace().nth(2)?;
+            Some((has_ro(fields.get(5)?), has_ro(super_options)))
+        })
+    }
+
+    fn status_mask(status: &str, name: &str) -> Option<u64> {
+        u64::from_str_radix(&status_field(status, name)?, 16).ok()
+    }
+
+    fn process_credentials() -> Option<super::ProcessCredentialFacts> {
+        let status = read_small("/proc/self/status").ok()?;
+        Some(super::ProcessCredentialFacts {
+            // SAFETY: geteuid has no pointer arguments or caller-owned memory.
+            uid: unsafe { libc::geteuid() },
+            effective_caps: status_mask(&status, "CapEff")?,
+            permitted_caps: status_mask(&status, "CapPrm")?,
+        })
+    }
+
+    /// The mount of the directory or file at `path`, read without following
+    /// a symbolic link in its last component.
+    fn mount_of_path(path: &Path) -> Option<u64> {
+        let name = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+        // SAFETY: `libc::statx` is a plain C struct of integers and integer
+        // arrays, for which all-zero bytes are a valid value, so every field
+        // read is defined whether or not the call below fills it.
+        let mut observation: libc::statx = unsafe { std::mem::zeroed() };
+        // SAFETY: `name` is NUL-terminated and outlives the call;
+        // `observation` is writable and sized for it.
+        let status = unsafe {
+            libc::statx(
+                libc::AT_FDCWD,
+                name.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+                libc::STATX_MNT_ID,
+                &mut observation,
+            )
+        };
+        (status == 0 && observation.stx_mask & libc::STATX_MNT_ID != 0)
+            .then_some(observation.stx_mnt_id)
+    }
+
+    pub(super) fn observe_immutable_root(path: &Path) -> super::ImmutableRootFacts {
+        let opened = open_path(path);
+        let mount_id = opened.as_ref().and_then(mount_identity);
+        let mountinfo = read_small("/proc/self/mountinfo").ok();
+        let entry = match (mount_id, mountinfo.as_deref()) {
+            (Some(mount_id), Some(mountinfo)) => mount_entry(mountinfo, mount_id),
+            _ => None,
+        };
+        let read_only = match (mount_id, mountinfo.as_deref()) {
+            (Some(mount_id), Some(mountinfo)) => mount_read_only(mountinfo, mount_id),
+            _ => None,
+        };
+        let (mount_point, filesystem) = match entry {
+            Some((point, filesystem, _)) => (Some(point), Some(filesystem)),
+            None => (None, None),
+        };
+        let mut classes: std::collections::BTreeMap<(u32, u32, u32), (u64, String)> =
+            std::collections::BTreeMap::new();
+        let mut files = 0u64;
+        let walk_refusal = (|| -> Result<(), String> {
+            let root = path.to_path_buf();
+            let root_mount = mount_id.ok_or("the mount of the root is unreadable")?;
+            let metadata = std::fs::metadata(&root)
+                .map_err(|error| format!("{} is unreadable ({error})", root.display()))?;
+            if !metadata.is_dir() {
+                return Err(format!("{} is not a directory", root.display()));
+            }
+            let mut pending = vec![(root.clone(), 0usize)];
+            while let Some((directory, depth)) = pending.pop() {
+                if depth > super::MAX_IMMUTABLE_ROOT_DEPTH {
+                    return Err(format!(
+                        "{} lies deeper than the {} directory levels this walk measures",
+                        directory.display(),
+                        super::MAX_IMMUTABLE_ROOT_DEPTH
+                    ));
+                }
+                let listing = std::fs::read_dir(&directory).map_err(|error| {
+                    format!("{} is unreadable ({error})", directory.display())
+                })?;
+                for item in listing {
+                    let item = item.map_err(|error| {
+                        format!("{} is unreadable ({error})", directory.display())
+                    })?;
+                    let entry_path = item.path();
+                    let metadata = std::fs::symlink_metadata(&entry_path).map_err(|error| {
+                        format!("{} is unreadable ({error})", entry_path.display())
+                    })?;
+                    let kind = metadata.file_type();
+                    if kind.is_dir() {
+                        if mount_of_path(&entry_path) != Some(root_mount) {
+                            return Err(format!(
+                                "{} is on a different mount than the root, so its state is not the root's",
+                                entry_path.display()
+                            ));
+                        }
+                        pending.push((entry_path, depth + 1));
+                    } else if kind.is_file() {
+                        files += 1;
+                        if files > super::MAX_IMMUTABLE_ROOT_FILES {
+                            return Err(format!(
+                                "more than {} regular files",
+                                super::MAX_IMMUTABLE_ROOT_FILES
+                            ));
+                        }
+                        let key = (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777);
+                        let relative = entry_path
+                            .strip_prefix(&root)
+                            .unwrap_or(&entry_path)
+                            .display()
+                            .to_string();
+                        classes.entry(key).or_insert((0, relative)).0 += 1;
+                    }
+                }
+            }
+            Ok(())
+        })()
+        .err();
+        super::ImmutableRootFacts {
+            path: path.display().to_string(),
+            mount_id,
+            mount_point,
+            filesystem,
+            mount_read_only: read_only.map(|(mount, _)| mount),
+            superblock_read_only: read_only.map(|(_, superblock)| superblock),
+            credentials: process_credentials(),
+            file_classes: classes
+                .into_iter()
+                .map(
+                    |((owner_uid, owner_gid, mode), (count, example))| super::FileClassFacts {
+                        owner_uid,
+                        owner_gid,
+                        mode,
+                        files: count,
+                        example,
+                    },
+                )
+                .collect(),
+            files_measured: files,
+            walk_refusal,
+            kernel_kind: kernel_kind(&read_small("/proc/version").unwrap_or_default()).to_owned(),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         /// Hold a descriptor lease on another thread for `hold`, returning
@@ -3589,6 +4007,189 @@ mod tests {
             "{names:?}"
         );
         assert!(names.len() <= MAX_CAPABILITY_ENTRIES, "{names:?}");
+    }
+
+    fn immutable_facts(
+        mount_ro: bool,
+        caps: u64,
+        uid: u32,
+        classes: &[(u32, u32)],
+    ) -> ImmutableRootFacts {
+        ImmutableRootFacts {
+            path: "/opt/store".to_owned(),
+            mount_id: Some(40),
+            mount_point: Some("/opt".to_owned()),
+            filesystem: Some("ext4".to_owned()),
+            mount_read_only: Some(mount_ro),
+            superblock_read_only: Some(false),
+            credentials: Some(ProcessCredentialFacts {
+                uid,
+                effective_caps: caps,
+                permitted_caps: caps,
+            }),
+            file_classes: classes
+                .iter()
+                .map(|(owner_uid, mode)| FileClassFacts {
+                    owner_uid: *owner_uid,
+                    owner_gid: *owner_uid,
+                    mode: *mode,
+                    files: 3,
+                    example: format!("file-{owner_uid}-{mode:o}"),
+                })
+                .collect(),
+            files_measured: 3 * classes.len() as u64,
+            walk_refusal: None,
+            kernel_kind: "native".to_owned(),
+        }
+    }
+
+    #[test]
+    fn immutable_root_read_only_mount_without_remount_capability_is_measured() {
+        let proof =
+            decide_immutable_root(&immutable_facts(true, 0, 1000, &[(1000, 0o644)])).unwrap();
+        assert_eq!(proof.source, ProofSource::Measured);
+        assert!(proof.basis.contains("read-only mount"), "{}", proof.basis);
+        // The superblock alone also makes the mount read-only.
+        let mut superblock = immutable_facts(false, 0, 1000, &[(1000, 0o644)]);
+        superblock.superblock_read_only = Some(true);
+        assert!(decide_immutable_root(&superblock).is_ok());
+    }
+
+    #[test]
+    fn immutable_root_read_only_mount_with_sys_admin_falls_to_permissions() {
+        // Root-owned read-only files: the permission route still proves.
+        let proof =
+            decide_immutable_root(&immutable_facts(true, CAP_SYS_ADMIN, 1000, &[(0, 0o444)]));
+        assert!(proof.is_err(), "{proof:?}");
+        let reason = proof.unwrap_err();
+        assert!(reason.contains("CAP_SYS_ADMIN"), "{reason}");
+    }
+
+    #[test]
+    fn immutable_root_writable_mount_is_decided_by_owner_mode_and_capabilities() {
+        // Not the node's files, no write bit for group or other, no capability.
+        let proof =
+            decide_immutable_root(&immutable_facts(false, 0, 1000, &[(0, 0o755), (0, 0o444)]))
+                .unwrap();
+        assert!(proof.basis.contains("owned by uid 1000"), "{}", proof.basis);
+        for (caps, name) in [
+            (CAP_DAC_OVERRIDE, "CAP_DAC_OVERRIDE"),
+            (CAP_FOWNER, "CAP_FOWNER"),
+            (CAP_CHOWN, "CAP_CHOWN"),
+            (CAP_SYS_ADMIN, "CAP_SYS_ADMIN"),
+        ] {
+            let reason = decide_immutable_root(&immutable_facts(false, caps, 1000, &[(0, 0o755)]))
+                .unwrap_err();
+            assert!(reason.contains(name), "{reason}");
+        }
+        // A file the node owns can have its write bit restored.
+        let owned =
+            decide_immutable_root(&immutable_facts(false, 0, 1000, &[(1000, 0o444)])).unwrap_err();
+        assert!(owned.contains("owner can restore"), "{owned}");
+        // Group or other write.
+        for mode in [0o775, 0o757, 0o666] {
+            let reason =
+                decide_immutable_root(&immutable_facts(false, 0, 1000, &[(0, mode)])).unwrap_err();
+            assert!(reason.contains("writable by group or other"), "{reason}");
+        }
+        // Root without capabilities still owns what it owns.
+        assert!(decide_immutable_root(&immutable_facts(false, 0, 0, &[(0, 0o444)])).is_err());
+    }
+
+    #[test]
+    fn immutable_root_unmeasured_facts_are_not_proven() {
+        let mut unreadable = immutable_facts(false, 0, 1000, &[(0, 0o444)]);
+        unreadable.credentials = None;
+        assert!(
+            decide_immutable_root(&unreadable)
+                .unwrap_err()
+                .contains("unreadable")
+        );
+        let mut walk = immutable_facts(false, 0, 1000, &[(0, 0o444)]);
+        walk.walk_refusal = Some("a different mount".to_owned());
+        assert!(
+            decide_immutable_root(&walk)
+                .unwrap_err()
+                .contains("a different mount")
+        );
+        // A read-only mount proves without the walk.
+        walk.mount_read_only = Some(true);
+        assert!(decide_immutable_root(&walk).is_ok());
+        let empty = immutable_facts(false, 0, 1000, &[]);
+        assert!(
+            decide_immutable_root(&empty)
+                .unwrap_err()
+                .contains("no regular file")
+        );
+        let mut gvisor = immutable_facts(true, 0, 1000, &[(0, 0o444)]);
+        gvisor.kernel_kind = "gvisor".to_owned();
+        assert_eq!(
+            decide_immutable_root(&gvisor).unwrap().source,
+            ProofSource::ProviderAttested
+        );
+    }
+
+    #[test]
+    fn an_in_place_root_is_admitted_only_at_the_grades_it_accepts() {
+        let measured =
+            decide_immutable_root(&immutable_facts(true, 0, 1000, &[(0, 0o444)])).unwrap();
+        let mut attested = immutable_facts(true, 0, 1000, &[(0, 0o444)]);
+        attested.kernel_kind = "gvisor".to_owned();
+        let attested = decide_immutable_root(&attested).unwrap();
+        let grades = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        // Absent grades admit only a measured proof, like a floor entry.
+        assert!(admit_immutable_root_proof(&[], &measured).is_ok());
+        let refused = admit_immutable_root_proof(&[], &attested).unwrap_err();
+        assert!(refused.contains("provider_attested"), "{refused}");
+        assert!(
+            admit_immutable_root_proof(&grades(&["measured", "provider_attested"]), &attested)
+                .is_ok()
+        );
+        assert!(admit_immutable_root_proof(&grades(&["provider_attested"]), &measured).is_err());
+        assert!(admit_immutable_root_proof(&grades(&["peer_attested"]), &measured).is_err());
+        assert!(admit_immutable_root_proof(&grades(&["bogus"]), &measured).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn immutable_root_observes_a_real_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        let file = root.path().join("nested/blob");
+        std::fs::write(&file, b"bytes").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let facts = ImmutableRootFacts::observe(root.path());
+        assert_eq!(facts.walk_refusal, None, "{facts:?}");
+        assert_eq!(facts.files_measured, 1);
+        assert_eq!(facts.file_classes.len(), 1);
+        assert_eq!(facts.file_classes[0].mode, 0o444);
+        assert_eq!(facts.file_classes[0].example, "nested/blob");
+        assert!(facts.credentials.is_some() && facts.mount_read_only.is_some());
+        // Owned by the test's own uid, so never proven by permissions.
+        let reason = decide_immutable_root(&facts);
+        if facts.mount_read_only != Some(true) && facts.superblock_read_only != Some(true) {
+            assert!(reason.unwrap_err().contains("owner can restore"));
+        }
+        let missing = ImmutableRootFacts::observe(&root.path().join("absent"));
+        assert!(missing.walk_refusal.is_some());
+        assert!(decide_immutable_root(&missing).is_err());
+    }
+
+    #[test]
+    fn mountinfo_read_only_options_are_read_by_mount_id() {
+        let mountinfo = "31 22 8:16 / /opt ro,relatime shared:1 - ext4 /dev/vdb rw\n\
+                         32 22 8:17 / /srv rw,relatime - ext4 /dev/vdc ro,errors=remount-ro\n\
+                         33 22 8:18 / /var rw,relatime - ext4 /dev/vdd rw,errors=remount-ro\n";
+        assert_eq!(linux::mount_read_only(mountinfo, 31), Some((true, false)));
+        assert_eq!(linux::mount_read_only(mountinfo, 32), Some((false, true)));
+        assert_eq!(linux::mount_read_only(mountinfo, 33), Some((false, false)));
+        assert_eq!(linux::mount_read_only(mountinfo, 9), None);
     }
 
     #[cfg(target_os = "linux")]

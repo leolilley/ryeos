@@ -512,7 +512,9 @@ impl DispatchError {
         if native_headroom_refusal(self).is_some() {
             return StatusCode::SERVICE_UNAVAILABLE;
         }
-        if quarantined_large_object(self).is_some() {
+        if quarantined_large_object(self).is_some()
+            || refused_reference_large_object(self).is_some()
+        {
             return StatusCode::NOT_FOUND;
         }
         match self {
@@ -609,6 +611,9 @@ impl DispatchError {
         }
         if quarantined_large_object(self).is_some() {
             return crate::execution::external_content::LARGE_OBJECT_QUARANTINED_CODE;
+        }
+        if let Some(refused) = refused_reference_large_object(self) {
+            return refused.code.as_str();
         }
         if let Some(refusal) = source_owner_trust_refusal(self) {
             return if refusal.unsigned {
@@ -721,6 +726,19 @@ pub(crate) fn quarantined_large_object(
         DispatchError::Internal(error) => error
             .chain()
             .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectQuarantined>()),
+        _ => None,
+    }
+}
+
+/// A launch whose content needs a reference large object that is refused by
+/// name travels the same way and keeps its own stable code.
+pub(crate) fn refused_reference_large_object(
+    error: &DispatchError,
+) -> Option<&ryeos_state::LargeObjectReferenceRefused> {
+    match error {
+        DispatchError::Internal(error) => error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectReferenceRefused>()),
         _ => None,
     }
 }

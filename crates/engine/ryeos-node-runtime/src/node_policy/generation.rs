@@ -1089,7 +1089,7 @@ mod tests {
         let app_root = tempfile::tempdir().unwrap();
         let mut profile = authored_profile("core").for_host_class("local").unwrap();
         let mut body = serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "roots": {},
             "declared_roots": {"inline": {"path": "{app_root}/imports/inline"}},
             "limits": {

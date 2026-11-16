@@ -78,9 +78,12 @@ pub use external_content::{
 };
 pub use head_cache::{CachedHead, HeadCache};
 pub use large_object_store::{
-    IngestedLargeObject, LargeObjectIntegrityFinding, LargeObjectQuarantinePurgeReport,
-    LargeObjectQuarantined, LargeObjectScrubReport, LargeObjectStagingSweepReport,
+    IngestedLargeObject, LARGE_OBJECT_REFERENCE_SCHEMA, LargeObjectIntegrityFinding,
+    LargeObjectQuarantinePurgeReport, LargeObjectQuarantined, LargeObjectReference,
+    LargeObjectReferenceRefused, LargeObjectScrubReport, LargeObjectStagingSweepReport,
     LargeObjectStore, LargeObjectSweepReport, LeasedLargeObject, PinnedLargeObjectSourceIdentity,
+    ReferenceRefusalCode, ReferenceRoot, ReferenceRootRefusal, ReferenceRoots, ReferenceSource,
+    install_reference_roots,
 };
 pub use locators::ThreadLocator;
 pub use objects::{

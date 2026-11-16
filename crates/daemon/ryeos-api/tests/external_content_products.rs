@@ -141,7 +141,7 @@ fn build_fixture(
         ryeos_node_runtime::node_policy::NodePolicySnapshot::from_test_records(vec![
             Arc::new(closure),
             Arc::new(ExternalContentImportPolicyRecord {
-                schema: 1,
+                schema: 2,
                 declared_roots: std::collections::BTreeMap::new(),
                 roots: Default::default(),
                 limits: ExternalContentImportLimits {
@@ -783,6 +783,7 @@ async fn admitted_remote_owner_reads_and_stages_own_product_without_ambient_auth
             storage: ImportStorage::Content,
             maximum_bytes: 11,
             expected_file_sha256: None,
+            hold: None,
         }),
         remote.clone(),
         Arc::clone(&fixture.state),

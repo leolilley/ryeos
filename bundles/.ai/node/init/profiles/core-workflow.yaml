@@ -1,4 +1,4 @@
-# ryeos:signed:2026-11-14T07:17:08Z:ca65c4e139967879140bddb4bb34b8a64843d55f79f860fc4926de6018d8bdbf:aaBeiMc0ogLwPbt1tFDiuAxtg6WpX5NbLKpf6D35h8IDaIY6tjClpoqYRiKjRAnHVGmJ+qOi9zC4hMdBF3xfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-11-16T13:27:47Z:2d640a9944eddd8aec71eb4f6bc1d53f0808bb589e5f1243360460ffbf793460:LkV2eMqsXifrFmrBaK8ssai8o8ATxLIGVmZyCH7oIsh7Q7TgoZyL83T/FOHNvPH0xIXFu4zjSEIZCNCLEnomCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Core plus the graph workflow bundles.
 schema: 1
 exact_bundles:
@@ -361,7 +361,7 @@ policies:
       - "node_modules/"
       - "target/"
   external_content:
-    schema: 1
+    schema: 2
     roots: {}
     limits:
       max_depth: 8

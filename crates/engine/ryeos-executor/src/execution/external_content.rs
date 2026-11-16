@@ -874,7 +874,21 @@ impl ExternalMaterializationCache {
                                     "large-content object {file_sha256} lost its launch lease"
                                 )
                             })?;
-                            if executable {
+                            if leased.is_reference() {
+                                // The bytes live in an import root the store does not
+                                // own, so the generation holds its own copy of them
+                                // (reflinked when the filesystem allows) at the
+                                // manifest's mode, verified by digest below.
+                                let size = entry.size.expect("validated large file has a size");
+                                let mut copy_allowance = size;
+                                parent.materialize_private_regular_child(
+                                    &name,
+                                    leased.file(),
+                                    size,
+                                    mode,
+                                    &mut copy_allowance,
+                                )?;
+                            } else if executable {
                                 store.link_executable_object_into(
                                     file_sha256,
                                     &parent,
@@ -1439,7 +1453,8 @@ where
 /// consulted for source bytes. A borrowed child arrives here with its own
 /// finalized resolution; the parent contributes workspace/lineage provenance,
 /// not an alternate prepared-launch realization set.
-/// A launch whose content needs a large object that scrub quarantined is
+/// A launch whose content needs a large object that scrub quarantined, or a
+/// reference object whose root or file no longer holds, is
 /// refused as an operator-correctable resource state, not an internal
 /// failure. The message is the store's own, which names the cure.
 pub(crate) fn classify_quarantined_large_object(
@@ -1452,6 +1467,18 @@ pub(crate) fn classify_quarantined_large_object(
             crate::dispatch_error::DispatchError::LaunchPolicyForbidden {
                 code: super::runner::LIVE_PROJECT_UNAVAILABLE_CODE.to_owned(),
                 message: live.message.clone(),
+                binding: None,
+            },
+        );
+    }
+    if let Some(refused) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ryeos_state::LargeObjectReferenceRefused>())
+    {
+        return Some(
+            crate::dispatch_error::DispatchError::LaunchResourceNotFound {
+                code: refused.code.as_str().to_owned(),
+                message: refused.to_string(),
                 binding: None,
             },
         );
@@ -2413,14 +2440,22 @@ fn verify_large_materialized_directory(
                         .file_sha256
                         .as_deref()
                         .expect("validated file has one storage tier");
-                    if let LargeMaterializationVerification::SharedObjects(large_sources) =
-                        verification
-                    {
-                        let source = large_sources
-                            .get(&(file_sha256.to_owned(), large_entry_is_executable(entry)))
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("large-content file {path} lost its source lease")
-                            })?;
+                    let leased_source = match verification {
+                        LargeMaterializationVerification::SharedObjects(large_sources) => Some(
+                            large_sources
+                                .get(&(file_sha256.to_owned(), large_entry_is_executable(entry)))
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "large-content file {path} lost its source lease"
+                                    )
+                                })?,
+                        ),
+                        _ => None,
+                    };
+                    // A store-owned object is hard-linked, so the generation file
+                    // must be the leased inode; a reference object is copied, so
+                    // its generation file is verified by digest instead.
+                    if let Some(source) = leased_source.filter(|source| !source.is_reference()) {
                         if !lillux::same_open_file_identity(&file, source.file())? {
                             anyhow::bail!(
                                 "materialized large-content file {path} is not the leased object"
