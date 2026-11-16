@@ -270,9 +270,30 @@ pub struct RetryConfig {
     pub backoff_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_backoff_ms: Option<u64>,
+    /// Extra failure classes that may consume the attempt budget. Absent
+    /// means only failures classified retryable (transport/callback, or a
+    /// child that declares itself retryable) consume it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on: Vec<RetryOn>,
+    /// Author attestation that repeating a live action is safe. Required
+    /// when a live node opts into `tool_failure`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub idempotent: bool,
+}
+
+/// Opt-in failure classes for `retry.on`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryOn {
+    /// An executed tool that exits nonzero or raises.
+    ToolFailure,
 }
 
 impl RetryConfig {
+    pub fn retries_tool_failure(&self) -> bool {
+        self.on.contains(&RetryOn::ToolFailure)
+    }
+
     pub fn delay_ms(&self, failed_attempt: u32) -> u64 {
         let exponent = failed_attempt.saturating_sub(1).min(63);
         let grown = self.backoff_ms.saturating_mul(1_u64 << exponent);
@@ -457,6 +478,8 @@ fn compile_effect_authorizations(
                 "attempts": retry.attempts,
                 "backoff_ms": retry.backoff_ms,
                 "max_backoff_ms": retry.max_backoff_ms,
+                "on": retry.on,
+                "idempotent": retry.idempotent,
             })),
             "effect_class": node.effects,
         }))?;
@@ -696,6 +719,16 @@ fn validate_node(name: &str, node: &GraphNode, config: &GraphConfig) -> Result<(
                 .is_some_and(|max| max < retry.backoff_ms || max > MAX_RETRY_BACKOFF_MS))
     {
         bail!("node `{name}` has invalid retry policy");
+    }
+    if let Some(retry) = &node.retry
+        && retry.retries_tool_failure()
+        && node.effects.is_live()
+        && !retry.idempotent
+    {
+        bail!(
+            "node `{name}`: retrying a live action on tool failure can repeat its side \
+             effects; declare retry.idempotent: true if it is safe"
+        );
     }
     if let Some(target) = &node.on_error
         && !config.nodes.contains_key(target)

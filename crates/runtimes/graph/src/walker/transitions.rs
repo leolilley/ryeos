@@ -16,6 +16,14 @@ pub(super) fn retry_attempts_remaining(node: &GraphNode, retry_attempt: u32) -> 
     (failed_attempt < rc.attempts).then_some(failed_attempt)
 }
 
+/// Whether the node opted into consuming its retry budget on an executed
+/// tool failure (`retry.on: [tool_failure]`).
+pub(super) fn retries_tool_failure(node: &GraphNode) -> bool {
+    node.retry
+        .as_ref()
+        .is_some_and(|rc| rc.retries_tool_failure())
+}
+
 /// Suffix appended to a failure diagnostic when the node declares a retry
 /// budget with attempts left but the failure was not classified retryable, so
 /// the refusal to retry is visible instead of silent.
@@ -132,6 +140,8 @@ mod tests {
                 attempts: 3,
                 backoff_ms: 10,
                 max_backoff_ms: None,
+                on: Vec::new(),
+                idempotent: false,
             }),
             ..node()
         };

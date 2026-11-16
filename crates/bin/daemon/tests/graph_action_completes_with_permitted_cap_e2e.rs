@@ -1056,3 +1056,87 @@ async fn graph_action_denied_without_permitted_cap() {
         Some("error"),
     );
 }
+
+/// Plant a Python tool that always exits nonzero.
+fn plant_failing_tool(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let tool_dir = project_dir.join(".ai").join("tools").join("alwaysfail");
+    std::fs::create_dir_all(&tool_dir)?;
+    let body = r#"#!/usr/bin/env python3
+# ryeos-tool:
+#   category: alwaysfail
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   execution_protocol: "protocol:ryeos/core/opaque"
+#   description: "always exits nonzero"
+
+import sys
+sys.stderr.write("boom\n")
+sys.exit(1)
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(tool_dir.join("fail.py"), signed)?;
+    Ok(())
+}
+
+/// A failing tool with `retry: {attempts: 3, on: [tool_failure]}` is retried
+/// twice (graph_node_retry x2) and then routed through on_error.
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_failing_tool_retries_on_opt_in_tool_failure() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_workflow_bundles(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_cmd| {})
+        .await
+        .expect("start daemon with the workflow bundles");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_failing_tool(project.path(), &fixture.publisher).expect("plant failing tool");
+    let graphs_dir = project.path().join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir).unwrap();
+    let body = r#"category: test
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.alwaysfail/fail
+config:
+  start: boom
+  nodes:
+    boom:
+      action:
+        item_id: "tool:alwaysfail/fail"
+        ref_bindings: {}
+      retry: {attempts: 3, backoff_ms: 1, on: [tool_failure], idempotent: true}
+      on_error: recover
+    recover:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
+    std::fs::write(graphs_dir.join("retry_tool_failure.yaml"), signed).unwrap();
+
+    let (status, resp) = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        h.post_execute(
+            "graph:retry_tool_failure",
+            project.path().to_str().unwrap(),
+            json!({}),
+        ),
+    )
+    .await
+    .expect("execute timed out")
+    .expect("post /execute");
+    assert!(status.is_success(), "status={status} body={resp:#}");
+
+    let thread_id = graph_thread_id(&resp, "retry tool failure").to_string();
+    let events = persisted_thread_events(&h, &thread_id).await;
+    let retries = events
+        .iter()
+        .filter(|(ty, _)| ty == "graph_node_retry")
+        .count();
+    assert_eq!(
+        retries, 2,
+        "attempts: 3 on a failing tool emits two retries; events={events:#?}"
+    );
+}

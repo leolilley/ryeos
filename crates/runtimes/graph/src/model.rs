@@ -882,6 +882,8 @@ config:
             attempts: 5,
             backoff_ms: 100,
             max_backoff_ms: Some(500),
+            on: Vec::new(),
+            idempotent: false,
         };
         // failed_attempt 1 → 100 * 2^0, 2 → 200, 3 → 400, 4 → 800 capped to 500.
         assert_eq!(rc.delay_ms(1), 100);
@@ -897,6 +899,8 @@ config:
             attempts: 3,
             backoff_ms: 250,
             max_backoff_ms: None,
+            on: Vec::new(),
+            idempotent: false,
         };
         assert_eq!(rc.delay_ms(1), 250);
         assert_eq!(rc.delay_ms(3), 1000);
@@ -908,6 +912,8 @@ config:
             attempts: 2,
             backoff_ms: u64::MAX,
             max_backoff_ms: None,
+            on: Vec::new(),
+            idempotent: false,
         };
         assert_eq!(rc.delay_ms(1), MAX_RETRY_BACKOFF_MS);
     }

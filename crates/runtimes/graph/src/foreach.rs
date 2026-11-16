@@ -298,7 +298,10 @@ async fn dispatch_item_with_retry(
         .await;
         let retryable = match &outcome {
             Err(error) => error.retryable,
-            Ok(crate::dispatch::ActionOutcome::Failure(failure)) => failure.retryable,
+            Ok(crate::dispatch::ActionOutcome::Failure(failure)) => {
+                failure.retryable
+                    || (!failure.integrity && retry.is_some_and(|rc| rc.retries_tool_failure()))
+            }
             Ok(crate::dispatch::ActionOutcome::Success(_)) => false,
         };
         if !retryable && attempt < total {
