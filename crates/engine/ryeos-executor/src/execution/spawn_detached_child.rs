@@ -137,6 +137,25 @@ pub async fn spawn_detached_child(
             state
                 .state_store
                 .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
+        // The child exists, so an earlier drive may have crashed between
+        // its link and its lineage event. A settled parent is the normal
+        // case on a late retry and must not turn the repair into a failure.
+        match state.threads.record_dispatch_child_lineage(&child_thread_id) {
+            Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+            )) => tracing::warn!(
+                parent_thread_id,
+                child_thread_id,
+                "parent settled before the detached child's lineage event was repaired"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                parent_thread_id,
+                child_thread_id,
+                error = %error,
+                "failed to repair the detached child's lineage event"
+            ),
+        }
         if inherited_stop.is_some() {
             crate::execution::process_attachment::finalize_requested_stop_if_present(
                 state,
@@ -559,7 +578,14 @@ pub async fn spawn_detached_child(
         match state
             .state_store
             .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")
-        {
+            .and_then(|inherited_stop| {
+                // A parent stopped during admission cannot author the
+                // lineage event; the child is stopped below instead.
+                if inherited_stop.is_none() {
+                    state.threads.require_dispatch_child_lineage(&child_thread_id)?;
+                }
+                Ok(inherited_stop)
+            }) {
             Ok(inherited_stop) => inherited_stop,
             Err(error) => {
                 let cleanup = crate::dispatch::finalize_child_link_failure_if_current(

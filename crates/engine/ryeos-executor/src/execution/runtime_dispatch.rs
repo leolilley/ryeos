@@ -1555,6 +1555,26 @@ async fn handle_execute(
             )?,
         };
         if state.threads.get_thread(&child_thread_id)?.is_some() {
+            // The child outlived an earlier drive that may have crashed between
+            // linking it and recording its lineage event. The append is
+            // idempotent; a settled parent or a failed append must not fail
+            // the recovery of the child's result.
+            match state.threads.record_dispatch_child_lineage(&child_thread_id) {
+                Ok(ryeos_app::thread_lifecycle::DispatchChildLineage::Recorded(
+                    ryeos_app::state_store::ChildLineageAppendOutcome::ParentSettled,
+                )) => tracing::warn!(
+                    operation_id,
+                    child_thread_id,
+                    "parent settled before the retained child's lineage event was recovered"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    operation_id,
+                    child_thread_id,
+                    error = %error,
+                    "failed to recover the retained child's lineage event"
+                ),
+            }
             if prepared_workspace_operation.is_some() {
                 let retained = state
                     .state_store
